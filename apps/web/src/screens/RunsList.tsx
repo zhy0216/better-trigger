@@ -1,0 +1,93 @@
+/* =============================================================================
+   Better Trigger — Runs list.
+   ============================================================================= */
+import React from 'react';
+import { Icon, Badge, StatusDot, StatusBadge, Input } from '../components/primitives';
+import { Page, Card } from '../components/Layout';
+import { RUNS } from '../data/mock';
+import type { Run } from '../types';
+
+const FILTERS = [
+  { id: 'all', label: 'All' },
+  { id: 'running', label: 'Running' },
+  { id: 'success', label: 'Completed' },
+  { id: 'failed', label: 'Failed' },
+  { id: 'queued', label: 'Queued' },
+];
+
+export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; env: string }) {
+  const [filter, setFilter] = React.useState('all');
+  const [q, setQ] = React.useState('');
+  const [live, setLive] = React.useState(true);
+  const runs = RUNS
+    .filter((r) => filter === 'all' || r.status === filter)
+    .filter((r) => !q || r.task.includes(q) || r.id.includes(q))
+    .filter((r) => (env === 'prod' ? true : r.env === env || env === 'dev'));
+
+  const colT = '112px 150px minmax(0,1fr) 96px 130px 96px 92px';
+  const Th = ({ children, style }: { children?: React.ReactNode; style?: React.CSSProperties }) => (
+    <div style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--fg-faint)', ...style }}>{children}</div>
+  );
+
+  return (
+    <Page>
+      {/* toolbar */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--fill)', borderRadius: 9999 }}>
+          {FILTERS.map((f) => (
+            <button key={f.id} onClick={() => setFilter(f.id)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, height: 28, padding: '0 12px', borderRadius: 9999, border: 'none', cursor: 'pointer',
+                fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500,
+                background: filter === f.id ? 'var(--surface)' : 'transparent', color: filter === f.id ? 'var(--fg)' : 'var(--fg-muted)',
+                boxShadow: filter === f.id ? 'var(--shadow-sm)' : 'none',
+              }}>
+              {f.id !== 'all' && <StatusDot status={f.id} size={6} />}{f.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ width: 220 }}><Input icon="search" placeholder="Filter by task or run id" value={q} onChange={setQ} mono /></div>
+        <div style={{ flex: 1 }} />
+        <button onClick={() => setLive((v) => !v)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 7, height: 32, padding: '0 11px', borderRadius: 8, border: '1px solid var(--border)',
+            background: live ? 'var(--accent-fill)' : 'var(--surface)', color: live ? 'var(--accent)' : 'var(--fg-muted)', cursor: 'pointer', fontSize: 12.5, fontWeight: 500,
+          }}>
+          {live ? <span className="bt-live-dot" /> : <Icon name="pause" size={13} />} {live ? 'Live tailing' : 'Paused'}
+        </button>
+      </div>
+
+      <Card>
+        <div style={{ display: 'grid', gridTemplateColumns: colT, gap: 12, padding: '11px 16px', borderBottom: '1px solid var(--divider)' }}>
+          <Th>Status</Th><Th>Run</Th><Th>Task</Th><Th>Trigger</Th><Th>Version</Th><Th style={{ textAlign: 'right' }}>Duration</Th><Th style={{ textAlign: 'right' }}>Started</Th>
+        </div>
+        {runs.map((r, i) => (
+          <div key={r.id} onClick={() => onOpenRun(r)}
+            style={{
+              display: 'grid', gridTemplateColumns: colT, gap: 12, padding: '0 16px', height: 'var(--row-h)', alignItems: 'center', cursor: 'pointer',
+              borderBottom: i < runs.length - 1 ? '1px solid var(--divider)' : 'none', transition: 'background var(--dur-fast)',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--hover)')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
+            <div><StatusBadge status={r.status} size="sm" /></div>
+            <div className="mono" style={{ fontSize: 12, color: 'var(--fg-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.id}</div>
+            <div style={{ fontSize: 13, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+              <Icon name="bolt" size={13} style={{ color: 'var(--accent)' }} />
+              <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.task}</span>
+              {r.env !== 'prod' && <Badge tone="orange" style={{ flexShrink: 0 }}>{r.env}</Badge>}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--fg-muted)' }}>{r.trigger}</div>
+            <div className="mono" style={{ fontSize: 11.5, color: 'var(--fg-subtle)' }}>{r.version}</div>
+            <div className="mono tnum" style={{ fontSize: 12.5, textAlign: 'right', color: r.status === 'running' ? 'var(--accent)' : 'var(--fg)' }}>
+              {r.duration || 'running…'}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--fg-subtle)', textAlign: 'right', whiteSpace: 'nowrap' }}>{r.started}</div>
+          </div>
+        ))}
+        {runs.length === 0 && (
+          <div style={{ padding: '48px 0', textAlign: 'center', color: 'var(--fg-subtle)', fontSize: 13 }}>No runs match these filters.</div>
+        )}
+      </Card>
+    </Page>
+  );
+}

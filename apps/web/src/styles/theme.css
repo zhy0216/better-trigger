@@ -1,0 +1,170 @@
+/* =============================================================================
+   Better Trigger — theme layer on top of Runner AI tokens.
+   Runner is light-first with grays as near-black overlays on white. Dev tools
+   read better dark, so we provide a dark surface set (white overlays on a
+   near-black #16181C base) and keep periwinkle #6E6EFF as the brand accent.
+   Theme / accent / density are driven by data-attributes on <html>.
+   ============================================================================= */
+
+:root {
+  /* ---- accent (overridable by Tweaks; shades derived from --accent) ---- */
+  --accent:        #6E6EFF;
+  --accent-fg:     #ffffff;
+  --accent-hover:  color-mix(in srgb, var(--accent) 82%, #fff);
+  --accent-ring:   color-mix(in srgb, var(--accent) 34%, transparent);
+  --accent-fill:   color-mix(in srgb, var(--accent) 12%, transparent);
+  --accent-border: color-mix(in srgb, var(--accent) 30%, transparent);
+
+  /* ---- status (shared across themes) ---- */
+  --st-running:  var(--blue-primary);
+  --st-queued:   var(--gray-50);
+  --st-success:  var(--green-primary);
+  --st-warning:  var(--orange-primary);
+  --st-failed:   var(--red-primary);
+  --st-frozen:   rgb(140, 150, 255);
+
+  /* ---- LIGHT THEME (default values; mapped from Runner) ---- */
+  --app-bg:       #f6f6f7;
+  --panel-bg:     #ffffff;
+  --surface:      #ffffff;
+  --surface-2:    rgba(30, 32, 37, 0.03);
+  --surface-3:    rgba(30, 32, 37, 0.05);
+  --hover:        rgba(30, 32, 37, 0.05);
+  --fill:         rgba(30, 32, 37, 0.06);
+  --border:       rgba(30, 32, 37, 0.10);
+  --border-strong:rgba(30, 32, 37, 0.14);
+  --divider:      rgba(30, 32, 37, 0.07);
+
+  --fg:           #1E2025;
+  --fg-muted:     rgba(30, 32, 37, 0.66);
+  --fg-subtle:    rgba(30, 32, 37, 0.45);
+  --fg-faint:     rgba(30, 32, 37, 0.30);
+
+  --code-bg:      rgba(30, 32, 37, 0.04);
+  --grid-line:    rgba(30, 32, 37, 0.06);
+  --shadow-panel: 0 1px 2px rgba(30,32,37,0.06), 0 1px 1px rgba(30,32,37,0.04);
+  --shadow-pop:   0 12px 32px rgba(30,32,37,0.14), 0 2px 6px rgba(30,32,37,0.08);
+
+  /* ---- density (default = comfortable) ---- */
+  --row-h:    36px;
+  --pad-x:    16px;
+  --pad-y:    12px;
+  --gap:      10px;
+  --span-h:   28px;
+}
+
+html[data-theme="dark"] {
+  --app-bg:       #131519;
+  --panel-bg:     #181A1F;
+  --surface:      #1E2025;
+  --surface-2:    rgba(255, 255, 255, 0.035);
+  --surface-3:    rgba(255, 255, 255, 0.06);
+  --hover:        rgba(255, 255, 255, 0.06);
+  --fill:         rgba(255, 255, 255, 0.07);
+  --border:       rgba(255, 255, 255, 0.09);
+  --border-strong:rgba(255, 255, 255, 0.15);
+  --divider:      rgba(255, 255, 255, 0.07);
+
+  --fg:           #ECEDEF;
+  --fg-muted:     rgba(236, 237, 239, 0.62);
+  --fg-subtle:    rgba(236, 237, 239, 0.42);
+  --fg-faint:     rgba(236, 237, 239, 0.26);
+
+  --code-bg:      rgba(0, 0, 0, 0.28);
+  --grid-line:    rgba(255, 255, 255, 0.05);
+  --shadow-panel: 0 1px 2px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.02);
+  --shadow-pop:   0 16px 40px rgba(0,0,0,0.5), 0 2px 8px rgba(0,0,0,0.4);
+
+  /* remap Runner semantic tokens (used by heading + paragraph rules) to dark */
+  --color-fg:           var(--fg);
+  --color-fg-muted:     var(--fg-muted);
+  --color-fg-subtle:    var(--fg-subtle);
+  --color-fg-disabled:  var(--fg-faint);
+  --color-bg:           var(--app-bg);
+  --color-bg-subtle:    var(--surface-2);
+  --color-surface:      var(--surface);
+  --color-border:       var(--border);
+  --color-border-strong:var(--border-strong);
+  --color-divider:      var(--divider);
+}
+
+html[data-density="compact"] {
+  --row-h:  29px;
+  --pad-x:  12px;
+  --pad-y:  8px;
+  --gap:    7px;
+  --span-h: 22px;
+}
+
+/* ---- base ---- */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  background: var(--app-bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--lh-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv11', 'ss01';
+  transition: background var(--dur-base) var(--ease-standard), color var(--dur-base) var(--ease-standard);
+}
+#root { height: 100vh; overflow: hidden; }
+
+::selection { background: var(--accent-fill); }
+
+/* thin scrollbars that respect theme */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 9999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--fg-faint); }
+*::-webkit-scrollbar-track { background: transparent; }
+
+.mono { font-family: var(--font-mono); }
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* keyframes */
+@keyframes bt-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@keyframes bt-spin { to { transform: rotate(360deg); } }
+@keyframes bt-ping {
+  0% { transform: scale(1); opacity: 0.6; }
+  80%, 100% { transform: scale(2.4); opacity: 0; }
+}
+@keyframes bt-fade-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes bt-grow {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes bt-stripe {
+  from { background-position: 0 0; }
+  to { background-position: 28px 0; }
+}
+@keyframes bt-pop {
+  0% { transform: scale(0.6); opacity: 0; }
+  60% { transform: scale(1.08); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.bt-live-dot {
+  position: relative;
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 9999px;
+  background: var(--st-running);
+}
+.bt-live-dot::after {
+  content: ""; position: absolute; inset: 0;
+  border-radius: 9999px; background: var(--st-running);
+  animation: bt-ping 1.6s var(--ease-standard) infinite;
+}
