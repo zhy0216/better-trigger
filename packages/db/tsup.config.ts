@@ -1,15 +1,14 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/main.ts'],
+  entry: ['src/index.ts'],
   format: ['esm', 'cjs'],
   dts: true,
   sourcemap: true,
   clean: true,
   target: 'node18',
+  // import.meta.url shim for the cjs build (migrations dir resolution in migrate.ts).
+  shims: true,
   // Keep heavy/native deps external so they resolve from node_modules at runtime.
-  external: ['pg', 'hono', '@hono/node-server', 'croner'],
-  banner: {
-    js: '#!/usr/bin/env node',
-  },
+  external: ['pg', 'drizzle-orm'],
 });

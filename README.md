@@ -23,6 +23,7 @@ ClickHouse, no Docker-in-Docker.
 │   └── web/             # dashboard (Vite + React) — live API + mock fallback
 ├── packages/
 │   ├── core/            # @better-trigger/core — shared types/protocol/errors
+│   ├── db/              # @better-trigger/db — Drizzle schema + generated migrations + pool factory
 │   ├── sdk/             # better-trigger — task()/ctx/replay executor/worker
 │   └── server/          # @better-trigger/server — Hono API + queue + orchestrator
 ├── examples/

@@ -1,7 +1,7 @@
 {
-  "name": "@better-trigger/server",
+  "name": "@better-trigger/db",
   "version": "0.1.0",
-  "description": "better-trigger server — Hono API, queue, orchestrator and bin entry",
+  "description": "better-trigger db — Drizzle schema (single source of truth), generated migrations, pool factory",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -13,27 +13,22 @@
       "require": "./dist/index.cjs"
     }
   },
-  "bin": {
-    "better-trigger-server": "./dist/main.js"
-  },
-  "files": ["dist"],
+  "files": ["dist", "migrations"],
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "dev": "bun --watch src/main.ts",
-    "start": "node dist/main.js"
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
-    "@better-trigger/core": "workspace:*",
-    "@better-trigger/db": "workspace:*",
-    "@hono/node-server": "^1.13.7",
-    "croner": "^9.0.0",
-    "hono": "^4.6.13",
+    "drizzle-orm": "^0.45.2",
     "pg": "^8.13.1"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
     "@types/pg": "^8.11.10",
+    "drizzle-kit": "^0.31.10",
     "tsup": "^8.3.0",
     "typescript": "^5.6.2"
   }

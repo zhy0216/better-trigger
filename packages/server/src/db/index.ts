@@ -1,13 +1,8 @@
 /* =============================================================================
-   @better-trigger/server — pg Pool + drizzle instance.
+   @better-trigger/server — process-wide pg Pool, created via @better-trigger/db.
    ============================================================================= */
-import pg from 'pg';
+import { createPool, DEFAULT_DATABASE_URL } from '@better-trigger/db';
 
-const { Pool } = pg;
+export const DATABASE_URL = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
 
-export const DATABASE_URL =
-  process.env.DATABASE_URL ?? 'postgres://localhost:5432/better_trigger';
-
-export const pool = new Pool({ connectionString: DATABASE_URL });
-
-export * as schema from './schema';
+export const pool = createPool(DATABASE_URL);

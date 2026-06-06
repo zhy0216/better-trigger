@@ -4,7 +4,7 @@ The better-trigger control plane: a Hono HTTP API + Postgres-backed durable
 queue, replay engine, retry/backoff, cron scheduler and parent/child
 orchestration. Workers long-poll it for work; the dashboard reads from it.
 
-Stack: Hono + `@hono/node-server`, `drizzle-orm` (node-postgres / pg Pool),
+Stack: Hono + `@hono/node-server`, `pg` (Pool via `@better-trigger/db`),
 `croner`, `@better-trigger/core`. ESM, built with tsup (esm + cjs + dts).
 
 ## Quick start
@@ -19,10 +19,17 @@ bun run dev                          # bun --watch src/main.ts
 bun run build && bun run start       # node dist/main.js
 ```
 
-On boot the server runs an **idempotent migration** (hand-written
-`CREATE TABLE IF NOT EXISTS …`, no drizzle-kit), starts the orchestrator loops,
-then listens on `PORT` (default `4848`). `SIGINT` / `SIGTERM` shut it down
-gracefully (stop loops → close server → drain the pool).
+On boot the server applies pending migrations from `@better-trigger/db`
+(drizzle-kit-generated SQL, tracked in the `drizzle.__drizzle_migrations`
+journal), starts the orchestrator loops, then listens on `PORT` (default
+`4848`). `SIGINT` / `SIGTERM` shut it down gracefully (stop loops → close
+server → drain the pool).
+
+> Upgrading from a pre-drizzle database (created by the old hand-written
+> `CREATE TABLE IF NOT EXISTS` migration, ≤ M2): the tables exist but the
+> drizzle journal does not, so the first boot fails with `duplicate_table`.
+> Drop and recreate the database (`DROP DATABASE better_trigger; CREATE
+> DATABASE better_trigger;`) — there is no in-place baseline path.
 
 ### Run everything in Docker
 
@@ -117,9 +124,7 @@ src/
 ├── middleware.ts         # bearer auth + CORS
 ├── ids.ts                # run_/sch_/wkr_ id generation
 ├── db/
-│   ├── schema.ts         # Drizzle tables (contract §2 + concurrency_key on runs)
-│   ├── migrate.ts        # idempotent DDL, run on boot
-│   └── index.ts          # pg Pool + drizzle instance
+│   └── index.ts          # process-wide pg Pool (createPool from @better-trigger/db)
 ├── engine/
 │   ├── queue.ts          # enqueue / SKIP-LOCKED dequeue / lock renew/release
 │   ├── runs.ts           # create/steps/suspend/wait-for-run/batch/complete/fail/cancel/retry

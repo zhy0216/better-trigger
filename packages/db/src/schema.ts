@@ -1,9 +1,12 @@
 /* =============================================================================
-   @better-trigger/server — Drizzle table definitions.
-   Authoritative source: docs/backend-contract.md §2 (+ §3.5 concurrency_key on runs).
+   @better-trigger/db — Drizzle table definitions.
+   SINGLE SOURCE OF TRUTH for the database shape: migrations are generated from
+   this file via `bun run db:generate` (drizzle-kit) into ../migrations.
+   Authoritative spec: docs/backend-contract.md §2 (+ §3.5 concurrency_key on runs).
    All business tables carry project_id ('default') and env ('prod').
    DB columns are snake_case; the JS object keys are camelCase.
    ============================================================================= */
+import { sql } from 'drizzle-orm';
 import {
   bigserial,
   boolean,
@@ -14,6 +17,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 /* ---------------------------------------------------------------------------
@@ -62,13 +66,16 @@ export const runs = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => ({
-    // NOTE: the partial UNIQUE (task_id, idempotency_key) WHERE idempotency_key IS NOT NULL
-    // is created in migrate.ts (raw idempotent SQL). We keep query-level indexes here.
-    byTaskCreated: index('runs_task_created_idx').on(t.taskId, t.createdAt),
-    byStatusConcurrency: index('runs_status_concurrency_idx').on(t.status, t.concurrencyKey),
-    byCreated: index('runs_created_idx').on(t.createdAt),
-  }),
+  (t) => [
+    // Partial UNIQUE backing the idempotent-trigger upsert
+    // (ON CONFLICT (task_id, idempotency_key) WHERE idempotency_key IS NOT NULL).
+    uniqueIndex('runs_task_idempotency_uniq')
+      .on(t.taskId, t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} IS NOT NULL`),
+    index('runs_task_created_idx').on(t.taskId, t.createdAt),
+    index('runs_status_concurrency_idx').on(t.status, t.concurrencyKey),
+    index('runs_created_idx').on(t.createdAt),
+  ],
 );
 
 /* ---------------------------------------------------------------------------
@@ -90,9 +97,7 @@ export const runSteps = pgTable(
     startedAt: timestamp('started_at', { withTimezone: true }),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
   },
-  (t) => ({
-    pk: primaryKey({ columns: [t.runId, t.seq] }),
-  }),
+  (t) => [primaryKey({ columns: [t.runId, t.seq] })],
 );
 
 /* ---------------------------------------------------------------------------
@@ -111,10 +116,10 @@ export const queue = pgTable(
     lockedAt: timestamp('locked_at', { withTimezone: true }),
     concurrencyKey: text('concurrency_key'),
   },
-  (t) => ({
-    byAvailable: index('queue_available_priority_idx').on(t.availableAt, t.priority),
-    byConcurrency: index('queue_concurrency_idx').on(t.concurrencyKey),
-  }),
+  (t) => [
+    index('queue_available_priority_idx').on(t.availableAt, t.priority.desc()),
+    index('queue_concurrency_idx').on(t.concurrencyKey),
+  ],
 );
 
 /* ---------------------------------------------------------------------------
@@ -134,10 +139,10 @@ export const waits = pgTable(
     status: text('status').notNull().default('pending'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => ({
-    byStatusResume: index('waits_status_resume_idx').on(t.status, t.resumeAt),
-    byChildRun: index('waits_child_run_idx').on(t.childRunId),
-  }),
+  (t) => [
+    index('waits_status_resume_idx').on(t.status, t.resumeAt),
+    index('waits_child_run_idx').on(t.childRunId),
+  ],
 );
 
 /* ---------------------------------------------------------------------------
@@ -156,9 +161,7 @@ export const logs = pgTable(
     data: jsonb('data'),
     ts: timestamp('ts', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => ({
-    byRun: index('logs_run_id_idx').on(t.runId, t.id),
-  }),
+  (t) => [index('logs_run_id_idx').on(t.runId, t.id)],
 );
 
 /* ---------------------------------------------------------------------------

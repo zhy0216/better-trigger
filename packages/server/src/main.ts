@@ -4,15 +4,15 @@
    bin: better-trigger-server (see package.json + tsup banner).
    ============================================================================= */
 import { serve } from '@hono/node-server';
+import { migrate } from '@better-trigger/db';
 import { createApp } from './app';
-import { migrate } from './db/migrate';
 import { pool } from './db/index';
 import { createOrchestrator } from './engine/orchestrator';
 
 const PORT = Number(process.env.PORT ?? 4848);
 
 async function main(): Promise<void> {
-  await migrate();
+  await migrate(pool);
 
   const orchestrator = createOrchestrator();
   orchestrator.start();

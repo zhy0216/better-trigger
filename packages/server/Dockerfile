@@ -11,6 +11,7 @@ WORKDIR /app
 FROM base AS deps
 COPY package.json bun.lock ./
 COPY packages/core/package.json packages/core/package.json
+COPY packages/db/package.json packages/db/package.json
 COPY packages/server/package.json packages/server/package.json
 RUN bun install --frozen-lockfile
 
@@ -19,9 +20,11 @@ FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json bun.lock turbo.json tsconfig.json ./
 COPY packages/core packages/core
+COPY packages/db packages/db
 COPY packages/server packages/server
-# Build core first (server depends on its dist), then the server.
+# Build core + db first (server depends on their dist), then the server.
 RUN bun run --cwd packages/core build \
+ && bun run --cwd packages/db build \
  && bun run --cwd packages/server build
 
 # ---- runtime ---------------------------------------------------------------
@@ -34,6 +37,10 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/packages/core/dist packages/core/dist
 COPY --from=build /app/packages/core/package.json packages/core/package.json
+COPY --from=build /app/packages/db/dist packages/db/dist
+# migrations are applied at boot; migrate() resolves them relative to db/dist.
+COPY --from=build /app/packages/db/migrations packages/db/migrations
+COPY --from=build /app/packages/db/package.json packages/db/package.json
 COPY --from=build /app/packages/server/dist packages/server/dist
 COPY --from=build /app/packages/server/package.json packages/server/package.json
 
