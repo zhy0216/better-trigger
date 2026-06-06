@@ -4,11 +4,27 @@
 import React from 'react';
 import { Icon, Button, Badge, Switch } from '../components/primitives';
 import { Page, Card, SectionHead } from '../components/Layout';
-import { SCHEDULES } from '../data/mock';
+import { useSchedules, api } from '../api/hooks';
+import type { Schedule } from '../types';
 
 export function Schedules() {
-  const [items, setItems] = React.useState(SCHEDULES);
-  const toggle = (id: string) => setItems((its) => its.map((i) => (i.id === id ? { ...i, enabled: !i.enabled } : i)));
+  const { data, live } = useSchedules();
+  // local override layer: optimistic toggles applied on top of polled data,
+  // so the switch stays responsive between 2s refreshes.
+  const [overrides, setOverrides] = React.useState<Record<string, boolean>>({});
+  const items: Schedule[] = data.map((s) => (s.id in overrides ? { ...s, enabled: overrides[s.id] } : s));
+  const toggle = (id: string) => {
+    const cur = items.find((i) => i.id === id);
+    if (!cur) return;
+    const next = !cur.enabled;
+    setOverrides((o) => ({ ...o, [id]: next }));
+    if (live) {
+      api.setScheduleEnabled(id, next).catch(() => {
+        // revert optimistic change on failure
+        setOverrides((o) => ({ ...o, [id]: cur.enabled }));
+      });
+    }
+  };
   return (
     <Page>
       <SectionHead title="Schedules" sub="Cron-style triggers attached to your tasks." action={<Button icon="plus">New schedule</Button>} />

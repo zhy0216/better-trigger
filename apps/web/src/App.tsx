@@ -18,6 +18,7 @@ import { Schedules } from './screens/Schedules';
 import { Alerts } from './screens/Alerts';
 import { Deployments } from './screens/Deployments';
 import { Onboarding } from './screens/Onboarding';
+import { useIsLive } from './api/hooks';
 import type { Route, VizStyle } from './types';
 
 const TWEAK_DEFAULTS = {
@@ -32,6 +33,10 @@ export default function App() {
   const [route, setRoute] = React.useState<Route>('run'); // run = hero trace detail
   const [env, setEnv] = React.useState('prod');
   const [collapsed, setCollapsed] = React.useState(false);
+  const [runId, setRunId] = React.useState<string | null>(null); // selected run for RunView
+  const isLive = useIsLive();
+
+  const openRun = (id?: string) => { setRunId(id ?? null); setRoute('run'); };
 
   // apply theme + density + accent to <html>
   React.useEffect(() => {
@@ -49,9 +54,9 @@ export default function App() {
   };
 
   let screen: React.ReactNode;
-  if (route === 'run') screen = <RunView vizStyle={t.vizStyle as VizStyle} onBack={() => setRoute('runs')} />;
-  else if (route === 'runs') screen = <RunsList env={env} onOpenRun={() => setRoute('run')} />;
-  else if (route === 'tasks') screen = <TasksDashboard setRoute={goTo} onOpenRun={() => setRoute('run')} />;
+  if (route === 'run') screen = <RunView vizStyle={t.vizStyle as VizStyle} runId={runId} onBack={() => setRoute('runs')} />;
+  else if (route === 'runs') screen = <RunsList env={env} onOpenRun={(r) => openRun(r.id)} />;
+  else if (route === 'tasks') screen = <TasksDashboard setRoute={goTo} onOpenRun={openRun} />;
   else if (route === 'schedules') screen = <Schedules />;
   else if (route === 'alerts') screen = <Alerts />;
   else if (route === 'deployments') screen = <Deployments />;
@@ -65,6 +70,7 @@ export default function App() {
           onToggleSidebar={() => setCollapsed((c) => !c)}
           theme={t.theme} setTheme={(v) => setTweak('theme', v)}
           onSearch={() => {}}>
+          <DataSourceDot isLive={isLive} />
           {route === 'tasks' && <Button variant="outline" size="sm" icon="plus" onClick={() => setRoute('onboarding')}>New task</Button>}
         </TopBar>
         {screen}
@@ -81,6 +87,24 @@ export default function App() {
         <TweakSection label="Run view" />
         <TweakRadio label="Trace style" value={t.vizStyle} options={['waterfall', 'tree']} onChange={(v) => setTweak('vizStyle', v)} />
       </TweaksPanel>
+    </div>
+  );
+}
+
+/* Tiny live/mock data-source indicator, sits among the TopBar trailing items. */
+function DataSourceDot({ isLive }: { isLive: boolean }) {
+  return (
+    <div title={isLive ? 'Connected to server' : 'Mock data'}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 6, height: 32, padding: '0 9px', borderRadius: 8,
+        border: '1px solid var(--border)', background: 'var(--surface)',
+        fontSize: 11.5, fontWeight: 500, color: 'var(--fg-subtle)', cursor: 'default',
+      }}>
+      <span style={{
+        width: 7, height: 7, borderRadius: 9999, display: 'inline-block', flexShrink: 0,
+        background: isLive ? 'var(--green-primary)' : 'var(--fg-faint)',
+      }} />
+      {isLive ? 'Live' : 'Mock'}
     </div>
   );
 }

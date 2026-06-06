@@ -22,6 +22,7 @@
   --st-warning:  var(--orange-primary);
   --st-failed:   var(--red-primary);
   --st-frozen:   rgb(140, 150, 255);
+  --st-canceled: var(--gray-50);
 
   /* ---- LIGHT THEME (default values; mapped from Runner) ---- */
   --app-bg:       #f6f6f7;

@@ -1,0 +1,47 @@
+# =============================================================================
+# better-trigger — local infra.
+#
+#   docker compose up -d                  # postgres only (for `bun run dev`)
+#   docker compose --profile server up    # postgres + the server image
+#
+# The `server` service is gated behind a profile so the common path
+# (run Postgres in Docker, run the server/worker on the host) stays one command.
+# =============================================================================
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: better-trigger-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: better_trigger
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - '5432:5432'
+    volumes:
+      - better-trigger-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d better_trigger']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    profiles: ['server']
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+    container_name: better-trigger-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/better_trigger
+      PORT: '4848'
+      # BETTER_TRIGGER_API_KEY: change-me   # uncomment to require Bearer auth
+    ports:
+      - '4848:4848'
+
+volumes:
+  better-trigger-pgdata:

@@ -1,0 +1,21 @@
+{
+  "name": "@better-trigger/example-basic",
+  "version": "0.1.0",
+  "description": "better-trigger SDK usage examples + e2e smoke test",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "worker": "bun src/worker.ts",
+    "e2e": "bun scripts/e2e.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@better-trigger/core": "workspace:*",
+    "better-trigger": "workspace:*",
+    "zod": "^3.23"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "typescript": "^5.6.2"
+  }
+}

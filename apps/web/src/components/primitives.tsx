@@ -150,6 +150,7 @@ export const STATUS_META: Record<string, { color: string; label: string; tone: s
   warning: { color: 'var(--st-warning)', label: 'Warning',   tone: 'orange' },
   failed:  { color: 'var(--st-failed)',  label: 'Failed',    tone: 'red' },
   frozen:  { color: 'var(--st-frozen)',  label: 'Frozen',    tone: 'blue' },
+  canceled:{ color: 'var(--st-canceled)', label: 'Canceled', tone: 'gray' },
 };
 
 export const StatusDot = ({ status, size = 8, live }: { status: string; size?: number; live?: boolean }) => {

@@ -4,12 +4,12 @@
 import React from 'react';
 import { Icon, Button, Sparkline } from '../components/primitives';
 import { Page, Card, Metric } from '../components/Layout';
-import { TASKS } from '../data/mock';
+import { useTasks } from '../api/hooks';
 
-export function TasksDashboard({ setRoute }: { onOpenRun?: () => void; setRoute: (r: string) => void }) {
-  const tasks = TASKS;
+export function TasksDashboard({ setRoute }: { onOpenRun?: (runId?: string) => void; setRoute: (r: string) => void }) {
+  const { data: tasks } = useTasks();
   const totalRuns = tasks.reduce((a, t) => a + t.runs24h, 0);
-  const avgSuccess = (tasks.reduce((a, t) => a + t.success, 0) / tasks.length).toFixed(1);
+  const avgSuccess = tasks.length ? (tasks.reduce((a, t) => a + t.success, 0) / tasks.length).toFixed(1) : '0.0';
 
   const Stat = ({ label, value, sub, tone }: { label: string; value: React.ReactNode; sub?: string; tone?: string }) => (
     <Card style={{ padding: '14px 16px', flex: 1, minWidth: 0 }}>

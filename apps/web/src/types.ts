@@ -8,7 +8,8 @@ export type RunStatus =
   | 'success'
   | 'warning'
   | 'failed'
-  | 'frozen';
+  | 'frozen'
+  | 'canceled';
 
 export type SpanKind = 'task' | 'http' | 'query' | 'fn';
 
@@ -53,7 +54,7 @@ export interface Trace {
   env: string;
   trigger: string;
   queuedFor: string;
-  payload: Record<string, string | number>;
+  payload: Record<string, unknown>;
   totalMs: number;
   spans: Span[];
 }

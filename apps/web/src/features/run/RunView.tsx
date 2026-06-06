@@ -6,7 +6,9 @@
 import React from 'react';
 import { Icon, IconButton, Badge, StatusBadge, StatusDot, STATUS_META } from '../../components/primitives';
 import { TRACE, SPAN_LOGS } from '../../data/mock';
-import type { Span, Trace, VizStyle } from '../../types';
+import { useRun } from '../../api/hooks';
+import { relativeFuture } from '../../api/adapter';
+import type { Span, Trace, LogLine, VizStyle } from '../../types';
 
 const KIND_ICON: Record<string, string> = { task: 'bolt', http: 'globe', query: 'db', fn: 'fn' };
 const KIND_LABEL: Record<string, string> = { task: 'subtask', http: 'http', query: 'query', fn: 'fn' };
@@ -69,7 +71,7 @@ function usePlayback(totalMs: number, persistKey: string): PlaybackState {
 }
 
 // ---- the trace header ----
-function RunHeader({ trace, t, pb, runStatus }: { trace: Trace; t: number; pb: PlaybackState; runStatus: string }) {
+function RunHeader({ trace, t, pb, runStatus, live }: { trace: Trace; t: number; pb: PlaybackState; runStatus: string; live?: boolean }) {
   const pct = Math.min(100, (t / trace.totalMs) * 100);
   const Meta = ({ icon, label, value, mono }: { icon: string; label: string; value: React.ReactNode; mono?: boolean }) => (
     <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
@@ -85,9 +87,11 @@ function RunHeader({ trace, t, pb, runStatus }: { trace: Trace; t: number; pb: P
         <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600, letterSpacing: '-0.01em' }}>{trace.task}</h3>
         <span className="mono" style={{ fontSize: 12, color: 'var(--fg-subtle)', padding: '2px 8px', borderRadius: 6, background: 'var(--fill)' }}>{trace.runId}</span>
         <div style={{ flex: 1 }} />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <PlaybackControls pb={pb} t={t} total={trace.totalMs} />
-        </div>
+        {!live && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <PlaybackControls pb={pb} t={t} total={trace.totalMs} />
+          </div>
+        )}
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', padding: '13px 0 14px' }}>
         <Meta icon="bolt" label="trigger" value={trace.trigger} mono />
@@ -99,7 +103,7 @@ function RunHeader({ trace, t, pb, runStatus }: { trace: Trace; t: number; pb: P
       <div style={{ height: 3, background: 'var(--fill)', borderRadius: 9999, overflow: 'hidden', marginBottom: -1.5 }}>
         <div style={{
           width: pct + '%', height: '100%', borderRadius: 9999,
-          background: runStatus === 'running' ? 'var(--st-running)' : runStatus === 'warning' ? 'var(--st-warning)' : 'var(--st-success)',
+          background: (STATUS_META[runStatus] || STATUS_META.success).color,
           transition: 'width 80ms linear',
         }} />
       </div>
@@ -161,10 +165,11 @@ function Ruler({ totalMs, labelW }: { totalMs: number; labelW: number }) {
 }
 
 // ---- a single span row ----
-function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle }: {
-  s: Span; t: number; totalMs: number; labelW: number; selected: boolean; onSelect: (id: string) => void; vizStyle: VizStyle;
+function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle, staticState }: {
+  s: Span; t: number; totalMs: number; labelW: number; selected: boolean; onSelect: (id: string) => void; vizStyle: VizStyle; staticState?: boolean;
 }) {
-  const state = spanStateAt(s, t);
+  // live mode renders the span's literal status; mock derives it from playback time.
+  const state = staticState ? s.status : spanStateAt(s, t);
   if (state === 'pending') return (
     <div style={{ height: 'var(--span-h)', display: 'flex', opacity: 0.32, alignItems: 'center' }}>
       <div style={{ width: labelW, flexShrink: 0, paddingLeft: 14 + s.level * 18, display: 'flex', alignItems: 'center', gap: 7 }}>
@@ -239,16 +244,16 @@ function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle }: {
 }
 
 // ---- inspector for selected span ----
-function Inspector({ span, t }: { span: Span | undefined; t: number }) {
+function Inspector({ span, t, trace, wake, staticState }: { span: Span | undefined; t: number; trace: Trace; wake?: WakeInfo; staticState?: boolean }) {
   if (!span) return null;
-  const state = spanStateAt(span, t);
+  const state = staticState ? span.status : spanStateAt(span, t);
   const Row = ({ k, v, mono }: { k: string; v: React.ReactNode; mono?: boolean }) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--divider)' }}>
       <span style={{ fontSize: 12, color: 'var(--fg-subtle)', whiteSpace: 'nowrap' }}>{k}</span>
       <span className={mono ? 'mono' : ''} style={{ fontSize: 12.5, color: 'var(--fg)', fontWeight: 500, textAlign: 'right', whiteSpace: 'nowrap' }}>{v}</span>
     </div>
   );
-  const payload = span.level === 0 ? TRACE.payload : null;
+  const payload = span.level === 0 ? trace.payload : null;
   return (
     <div style={{ width: 320, flexShrink: 0, borderLeft: '1px solid var(--border)', background: 'var(--panel-bg)', overflowY: 'auto' }}>
       <div style={{ padding: '16px 16px 14px', borderBottom: '1px solid var(--divider)' }}>
@@ -276,6 +281,31 @@ function Inspector({ span, t }: { span: Span | undefined; t: number }) {
           }}>{JSON.stringify(payload, null, 2)}</pre>
         </div>
       )}
+      {span.level === 0 && wake && wake.waits.length > 0 && (
+        <div style={{ padding: '0 16px 16px' }}>
+          <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--fg-faint)', marginBottom: 6 }}>Waiting on</div>
+          <div style={{
+            background: 'color-mix(in srgb, var(--st-frozen) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--st-frozen) 22%, transparent)',
+            borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8,
+          }}>
+            {wake.waits.map((w, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                <Icon name={w.childRunId ? 'bolt' : 'clock'} size={13} style={{ color: 'var(--st-frozen)', flexShrink: 0 }} />
+                <span style={{ fontSize: 12, color: 'var(--fg-muted)', flexShrink: 0 }}>
+                  {w.childRunId ? 'child run' : w.kind === 'until' ? 'resume at' : 'resume in'}
+                </span>
+                <span className="mono" style={{ fontSize: 12, color: 'var(--fg)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {w.childRunId
+                    ? w.childRunId
+                    : w.resumeAt
+                      ? relativeFuture(w.resumeAt)
+                      : 'pending'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {span.kind !== 'task' && (
         <div style={{ padding: '0 16px 16px' }}>
           <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--fg-faint)', marginBottom: 6 }}>Attributes</div>
@@ -299,19 +329,19 @@ const LOG_TONE: Record<string, string> = {
 
 interface LogEntry { spanId: string; lvl: string; msg: string; ms: number; label: string }
 
-function LogStream({ trace, t, selectedId, scoped, setScoped }: {
-  trace: Trace; t: number; selectedId: string; scoped: boolean; setScoped: React.Dispatch<React.SetStateAction<boolean>>;
+function LogStream({ trace, logs, t, selectedId, scoped, setScoped }: {
+  trace: Trace; logs: Record<string, LogLine[]>; t: number; selectedId: string; scoped: boolean; setScoped: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
   const lines = React.useMemo<LogEntry[]>(() => {
     const out: LogEntry[] = [];
     trace.spans.forEach((s) => {
-      (SPAN_LOGS[s.id] || []).forEach(([lvl, msg, at]) => {
+      (logs[s.id] || []).forEach(([lvl, msg, at]) => {
         const ms = parseInt(at);
         out.push({ spanId: s.id, lvl, msg, ms, label: s.label });
       });
     });
     return out.sort((a, b) => a.ms - b.ms);
-  }, [trace]);
+  }, [trace, logs]);
   const visible = lines.filter((l) => l.ms <= t && (!scoped || !selectedId || l.spanId === selectedId));
   const ref = React.useRef<HTMLDivElement | null>(null);
   React.useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [visible.length]);
@@ -345,20 +375,36 @@ function LogStream({ trace, t, selectedId, scoped, setScoped }: {
 }
 
 // ---- full run view ----
-export function RunView({ vizStyle = 'waterfall', onBack }: { vizStyle?: VizStyle; onBack?: () => void }) {
-  const trace = TRACE;
-  const pb = usePlayback(trace.totalMs, 'bt_playback');
+interface WakeInfo {
+  waits: Array<{ kind: string; resumeAt: string | null; childRunId: string | null }>;
+}
+
+export function RunView({ vizStyle = 'waterfall', runId = null, onBack }: { vizStyle?: VizStyle; runId?: string | null; onBack?: () => void }) {
+  const { data: detail, live } = useRun(runId);
+  // live run detail present → render real data static (no playback reset on poll);
+  // otherwise fall back to the animated mock TRACE (contract §7).
+  const liveMode = live && !!runId && !!detail;
+  const trace = liveMode ? detail!.trace : TRACE;
+  const logs: Record<string, LogLine[]> = liveMode ? detail!.spanLogs : SPAN_LOGS;
+
+  const pb = usePlayback(trace.totalMs, liveMode ? 'bt_playback_live' : 'bt_playback');
   const [selectedId, setSelectedId] = React.useState('s4');
   const [scoped, setScoped] = React.useState(false);
   const labelW = vizStyle === 'tree' ? 320 : 300;
-  const selected = trace.spans.find((s) => s.id === selectedId);
-  const runStatus = pb.t < trace.totalMs
-    ? 'running'
-    : trace.spans.some((s) => s.status === 'failed')
-      ? 'failed'
-      : trace.spans.some((s) => s.status === 'warning')
-        ? 'warning'
-        : 'success';
+
+  // live: reveal the whole timeline (no animation), status comes from the server.
+  const t = liveMode ? trace.totalMs : pb.t;
+  const selected = trace.spans.find((s) => s.id === selectedId) ?? trace.spans[0];
+  const wake: WakeInfo | undefined = liveMode ? { waits: detail!.pendingWaits } : undefined;
+  const runStatus = liveMode
+    ? detail!.status
+    : pb.t < trace.totalMs
+      ? 'running'
+      : trace.spans.some((s) => s.status === 'failed')
+        ? 'failed'
+        : trace.spans.some((s) => s.status === 'warning')
+          ? 'warning'
+          : 'success';
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -372,31 +418,31 @@ export function RunView({ vizStyle = 'waterfall', onBack }: { vizStyle?: VizStyl
           </button>
         </div>
       )}
-      <RunHeader trace={trace} t={pb.t} pb={pb} runStatus={runStatus} />
+      <RunHeader trace={trace} t={t} pb={pb} runStatus={runStatus} live={liveMode} />
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, position: 'relative', background: 'var(--surface)' }}>
           <div style={{ flex: 1, overflowY: 'auto', position: 'relative' }}>
             <Ruler totalMs={trace.totalMs} labelW={labelW} />
             <div style={{ position: 'relative', padding: '6px 0 16px' }}>
               {/* now-line */}
-              {runStatus === 'running' && vizStyle !== 'tree' && (
+              {!liveMode && runStatus === 'running' && vizStyle !== 'tree' && (
                 <div style={{
                   position: 'absolute', top: 0, bottom: 16,
-                  left: `calc(${labelW}px + (100% - ${labelW}px) * ${pb.t / trace.totalMs})`,
+                  left: `calc(${labelW}px + (100% - ${labelW}px) * ${t / trace.totalMs})`,
                   width: 1.5, background: 'var(--accent)', opacity: 0.7, zIndex: 2, pointerEvents: 'none',
                 }}>
                   <div style={{ position: 'absolute', top: -1, left: -3, width: 7, height: 7, borderRadius: 9999, background: 'var(--accent)' }} />
                 </div>
               )}
               {trace.spans.map((s) => (
-                <SpanRow key={s.id} s={s} t={pb.t} totalMs={trace.totalMs} labelW={labelW}
-                  selected={selectedId === s.id} onSelect={setSelectedId} vizStyle={vizStyle} />
+                <SpanRow key={s.id} s={s} t={t} totalMs={trace.totalMs} labelW={labelW}
+                  selected={selected?.id === s.id} onSelect={setSelectedId} vizStyle={vizStyle} staticState={liveMode} />
               ))}
             </div>
           </div>
-          <LogStream trace={trace} t={pb.t} selectedId={selectedId} scoped={scoped} setScoped={setScoped} />
+          <LogStream trace={trace} logs={logs} t={t} selectedId={selected?.id ?? ''} scoped={scoped} setScoped={setScoped} />
         </div>
-        <Inspector span={selected} t={pb.t} />
+        <Inspector span={selected} t={t} trace={trace} wake={wake} staticState={liveMode} />
       </div>
     </div>
   );

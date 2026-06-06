@@ -4,8 +4,17 @@
 import React from 'react';
 import { Icon, Badge, StatusDot, StatusBadge, Input } from '../components/primitives';
 import { Page, Card } from '../components/Layout';
-import { RUNS } from '../data/mock';
+import { useRuns } from '../api/hooks';
 import type { Run } from '../types';
+
+// filter id → server status (contract §5: queued|running|waiting|completed|failed|canceled)
+const FILTER_TO_SERVER: Record<string, string | undefined> = {
+  all: undefined,
+  running: 'running',
+  success: 'completed',
+  failed: 'failed',
+  queued: 'queued',
+};
 
 const FILTERS = [
   { id: 'all', label: 'All' },
@@ -19,10 +28,16 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
   const [filter, setFilter] = React.useState('all');
   const [q, setQ] = React.useState('');
   const [live, setLive] = React.useState(true);
-  const runs = RUNS
+  // live: server-side env + status filtering; mock fallback served by the hook.
+  // `live` also gates polling — Paused stops requests and holds current data,
+  // resuming refreshes immediately.
+  const { data: source, live: isLive } = useRuns(env, { status: FILTER_TO_SERVER[filter] }, live);
+  // filter ids are UI status values (all/running/success/failed/queued); applied
+  // client-side too so the mock path narrows even without a server round-trip.
+  const runs = source
     .filter((r) => filter === 'all' || r.status === filter)
     .filter((r) => !q || r.task.includes(q) || r.id.includes(q))
-    .filter((r) => (env === 'prod' ? true : r.env === env || env === 'dev'));
+    .filter((r) => (isLive ? true : env === 'prod' ? true : r.env === env || env === 'dev'));
 
   const colT = '112px 150px minmax(0,1fr) 96px 130px 96px 92px';
   const Th = ({ children, style }: { children?: React.ReactNode; style?: React.CSSProperties }) => (
