@@ -98,4 +98,4 @@ bun run lint
 Implemented (PRD M0–M2): task/step replay · queue/retry/idempotency ·
 wait.for/until · triggerAndWait/batchTrigger · cron · concurrency limits ·
 dashboard wiring. Next: events (`wait.forEvent`), CLI (`dev`/`migrate`),
-multi-agent runtime primitives (see `multi-agent-design.md`).
+multi-agent runtime primitives.
