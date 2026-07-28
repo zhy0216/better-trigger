@@ -178,6 +178,7 @@ async function checkTasksRegistered(): Promise<void> {
       'always-aborts',
       'parallel-steps',
       'every-minute',
+      'every-2s',
     ];
     for (const id of expected) {
       assert(ids.has(id), `task "${id}" missing from tasks (worker not registered?)`);
@@ -426,6 +427,54 @@ async function checkSchedules(): Promise<void> {
   });
 }
 
+async function checkCronFires(): Promise<void> {
+  await check(`cron fires: every-2s (seconds pattern) completed a 'schedule' run`, async () => {
+    // The pattern fires every 2s and the cron loop scans every 1s, so at most
+    // ~3s should pass before a run exists + completes; allow 6s of polling.
+    // (In practice the earlier checks already gave the scheduler ample time.)
+    const deadline = Date.now() + 6_000;
+    let firedId: string | undefined;
+    for (;;) {
+      const res = await pool.query<{ id: string }>(
+        `SELECT id FROM runs
+          WHERE task_id = 'every-2s' AND trigger_type = 'schedule' AND status = 'completed'
+          ORDER BY created_at ASC
+          LIMIT 1`,
+      );
+      firedId = res.rows[0]?.id;
+      if (firedId || Date.now() >= deadline) break;
+      await sleep(POLL_INTERVAL_MS);
+    }
+    assert(firedId, `no completed schedule-triggered 'every-2s' run within 6s`);
+
+    // The instance API must agree on the trigger type.
+    const rec = await trigger.getRun(firedId);
+    assertEqual(rec.trigger, 'schedule', 'every-2s run triggerType');
+    assertEqual(rec.status, 'completed', 'every-2s run status');
+
+    // The schedule row must have advanced past the fired slot.
+    const s = await pool.query<{
+      cron_pattern: string;
+      last_run_at: Date | null;
+      last_run_id: string | null;
+      next_run_at: Date | null;
+    }>(
+      `SELECT cron_pattern, last_run_at, last_run_id, next_run_at
+         FROM schedules WHERE task_id = 'every-2s'`,
+    );
+    const row = s.rows[0];
+    assert(!!row, `no schedule row for 'every-2s'`);
+    assertEqual(row.cron_pattern, '*/2 * * * * *', 'every-2s cron pattern');
+    assert(!!row.last_run_at && !!row.last_run_id, 'fired schedule should record last_run_at + last_run_id');
+    assert(!!row.next_run_at, 'fired schedule should have a next_run_at');
+    assert(
+      row.next_run_at!.getTime() > row.last_run_at!.getTime(),
+      `next_run_at (${row.next_run_at!.toISOString()}) should advance past the fired slot ` +
+        `(last_run_at ${row.last_run_at!.toISOString()})`,
+    );
+  });
+}
+
 /* ---------------------------------------------------------------------------
  * Main
  * ------------------------------------------------------------------------- */
@@ -445,6 +494,7 @@ async function main(): Promise<void> {
   await checkFlakyTask();
   await checkParallelSteps();
   await checkSchedules();
+  await checkCronFires();
 
   await trigger.stop();
   await pool.end();

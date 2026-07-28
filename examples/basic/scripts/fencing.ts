@@ -4,8 +4,13 @@
    Two workers race over one run, straight against createKernel (no SDK
    executor): worker A claims with a tiny lease and never heartbeats; the
    reaper releases the expired claim; worker B reclaims and the fencing token
-   increments by exactly 1. Every write A attempts with its stale token must
-   be rejected with StaleLeaseError, while B's writes land normally.
+   increments by exactly 1. Every fenced mutation A attempts with its stale
+   token (reportStep / completeRun / suspendRun / failRun retry-shaped +
+   abort / waitForChildRun / batchTriggerChild) must be rejected with
+   StaleLeaseError AND zero state change, while B's writes land normally.
+   A second run then pins token monotonicity across suspend/resume: the
+   post-resume claim's token is strictly greater than the pre-suspend token,
+   which no longer authorizes writes.
 
    Fully self-contained: provisions its own database (better_trigger_fencing).
 
@@ -63,6 +68,95 @@ console.log(`\nbetter-trigger fencing e2e → ${DB_URL}\n`);
 const pool = createPool(DB_URL);
 await migrate(pool);
 const kernel = createKernel({ pool });
+
+/* ---------------------------------------------------------------------------
+ * State-snapshot helpers — used to prove stale ops are rejected with ZERO
+ * state change (not merely that they throw).
+ * ------------------------------------------------------------------------- */
+interface StateSnap {
+  status: string;
+  attempt: number;
+  output: unknown;
+  error: unknown;
+  token: number;
+  lockedBy: string | null;
+  hasQueueRow: boolean;
+  steps: Array<{ seq: number; status: string }>;
+  waitCount: number;
+  /** Total rows in runs — catches stale child creation (waitForChildRun / batchTriggerChild). */
+  totalRuns: number;
+}
+
+async function snapshot(id: string): Promise<StateSnap> {
+  const run = (
+    await pool.query(
+      `SELECT status, attempt, output, error, fencing_token FROM runs WHERE id = $1`,
+      [id],
+    )
+  ).rows[0];
+  assert(run, `snapshot: run ${id} not found`);
+  const q = (await pool.query(`SELECT locked_by FROM queue WHERE run_id = $1`, [id])).rows[0];
+  const steps = (
+    await pool.query(`SELECT seq, status FROM run_steps WHERE run_id = $1 ORDER BY seq`, [id])
+  ).rows;
+  const waits = (
+    await pool.query(`SELECT count(*)::int AS n FROM waits WHERE run_id = $1`, [id])
+  ).rows[0];
+  const runs = (await pool.query(`SELECT count(*)::int AS n FROM runs`)).rows[0];
+  return {
+    status: run.status,
+    attempt: run.attempt,
+    output: run.output,
+    error: run.error,
+    token: Number(run.fencing_token),
+    lockedBy: q ? q.locked_by : null,
+    hasQueueRow: !!q,
+    steps: steps.map((s) => ({ seq: s.seq, status: s.status })),
+    waitCount: waits.n,
+    totalRuns: runs.n,
+  };
+}
+
+/**
+ * Run an op holding stale credentials: it must throw StaleLeaseError AND leave
+ * the observable world identical (runs / queue / run_steps / waits untouched,
+ * no new runs created).
+ */
+async function expectStaleNoop(
+  label: string,
+  id: string,
+  fn: () => Promise<unknown>,
+): Promise<void> {
+  const before = await snapshot(id);
+  let thrown: unknown = null;
+  try {
+    await fn();
+  } catch (err) {
+    thrown = err;
+  }
+  assert(thrown !== null, `${label} should have thrown`);
+  assert(
+    thrown instanceof StaleLeaseError,
+    `${label}: expected StaleLeaseError, got ${String(thrown)}`,
+  );
+  const after = await snapshot(id);
+  assert(
+    JSON.stringify(after) === JSON.stringify(before),
+    `${label}: state changed despite StaleLeaseError\n` +
+      `  before ${JSON.stringify(before)}\n  after  ${JSON.stringify(after)}`,
+  );
+  ok(`${label} → StaleLeaseError, zero state change`);
+}
+
+/** Poll a run until it reaches `status` (fails the script on timeout). */
+async function waitForStatus(id: string, status: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await kernel.getRun(id)).status === status) return;
+    await sleep(100);
+  }
+  fail(`timed out after ${timeoutMs}ms waiting for run ${id} to reach '${status}'`);
+}
 
 /* -- two workers, one task, one run ---------------------------------------- */
 const manifest = [{ id: 'fenced-task', retry: { maxAttempts: 3 } }];
@@ -151,6 +245,93 @@ try {
   ok('A completeRun with stale token → StaleLeaseError');
 }
 
+/* -- stale write at a seq the legit worker NEVER writes: rejected-with-no-
+ *    state-change, not just thrown (seq 99 must have no row afterwards) ------ */
+await expectStaleNoop('A reportStep(seq 99) with stale token', runId, () =>
+  kernel.reportStep({
+    runId,
+    seq: 99,
+    kind: 'step',
+    label: 'zombie-99',
+    status: 'completed',
+    output: 'from-A',
+    attempt: 1,
+    startedAt: nowIso(),
+    finishedAt: nowIso(),
+    workerId: workerA,
+    fencingToken: tokenA,
+  }),
+);
+{
+  const seq99 = await pool.query(
+    `SELECT 1 FROM run_steps WHERE run_id = $1 AND seq = 99`,
+    [runId],
+  );
+  assert(seq99.rows.length === 0, `seq 99 must have no step row, got ${seq99.rows.length}`);
+  const now = await kernel.getRun(runId);
+  assert(
+    now.status === 'running' && now.attempt === 2,
+    `run must stay running at attempt 2 after the rejected write, got status='${now.status}' attempt=${now.attempt}`,
+  );
+  ok('seq 99 has no row; run status/attempt unchanged (running, attempt 2)');
+}
+
+/* -- EVERY fenced mutation rejects stale credentials with zero state change - */
+const staleCreds = { workerId: workerA, fencingToken: tokenA };
+
+await expectStaleNoop('A suspendRun (wait.for) with stale token', runId, () =>
+  kernel.suspendRun({
+    runId,
+    seq: 98,
+    label: 'zombie-wait',
+    kind: 'duration',
+    resumeAt: new Date(Date.now() + 60_000).toISOString(),
+    ...staleCreds,
+  }),
+);
+
+await expectStaleNoop('A failRun (retry-shaped) with stale token', runId, () =>
+  kernel.failRun({
+    runId,
+    error: { message: 'zombie transient failure' },
+    retry: { maxAttempts: 5, baseMs: 100 },
+    ...staleCreds,
+  }),
+);
+
+await expectStaleNoop('A failRun (abort:true) with stale token', runId, () =>
+  kernel.failRun({
+    runId,
+    error: { message: 'zombie abort' },
+    abort: true,
+    ...staleCreds,
+  }),
+);
+
+await expectStaleNoop('A waitForChildRun (triggerAndWait) with stale token', runId, () =>
+  kernel.waitForChildRun({
+    runId,
+    seq: 97,
+    label: 'zombie-child',
+    taskId: 'fenced-task',
+    payload: { child: true },
+    ...staleCreds,
+  }),
+);
+
+await expectStaleNoop('A batchTriggerChild with stale token', runId, () =>
+  kernel.batchTriggerChild({
+    runId,
+    seq: 96,
+    label: 'zombie-batch',
+    items: [
+      { taskId: 'fenced-task', payload: { i: 0 } },
+      { taskId: 'fenced-task', payload: { i: 1 } },
+    ],
+    ...staleCreds,
+  }),
+);
+
 /* -- B's writes land normally ----------------------------------------------- */
 await kernel.reportStep({
   runId,
@@ -183,6 +364,89 @@ assert(
 );
 assert(detail.run.attempt === 2, `attempt should be 2, got ${detail.run.attempt}`);
 ok('run completed with a single step row (B) and attempt = 2');
+
+/* -- regression: token monotonicity across suspend/resume -------------------
+ * The token lives on runs, while suspend DELETEs the queue row and resume
+ * re-INSERTs it — the post-resume claim's token must therefore be strictly
+ * greater than the pre-suspend token (never reset), and a write holding the
+ * pre-suspend token must be rejected. ------------------------------------- */
+const { runId: runId2 } = await kernel.trigger({ taskId: 'fenced-task', payload: { n: 2 } });
+
+const [preClaim] = await kernel.claimRuns({
+  workerId: workerB,
+  taskIds: ['fenced-task'],
+  limit: 1,
+  leaseMs: 60_000,
+});
+assert(preClaim && preClaim.id === runId2, 'worker B should claim run #2');
+const preToken = preClaim.fencingToken;
+ok(`B claimed run #2 with pre-suspend token ${preToken}`);
+
+const { resumed } = await kernel.suspendRun({
+  runId: runId2,
+  seq: 1,
+  label: 'short-wait',
+  kind: 'duration',
+  resumeAt: new Date(Date.now() + 1_200).toISOString(),
+  workerId: workerB,
+  fencingToken: preToken,
+});
+assert(!resumed, 'suspend with a future resumeAt must not resume synchronously');
+{
+  const q = await pool.query(`SELECT 1 FROM queue WHERE run_id = $1`, [runId2]);
+  assert(q.rows.length === 0, 'suspend should delete the queue row');
+}
+ok('run #2 suspended on wait.for (queue row deleted)');
+
+// The already-running orchestrator's wait scanner resumes it (~1.2s + 1s tick).
+await waitForStatus(runId2, 'queued', 10_000);
+const [postClaim] = await kernel.claimRuns({
+  workerId: workerA,
+  taskIds: ['fenced-task'],
+  limit: 1,
+  leaseMs: 60_000,
+});
+assert(postClaim && postClaim.id === runId2, 'worker A should reclaim run #2 after resume');
+assert(
+  postClaim.fencingToken > preToken,
+  `post-resume token must be strictly greater than the pre-suspend token ` +
+    `(${preToken}), got ${postClaim.fencingToken}`,
+);
+ok(
+  `post-resume reclaim token ${postClaim.fencingToken} > pre-suspend token ${preToken} (monotonic across suspend/resume)`,
+);
+
+// A write still holding the pre-suspend token is rejected with no state change.
+await expectStaleNoop('B reportStep with pre-suspend token (post-resume)', runId2, () =>
+  kernel.reportStep({
+    runId: runId2,
+    seq: 2,
+    kind: 'step',
+    label: 'pre-suspend-zombie',
+    status: 'completed',
+    output: 'stale',
+    attempt: 1,
+    startedAt: nowIso(),
+    finishedAt: nowIso(),
+    workerId: workerB,
+    fencingToken: preToken,
+  }),
+);
+
+await kernel.completeRun({
+  runId: runId2,
+  output: 'resumed-done',
+  workerId: workerA,
+  fencingToken: postClaim.fencingToken,
+});
+{
+  const run2 = await kernel.getRun(runId2);
+  assert(
+    run2.status === 'completed' && run2.output === 'resumed-done',
+    `run #2 should complete under the live token, got status='${run2.status}' output=${JSON.stringify(run2.output)}`,
+  );
+}
+ok('run #2 completed under the post-resume token');
 
 /* -- teardown --------------------------------------------------------------- */
 orch.stop();

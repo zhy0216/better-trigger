@@ -18,7 +18,8 @@ server, no HTTP — one process is enough.
 | `src/worker.ts` | `trigger.start({ tasks, concurrency: 5 })` — claims + executes in-process. |
 | `scripts/e2e.ts` | End-to-end assertions through the instance API (self-provisions its db). |
 | `scripts/crash.ts` + `scripts/crash-worker.ts` | Crash recovery: 3 SIGKILLs, exactly-once durable steps. |
-| `scripts/fencing.ts` | Kernel-level lease/fencing-token test (`createKernel`, `StaleLeaseError`). |
+| `scripts/fencing.ts` | Kernel-level lease/fencing test: 6 fenced ops rejected with zero state change, token monotonic across suspend/resume. |
+| `scripts/worker-lost.ts` + `scripts/worker-lost-worker.ts` | Reaper terminal-fail: child dies of `worker lost` at max attempts, waiting parent is woken with `ok: false`. |
 
 ### Example tasks (`src/tasks.ts`)
 

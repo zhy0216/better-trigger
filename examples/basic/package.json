@@ -8,6 +8,7 @@
     "worker": "bun src/worker.ts",
     "e2e": "bun scripts/e2e.ts",
     "crash": "bun scripts/crash.ts",
+    "worker-lost": "bun scripts/worker-lost.ts",
     "fencing": "bun scripts/fencing.ts",
     "typecheck": "tsc --noEmit"
   },

@@ -17,6 +17,10 @@
      - step ledger is exactly [step, wait, step]
      - attempt >= 3 (one bump per reaped kill; the 'waiting' kill costs none)
 
+   Mid-flight (while 'waiting', before kill-②) it also asserts that kill-①
+   recovery cost exactly one attempt bump (attempt === 2) and that the suspend
+   released the claim (zero queue rows for the run).
+
    Env:
      DATABASE_URL  base connection derived from it; default
                    postgres://localhost:5432/better_trigger
@@ -161,6 +165,29 @@ proc = spawnWorker();
 await waitFor(`run 'waiting' (suspended on wait.for)`, 60_000, async () =>
   (await runStatus(handle.id)) === 'waiting',
 );
+
+// Kill-① recovery must have cost exactly ONE attempt bump: reap → attempt 2,
+// reclaim + replay by worker #2 (no further bumps up to the suspend).
+{
+  const mid = await client.getRunDetail(handle.id);
+  assert(
+    mid.run.attempt === 2,
+    `attempt should be exactly 2 after kill-① reap+reclaim, got ${mid.run.attempt}`,
+  );
+  ok('kill-① recovery cost exactly one attempt bump (attempt = 2)');
+
+  // Suspend must have released the claim: no queue row while 'waiting'.
+  const q = await pool.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM queue WHERE run_id = $1`,
+    [handle.id],
+  );
+  assert(
+    q.rows[0].n === '0',
+    `expected 0 queue rows while 'waiting' (suspend releases the claim), got ${q.rows[0].n}`,
+  );
+  ok(`no queue row while 'waiting' (suspend released the claim)`);
+}
+
 await sigkill(proc);
 ok(`kill ② — SIGKILL while run is 'waiting' (worker held no claim)`);
 
