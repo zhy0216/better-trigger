@@ -97,7 +97,8 @@ export interface Kernel {
   appendLogs(runId: string, entries: LogEntry[]): Promise<void>;
 
   /* ------------------------------------------------------ orchestration */
-  /** Start the wait/cron/reaper/offline-marker loops. Caller must stop(). */
+  /** Start the wait/cron/reaper/offline-marker loops (each individually
+   *  switchable, all default on). Caller must stop(). */
   startOrchestrator(opts?: OrchestratorOptions): OrchestratorHandle;
 }
 

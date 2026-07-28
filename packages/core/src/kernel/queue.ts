@@ -21,7 +21,9 @@ export interface EnqueueArgs {
 /**
  * Insert (or move-back) a run into the queue. Idempotent on run_id.
  * The conflict path clears locked_by/locked_at/lease_until (NULL lease =
- * unoccupied) but never resets fencing_token — it only ever grows via claims.
+ * unoccupied). The fencing token lives on the runs row — queue rows are
+ * deleted and re-inserted across suspend/resume, so the watermark must not
+ * (and does not) travel with them.
  */
 export async function enqueue(client: PoolClient, args: EnqueueArgs): Promise<void> {
   await client.query(
@@ -67,11 +69,13 @@ export interface ClaimRunsArgs {
  * Claim up to `limit` runs for the given worker. Single transaction:
  *   SELECT candidates FOR UPDATE SKIP LOCKED (available + unclaimed, by
  *   priority, task set filtered in SQL), for each candidate skip if the
- *   concurrency limit is hit, otherwise claim it (locked_by/locked_at +
- *   lease_until = now() + leaseMs, fencing_token++), flip the run to running
- *   and set started_at. Returns claimed runs + step snapshots + the fencing
- *   token guarding each claim's writes. Expired-lease recovery is the reaper's
- *   job alone — candidates here stay `locked_by IS NULL`.
+ *   concurrency limit is hit, otherwise claim it: take the lease on the queue
+ *   row (locked_by/locked_at + lease_until = now() + leaseMs), then flip the
+ *   run to running and bump runs.fencing_token — queue row locked before the
+ *   runs row, the canonical kernel lock order (see runs.ts header). Returns
+ *   claimed runs + step snapshots + the fencing token guarding each claim's
+ *   writes. Expired-lease recovery is the reaper's job alone — candidates here
+ *   stay `locked_by IS NULL`.
  */
 export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<ClaimedRun[]> {
   if (args.taskIds.length === 0 || args.limit <= 0) return [];
@@ -144,28 +148,31 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
         if (running >= limit) continue; // leave it in the queue
       }
 
-      // Claim it: take the lease and bump the fencing token. The returned token
-      // is the claim's write credential — any later claim invalidates it.
-      const lockRes = await client.query<{ fencing_token: string }>(
+      // Claim it: take the lease on the (already SKIP LOCKED-held) queue row,
+      // then bump the run's fencing token while flipping it to running. The
+      // returned token is the claim's write credential — any later claim
+      // invalidates it, and it survives suspend/resume because it lives on
+      // runs, not on the delete-and-reinserted queue row.
+      await client.query(
         `UPDATE queue
             SET locked_by = $1,
                 locked_at = now(),
-                lease_until = now() + ($2::text || ' milliseconds')::interval,
-                fencing_token = fencing_token + 1
-          WHERE id = $3
-          RETURNING fencing_token`,
+                lease_until = now() + ($2::text || ' milliseconds')::interval
+          WHERE id = $3`,
         [args.workerId, String(args.leaseMs), cand.id],
       );
-      const fencingToken = Number(lockRes.rows[0]?.fencing_token ?? 0);
 
-      await client.query(
+      const tokenRes = await client.query<{ fencing_token: string }>(
         `UPDATE runs
             SET status = 'running',
                 started_at = COALESCE(started_at, now()),
-                updated_at = now()
-          WHERE id = $1`,
+                updated_at = now(),
+                fencing_token = fencing_token + 1
+          WHERE id = $1
+          RETURNING fencing_token`,
         [run.id],
       );
+      const fencingToken = Number(tokenRes.rows[0]?.fencing_token ?? 0);
 
       const stepsRes = await client.query<{
         seq: number;

@@ -61,6 +61,10 @@ export const runs = pgTable(
     concurrencyKey: text('concurrency_key'),
     attempt: integer('attempt').notNull().default(1),
     maxAttempts: integer('max_attempts').notNull().default(1),
+    /** Monotonic write credential, bumped on every claim. Lives on runs (not
+     *  queue) so suspend/resume cycles — which delete and re-insert the queue
+     *  row — can never reset the watermark. */
+    fencingToken: bigint('fencing_token', { mode: 'number' }).notNull().default(0),
     queuedAt: timestamp('queued_at', { withTimezone: true }),
     startedAt: timestamp('started_at', { withTimezone: true }),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
@@ -116,7 +120,6 @@ export const queue = pgTable(
     lockedBy: text('locked_by'),
     lockedAt: timestamp('locked_at', { withTimezone: true }),
     leaseUntil: timestamp('lease_until', { withTimezone: true }),
-    fencingToken: bigint('fencing_token', { mode: 'number' }).notNull().default(0),
     concurrencyKey: text('concurrency_key'),
   },
   (t) => [

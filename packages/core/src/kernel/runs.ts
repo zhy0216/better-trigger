@@ -4,11 +4,37 @@
    complete / fail / cancel / retry, plus parent-wakeup for child runs, run
    reads (getRun / getRunDetail / waitForResult) and best-effort logs.
    See docs/backend-contract.md §3.2–3.7. All multi-row mutations are wrapped
-   in a single transaction via withTx(). Worker-side writes are guarded by the
-   fencing check (locked_by + fencing_token under FOR UPDATE) — lease_until is
-   deliberately NOT part of validity: an expired-but-unreclaimed owner is still
-   the only owner, so its writes stay legal until the reaper or a new claim
-   invalidates the token.
+   in a single transaction via withTx().
+
+   LOCK ORDER (canonical — every multi-row kernel tx acquires in this order):
+     1. queue row  — SELECT ... FROM queue WHERE run_id = $1 FOR UPDATE (0/1 rows)
+     2. runs row   — SELECT ... FROM runs  WHERE id     = $1 FOR UPDATE
+     3. dependent rows of that run (waits / run_steps)
+   A tx that touches two runs orders them child before parent
+   (wakeParentIfWaiting runs inside the child's terminal tx and re-acquires
+   1→2→3 for the parent); parent_run_id chains are acyclic, so cross-run
+   acquisition cannot cycle. The runs row is the true serialization point —
+   locking the (possibly absent) queue row first exists purely to keep ordering
+   consistent with the claim/reaper paths, whose scans necessarily start from
+   the queue. claimRuns is compatible: its SKIP LOCKED candidate scan locks
+   queue rows first, and only rows with locked_by IS NULL, so it never contends
+   with a fenced op's held claim (those keep locked_by set until
+   terminal/suspend); it then locks each candidate's runs row — same 1→2 order.
+   The reaper likewise locks expired-lease queue rows via SKIP LOCKED, then the
+   runs row; claim and reap candidate sets are disjoint (locked_by IS NULL vs
+   lease_until set), and neither scan ever *waits* on a queue row, so neither
+   can close a cycle. heartbeat touches only queue rows (never runs) and thus
+   cannot participate in a queue↔runs cycle.
+
+   FENCING: worker-side writes are guarded by assertOwnedRunning — owner
+   (locked_by) from the queue row, status + fencing_token from the runs row,
+   both locked in the SAME tx as the mutation that follows. The token lives on
+   runs, NOT on the queue row (which is deleted and re-inserted across
+   suspend/resume and would reset a queue-held counter), and only ever grows:
+   claimRuns increments it, so any later claim invalidates every older token
+   for that run. lease_until is deliberately NOT part of validity: an
+   expired-but-unreclaimed owner is still the only owner, so its writes stay
+   legal until the reaper or a new claim invalidates the token.
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { computeBackoffMs, resolveRetryPolicy } from '../backoff';
@@ -66,27 +92,58 @@ export interface RunRow {
   env: string;
   concurrency_key: string | null;
   code_version: string | null;
+  /** Monotonic claim counter (bigint → text through pg). */
+  fencing_token: string;
 }
+
+const RUN_ROW_COLS = `id, task_id, status, attempt, max_attempts, parent_run_id,
+            payload, env, concurrency_key, code_version, fencing_token`;
 
 export async function getRunRow(
   db: Pool | PoolClient,
   id: string,
 ): Promise<RunRow | null> {
   const res = await db.query<RunRow>(
-    `SELECT id, task_id, status, attempt, max_attempts, parent_run_id,
-            payload, env, concurrency_key, code_version
-       FROM runs WHERE id = $1`,
+    `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1`,
     [id],
   );
   return res.rows[0] ?? null;
 }
 
 /**
+ * Lock + read a runs row (canonical lock position 2 — the caller must already
+ * hold / have attempted the run's queue-row lock; see file header).
+ */
+export async function lockRunRow(
+  client: PoolClient,
+  id: string,
+): Promise<RunRow | null> {
+  const res = await client.query<RunRow>(
+    `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1 FOR UPDATE`,
+    [id],
+  );
+  return res.rows[0] ?? null;
+}
+
+/** Canonical lock position 1: the run's queue row, 0 or 1 rows (see header). */
+async function lockQueueRow(
+  client: PoolClient,
+  runId: string,
+): Promise<{ locked_by: string | null } | null> {
+  const res = await client.query<{ locked_by: string | null }>(
+    `SELECT locked_by FROM queue WHERE run_id = $1 FOR UPDATE`,
+    [runId],
+  );
+  return res.rows[0] ?? null;
+}
+
+/**
  * Fencing check — assert a worker may report on this run: lock the queue row
- * (FOR UPDATE serializes against claims and the reaper), then require the run
- * to be 'running' and the row to carry this worker's id + fencing token.
- * lease_until is NOT checked (see file header). Run in non-running state →
- * RunNotRunningError; owner/token mismatch → StaleLeaseError.
+ * (owner check; FOR UPDATE serializes against claims and the reaper), then
+ * lock the runs row and require status 'running' + this claim's fencing token,
+ * all in the caller's transaction so the mutation that follows is atomic with
+ * the check. lease_until is NOT checked (see file header). Run in non-running
+ * state → RunNotRunningError; owner/token mismatch → StaleLeaseError.
  */
 async function assertOwnedRunning(
   client: PoolClient,
@@ -94,20 +151,16 @@ async function assertOwnedRunning(
   workerId: string,
   fencingToken: number,
 ): Promise<RunRow> {
-  const lock = await client.query<{ locked_by: string | null; fencing_token: string }>(
-    `SELECT locked_by, fencing_token FROM queue WHERE run_id = $1 FOR UPDATE`,
-    [runId],
-  );
-  const run = await getRunRow(client, runId);
+  const owner = await lockQueueRow(client, runId);
+  const run = await lockRunRow(client, runId);
   if (!run) throw new KernelError('not_found', `run ${runId} not found`);
   if (run.status !== 'running') {
     throw new RunNotRunningError(`run ${runId} is ${run.status}`);
   }
-  const owner = lock.rows[0];
   if (
     !owner ||
     owner.locked_by !== workerId ||
-    Number(owner.fencing_token) !== fencingToken
+    Number(run.fencing_token) !== fencingToken
   ) {
     throw new StaleLeaseError(`run ${runId} is not held by this worker (stale lease)`);
   }
@@ -557,25 +610,38 @@ export async function batchTriggerChild(
 /**
  * If `childRunId` is awaited by a pending 'run' wait, fill the parent step row
  * with { id, ok, output?, error? } and re-enqueue the parent. Runs inside the
- * caller's transaction.
+ * caller's transaction (which holds the CHILD's locks — the parent's rows are
+ * re-acquired here in canonical order: queue → runs → wait row).
  */
 async function wakeParentIfWaiting(
   client: PoolClient,
   childRunId: string,
   result: { ok: boolean; output?: unknown; error?: SerializedError },
 ): Promise<void> {
+  // Locate the parent's pending wait WITHOUT locking it — the wait row may
+  // only be locked after the parent's queue + runs rows (lock order 1→2→3).
   const waitRes = await client.query<{
     id: number;
     run_id: string;
     step_seq: number;
   }>(
     `SELECT id, run_id, step_seq FROM waits
-      WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'
-      FOR UPDATE`,
+      WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'`,
     [childRunId],
   );
   const wait = waitRes.rows[0];
   if (!wait) return;
+
+  // Parent rows in canonical order: queue row (absent while the parent is
+  // waiting → 0 rows, still ordered), runs row, then the wait row — re-checked
+  // under its lock since it was located with a plain read above.
+  await lockQueueRow(client, wait.run_id);
+  const parent = await lockRunRow(client, wait.run_id);
+  const lockedWait = await client.query<{ id: number }>(
+    `SELECT id FROM waits WHERE id = $1 AND status = 'pending' FOR UPDATE`,
+    [wait.id],
+  );
+  if (!lockedWait.rows[0]) return; // canceled/completed while ordering locks
 
   await client.query(`UPDATE waits SET status = 'completed' WHERE id = $1`, [wait.id]);
 
@@ -594,7 +660,6 @@ async function wakeParentIfWaiting(
   );
 
   // Re-enqueue the parent.
-  const parent = await getRunRow(client, wait.run_id);
   if (parent && parent.status === 'waiting') {
     await client.query(
       `UPDATE runs SET status = 'queued', updated_at = now() WHERE id = $1`,
@@ -705,7 +770,7 @@ export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult
       [args.runId, JSON.stringify(args.error)],
     );
     // Keep the queue row but release the claim (owner + lease) and push
-    // availability out. fencing_token stays — it only grows via claims.
+    // availability out. runs.fencing_token stays — it only grows via claims.
     await client.query(
       `UPDATE queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = $2
         WHERE run_id = $1`,
@@ -717,7 +782,10 @@ export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult
 
 export async function cancelRun(pool: Pool, runId: string): Promise<void> {
   await withTx(pool, async (client) => {
-    const run = await getRunRow(client, runId);
+    // Canonical lock order: queue row (if any) before the runs row, so cancel
+    // can never AB-BA against a fenced op holding the claim (see file header).
+    await lockQueueRow(client, runId);
+    const run = await lockRunRow(client, runId);
     if (!run) throw new KernelError('not_found', `run ${runId} not found`);
     if (['completed', 'failed', 'canceled'].includes(run.status)) {
       // Already terminal — treat cancel as a no-op success.
@@ -744,6 +812,8 @@ export async function cancelRun(pool: Pool, runId: string): Promise<void> {
 
 export async function retryRun(pool: Pool, runId: string): Promise<{ runId: string }> {
   return withTx(pool, async (client) => {
+    // Reads the (terminal) source run without locking and only inserts fresh
+    // rows via createRunIn — no existing-row locks, so trivially order-safe.
     const run = await getRunRow(client, runId);
     if (!run) throw new KernelError('not_found', `run ${runId} not found`);
     if (!['failed', 'canceled'].includes(run.status)) {

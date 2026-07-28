@@ -1,6 +1,7 @@
 /* =============================================================================
    @better-trigger/core — kernel background orchestrator.
-   Four interval loops (each with re-entrancy guards):
+   Four interval loops (each with re-entrancy guards, each individually
+   switchable via OrchestratorOptions — all default on):
      1. wait-due scanner   (timerIntervalMs, 1s)   — resume duration/until waits
      2. cron scheduler     (cronIntervalMs, 1s)    — fire due schedules via
         createRunIn (task retry policy resolved like any other trigger)
@@ -8,13 +9,17 @@
         lease_until has expired
      4. worker offline marker (30s)                — mark workers with no
         heartbeat > 2m
+   A bookkeeping-only host (e.g. the dashboard server) runs { waits: false,
+   cron: false } so it reaps leases and marks workers offline without becoming
+   an execution scheduler. All loops follow the canonical kernel lock order
+   (queue → runs → dependent rows; see runs.ts header).
    See docs/backend-contract.md §3.2, §3.5, §3.6. Loop errors are swallowed
    (logged via the kernel logger) so loops never die.
    ============================================================================= */
 import { Cron } from 'croner';
 import type { Pool } from 'pg';
 import type { KernelLogger } from './kernel';
-import { createRunIn, getRunRow, terminalFail } from './runs';
+import { createRunIn, lockRunRow, terminalFail, withTx } from './runs';
 
 const WORKER_OFFLINE_MS = 120_000;
 const WORKER_OFFLINE_SCAN_MS = 30_000;
@@ -32,6 +37,14 @@ export interface OrchestratorOptions {
   cronIntervalMs?: number;
   /** Expired-lease reap interval (default 10s). */
   reaperIntervalMs?: number;
+  /** Run the wait-due scanner loop (default true). */
+  waits?: boolean;
+  /** Run the cron scheduler loop (default true). */
+  cron?: boolean;
+  /** Run the lease reaper loop (default true). */
+  reaper?: boolean;
+  /** Run the worker offline marker loop (default true). */
+  workerOffline?: boolean;
 }
 
 export interface OrchestratorHandle {
@@ -73,28 +86,35 @@ export function startOrchestrator(
 
   /* ------------------------------------------------------------------ waits */
   async function scanWaits(): Promise<void> {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      const due = await client.query<{
-        id: number;
-        run_id: string;
-        step_seq: number;
-        concurrency_key: string | null;
-        env: string;
-      }>(
-        `SELECT w.id, w.run_id, w.step_seq, r.concurrency_key, r.env
-           FROM waits w
-           JOIN runs r ON r.id = w.run_id
-          WHERE w.status = 'pending'
-            AND w.kind IN ('duration','until')
-            AND w.resume_at <= now()
-          ORDER BY w.resume_at ASC
-          LIMIT 50
-          FOR UPDATE OF w SKIP LOCKED`,
-      );
+    // Phase 1 — discover due timer waits with a plain read, holding no locks.
+    const due = await pool.query<{ id: number; run_id: string; step_seq: number }>(
+      `SELECT id, run_id, step_seq
+         FROM waits
+        WHERE status = 'pending'
+          AND kind IN ('duration','until')
+          AND resume_at <= now()
+        ORDER BY resume_at ASC
+        LIMIT 50`,
+    );
 
-      for (const w of due.rows) {
+    // Phase 2 — one short tx per wait, acquiring the canonical lock order
+    // (queue → runs → wait row; see runs.ts header) and re-checking the wait
+    // under its lock: a concurrent cancel or another orchestrator instance may
+    // have resolved it between the phases. Per-wait txs keep each tx's lock
+    // footprint to a single run, so scanners can never cross-deadlock.
+    for (const w of due.rows) {
+      await withTx(pool, async (client) => {
+        await client.query(`SELECT run_id FROM queue WHERE run_id = $1 FOR UPDATE`, [
+          w.run_id,
+        ]);
+        const run = await lockRunRow(client, w.run_id);
+        if (!run) return; // run vanished — leave the orphan wait alone
+        const lockedWait = await client.query<{ id: number }>(
+          `SELECT id FROM waits WHERE id = $1 AND status = 'pending' FOR UPDATE`,
+          [w.id],
+        );
+        if (!lockedWait.rows[0]) return; // already resumed/canceled
+
         await client.query(`UPDATE waits SET status = 'completed' WHERE id = $1`, [w.id]);
         await client.query(
           `INSERT INTO run_steps
@@ -113,15 +133,9 @@ export function startOrchestrator(
            VALUES ($1, now(), 0, $2, $3)
            ON CONFLICT (run_id) DO UPDATE
              SET available_at = now(), locked_by = NULL, locked_at = NULL, lease_until = NULL`,
-          [w.run_id, w.concurrency_key, w.env],
+          [w.run_id, run.concurrency_key, run.env],
         );
-      }
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw err;
-    } finally {
-      client.release();
+      });
     }
   }
 
@@ -190,7 +204,9 @@ export function startOrchestrator(
       );
 
       for (const q of stale.rows) {
-        const run = await getRunRow(client, q.run_id);
+        // Queue row already held via SKIP LOCKED → lock the runs row second
+        // (canonical order; see runs.ts header).
+        const run = await lockRunRow(client, q.run_id);
         if (!run) {
           await client.query(`DELETE FROM queue WHERE id = $1`, [q.id]);
           continue;
@@ -206,8 +222,9 @@ export function startOrchestrator(
               WHERE id = $1`,
             [q.run_id],
           );
-          // Release the claim. fencing_token is deliberately NOT reset — the
-          // next claim's token++ is what invalidates the lost worker's writes.
+          // Release the claim. runs.fencing_token is deliberately untouched —
+          // the next claim's token++ is what invalidates the lost worker's
+          // writes.
           await client.query(
             `UPDATE queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = now()
               WHERE id = $1`,
@@ -235,10 +252,10 @@ export function startOrchestrator(
     );
   }
 
-  loop('waits', timerIntervalMs, scanWaits);
-  loop('cron', cronIntervalMs, scanCron);
-  loop('reaper', reaperIntervalMs, reap);
-  loop('workers', WORKER_OFFLINE_SCAN_MS, markOfflineWorkers);
+  if (opts.waits ?? true) loop('waits', timerIntervalMs, scanWaits);
+  if (opts.cron ?? true) loop('cron', cronIntervalMs, scanCron);
+  if (opts.reaper ?? true) loop('reaper', reaperIntervalMs, reap);
+  if (opts.workerOffline ?? true) loop('workers', WORKER_OFFLINE_SCAN_MS, markOfflineWorkers);
 
   return {
     stop() {

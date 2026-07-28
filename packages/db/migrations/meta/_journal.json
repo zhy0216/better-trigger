@@ -15,6 +15,13 @@
       "when": 1785254376019,
       "tag": "0001_slow_peter_parker",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785259672211,
+      "tag": "0002_naive_harpoon",
+      "breakpoints": true
     }
   ]
 }
