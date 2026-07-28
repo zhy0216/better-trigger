@@ -1,11 +1,15 @@
 # @better-trigger/server
 
-The better-trigger control plane: a Hono HTTP API + Postgres-backed durable
-queue, replay engine, retry/backoff, cron scheduler and parent/child
-orchestration. Workers long-poll it for work; the dashboard reads from it.
+The **optional dashboard API** for better-trigger: a Hono HTTP server exposing
+read/trigger/cancel/retry endpoints over an existing better-trigger Postgres
+database. It is a tool process for `apps/web` (and external HTTP triggering) —
+**not part of the execution architecture**. Workers are embedded in your own
+processes via the SDK (`betterTrigger().start()`), which talk straight to
+Postgres; this server runs **no orchestration loops** and no workers.
 
 Stack: Hono + `@hono/node-server`, `pg` (Pool via `@better-trigger/db`),
-`croner`, `@better-trigger/core`. ESM, built with tsup (esm + cjs + dts).
+`@better-trigger/core` (kernel for trigger/cancel/retry). ESM, built with tsup
+(esm + cjs + dts).
 
 ## Quick start
 
@@ -21,25 +25,19 @@ bun run build && bun run start       # node dist/main.js
 
 On boot the server applies pending migrations from `@better-trigger/db`
 (drizzle-kit-generated SQL, tracked in the `drizzle.__drizzle_migrations`
-journal), starts the orchestrator loops, then listens on `PORT` (default
-`4848`). `SIGINT` / `SIGTERM` shut it down gracefully (stop loops → close
-server → drain the pool).
-
-> Upgrading from a pre-drizzle database (created by the old hand-written
-> `CREATE TABLE IF NOT EXISTS` migration, ≤ M2): the tables exist but the
-> drizzle journal does not, so the first boot fails with `duplicate_table`.
-> Drop and recreate the database (`DROP DATABASE better_trigger; CREATE
-> DATABASE better_trigger;`) — there is no in-place baseline path.
+journal), builds a kernel over the pool, then listens on `PORT` (default
+`4848`). `SIGINT` / `SIGTERM` shut it down gracefully (close server → drain
+the pool).
 
 ### Run everything in Docker
 
 ```bash
-docker compose --profile server up   # postgres + the server image
+docker compose --profile server up   # postgres + the optional dashboard API
 ```
 
 The `server` service is gated behind a compose **profile** so the default
-`docker compose up` only brings up Postgres (the common dev setup is Postgres in
-Docker, server + worker on the host).
+`docker compose up` only brings up Postgres (the common setup is Postgres in
+Docker, your app — with its embedded workers — on the host).
 
 ## Environment variables
 
@@ -51,43 +49,13 @@ Docker, server + worker on the host).
 
 CORS is open (`*`) for local tooling.
 
-## Orchestrator loops
-
-Four `setInterval` loops run in-process (each re-entrancy guarded, all using
-`FOR UPDATE SKIP LOCKED` where they mutate shared rows):
-
-| Loop | Interval | Job |
-|---|---|---|
-| wait scanner | 1s | resume `duration`/`until` waits whose `resume_at <= now()` |
-| cron scheduler | 1s | fire due schedules, recompute `next_run_at` (croner, timezone-aware) |
-| visibility reaper | 10s | recover runs locked > **60s** (re-queue, or fail as `worker lost` past max attempts) |
-| worker reaper | 30s | mark workers `offline` after **2m** with no heartbeat |
-
 ## API
 
 All endpoints live under `/api/v1`, speak camelCase JSON, and travel dates as
 ISO-8601 strings. Request/response types are the authoritative ones in
-`@better-trigger/core` (`protocol.ts`).
+`packages/server/src/types.ts` (re-exported from the package root).
 
-### Worker protocol
-
-| Method · Path | Body → Response |
-|---|---|
-| `POST /workers/register` | `{ name?, codeVersion, runtime, concurrency, tasks: TaskManifest[] }` → `{ workerId, heartbeatIntervalMs, visibilityTimeoutMs }` (upserts tasks + schedules) |
-| `POST /workers/:id/heartbeat` | `{ runIds }` → `{ ok, cancelRunIds }` (extends locks; reports canceled runs) |
-| `GET /dequeue?workerId=&timeoutMs=` | → `{ run }` or `{ run: null }` (long-poll, ≤30s, 500ms interval) |
-| `POST /runs/:id/steps` | report a memoized step (`{ seq, kind, status, output?, error?, … }`) → `{ ok }` |
-| `POST /runs/:id/suspend` | `{ seq, kind, resumeAt, … }` → `{ ok, resumed }` (`resumed:true` = already due) |
-| `POST /runs/:id/wait-for-run` | `{ seq, taskId, payload, options?, … }` → `{ childRunId }` (triggerAndWait) |
-| `POST /runs/:id/batch-trigger` | `{ seq, items, … }` → `{ runIds }` (durable, idempotent on `(runId, seq)`) |
-| `POST /runs/:id/complete` | `{ output }` → `{ ok }` (terminal; wakes a waiting parent) |
-| `POST /runs/:id/fail` | `{ error, stepSeq?, retry?, abort? }` → `{ ok, willRetry, nextAttemptAt? }` |
-| `POST /runs/:id/logs` | `{ logs }` → `{ ok }` (best effort, any run status) |
-
-Reporting endpoints (everything except `logs`) require the run to be `running`
-and locked by the calling worker, else `409 { error: { code: 'run_not_running' } }`.
-
-### Trigger API (app code / dashboard)
+### Trigger API (dashboard / external HTTP)
 
 | Method · Path | Body → Response |
 |---|---|
@@ -95,6 +63,10 @@ and locked by the calling worker, else `409 { error: { code: 'run_not_running' }
 | `POST /batch-trigger` | `{ items }` → `{ runIds }` |
 
 `options`: `{ delay?, idempotencyKey?, priority?, concurrencyKey?, env? }`.
+
+App code normally triggers through the SDK instead (`trigger.trigger(...)`,
+straight to Postgres) — this HTTP path exists for the dashboard and for
+non-TypeScript callers.
 
 ### Dashboard API
 
@@ -110,29 +82,23 @@ and locked by the calling worker, else `409 { error: { code: 'run_not_running' }
 | `PATCH /schedules/:id` | `{ enabled }` → `{ ok }` (re-computes `nextRunAt` when enabling) |
 | `GET /workers` | `{ workers: WorkerSummary[] }` |
 
-Errors use a uniform envelope: `{ error: { code, message } }` — `404 not_found`
-for missing resources, `400` for validation failures, `409 run_not_running`
-for stale worker reports.
+Errors use a uniform envelope: `{ error: { code, message } }`. Kernel error
+codes map to statuses — `400 bad_request`, `404 not_found` / `task_not_found`,
+`409 run_not_running` / `stale_lease` / `conflict` (e.g. retrying a run that
+is not terminal) — everything else is `500 internal_error`.
 
 ## Layout
 
 ```
 src/
-├── main.ts               # process entry: migrate → orchestrator → serve
-├── index.ts              # library surface (createApp, db, orchestrator, …)
-├── app.ts                # Hono assembly + uniform error handler
+├── main.ts               # process entry: pool → migrate → createKernel → createApp → serve
+├── index.ts              # library surface (createApp, createPool/migrate/schema, REST types)
+├── app.ts                # Hono assembly + uniform error handler (kernel code → status)
 ├── middleware.ts         # bearer auth + CORS
-├── ids.ts                # run_/sch_/wkr_ id generation
-├── db/
-│   └── index.ts          # process-wide pg Pool (createPool from @better-trigger/db)
-├── engine/
-│   ├── queue.ts          # enqueue / SKIP-LOCKED dequeue / lock renew/release
-│   ├── runs.ts           # create/steps/suspend/wait-for-run/batch/complete/fail/cancel/retry
-│   ├── orchestrator.ts   # 4 timer loops + cron next-run computation
-│   └── stats.ts          # task aggregations (percentile_cont, trend buckets)
+├── types.ts              # dashboard REST request/response types
+├── stats.ts              # task aggregations (percentile_cont, trend buckets)
 └── routes/
-    ├── workers.ts        # register / heartbeat / dequeue
     ├── trigger.ts        # /trigger /batch-trigger
-    ├── runs.ts           # worker reporting + cancel/retry
+    ├── runs.ts           # cancel/retry
     └── dashboard.ts      # health / tasks / runs / schedules / workers
 ```
