@@ -2,14 +2,19 @@
    Better Trigger — Tasks dashboard.
    ============================================================================= */
 import React from 'react';
-import { Icon, Button, Sparkline } from '../components/primitives';
-import { Page, Card, Metric } from '../components/Layout';
-import { useTasks } from '../api/hooks';
+import { Icon, Sparkline } from '../components/primitives';
+import { Page, Card, Metric, ErrorState, LoadingState } from '../components/Layout';
+import { useTasks, useSchedules, useWorkers } from '../api/hooks';
 
 export function TasksDashboard({ setRoute }: { onOpenRun?: (runId?: string) => void; setRoute: (r: string) => void }) {
-  const { data: tasks } = useTasks();
+  const { data: tasks, error } = useTasks();
+  const { data: schedules } = useSchedules();
+  const { data: workers } = useWorkers();
+  if (!tasks) return <Page>{error ? <ErrorState message={error} /> : <LoadingState />}</Page>;
   const totalRuns = tasks.reduce((a, t) => a + t.runs24h, 0);
   const avgSuccess = tasks.length ? (tasks.reduce((a, t) => a + t.success, 0) / tasks.length).toFixed(1) : '0.0';
+  const scheduledCount = schedules?.filter((s) => s.enabled).length;
+  const workersOnline = workers?.filter((w) => w.status === 'online').length;
 
   const Stat = ({ label, value, sub, tone }: { label: string; value: React.ReactNode; sub?: string; tone?: string }) => (
     <Card style={{ padding: '14px 16px', flex: 1, minWidth: 0 }}>
@@ -24,17 +29,21 @@ export function TasksDashboard({ setRoute }: { onOpenRun?: (runId?: string) => v
   return (
     <Page>
       <div style={{ display: 'flex', gap: 12, marginBottom: 18 }}>
-        <Stat label="Runs · last 24h" value={totalRuns.toLocaleString()} sub="+8.2%" />
+        <Stat label="Runs · last 24h" value={totalRuns.toLocaleString()} />
         <Stat label="Avg success rate" value={avgSuccess + '%'} tone="var(--green-primary)" />
-        <Stat label="Active tasks" value={tasks.length} sub="2 scheduled" />
-        <Stat label="Open alerts" value="1" tone="var(--red-primary)" sub="firing" />
+        <Stat label="Active tasks" value={tasks.length} sub={scheduledCount != null ? scheduledCount + ' scheduled' : undefined} />
+        <Stat label="Workers online" value={workersOnline ?? '—'} tone={workersOnline ? 'var(--green-primary)' : undefined} />
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
         <h4 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>Tasks</h4>
-        <Button variant="outline" size="sm" icon="book">View source</Button>
       </div>
 
+      {tasks.length === 0 && (
+        <Card style={{ padding: '48px 0', textAlign: 'center', color: 'var(--fg-subtle)', fontSize: 13 }}>
+          No tasks registered yet — start a worker to register its tasks.
+        </Card>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
         {tasks.map((t) => (
           <Card key={t.id} hover onClick={() => setRoute('runs')} style={{ padding: 16 }}>

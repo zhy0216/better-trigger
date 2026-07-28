@@ -1,35 +1,67 @@
 /* =============================================================================
    Better Trigger — Onboarding / get started.
+   The three steps mirror the real flow (see examples/basic): install the SDK
+   (`better-trigger`), declare a task(), then startWorker + trigger over HTTP.
    ============================================================================= */
 import React from 'react';
 import { Icon, Button, Badge, IconButton } from '../components/primitives';
-import { Page, Card } from '../components/Layout';
+import { Page } from '../components/Layout';
 
 type Token = [string] | [string, string];
 
+const CODE_INSTALL: Token[] = [
+  ['fn', 'npm i'], ['t', ' better-trigger'], ['nl'],
+  ['c', '# server: better-trigger-server + Postgres'], ['nl'],
+  ['fn', 'export'], ['t', ' BETTER_TRIGGER_API_URL=http://localhost:4848'],
+];
+
 const CODE_TASK: Token[] = [
-  ['kw', 'import'], ['t', ' { task } '], ['kw', 'from'], ['s', ' "@better-trigger/sdk"'], ['t', ';'], ['nl'],
+  ['kw', 'import'], ['t', ' { task } '], ['kw', 'from'], ['s', ' "better-trigger"'], ['t', ';'], ['nl'],
   ['nl'],
   ['kw', 'export const'], ['fn', ' processOrder'], ['t', ' = task({'], ['nl'],
   ['t', '  id: '], ['s', '"process-order"'], ['t', ','], ['nl'],
-  ['c', '  // up to 1hr, auto-retried, fully traced'], ['nl'],
-  ['kw', '  run'], ['t', ': '], ['kw', 'async'], ['t', ' (payload) => {'], ['nl'],
-  ['kw', '    const'], ['t', ' order = '], ['kw', 'await'], ['fn', ' charge'], ['t', '(payload);'], ['nl'],
-  ['kw', '    await'], ['fn', ' sendReceipt'], ['t', '(order);'], ['nl'],
-  ['kw', '    return'], ['t', ' { ok: '], ['kw', 'true'], ['t', ' };'], ['nl'],
+  ['kw', '  run'], ['t', ': '], ['kw', 'async'], ['t', ' (payload, ctx) => {'], ['nl'],
+  ['c', '    // durable step — replayed from cache on retry'], ['nl'],
+  ['kw', '    const'], ['t', ' charge = '], ['kw', 'await'], ['t', ' ctx.'], ['fn', 'step'], ['t', '('], ['s', '"charge"'], ['t', ', () =>'], ['nl'],
+  ['fn', '      chargeCard'], ['t', '(payload));'], ['nl'],
+  ['kw', '    await'], ['t', ' ctx.wait.'], ['fn', 'for'], ['t', '('], ['s', '"5s"'], ['t', ');'], ['nl'],
+  ['kw', '    return'], ['t', ' { ok: '], ['kw', 'true'], ['t', ', chargeId: charge.id };'], ['nl'],
   ['t', '  },'], ['nl'],
   ['t', '});'],
 ];
+
+const CODE_WORKER: Token[] = [
+  ['kw', 'import'], ['t', ' { startWorker } '], ['kw', 'from'], ['s', ' "better-trigger"'], ['t', ';'], ['nl'],
+  ['kw', 'import'], ['t', ' { processOrder } '], ['kw', 'from'], ['s', ' "./tasks"'], ['t', ';'], ['nl'],
+  ['nl'],
+  ['kw', 'await'], ['fn', ' startWorker'], ['t', '({ tasks: [processOrder] });'],
+];
+
+const CODE_TRIGGER: Token[] = [
+  ['fn', 'bun'], ['t', ' src/worker.ts'], ['nl'],
+  ['fn', 'curl'], ['t', ' -s localhost:4848/api/v1/trigger \\'], ['nl'],
+  ['t', "  -H 'content-type: application/json' \\"], ['nl'],
+  ['t', "  -d '"], ['s', '{"taskId":"process-order","payload":{}}'], ['t', "'"],
+];
+
 const TOK: Record<string, string> = { kw: 'var(--st-frozen)', s: 'var(--green-primary)', fn: 'var(--accent)', c: 'var(--fg-faint)', t: 'var(--fg)' };
 
 function CodeBlock({ tokens, title }: { tokens: Token[]; title: string }) {
+  const [copied, setCopied] = React.useState(false);
+  const copy = () => {
+    const text = tokens.map((tk) => (tk[0] === 'nl' ? '\n' : tk[1])).join('');
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    });
+  };
   return (
     <div style={{ borderRadius: 10, overflow: 'hidden', border: '1px solid var(--border)', background: 'var(--code-bg)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--divider)', background: 'var(--surface-2)' }}>
         <Icon name="fn" size={13} style={{ color: 'var(--fg-subtle)' }} />
         <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-muted)' }}>{title}</span>
         <div style={{ flex: 1 }} />
-        <IconButton name="copy" size={13} box={24} title="Copy" />
+        <IconButton name={copied ? 'check' : 'copy'} size={13} box={24} title="Copy" onClick={copy} />
       </div>
       <pre className="mono" style={{ margin: 0, padding: '14px 16px', fontSize: 12.5, lineHeight: 1.75, overflowX: 'auto' }}>
         {tokens.map((tk, i) => (tk[0] === 'nl' ? '\n' : <span key={i} style={{ color: TOK[tk[0]] }}>{tk[1]}</span>))}
@@ -41,9 +73,9 @@ function CodeBlock({ tokens, title }: { tokens: Token[]; title: string }) {
 export function Onboarding({ setRoute }: { setRoute: (r: string) => void }) {
   const [step, setStep] = React.useState(1);
   const steps = [
-    { n: 1, title: 'Install the CLI', body: 'Add the SDK and log in. One command per project.' },
-    { n: 2, title: 'Write a task', body: 'A task is a regular async function. No queues to wire up.' },
-    { n: 3, title: 'Trigger it', body: 'Run locally, then deploy. Every run is traced automatically.' },
+    { n: 1, title: 'Install the SDK', body: 'One package. It talks to your self-hosted server.' },
+    { n: 2, title: 'Write a task', body: 'A plain async function with durable, replayable steps.' },
+    { n: 3, title: 'Run a worker & trigger', body: 'The worker registers tasks and long-polls for runs.' },
   ];
   return (
     <Page>
@@ -85,27 +117,21 @@ export function Onboarding({ setRoute }: { setRoute: (r: string) => void }) {
           <div style={{ flex: 1, minWidth: 0 }}>
             {step === 1 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <CodeBlock title="terminal" tokens={[['fn', 'npm i'], ['t', ' -g @better-trigger/cli'], ['nl'], ['fn', 'bt login'], ['nl'], ['fn', 'bt init'], ['t', ' acme-store']]} />
-                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>Creates a <code className="mono">trigger/</code> folder and links this workspace.</p>
+                <CodeBlock title="terminal" tokens={CODE_INSTALL} />
+                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>The server needs a Postgres database — migrations run automatically on startup.</p>
               </div>
             )}
             {step === 2 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <CodeBlock title="trigger/orders.ts" tokens={CODE_TASK} />
-                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>Any export wrapped in <code className="mono">task()</code> becomes triggerable and traceable.</p>
+                <CodeBlock title="src/tasks.ts" tokens={CODE_TASK} />
+                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>Each <code className="mono">ctx.step</code> is memoized — on retry, completed steps replay from cache instead of re-executing.</p>
               </div>
             )}
             {step === 3 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <CodeBlock title="terminal" tokens={[['fn', 'bt dev'], ['c', '   # run + watch locally'], ['nl'], ['fn', 'bt deploy'], ['c', ' # ship an immutable version']]} />
-                <Card style={{ padding: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <span className="bt-live-dot" />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>A run just started</div>
-                    <div style={{ fontSize: 12, color: 'var(--fg-subtle)' }}>Watch it stream live in the run view.</div>
-                  </div>
-                  <Button icon="activity" onClick={() => setRoute('run')}>Open run</Button>
-                </Card>
+                <CodeBlock title="src/worker.ts" tokens={CODE_WORKER} />
+                <CodeBlock title="terminal" tokens={CODE_TRIGGER} />
+                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>Every run is traced automatically — open Runs to watch it stream live.</p>
               </div>
             )}
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 18 }}>

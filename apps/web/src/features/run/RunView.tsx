@@ -1,78 +1,25 @@
 /* =============================================================================
    Better Trigger — Run observability (the hero).
-   A single coherent waterfall: time-aligned span tree + live playback +
-   inspector + streaming logs. vizStyle: "waterfall" | "tree".
+   A single coherent waterfall: time-aligned span tree + inspector + logs,
+   rendered from live run detail. vizStyle: "waterfall" | "tree".
    ============================================================================= */
 import React from 'react';
-import { Icon, IconButton, Badge, StatusBadge, StatusDot, STATUS_META } from '../../components/primitives';
-import { TRACE, SPAN_LOGS } from '../../data/mock';
+import { Icon, Badge, StatusBadge, StatusDot, STATUS_META } from '../../components/primitives';
+import { ErrorState, LoadingState } from '../../components/Layout';
 import { useRun } from '../../api/hooks';
-import { relativeFuture } from '../../api/adapter';
+import { relativeFuture, type AdaptedRunDetail } from '../../api/adapter';
 import type { Span, Trace, LogLine, VizStyle } from '../../types';
 
 const KIND_ICON: Record<string, string> = { task: 'bolt', http: 'globe', query: 'db', fn: 'fn' };
 const KIND_LABEL: Record<string, string> = { task: 'subtask', http: 'http', query: 'query', fn: 'fn' };
 
-function finalStatus(s: Span): string { return s.status === 'running' ? 'success' : s.status; }
-function spanStateAt(s: Span, t: number): string {
-  if (t < s.start) return 'pending';
-  if (t < s.start + s.dur) return 'running';
-  return finalStatus(s);
-}
 function fmtMs(ms: number): string {
   if (ms < 1000) return Math.round(ms) + 'ms';
   return (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + 's';
 }
 
-interface PlaybackState {
-  t: number;
-  setT: React.Dispatch<React.SetStateAction<number>>;
-  playing: boolean;
-  toggle: () => void;
-  restart: () => void;
-  speed: number;
-  setSpeed: (s: number) => void;
-}
-
-// ---- playback hook (persisted) ----
-function usePlayback(totalMs: number, persistKey: string): PlaybackState {
-  const init = (): { t?: number; playing?: boolean; speed?: number } => {
-    try { return JSON.parse(localStorage.getItem(persistKey) || '{}'); } catch { return {}; }
-  };
-  const saved = init();
-  const [t, setT] = React.useState(typeof saved.t === 'number' ? saved.t : 0);
-  const [playing, setPlaying] = React.useState(saved.playing !== false);
-  const [speed, setSpeed] = React.useState(saved.speed || 1);
-  const raf = React.useRef(0);
-  const last = React.useRef(0);
-  React.useEffect(() => {
-    if (!playing) return;
-    last.current = performance.now();
-    const tick = (now: number) => {
-      const dt = now - last.current;
-      last.current = now;
-      setT((prev) => {
-        const next = prev + dt * speed;
-        if (next >= totalMs) { setPlaying(false); return totalMs; }
-        return next;
-      });
-      raf.current = requestAnimationFrame(tick);
-    };
-    raf.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf.current);
-  }, [playing, speed, totalMs]);
-  React.useEffect(() => {
-    const id = setTimeout(() => { try { localStorage.setItem(persistKey, JSON.stringify({ t, playing, speed })); } catch { /* ignore */ } }, 120);
-    return () => clearTimeout(id);
-  }, [t, playing, speed, persistKey]);
-  const restart = () => { setT(0); setPlaying(true); };
-  const toggle = () => { if (t >= totalMs) { setT(0); setPlaying(true); } else setPlaying((p) => !p); };
-  return { t, setT, playing, toggle, restart, speed, setSpeed };
-}
-
 // ---- the trace header ----
-function RunHeader({ trace, t, pb, runStatus, live }: { trace: Trace; t: number; pb: PlaybackState; runStatus: string; live?: boolean }) {
-  const pct = Math.min(100, (t / trace.totalMs) * 100);
+function RunHeader({ trace, runStatus }: { trace: Trace; runStatus: string }) {
   const Meta = ({ icon, label, value, mono }: { icon: string; label: string; value: React.ReactNode; mono?: boolean }) => (
     <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
       <Icon name={icon} size={14} style={{ color: 'var(--fg-subtle)' }} />
@@ -87,51 +34,19 @@ function RunHeader({ trace, t, pb, runStatus, live }: { trace: Trace; t: number;
         <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600, letterSpacing: '-0.01em' }}>{trace.task}</h3>
         <span className="mono" style={{ fontSize: 12, color: 'var(--fg-subtle)', padding: '2px 8px', borderRadius: 6, background: 'var(--fill)' }}>{trace.runId}</span>
         <div style={{ flex: 1 }} />
-        {!live && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <PlaybackControls pb={pb} t={t} total={trace.totalMs} />
-          </div>
-        )}
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', padding: '13px 0 14px' }}>
         <Meta icon="bolt" label="trigger" value={trace.trigger} mono />
         <Meta icon="layers" label="env" value={trace.env} />
         <Meta icon="git" label="version" value={trace.version} mono />
         <Meta icon="clock" label="queued" value={trace.queuedFor} />
-        <Meta icon="activity" label="elapsed" value={fmtMs(t)} />
+        <Meta icon="activity" label="elapsed" value={fmtMs(trace.totalMs)} />
       </div>
       <div style={{ height: 3, background: 'var(--fill)', borderRadius: 9999, overflow: 'hidden', marginBottom: -1.5 }}>
         <div style={{
-          width: pct + '%', height: '100%', borderRadius: 9999,
+          width: '100%', height: '100%', borderRadius: 9999,
           background: (STATUS_META[runStatus] || STATUS_META.success).color,
-          transition: 'width 80ms linear',
         }} />
-      </div>
-    </div>
-  );
-}
-
-function PlaybackControls({ pb, t, total }: { pb: PlaybackState; t: number; total: number }) {
-  const done = t >= total;
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: 4, borderRadius: 9999, background: 'var(--fill)' }}>
-      <IconButton name="restart" size={15} box={28} onClick={pb.restart} title="Replay" />
-      <button onClick={pb.toggle} title={done ? 'Replay' : pb.playing ? 'Pause' : 'Play'}
-        style={{
-          width: 30, height: 30, borderRadius: 9999, border: 'none', cursor: 'pointer', background: 'var(--accent)', color: 'var(--accent-fg)',
-          display: 'grid', placeItems: 'center',
-        }}>
-        <Icon name={done ? 'restart' : pb.playing ? 'pause' : 'play'} size={14} />
-      </button>
-      <div style={{ display: 'flex', gap: 2, padding: '0 4px 0 2px' }}>
-        {[1, 2, 4].map((s) => (
-          <button key={s} onClick={() => pb.setSpeed(s)}
-            style={{
-              fontFamily: 'var(--font-mono)', fontSize: 10.5, fontWeight: 600, padding: '3px 5px', borderRadius: 5, border: 'none', cursor: 'pointer',
-              background: pb.speed === s ? 'var(--surface)' : 'transparent', color: pb.speed === s ? 'var(--fg)' : 'var(--fg-subtle)',
-              boxShadow: pb.speed === s ? 'var(--shadow-sm)' : 'none',
-            }}>{s}×</button>
-        ))}
       </div>
     </div>
   );
@@ -165,19 +80,10 @@ function Ruler({ totalMs, labelW }: { totalMs: number; labelW: number }) {
 }
 
 // ---- a single span row ----
-function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle, staticState }: {
-  s: Span; t: number; totalMs: number; labelW: number; selected: boolean; onSelect: (id: string) => void; vizStyle: VizStyle; staticState?: boolean;
+function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle }: {
+  s: Span; t: number; totalMs: number; labelW: number; selected: boolean; onSelect: (id: string) => void; vizStyle: VizStyle;
 }) {
-  // live mode renders the span's literal status; mock derives it from playback time.
-  const state = staticState ? s.status : spanStateAt(s, t);
-  if (state === 'pending') return (
-    <div style={{ height: 'var(--span-h)', display: 'flex', opacity: 0.32, alignItems: 'center' }}>
-      <div style={{ width: labelW, flexShrink: 0, paddingLeft: 14 + s.level * 18, display: 'flex', alignItems: 'center', gap: 7 }}>
-        <span style={{ width: 7, height: 7, borderRadius: 9999, border: '1.5px dashed var(--fg-faint)' }} />
-        <span style={{ fontSize: 12.5, color: 'var(--fg-faint)' }}>{s.label}</span>
-      </div>
-    </div>
-  );
+  const state = s.status;
   const m = STATUS_META[state];
   const visDur = state === 'running' ? Math.max(t - s.start, 20) : s.dur;
   const left = (s.start / totalMs) * 100;
@@ -244,9 +150,9 @@ function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle, staticSt
 }
 
 // ---- inspector for selected span ----
-function Inspector({ span, t, trace, wake, staticState }: { span: Span | undefined; t: number; trace: Trace; wake?: WakeInfo; staticState?: boolean }) {
+function Inspector({ span, t, trace, wake }: { span: Span | undefined; t: number; trace: Trace; wake?: WakeInfo }) {
   if (!span) return null;
-  const state = staticState ? span.status : spanStateAt(span, t);
+  const state = span.status;
   const Row = ({ k, v, mono }: { k: string; v: React.ReactNode; mono?: boolean }) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--divider)' }}>
       <span style={{ fontSize: 12, color: 'var(--fg-subtle)', whiteSpace: 'nowrap' }}>{k}</span>
@@ -269,8 +175,7 @@ function Inspector({ span, t, trace, wake, staticState }: { span: Span | undefin
         <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--fg-faint)', marginBottom: 4 }}>Timing</div>
         <Row k="started at" v={fmtMs(span.start)} mono />
         <Row k="duration" v={state === 'running' ? fmtMs(Math.max(t - span.start, 0)) + ' …' : fmtMs(span.dur)} mono />
-        <Row k="self time" v={fmtMs(Math.round(span.dur * 0.4))} mono />
-        <Row k="attempt" v={state === 'failed' ? '3 of 3' : '1 of 1'} mono />
+        {span.attempt && <Row k="attempt" v={span.attempt} mono />}
       </div>
       {payload && (
         <div style={{ padding: '0 16px 16px' }}>
@@ -306,16 +211,24 @@ function Inspector({ span, t, trace, wake, staticState }: { span: Span | undefin
           </div>
         </div>
       )}
-      {span.kind !== 'task' && (
+      {span.error && (
         <div style={{ padding: '0 16px 16px' }}>
-          <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--fg-faint)', marginBottom: 6 }}>Attributes</div>
+          <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--fg-faint)', marginBottom: 6 }}>Error</div>
+          <pre className="mono" style={{
+            margin: 0, fontSize: 11.5, lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            background: 'color-mix(in srgb, var(--red-primary) 7%, transparent)',
+            border: '1px solid color-mix(in srgb, var(--red-primary) 25%, transparent)',
+            borderRadius: 8, padding: 12, overflowX: 'auto', color: 'var(--red-text)',
+          }}>{span.error.message + (span.error.stack ? '\n\n' + span.error.stack : '')}</pre>
+        </div>
+      )}
+      {span.output != null && (
+        <div style={{ padding: '0 16px 16px' }}>
+          <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--fg-faint)', marginBottom: 6 }}>Output</div>
           <pre className="mono" style={{
             margin: 0, fontSize: 11.5, lineHeight: 1.6, background: 'var(--code-bg)', border: '1px solid var(--divider)',
             borderRadius: 8, padding: 12, overflowX: 'auto', color: 'var(--fg-muted)',
-          }}>{JSON.stringify(
-            span.kind === 'http' ? { method: 'POST', status: state === 'warning' ? 207 : 200, retries: state === 'warning' ? 1 : 0 }
-              : span.kind === 'query' ? { rows: 3, cached: false, db: 'primary' }
-                : { ok: true }, null, 2)}</pre>
+          }}>{JSON.stringify(span.output, null, 2)}</pre>
         </div>
       )}
     </div>
@@ -380,31 +293,24 @@ interface WakeInfo {
 }
 
 export function RunView({ vizStyle = 'waterfall', runId = null, onBack }: { vizStyle?: VizStyle; runId?: string | null; onBack?: () => void }) {
-  const { data: detail, live } = useRun(runId);
-  // live run detail present → render real data static (no playback reset on poll);
-  // otherwise fall back to the animated mock TRACE (contract §7).
-  const liveMode = live && !!runId && !!detail;
-  const trace = liveMode ? detail!.trace : TRACE;
-  const logs: Record<string, LogLine[]> = liveMode ? detail!.spanLogs : SPAN_LOGS;
+  const { data: detail, error } = useRun(runId);
 
-  const pb = usePlayback(trace.totalMs, liveMode ? 'bt_playback_live' : 'bt_playback');
-  const [selectedId, setSelectedId] = React.useState('s4');
-  const [scoped, setScoped] = React.useState(false);
-  const labelW = vizStyle === 'tree' ? 320 : 300;
-
-  // live: reveal the whole timeline (no animation), status comes from the server.
-  const t = liveMode ? trace.totalMs : pb.t;
-  const selected = trace.spans.find((s) => s.id === selectedId) ?? trace.spans[0];
-  const wake: WakeInfo | undefined = liveMode ? { waits: detail!.pendingWaits } : undefined;
-  const runStatus = liveMode
-    ? detail!.status
-    : pb.t < trace.totalMs
-      ? 'running'
-      : trace.spans.some((s) => s.status === 'failed')
-        ? 'failed'
-        : trace.spans.some((s) => s.status === 'warning')
-          ? 'warning'
-          : 'success';
+  let body: React.ReactNode;
+  if (!runId) {
+    body = (
+      <div style={{ display: 'grid', placeItems: 'center', flex: 1 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, color: 'var(--fg-subtle)' }}>
+          <Icon name="activity" size={22} style={{ color: 'var(--fg-faint)' }} />
+          <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--fg)' }}>No run selected</div>
+          <div style={{ fontSize: 12.5 }}>Pick a run from the Runs list to inspect its trace.</div>
+        </div>
+      </div>
+    );
+  } else if (!detail) {
+    body = <div style={{ flex: 1, overflowY: 'auto' }}>{error ? <ErrorState message={error} /> : <LoadingState />}</div>;
+  } else {
+    body = <RunDetail key={runId} detail={detail} vizStyle={vizStyle} />;
+  }
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -418,32 +324,41 @@ export function RunView({ vizStyle = 'waterfall', runId = null, onBack }: { vizS
           </button>
         </div>
       )}
-      <RunHeader trace={trace} t={t} pb={pb} runStatus={runStatus} live={liveMode} />
+      {body}
+    </div>
+  );
+}
+
+function RunDetail({ detail, vizStyle }: { detail: AdaptedRunDetail; vizStyle: VizStyle }) {
+  const trace = detail.trace;
+  const logs: Record<string, LogLine[]> = detail.spanLogs;
+  const [selectedId, setSelectedId] = React.useState(trace.spans[0]?.id ?? '');
+  const [scoped, setScoped] = React.useState(false);
+  const labelW = vizStyle === 'tree' ? 320 : 300;
+
+  // the whole timeline is revealed at once; status comes from the server.
+  const t = trace.totalMs;
+  const selected = trace.spans.find((s) => s.id === selectedId) ?? trace.spans[0];
+  const wake: WakeInfo = { waits: detail.pendingWaits };
+
+  return (
+    <>
+      <RunHeader trace={trace} runStatus={detail.status} />
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, position: 'relative', background: 'var(--surface)' }}>
           <div style={{ flex: 1, overflowY: 'auto', position: 'relative' }}>
             <Ruler totalMs={trace.totalMs} labelW={labelW} />
             <div style={{ position: 'relative', padding: '6px 0 16px' }}>
-              {/* now-line */}
-              {!liveMode && runStatus === 'running' && vizStyle !== 'tree' && (
-                <div style={{
-                  position: 'absolute', top: 0, bottom: 16,
-                  left: `calc(${labelW}px + (100% - ${labelW}px) * ${t / trace.totalMs})`,
-                  width: 1.5, background: 'var(--accent)', opacity: 0.7, zIndex: 2, pointerEvents: 'none',
-                }}>
-                  <div style={{ position: 'absolute', top: -1, left: -3, width: 7, height: 7, borderRadius: 9999, background: 'var(--accent)' }} />
-                </div>
-              )}
               {trace.spans.map((s) => (
                 <SpanRow key={s.id} s={s} t={t} totalMs={trace.totalMs} labelW={labelW}
-                  selected={selected?.id === s.id} onSelect={setSelectedId} vizStyle={vizStyle} staticState={liveMode} />
+                  selected={selected?.id === s.id} onSelect={setSelectedId} vizStyle={vizStyle} />
               ))}
             </div>
           </div>
           <LogStream trace={trace} logs={logs} t={t} selectedId={selected?.id ?? ''} scoped={scoped} setScoped={setScoped} />
         </div>
-        <Inspector span={selected} t={t} trace={trace} wake={wake} staticState={liveMode} />
+        <Inspector span={selected} t={t} trace={trace} wake={wake} />
       </div>
-    </div>
+    </>
   );
 }

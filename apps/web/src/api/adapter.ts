@@ -41,7 +41,7 @@ export function mapStatus(s: ServerRunStatus): RunStatus {
 }
 
 /* ---- formatting helpers -------------------------------------------------- */
-/** 640 → "640ms", 2100 → "2.1s" (matches mock + RunView fmtMs). */
+/** 640 → "640ms", 2100 → "2.1s" (matches RunView fmtMs). */
 export function fmtDuration(ms: number | null | undefined): string | null {
   if (ms == null) return null;
   if (ms < 1000) return Math.round(ms) + 'ms';
@@ -213,6 +213,9 @@ export function adaptRunDetail(detail: RunDetailResponse, now: number = Date.now
       start: Math.max(0, start),
       dur,
       status: running ? 'running' : stepSpanStatus(st),
+      attempt: String(st.attempt),
+      output: st.output,
+      error: st.error,
     });
     maxEnd = Math.max(maxEnd, start + dur);
   });
@@ -233,6 +236,9 @@ export function adaptRunDetail(detail: RunDetailResponse, now: number = Date.now
     start: 0,
     dur: Math.max(rootDur, totalMs),
     status,
+    attempt: run.attempt + (run.maxAttempts != null ? ' of ' + run.maxAttempts : ''),
+    output: run.output,
+    error: run.error,
   });
   spans.push(...childSpans);
 
@@ -289,7 +295,7 @@ function toPayloadRecord(payload: unknown): Record<string, unknown> {
 
 /* ---- schedules (ScheduleSummary → Schedule) ------------------------------ */
 export function adaptSchedule(s: ScheduleSummary, now: number = Date.now()): Schedule {
-  // mock uses last: 'ok' | 'warn'; map server lastRunStatus onto that vocabulary.
+  // Schedules screen renders last: 'ok' | 'warn'; map server lastRunStatus onto that vocabulary.
   let last = '—';
   if (s.lastRunStatus === 'failed' || s.lastRunStatus === 'canceled') last = 'warn';
   else if (s.lastRunStatus != null) last = 'ok';

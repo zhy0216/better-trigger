@@ -18,7 +18,7 @@ import { Schedules } from './screens/Schedules';
 import { Alerts } from './screens/Alerts';
 import { Deployments } from './screens/Deployments';
 import { Onboarding } from './screens/Onboarding';
-import { useIsLive } from './api/hooks';
+import { useConnection } from './api/hooks';
 import type { Route, VizStyle } from './types';
 
 const TWEAK_DEFAULTS = {
@@ -30,11 +30,11 @@ const TWEAK_DEFAULTS = {
 
 export default function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
-  const [route, setRoute] = React.useState<Route>('run'); // run = hero trace detail
+  const [route, setRoute] = React.useState<Route>('runs');
   const [env, setEnv] = React.useState('prod');
   const [collapsed, setCollapsed] = React.useState(false);
   const [runId, setRunId] = React.useState<string | null>(null); // selected run for RunView
-  const isLive = useIsLive();
+  const connection = useConnection();
 
   const openRun = (id?: string) => { setRunId(id ?? null); setRoute('run'); };
 
@@ -68,9 +68,8 @@ export default function App() {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <TopBar title={titles[route]} env={env} setEnv={setEnv}
           onToggleSidebar={() => setCollapsed((c) => !c)}
-          theme={t.theme} setTheme={(v) => setTweak('theme', v)}
-          onSearch={() => {}}>
-          <DataSourceDot isLive={isLive} />
+          theme={t.theme} setTheme={(v) => setTweak('theme', v)}>
+          <ConnectionDot connection={connection} />
           {route === 'tasks' && <Button variant="outline" size="sm" icon="plus" onClick={() => setRoute('onboarding')}>New task</Button>}
         </TopBar>
         {screen}
@@ -91,10 +90,17 @@ export default function App() {
   );
 }
 
-/* Tiny live/mock data-source indicator, sits among the TopBar trailing items. */
-function DataSourceDot({ isLive }: { isLive: boolean }) {
+/* Tiny connection indicator, sits among the TopBar trailing items. */
+const CONNECTION_META = {
+  connecting: { label: 'Connecting…', title: 'Waiting for the first server response', color: 'var(--fg-faint)' },
+  live: { label: 'Live', title: 'Connected to server', color: 'var(--green-primary)' },
+  down: { label: 'Offline', title: 'Server unreachable — retrying', color: 'var(--red-primary)' },
+} as const;
+
+function ConnectionDot({ connection }: { connection: keyof typeof CONNECTION_META }) {
+  const m = CONNECTION_META[connection];
   return (
-    <div title={isLive ? 'Connected to server' : 'Mock data'}
+    <div title={m.title}
       style={{
         display: 'flex', alignItems: 'center', gap: 6, height: 32, padding: '0 9px', borderRadius: 8,
         border: '1px solid var(--border)', background: 'var(--surface)',
@@ -102,9 +108,9 @@ function DataSourceDot({ isLive }: { isLive: boolean }) {
       }}>
       <span style={{
         width: 7, height: 7, borderRadius: 9999, display: 'inline-block', flexShrink: 0,
-        background: isLive ? 'var(--green-primary)' : 'var(--fg-faint)',
+        background: m.color,
       }} />
-      {isLive ? 'Live' : 'Mock'}
+      {m.label}
     </div>
   );
 }

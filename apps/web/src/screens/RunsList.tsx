@@ -3,7 +3,7 @@
    ============================================================================= */
 import React from 'react';
 import { Icon, Badge, StatusDot, StatusBadge, Input } from '../components/primitives';
-import { Page, Card } from '../components/Layout';
+import { Page, Card, ErrorState, LoadingState } from '../components/Layout';
 import { useRuns } from '../api/hooks';
 import type { Run } from '../types';
 
@@ -28,16 +28,10 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
   const [filter, setFilter] = React.useState('all');
   const [q, setQ] = React.useState('');
   const [live, setLive] = React.useState(true);
-  // live: server-side env + status filtering; mock fallback served by the hook.
-  // `live` also gates polling — Paused stops requests and holds current data,
-  // resuming refreshes immediately.
-  const { data: source, live: isLive } = useRuns(env, { status: FILTER_TO_SERVER[filter] }, live);
-  // filter ids are UI status values (all/running/success/failed/queued); applied
-  // client-side too so the mock path narrows even without a server round-trip.
-  const runs = source
-    .filter((r) => filter === 'all' || r.status === filter)
-    .filter((r) => !q || r.task.includes(q) || r.id.includes(q))
-    .filter((r) => (isLive ? true : env === 'prod' ? true : r.env === env || env === 'dev'));
+  // env + status filtering happen server-side. `live` gates polling — Paused
+  // stops requests and holds current data, resuming refreshes immediately.
+  const { data: source, error } = useRuns(env, { status: FILTER_TO_SERVER[filter] }, live);
+  const runs = (source ?? []).filter((r) => !q || r.task.includes(q) || r.id.includes(q));
 
   const colT = '112px 150px minmax(0,1fr) 96px 130px 96px 92px';
   const Th = ({ children, style }: { children?: React.ReactNode; style?: React.CSSProperties }) => (
@@ -72,6 +66,9 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
         </button>
       </div>
 
+      {source === null ? (
+        <Card>{error ? <ErrorState message={error} /> : <LoadingState />}</Card>
+      ) : (
       <Card>
         <div style={{ display: 'grid', gridTemplateColumns: colT, gap: 12, padding: '11px 16px', borderBottom: '1px solid var(--divider)' }}>
           <Th>Status</Th><Th>Run</Th><Th>Task</Th><Th>Trigger</Th><Th>Version</Th><Th style={{ textAlign: 'right' }}>Duration</Th><Th style={{ textAlign: 'right' }}>Started</Th>
@@ -94,7 +91,7 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
             <div style={{ fontSize: 12, color: 'var(--fg-muted)' }}>{r.trigger}</div>
             <div className="mono" style={{ fontSize: 11.5, color: 'var(--fg-subtle)' }}>{r.version}</div>
             <div className="mono tnum" style={{ fontSize: 12.5, textAlign: 'right', color: r.status === 'running' ? 'var(--accent)' : 'var(--fg)' }}>
-              {r.duration || 'running…'}
+              {r.duration || (r.status === 'running' ? 'running…' : '—')}
             </div>
             <div style={{ fontSize: 12, color: 'var(--fg-subtle)', textAlign: 'right', whiteSpace: 'nowrap' }}>{r.started}</div>
           </div>
@@ -103,6 +100,7 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
           <div style={{ padding: '48px 0', textAlign: 'center', color: 'var(--fg-subtle)', fontSize: 13 }}>No runs match these filters.</div>
         )}
       </Card>
+      )}
     </Page>
   );
 }

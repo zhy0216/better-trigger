@@ -37,6 +37,12 @@ export interface Run {
   ts: number;
 }
 
+export interface SpanError {
+  message: string;
+  stack?: string;
+  name?: string;
+}
+
 export interface Span {
   id: string;
   label: string;
@@ -45,6 +51,12 @@ export interface Span {
   start: number;
   dur: number;
   status: RunStatus;
+  /** formatted attempt, e.g. "2 of 3" (run) or "1" (step); absent when unknown. */
+  attempt?: string;
+  /** real run/step output from the server, shown in the inspector. */
+  output?: unknown;
+  /** real run/step error from the server. */
+  error?: SpanError | null;
 }
 
 export interface Trace {
@@ -71,27 +83,6 @@ export interface Schedule {
   next: string;
   last: string;
   enabled: boolean;
-}
-
-export interface Alert {
-  id: string;
-  title: string;
-  scope: string;
-  channel: string;
-  status: 'firing' | 'armed' | 'resolved';
-  when: string;
-  tone: string;
-}
-
-export interface Deployment {
-  id: string;
-  env: string;
-  status: 'current' | 'previous' | 'archived' | 'failed';
-  tasks: number;
-  when: string;
-  git: string;
-  by: string;
-  msg: string;
 }
 
 export type Route =

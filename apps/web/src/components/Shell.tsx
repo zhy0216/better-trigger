@@ -23,14 +23,13 @@ interface NavEntry {
   id: string;
   label: string;
   icon: string;
-  badge?: number;
 }
 
 export const NAV: NavEntry[] = [
   { id: 'runs',        label: 'Runs',        icon: 'activity' },
   { id: 'tasks',       label: 'Tasks',       icon: 'task' },
   { id: 'schedules',   label: 'Schedules',   icon: 'clock' },
-  { id: 'alerts',      label: 'Alerts',      icon: 'bell', badge: 1 },
+  { id: 'alerts',      label: 'Alerts',      icon: 'bell' },
   { id: 'deployments', label: 'Deployments', icon: 'rocket' },
 ];
 
@@ -54,12 +53,6 @@ export function Sidebar({ route, setRoute, collapsed }: { route: string; setRout
         onMouseLeave={(e) => { if (!on) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--fg-muted)'; } }}>
         <Icon name={item.icon} size={17} strokeWidth={on ? 2.2 : 2} />
         {!collapsed && <span style={{ flex: 1, textAlign: 'left' }}>{item.label}</span>}
-        {!collapsed && item.badge && (
-          <span style={{
-            minWidth: 17, height: 17, padding: '0 5px', borderRadius: 9999, background: 'var(--red-primary)',
-            color: '#fff', fontSize: 10, fontWeight: 600, display: 'grid', placeItems: 'center',
-          }}>{item.badge}</span>
-        )}
       </button>
     );
   };
@@ -69,13 +62,13 @@ export function Sidebar({ route, setRoute, collapsed }: { route: string; setRout
       borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column',
       transition: 'width var(--dur-base) var(--ease-standard)',
     }}>
-      {/* brand + workspace */}
+      {/* brand */}
       <div style={{ height: 56, display: 'flex', alignItems: 'center', gap: 10, padding: '0 14px', borderBottom: '1px solid var(--divider)' }}>
         <Logo />
         {!collapsed && (
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, letterSpacing: '-0.01em', lineHeight: 1.15, whiteSpace: 'nowrap' }}>Better Trigger</div>
-            <div style={{ fontSize: 11, color: 'var(--fg-subtle)', lineHeight: 1.2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>acme-store</div>
+            <div style={{ fontSize: 11, color: 'var(--fg-subtle)', lineHeight: 1.2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Self-hosted</div>
           </div>
         )}
       </div>
@@ -86,30 +79,6 @@ export function Sidebar({ route, setRoute, collapsed }: { route: string; setRout
         <div style={{ height: 1, background: 'var(--divider)', margin: collapsed ? '10px 4px' : '10px 6px' }} />
         {navItem({ id: 'onboarding', label: 'Get started', icon: 'sparkle' })}
       </nav>
-
-      {/* footer */}
-      <div style={{ padding: collapsed ? '10px 8px' : '10px 12px', borderTop: '1px solid var(--divider)', display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <a href="#" onClick={(e) => e.preventDefault()} style={{ textDecoration: 'none' }}>
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 10, height: 34, padding: collapsed ? 0 : '0 10px',
-            justifyContent: collapsed ? 'center' : 'flex-start', borderRadius: 8, color: 'var(--fg-muted)', fontSize: 13, fontWeight: 500,
-          }}>
-            <Icon name="book" size={16} />{!collapsed && <span>Docs</span>}
-          </div>
-        </a>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 9, height: 40, padding: collapsed ? 0 : '0 6px', justifyContent: collapsed ? 'center' : 'flex-start' }}>
-          <div style={{
-            width: 26, height: 26, borderRadius: 9999, background: 'linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 50%, #18C580))',
-            display: 'grid', placeItems: 'center', color: '#fff', fontSize: 11, fontWeight: 600, flexShrink: 0,
-          }}>JD</div>
-          {!collapsed && (
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 500, lineHeight: 1.1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Jamie Doe</div>
-              <div style={{ fontSize: 10.5, color: 'var(--fg-subtle)', lineHeight: 1.2 }}>Free · Hobby</div>
-            </div>
-          )}
-        </div>
-      </div>
     </aside>
   );
 }
@@ -164,7 +133,7 @@ export function EnvSwitcher({ env, setEnv }: { env: string; setEnv: (e: string) 
 }
 
 export function TopBar({
-  title, env, setEnv, onToggleSidebar, theme, setTheme, children, onSearch,
+  title, env, setEnv, onToggleSidebar, theme, setTheme, children,
 }: {
   title: string;
   env: string;
@@ -173,7 +142,6 @@ export function TopBar({
   theme: string;
   setTheme: (t: string) => void;
   children?: React.ReactNode;
-  onSearch: () => void;
 }) {
   return (
     <header style={{
@@ -186,14 +154,6 @@ export function TopBar({
       </div>
       <div style={{ flex: 1 }} />
       {children}
-      <button onClick={onSearch} style={{
-        display: 'flex', alignItems: 'center', gap: 8, height: 32, padding: '0 10px', borderRadius: 8,
-        border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--fg-subtle)', cursor: 'pointer',
-        fontFamily: 'var(--font-sans)', fontSize: 12.5,
-      }}>
-        <Icon name="search" size={14} /> Search
-        <kbd className="mono" style={{ fontSize: 10.5, padding: '1px 5px', borderRadius: 4, background: 'var(--fill)', color: 'var(--fg-subtle)' }}>⌘K</kbd>
-      </button>
       <EnvSwitcher env={env} setEnv={setEnv} />
       <IconButton name={theme === 'dark' ? 'sun' : 'moon'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="Toggle theme" />
     </header>

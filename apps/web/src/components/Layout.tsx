@@ -1,7 +1,10 @@
 /* =============================================================================
-   Better Trigger — shared layout pieces: Page, Card, Metric, SectionHead.
+   Better Trigger — shared layout pieces: Page, Card, Metric, SectionHead,
+   LoadingState, ErrorState.
    ============================================================================= */
 import React from 'react';
+import { Icon } from './primitives';
+import { API_BASE_URL } from '../api/client';
 
 export function Page({ children, pad = true, scroll = true }: { children?: React.ReactNode; pad?: boolean; scroll?: boolean }) {
   return (
@@ -40,6 +43,43 @@ export function Metric({ label, value, tone }: { label: string; value: React.Rea
     <div>
       <div style={{ fontSize: 10.5, color: 'var(--fg-faint)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 2, whiteSpace: 'nowrap' }}>{label}</div>
       <div className="mono tnum" style={{ fontSize: 13.5, fontWeight: 600, color: tone || 'var(--fg)', whiteSpace: 'nowrap' }}>{value}</div>
+    </div>
+  );
+}
+
+/** Centered "waiting for the first response" placeholder. */
+export function LoadingState({ label = 'Connecting to server…' }: { label?: string }) {
+  return (
+    <div style={{ display: 'grid', placeItems: 'center', padding: '80px 0', color: 'var(--fg-subtle)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 13 }}>
+        <span className="bt-live-dot" /> {label}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Centered "server unreachable" panel. Polling keeps retrying behind it, so
+ * the screen recovers on its own once the API is back.
+ */
+export function ErrorState({ message }: { message?: string | null }) {
+  return (
+    <div style={{ display: 'grid', placeItems: 'center', padding: '64px 0' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, maxWidth: 440, textAlign: 'center' }}>
+        <div style={{
+          width: 38, height: 38, borderRadius: 10, display: 'grid', placeItems: 'center',
+          background: 'color-mix(in srgb, var(--red-primary) 10%, transparent)',
+          border: '1px solid color-mix(in srgb, var(--red-primary) 25%, transparent)',
+        }}>
+          <Icon name="close" size={17} style={{ color: 'var(--red-primary)' }} />
+        </div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--fg)' }}>Can’t reach the server</div>
+        {message && <div className="mono" style={{ fontSize: 12, color: 'var(--fg-muted)', wordBreak: 'break-word' }}>{message}</div>}
+        <div style={{ fontSize: 12.5, color: 'var(--fg-subtle)', lineHeight: 1.6 }}>
+          Expected the API at <code className="mono" style={{ color: 'var(--fg-muted)' }}>{API_BASE_URL}</code>.
+          Start the server (or set <code className="mono" style={{ color: 'var(--fg-muted)' }}>VITE_BT_API_URL</code>) — retrying automatically.
+        </div>
+      </div>
     </div>
   );
 }

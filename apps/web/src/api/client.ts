@@ -9,10 +9,6 @@
 export const API_BASE_URL: string =
   (import.meta.env.VITE_BT_API_URL as string | undefined) ?? 'http://localhost:4848';
 
-/** Set when VITE_BT_API_URL is explicitly configured; mock-only otherwise. */
-export const API_CONFIGURED: boolean =
-  typeof import.meta.env.VITE_BT_API_URL === 'string' && import.meta.env.VITE_BT_API_URL.length > 0;
-
 const PREFIX = '/api/v1';
 
 export class ApiError extends Error {

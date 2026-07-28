@@ -2,33 +2,44 @@
    Better Trigger — Schedules.
    ============================================================================= */
 import React from 'react';
-import { Icon, Button, Badge, Switch } from '../components/primitives';
-import { Page, Card, SectionHead } from '../components/Layout';
+import { Icon, Badge, Switch } from '../components/primitives';
+import { Page, Card, SectionHead, ErrorState, LoadingState } from '../components/Layout';
 import { useSchedules, api } from '../api/hooks';
 import type { Schedule } from '../types';
 
 export function Schedules() {
-  const { data, live } = useSchedules();
+  const { data, error } = useSchedules();
   // local override layer: optimistic toggles applied on top of polled data,
   // so the switch stays responsive between 2s refreshes.
   const [overrides, setOverrides] = React.useState<Record<string, boolean>>({});
-  const items: Schedule[] = data.map((s) => (s.id in overrides ? { ...s, enabled: overrides[s.id] } : s));
+  const items: Schedule[] = (data ?? []).map((s) => (s.id in overrides ? { ...s, enabled: overrides[s.id] } : s));
   const toggle = (id: string) => {
     const cur = items.find((i) => i.id === id);
     if (!cur) return;
     const next = !cur.enabled;
     setOverrides((o) => ({ ...o, [id]: next }));
-    if (live) {
-      api.setScheduleEnabled(id, next).catch(() => {
-        // revert optimistic change on failure
-        setOverrides((o) => ({ ...o, [id]: cur.enabled }));
-      });
-    }
+    api.setScheduleEnabled(id, next).catch(() => {
+      // revert optimistic change on failure
+      setOverrides((o) => ({ ...o, [id]: cur.enabled }));
+    });
   };
+  if (!data) {
+    return (
+      <Page>
+        <SectionHead title="Schedules" sub="Cron-style triggers attached to your tasks." />
+        {error ? <ErrorState message={error} /> : <LoadingState />}
+      </Page>
+    );
+  }
   return (
     <Page>
-      <SectionHead title="Schedules" sub="Cron-style triggers attached to your tasks." action={<Button icon="plus">New schedule</Button>} />
+      <SectionHead title="Schedules" sub="Cron-style triggers attached to your tasks." />
       <Card>
+        {items.length === 0 && (
+          <div style={{ padding: '48px 0', textAlign: 'center', color: 'var(--fg-subtle)', fontSize: 13 }}>
+            No schedules yet — declare <code className="mono">cron</code> on a task and start its worker.
+          </div>
+        )}
         {items.map((s, i) => (
           <div key={s.id} style={{
             display: 'flex', alignItems: 'center', gap: 16, padding: '0 16px', height: 60, opacity: s.enabled ? 1 : 0.55,
