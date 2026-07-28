@@ -8,6 +8,10 @@
      - failures are reported and the execution ends via an internal signal;
      - waits / triggerAndWait suspend by throwing SuspendSignal (caught here).
 
+   Every kernel write carries this claim's { workerId, fencingToken }; a
+   run_not_running / stale_lease rejection means the run moved on without us
+   and the executor abandons silently (the old HTTP-409 path).
+
    The executor is stored in AsyncLocalStorage so handles created elsewhere can
    detect "am I inside a run?" and become durable steps.
    ============================================================================= */
@@ -18,9 +22,11 @@ import {
   durationToDate,
   isAbortError,
   isSuspendSignal,
+  KernelError,
   serializeError,
   SuspendSignal,
-  type DequeuedRun,
+  type ClaimedRun,
+  type Kernel,
   type LogEntry,
   type RetryPolicy,
   type StepKind,
@@ -29,7 +35,6 @@ import {
   type TriggerItem,
   type TriggerOptions,
 } from '@better-trigger/core';
-import { HttpClient, isRunNotRunning } from './client';
 import { executorStorage, type RunCtx, type RunInfo, type StepOptions } from './context';
 
 /** Thrown internally to unwind the run() stack after a fatal failure was reported. */
@@ -39,6 +44,18 @@ class ExecutionDone extends Error {
     super('execution complete');
     this.name = 'ExecutionDone';
   }
+}
+
+/**
+ * Kernel rejections that mean this attempt may no longer write: the run left
+ * 'running' (canceled / resumed elsewhere / terminal) or the claim's fencing
+ * token went stale (lease reaped, run reclaimed). Both → abandon silently.
+ */
+function isAbandonment(err: unknown): boolean {
+  return (
+    err instanceof KernelError &&
+    (err.code === 'run_not_running' || err.code === 'stale_lease')
+  );
 }
 
 /** Minimal task shape the executor needs (avoids a circular import on TaskHandle). */
@@ -55,7 +72,7 @@ export type ExecutionResult =
   | { type: 'completed'; output: unknown }
   | { type: 'failed' }
   | { type: 'suspended' }
-  | { type: 'abandoned' }; // run no longer running (409) — give up silently
+  | { type: 'abandoned' }; // run no longer running / lease lost — give up silently
 
 const LOG_FLUSH_INTERVAL_MS = 1_000;
 const LOG_FLUSH_THRESHOLD = 50;
@@ -72,17 +89,17 @@ export class Executor {
   private readonly stepAls = new AsyncLocalStorage<number>();
   private logBuffer: LogEntry[] = [];
   private logTimer: ReturnType<typeof setInterval> | null = null;
-  /** Set true once we observe a 409 run_not_running; short-circuits the rest. */
+  /** Set true once a kernel write is rejected (run_not_running / stale_lease). */
   private abandoned = false;
-  /** Set by the worker when the server asks to cancel this run. */
+  /** Set by the worker when a heartbeat reports a cancel for this run. */
   private canceled = false;
 
   readonly ctx: RunCtx;
 
   constructor(
-    private readonly client: HttpClient,
+    private readonly kernel: Kernel,
     private readonly task: ExecutorTask,
-    private readonly run: DequeuedRun,
+    private readonly run: ClaimedRun,
     private readonly workerId: string,
   ) {
     for (const s of run.steps) this.snapshot.set(s.seq, s);
@@ -128,9 +145,14 @@ export class Executor {
       if (this.abandoned) return { type: 'abandoned' };
       await this.flushLogs();
       try {
-        await this.client.completeRun(this.run.id, { output, workerId: this.workerId });
+        await this.kernel.completeRun({
+          runId: this.run.id,
+          output,
+          workerId: this.workerId,
+          fencingToken: this.run.fencingToken,
+        });
       } catch (err) {
-        if (isRunNotRunning(err)) return { type: 'abandoned' };
+        if (isAbandonment(err)) return { type: 'abandoned' };
         throw err;
       }
       return { type: 'completed', output };
@@ -141,7 +163,7 @@ export class Executor {
 
   /** Classify a thrown value from run()/between-step code into an outcome. */
   private async handleThrown(err: unknown): Promise<ExecutionResult> {
-    // SuspendSignal: wait / triggerAndWait already reported to the server.
+    // SuspendSignal: wait / triggerAndWait already recorded in the kernel.
     if (isSuspendSignal(err)) {
       await this.flushLogs();
       return { type: 'suspended' };
@@ -257,8 +279,8 @@ export class Executor {
   }
 
   /**
-   * Step fn threw: write the failed step row, then POST /fail with the effective
-   * retry policy, then unwind via ExecutionDone. AbortError → abort:true.
+   * Step fn threw: write the failed step row, then fail the run with the
+   * effective retry policy, then unwind via ExecutionDone. AbortError → abort:true.
    */
   private async onStepError(
     seq: number,
@@ -273,7 +295,8 @@ export class Executor {
 
     // Best-effort record the failed step row (status='failed').
     try {
-      await this.client.reportStep(this.run.id, {
+      await this.kernel.reportStep({
+        runId: this.run.id,
         seq,
         kind,
         label,
@@ -283,9 +306,10 @@ export class Executor {
         startedAt,
         finishedAt: new Date().toISOString(),
         workerId: this.workerId,
+        fencingToken: this.run.fencingToken,
       });
     } catch (e) {
-      if (isRunNotRunning(e)) {
+      if (isAbandonment(e)) {
         this.abandoned = true;
         throw new ExecutionDone();
       }
@@ -306,7 +330,8 @@ export class Executor {
     startedAt: string,
   ): Promise<void> {
     try {
-      await this.client.reportStep(this.run.id, {
+      await this.kernel.reportStep({
+        runId: this.run.id,
         seq,
         kind,
         label: label ?? undefined,
@@ -316,9 +341,10 @@ export class Executor {
         startedAt,
         finishedAt: new Date().toISOString(),
         workerId: this.workerId,
+        fencingToken: this.run.fencingToken,
       });
     } catch (err) {
-      if (isRunNotRunning(err)) {
+      if (isAbandonment(err)) {
         this.abandoned = true;
         throw new ExecutionDone();
       }
@@ -338,15 +364,17 @@ export class Executor {
 
     let resumed: boolean;
     try {
-      const res = await this.client.suspend(this.run.id, {
+      const res = await this.kernel.suspendRun({
+        runId: this.run.id,
         seq,
         kind,
         resumeAt: resumeAt.toISOString(),
         workerId: this.workerId,
+        fencingToken: this.run.fencingToken,
       });
       resumed = res.resumed;
     } catch (err) {
-      if (isRunNotRunning(err)) {
+      if (isAbandonment(err)) {
         this.abandoned = true;
         throw new ExecutionDone();
       }
@@ -374,16 +402,18 @@ export class Executor {
     this.checkCanceled();
 
     try {
-      await this.client.waitForRun(this.run.id, {
+      await this.kernel.waitForChildRun({
+        runId: this.run.id,
         seq,
         label,
         taskId,
         payload,
         options,
         workerId: this.workerId,
+        fencingToken: this.run.fencingToken,
       });
     } catch (err) {
-      if (isRunNotRunning(err)) {
+      if (isAbandonment(err)) {
         this.abandoned = true;
         throw new ExecutionDone();
       }
@@ -410,15 +440,17 @@ export class Executor {
     this.checkCanceled();
 
     try {
-      const res = await this.client.batchTriggerStep(this.run.id, {
+      const res = await this.kernel.batchTriggerChild({
+        runId: this.run.id,
         seq,
         label,
         items,
         workerId: this.workerId,
+        fencingToken: this.run.fencingToken,
       });
       return res.runIds;
     } catch (err) {
-      if (isRunNotRunning(err)) {
+      if (isAbandonment(err)) {
         this.abandoned = true;
         throw new ExecutionDone();
       }
@@ -473,15 +505,17 @@ export class Executor {
   ): Promise<void> {
     await this.flushLogs();
     try {
-      await this.client.failRun(this.run.id, {
+      await this.kernel.failRun({
+        runId: this.run.id,
         error,
         stepSeq,
         retry,
         abort,
         workerId: this.workerId,
+        fencingToken: this.run.fencingToken,
       });
     } catch (err) {
-      if (isRunNotRunning(err)) {
+      if (isAbandonment(err)) {
         this.abandoned = true;
         return;
       }
@@ -521,7 +555,7 @@ export class Executor {
     const logs = this.logBuffer;
     this.logBuffer = [];
     try {
-      await this.client.reportLogs(this.run.id, { logs });
+      await this.kernel.appendLogs(this.run.id, logs);
     } catch {
       // best-effort: logs are not critical, drop on failure
     }

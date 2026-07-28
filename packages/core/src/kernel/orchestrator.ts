@@ -1,18 +1,23 @@
 /* =============================================================================
-   @better-trigger/server — background orchestrator.
+   @better-trigger/core — kernel background orchestrator.
    Four interval loops (each with re-entrancy guards):
-     1. wait-due scanner          (1s)  — resume duration/until waits
-     2. cron scheduler            (1s)  — fire due schedules, compute next_run_at
-     3. visibility-timeout reaper (10s) — recover runs locked > 60s
-     4. worker offline marker     (30s) — mark workers with no heartbeat > 2m
-   See docs/backend-contract.md §3.2, §3.5, §3.6.
+     1. wait-due scanner   (timerIntervalMs, 1s)   — resume duration/until waits
+     2. cron scheduler     (cronIntervalMs, 1s)    — fire due schedules via
+        createRunIn (task retry policy resolved like any other trigger)
+     3. lease reaper       (reaperIntervalMs, 10s) — recover runs whose
+        lease_until has expired
+     4. worker offline marker (30s)                — mark workers with no
+        heartbeat > 2m
+   See docs/backend-contract.md §3.2, §3.5, §3.6. Loop errors are swallowed
+   (logged via the kernel logger) so loops never die.
    ============================================================================= */
 import { Cron } from 'croner';
-import { pool } from '../db/index';
-import { runId as genRunId } from '../ids';
+import type { Pool } from 'pg';
+import type { KernelLogger } from './kernel';
+import { createRunIn, getRunRow, terminalFail } from './runs';
 
-const VISIBILITY_TIMEOUT_MS = 60_000;
 const WORKER_OFFLINE_MS = 120_000;
+const WORKER_OFFLINE_SCAN_MS = 30_000;
 
 /** Compute the next fire time for a cron pattern, in a timezone. */
 export function nextCronAt(pattern: string, timezone?: string, from?: Date): Date | null {
@@ -20,12 +25,28 @@ export function nextCronAt(pattern: string, timezone?: string, from?: Date): Dat
   return cron.nextRun(from ?? new Date());
 }
 
-export interface Orchestrator {
-  start(): void;
+export interface OrchestratorOptions {
+  /** Wait-due scan interval (default 1s). */
+  timerIntervalMs?: number;
+  /** Cron scan interval (default 1s). */
+  cronIntervalMs?: number;
+  /** Expired-lease reap interval (default 10s). */
+  reaperIntervalMs?: number;
+}
+
+export interface OrchestratorHandle {
   stop(): void;
 }
 
-export function createOrchestrator(): Orchestrator {
+export function startOrchestrator(
+  pool: Pool,
+  logger: KernelLogger,
+  opts: OrchestratorOptions = {},
+): OrchestratorHandle {
+  const timerIntervalMs = opts.timerIntervalMs ?? 1_000;
+  const cronIntervalMs = opts.cronIntervalMs ?? 1_000;
+  const reaperIntervalMs = opts.reaperIntervalMs ?? 10_000;
+
   const timers: NodeJS.Timeout[] = [];
   const running = { waits: false, cron: false, reaper: false, workers: false };
   let stopped = false;
@@ -42,7 +63,7 @@ export function createOrchestrator(): Orchestrator {
         await fn();
       } catch (err) {
         // Keep loops alive; surface for debugging.
-        console.error(`[orchestrator:${key}]`, err);
+        logger.error(`[orchestrator:${key}]`, err);
       } finally {
         running[key] = false;
       }
@@ -91,7 +112,7 @@ export function createOrchestrator(): Orchestrator {
           `INSERT INTO queue (run_id, available_at, priority, concurrency_key, env)
            VALUES ($1, now(), 0, $2, $3)
            ON CONFLICT (run_id) DO UPDATE
-             SET available_at = now(), locked_by = NULL, locked_at = NULL`,
+             SET available_at = now(), locked_by = NULL, locked_at = NULL, lease_until = NULL`,
           [w.run_id, w.concurrency_key, w.env],
         );
       }
@@ -125,36 +146,22 @@ export function createOrchestrator(): Orchestrator {
       );
 
       for (const s of due.rows) {
-        // Resolve the task's concurrency settings for the new run.
-        const taskRes = await client.query<{
-          retry: unknown;
-          concurrency_limit: number | null;
-        }>(`SELECT retry, concurrency_limit FROM tasks WHERE id = $1`, [s.task_id]);
-        const limit = taskRes.rows[0]?.concurrency_limit ?? null;
-        const concurrencyKey = limit && limit > 0 ? s.task_id : null;
-        const maxAttempts =
-          (taskRes.rows[0]?.retry as { maxAttempts?: number } | null)?.maxAttempts ?? 3;
+        // Create + enqueue through the shared path so retry policy and
+        // concurrency key resolve exactly like any other trigger.
+        const created = await createRunIn(client, {
+          taskId: s.task_id,
+          payload: null,
+          triggerType: 'schedule',
+          env: s.env,
+        });
 
-        const newRunId = genRunId();
-        await client.query(
-          `INSERT INTO runs
-             (id, task_id, status, payload, trigger_type, concurrency_key,
-              attempt, max_attempts, env, queued_at, created_at, updated_at)
-           VALUES ($1,$2,'queued', 'null'::jsonb, 'schedule', $3, 1, $4, $5, now(), now(), now())`,
-          [newRunId, s.task_id, concurrencyKey, maxAttempts, s.env],
-        );
-        await client.query(
-          `INSERT INTO queue (run_id, available_at, priority, concurrency_key, env)
-           VALUES ($1, now(), 0, $2, $3)`,
-          [newRunId, concurrencyKey, s.env],
-        );
-
+        // Next fire computed from now → missed windows are skipped (no catch-up).
         const next = nextCronAt(s.cron_pattern, s.cron_tz ?? undefined);
         await client.query(
           `UPDATE schedules
               SET last_run_at = now(), last_run_id = $2, next_run_at = $3, updated_at = now()
             WHERE id = $1`,
-          [s.id, newRunId, next],
+          [s.id, created.runId, next],
         );
       }
       await client.query('COMMIT');
@@ -177,32 +184,21 @@ export function createOrchestrator(): Orchestrator {
       }>(
         `SELECT q.id, q.run_id
            FROM queue q
-          WHERE q.locked_at IS NOT NULL
-            AND q.locked_at < now() - ($1::text || ' milliseconds')::interval
+          WHERE q.lease_until IS NOT NULL
+            AND q.lease_until <= now()
           FOR UPDATE SKIP LOCKED`,
-        [String(VISIBILITY_TIMEOUT_MS)],
       );
 
       for (const q of stale.rows) {
-        const runRes = await client.query<{ attempt: number; max_attempts: number }>(
-          `SELECT attempt, max_attempts FROM runs WHERE id = $1`,
-          [q.run_id],
-        );
-        const run = runRes.rows[0];
+        const run = await getRunRow(client, q.run_id);
         if (!run) {
           await client.query(`DELETE FROM queue WHERE id = $1`, [q.id]);
           continue;
         }
         if (run.attempt >= run.max_attempts) {
-          await client.query(
-            `UPDATE runs
-                SET status = 'failed',
-                    error = '{"message":"worker lost"}'::jsonb,
-                    finished_at = now(), updated_at = now()
-              WHERE id = $1`,
-            [q.run_id],
-          );
-          await client.query(`DELETE FROM queue WHERE id = $1`, [q.id]);
+          // Terminal 'worker lost' — same wrap-up as failRun so a waiting
+          // parent gets woken instead of hanging forever.
+          await terminalFail(client, run, { message: 'worker lost' });
         } else {
           await client.query(
             `UPDATE runs
@@ -210,8 +206,10 @@ export function createOrchestrator(): Orchestrator {
               WHERE id = $1`,
             [q.run_id],
           );
+          // Release the claim. fencing_token is deliberately NOT reset — the
+          // next claim's token++ is what invalidates the lost worker's writes.
           await client.query(
-            `UPDATE queue SET locked_by = NULL, locked_at = NULL, available_at = now()
+            `UPDATE queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = now()
               WHERE id = $1`,
             [q.id],
           );
@@ -237,14 +235,12 @@ export function createOrchestrator(): Orchestrator {
     );
   }
 
+  loop('waits', timerIntervalMs, scanWaits);
+  loop('cron', cronIntervalMs, scanCron);
+  loop('reaper', reaperIntervalMs, reap);
+  loop('workers', WORKER_OFFLINE_SCAN_MS, markOfflineWorkers);
+
   return {
-    start() {
-      stopped = false;
-      loop('waits', 1_000, scanWaits);
-      loop('cron', 1_000, scanCron);
-      loop('reaper', 10_000, reap);
-      loop('workers', 30_000, markOfflineWorkers);
-    },
     stop() {
       stopped = true;
       for (const t of timers) clearInterval(t);

@@ -8,6 +8,13 @@
       "when": 1780718877608,
       "tag": "0000_volatile_silver_centurion",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1785254376019,
+      "tag": "0001_slow_peter_parker",
+      "breakpoints": true
     }
   ]
 }

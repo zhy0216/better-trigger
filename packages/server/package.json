@@ -1,7 +1,7 @@
 {
   "name": "@better-trigger/server",
   "version": "0.1.0",
-  "description": "better-trigger server — Hono API, queue, orchestrator and bin entry",
+  "description": "better-trigger server — dashboard API (Hono) over the embedded kernel",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -27,7 +27,6 @@
     "@better-trigger/core": "workspace:*",
     "@better-trigger/db": "workspace:*",
     "@hono/node-server": "^1.13.7",
-    "croner": "^9.0.0",
     "hono": "^4.6.13",
     "pg": "^8.13.1"
   },

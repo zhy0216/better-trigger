@@ -8,6 +8,7 @@
    ============================================================================= */
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   bigserial,
   boolean,
   index,
@@ -114,6 +115,8 @@ export const queue = pgTable(
     priority: integer('priority').notNull().default(0),
     lockedBy: text('locked_by'),
     lockedAt: timestamp('locked_at', { withTimezone: true }),
+    leaseUntil: timestamp('lease_until', { withTimezone: true }),
+    fencingToken: bigint('fencing_token', { mode: 'number' }).notNull().default(0),
     concurrencyKey: text('concurrency_key'),
   },
   (t) => [

@@ -1,5 +1,5 @@
 /* =============================================================================
-   @better-trigger/server — prefixed id generation.
+   @better-trigger/core — prefixed id generation.
    Random ids: a prefix + a hex token derived from crypto.randomUUID() (dashes
    stripped, truncated). e.g. run_3f9c1a2b4d5e6f70
    ============================================================================= */

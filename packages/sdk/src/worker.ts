@@ -1,14 +1,18 @@
 /* =============================================================================
-   better-trigger — worker runtime.
-   register → N concurrent long-poll dequeue loops → replay execution
-            + a heartbeat loop (15s, reports running runs, honours cancels).
-   Graceful shutdown on SIGINT/SIGTERM: stop pulling, drain in-flight runs.
-   (docs/backend-contract.md §3.5, §4, §5.)
+   better-trigger — embedded worker runtime (driven by instance.start()).
+   register → orchestrator loops (waits / cron / reaper / offline markers)
+            → N concurrent claim-and-execute slots (idle backoff + jitter)
+            + a heartbeat loop (max(500, leaseMs/3): lease renewal + cancels).
+   Graceful shutdown on SIGINT/SIGTERM: stop claiming, drain in-flight runs,
+   stop the loops and (when the instance owns the pool) end it.
    ============================================================================= */
 import { createHash } from 'node:crypto';
-import type { DequeuedRun } from '@better-trigger/core';
-import { HttpClient } from './client';
-import type { SdkConfig } from './config';
+import type {
+  ClaimedRun,
+  Kernel,
+  OrchestratorOptions,
+  RetryPolicy,
+} from '@better-trigger/core';
 import { Executor } from './executor';
 import {
   toExecutorTask,
@@ -17,105 +21,131 @@ import {
   type TaskHandle,
 } from './task';
 
-export interface StartWorkerOptions {
+/** Options accepted by instance.start(). */
+export interface StartOptions {
   /** Tasks this worker can execute. */
   tasks: Array<TaskHandle<any, any>>;
-  /** Server URL override (else BETTER_TRIGGER_API_URL / default). */
-  apiUrl?: string;
-  /** API key override (else BETTER_TRIGGER_API_KEY). */
-  apiKey?: string;
-  /** Number of concurrent execution slots / poll loops. Default 5. */
+  /** Number of concurrent execution slots / claim loops. Default 5. */
   concurrency?: number;
-  /** Friendly worker name reported to the server. */
+  /** Friendly worker name recorded on registration. */
   name?: string;
+  /** Lease duration granted per claim (renewed by heartbeat). Default 60s. */
+  leaseMs?: number;
 }
 
-/** Handle returned by startWorker(); lets callers stop it programmatically. */
+/** Handle returned by instance.start(); lets callers stop it programmatically. */
 export interface WorkerHandle {
   workerId: string;
   /** Resolves once the worker has fully drained and exited its loops. */
   stop(): Promise<void>;
-  /** Promise that resolves when the worker stops (e.g. via signal). */
+  /** Promise that resolves when the claim loops exit (e.g. via signal). */
   done: Promise<void>;
 }
 
-const DEQUEUE_TIMEOUT_MS = 20_000;
-const SHUTDOWN_DRAIN_MS = 30_000;
-const RECONNECT_BASE_MS = 500;
-const RECONNECT_MAX_MS = 10_000;
+/** What the owning instance injects into the worker runtime. */
+export interface WorkerDeps {
+  kernel: Kernel;
+  /** Orchestrator loop intervals (instance-level test knobs). */
+  orchestrator?: OrchestratorOptions;
+  /** Instance default retry, applied to manifests of tasks without their own. */
+  defaultRetry?: RetryPolicy;
+  /** Invoked after all loops stop; the instance ends its owned pool here. */
+  onStopped?: () => Promise<void>;
+}
 
-export async function startWorker(options: StartWorkerOptions): Promise<WorkerHandle> {
+const DEFAULT_LEASE_MS = 60_000;
+const MIN_HEARTBEAT_MS = 500;
+const IDLE_POLL_BASE_MS = 300;
+const IDLE_POLL_MAX_MS = 2_000;
+const SHUTDOWN_DRAIN_MS = 30_000;
+
+export async function startWorkerRuntime(
+  deps: WorkerDeps,
+  options: StartOptions,
+): Promise<WorkerHandle> {
+  const { kernel } = deps;
   const concurrency = options.concurrency ?? 5;
-  const perCall: Partial<SdkConfig> = {};
-  if (options.apiUrl !== undefined) perCall.apiUrl = options.apiUrl;
-  if (options.apiKey !== undefined) perCall.apiKey = options.apiKey;
-  const client = new HttpClient(perCall);
+  const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
 
   const definitions = options.tasks.map((t) => t.__definition);
   const taskById = new Map<string, ResolvedTaskDefinition<any, any>>();
   for (const def of definitions) taskById.set(def.id, def);
+  const taskIds = definitions.map((d) => d.id);
 
   const codeVersion = resolveCodeVersion(definitions);
   const manifests = definitions.map(toManifest);
+  if (deps.defaultRetry) {
+    for (const m of manifests) m.retry ??= deps.defaultRetry;
+  }
 
-  const registration = await client.registerWorker({
+  const { workerId } = await kernel.registerWorker({
     name: options.name,
     codeVersion,
     runtime: 'self-host',
     concurrency,
     tasks: manifests,
   });
-  const workerId = registration.workerId;
-  const heartbeatIntervalMs = registration.heartbeatIntervalMs || 15_000;
+
+  // Background loops (wait resumption, cron, lease reaper, offline markers)
+  // run inside the worker process and stop with it.
+  const orchestrator = kernel.startOrchestrator(deps.orchestrator);
 
   // Runs currently executing, keyed by run id → their Executor (for cancels).
   const inFlight = new Map<string, Executor>();
   let stopping = false;
-  // Aborts in-flight long-polls on stop so the server stops polling for us
-  // (otherwise an open dequeue could lock a run after this worker is gone).
-  const stopController = new AbortController();
 
   /* ---- heartbeat loop --------------------------------------------------- */
+  const heartbeatMs = Math.max(MIN_HEARTBEAT_MS, Math.floor(leaseMs / 3));
   const heartbeatTimer = setInterval(() => {
     void (async () => {
       try {
-        const res = await client.heartbeat(workerId, { runIds: [...inFlight.keys()] });
+        const res = await kernel.heartbeat({
+          workerId,
+          runIds: [...inFlight.keys()],
+          leaseMs,
+        });
         for (const runId of res.cancelRunIds) {
           inFlight.get(runId)?.markCanceled();
         }
       } catch {
-        // best-effort; the visibility timeout / reaper protects correctness
+        // best-effort; the lease reaper protects correctness
       }
     })();
-  }, heartbeatIntervalMs);
+  }, heartbeatMs);
   (heartbeatTimer as { unref?: () => void }).unref?.();
 
-  /* ---- one poll-and-execute loop (a single concurrency slot) ----------- */
-  async function pollLoop(): Promise<void> {
-    let backoff = RECONNECT_BASE_MS;
+  /* ---- one claim-and-execute loop (a single concurrency slot) ----------- */
+  async function claimLoop(): Promise<void> {
+    let idleBackoff = IDLE_POLL_BASE_MS;
     while (!stopping) {
-      let run: DequeuedRun | null;
+      let run: ClaimedRun | undefined;
       try {
-        const res = await client.dequeue(workerId, DEQUEUE_TIMEOUT_MS, stopController.signal);
-        run = res.run;
-        backoff = RECONNECT_BASE_MS; // reset on a successful poll
+        const claimed = await kernel.claimRuns({ workerId, taskIds, limit: 1, leaseMs });
+        run = claimed[0];
       } catch {
-        if (stopping) break; // poll aborted by stop(); exit the loop
-        // network / server error: exponential backoff before reconnecting
-        await sleep(backoff);
-        backoff = Math.min(RECONNECT_MAX_MS, backoff * 2);
+        if (stopping) break;
+        // DB hiccup: back off like an idle poll before retrying.
+        await sleep(jittered(idleBackoff));
+        idleBackoff = Math.min(IDLE_POLL_MAX_MS, idleBackoff * 2);
         continue;
       }
 
-      if (!run) continue; // long-poll returned empty; poll again
+      if (!run) {
+        // Nothing due: exponential idle backoff 300ms → 2s, ± jitter.
+        await sleep(jittered(idleBackoff));
+        idleBackoff = Math.min(IDLE_POLL_MAX_MS, idleBackoff * 2);
+        continue;
+      }
+      idleBackoff = IDLE_POLL_BASE_MS; // got work — claim again immediately after
 
       const def = taskById.get(run.taskId);
       if (!def) {
-        // Should not happen (server filters by registered tasks); skip safely.
+        // Should not happen (the claim filters by this worker's task ids);
+        // skip safely — the lease reaper recovers the abandoned claim.
         continue;
       }
 
-      const executor = new Executor(client, toExecutorTask(def), run, workerId);
+      const executor = new Executor(kernel, toExecutorTask(def), run, workerId);
       inFlight.set(run.id, executor);
       try {
         await executor.execute();
@@ -127,7 +157,7 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     }
   }
 
-  const loops = Array.from({ length: concurrency }, () => pollLoop());
+  const loops = Array.from({ length: concurrency }, () => claimLoop());
   const loopsDone = Promise.all(loops).then(() => undefined);
 
   /* ---- graceful shutdown ------------------------------------------------ */
@@ -136,12 +166,14 @@ export async function startWorker(options: StartWorkerOptions): Promise<WorkerHa
     if (stopPromise) return stopPromise;
     stopPromise = (async () => {
       stopping = true;
-      stopController.abort();
-      clearInterval(heartbeatTimer);
-      // Wait for poll loops to notice `stopping` and for in-flight runs to drain,
-      // bounded by SHUTDOWN_DRAIN_MS.
+      // Claim loops exit at the next check; in-flight runs drain, bounded by
+      // SHUTDOWN_DRAIN_MS. The heartbeat stays alive during the drain so
+      // leases keep renewing while runs finish.
       await Promise.race([loopsDone, sleep(SHUTDOWN_DRAIN_MS)]);
+      clearInterval(heartbeatTimer);
+      orchestrator.stop();
       removeSignalHandlers();
+      await deps.onStopped?.();
     })();
     return stopPromise;
   }
@@ -185,6 +217,11 @@ export function resolveCodeVersion(
     .join('\n');
   const hash = createHash('sha256').update(signature).digest('hex').slice(0, 12);
   return `v_${hash}`;
+}
+
+/** Multiply a delay by [0.8, 1.2) so idle slots do not poll in lockstep. */
+function jittered(ms: number): number {
+  return Math.round(ms * (0.8 + Math.random() * 0.4));
 }
 
 function sleep(ms: number): Promise<void> {

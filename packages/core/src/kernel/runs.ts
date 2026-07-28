@@ -1,23 +1,33 @@
 /* =============================================================================
-   @better-trigger/server — run lifecycle engine.
-   Create (idempotent) / steps / suspend / wait-for-run / batch-trigger /
-   complete / fail / cancel / retry, plus parent-wakeup for child runs.
+   @better-trigger/core — kernel run lifecycle.
+   Create (idempotent) / steps / suspend / wait-for-child / batch-trigger /
+   complete / fail / cancel / retry, plus parent-wakeup for child runs, run
+   reads (getRun / getRunDetail / waitForResult) and best-effort logs.
    See docs/backend-contract.md §3.2–3.7. All multi-row mutations are wrapped
-   in a single transaction via withTx().
+   in a single transaction via withTx(). Worker-side writes are guarded by the
+   fencing check (locked_by + fencing_token under FOR UPDATE) — lease_until is
+   deliberately NOT part of validity: an expired-but-unreclaimed owner is still
+   the only owner, so its writes stay legal until the reaper or a new claim
+   invalidates the token.
    ============================================================================= */
-import type { PoolClient } from 'pg';
-import {
-  computeBackoffMs,
-  parseDuration,
-  resolveRetryPolicy,
-  type RetryPolicy,
-  type SerializedError,
-  type StepKind,
-  type TriggerOptions,
-  type TriggerType,
-} from '@better-trigger/core';
-import { pool } from '../db/index';
-import { runId as genRunId } from '../ids';
+import type { Pool, PoolClient } from 'pg';
+import { computeBackoffMs, resolveRetryPolicy } from '../backoff';
+import { parseDuration } from '../duration';
+import type {
+  LogEntry,
+  LogLevel,
+  RetryPolicy,
+  RunStatus,
+  SerializedError,
+  StepKind,
+  StepStatus,
+  TriggerItem,
+  TriggerOptions,
+  TriggerType,
+  WaitKind,
+} from '../types';
+import { KernelError, RunNotRunningError, StaleLeaseError, TaskNotFoundError } from './errors';
+import { runId as genRunId } from './ids';
 import { enqueue, removeFromQueue } from './queue';
 
 /** Upper bound for a delay before a run becomes available: 10 years in ms. */
@@ -27,7 +37,10 @@ const MAX_DELAY_MS = 315_576_000_000;
  * Small helpers
  * ------------------------------------------------------------------------- */
 
-export async function withTx<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {
+export async function withTx<T>(
+  pool: Pool,
+  fn: (c: PoolClient) => Promise<T>,
+): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -42,17 +55,7 @@ export async function withTx<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {
   }
 }
 
-export class HttpError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
-interface RunRow {
+export interface RunRow {
   id: string;
   task_id: string;
   status: string;
@@ -65,11 +68,11 @@ interface RunRow {
   code_version: string | null;
 }
 
-async function getRun(
-  client: PoolClient | typeof pool,
+export async function getRunRow(
+  db: Pool | PoolClient,
   id: string,
 ): Promise<RunRow | null> {
-  const res = await client.query<RunRow>(
+  const res = await db.query<RunRow>(
     `SELECT id, task_id, status, attempt, max_attempts, parent_run_id,
             payload, env, concurrency_key, code_version
        FROM runs WHERE id = $1`,
@@ -79,25 +82,34 @@ async function getRun(
 }
 
 /**
- * Assert a worker may report on this run: the run must be 'running' and the
- * queue row must be locked by this worker. Throws 409 run_not_running otherwise.
+ * Fencing check — assert a worker may report on this run: lock the queue row
+ * (FOR UPDATE serializes against claims and the reaper), then require the run
+ * to be 'running' and the row to carry this worker's id + fencing token.
+ * lease_until is NOT checked (see file header). Run in non-running state →
+ * RunNotRunningError; owner/token mismatch → StaleLeaseError.
  */
-async function assertRunningOwnedBy(
+async function assertOwnedRunning(
   client: PoolClient,
   runId: string,
   workerId: string,
+  fencingToken: number,
 ): Promise<RunRow> {
-  const run = await getRun(client, runId);
-  if (!run) throw new HttpError(404, 'not_found', `run ${runId} not found`);
-  if (run.status !== 'running') {
-    throw new HttpError(409, 'run_not_running', `run ${runId} is ${run.status}`);
-  }
-  const lock = await client.query<{ locked_by: string | null }>(
-    `SELECT locked_by FROM queue WHERE run_id = $1`,
+  const lock = await client.query<{ locked_by: string | null; fencing_token: string }>(
+    `SELECT locked_by, fencing_token FROM queue WHERE run_id = $1 FOR UPDATE`,
     [runId],
   );
-  if (lock.rows[0]?.locked_by !== workerId) {
-    throw new HttpError(409, 'run_not_running', `run ${runId} not locked by worker`);
+  const run = await getRunRow(client, runId);
+  if (!run) throw new KernelError('not_found', `run ${runId} not found`);
+  if (run.status !== 'running') {
+    throw new RunNotRunningError(`run ${runId} is ${run.status}`);
+  }
+  const owner = lock.rows[0];
+  if (
+    !owner ||
+    owner.locked_by !== workerId ||
+    Number(owner.fencing_token) !== fencingToken
+  ) {
+    throw new StaleLeaseError(`run ${runId} is not held by this worker (stale lease)`);
   }
   return run;
 }
@@ -115,7 +127,6 @@ export interface CreateRunArgs {
   /** Defaults to task.retry policy. */
   retry?: RetryPolicy;
   env?: string;
-  client?: PoolClient;
   /** Require the task to exist (trigger API). */
   requireTask?: boolean;
 }
@@ -129,13 +140,11 @@ export interface CreatedRun {
  * Create a run + enqueue it. If options.idempotencyKey matches an existing run
  * for the same task, the existing run id is returned with idempotent=true.
  */
-export async function createRun(args: CreateRunArgs): Promise<CreatedRun> {
-  const run = (c: PoolClient) => createRunIn(c, args);
-  if (args.client) return run(args.client);
-  return withTx(run);
+export async function createRun(pool: Pool, args: CreateRunArgs): Promise<CreatedRun> {
+  return withTx(pool, (c) => createRunIn(c, args));
 }
 
-async function createRunIn(
+export async function createRunIn(
   client: PoolClient,
   args: CreateRunArgs,
 ): Promise<CreatedRun> {
@@ -150,7 +159,7 @@ async function createRunIn(
       opts.priority < -2147483648 ||
       opts.priority > 2147483647
     ) {
-      throw new HttpError(400, 'bad_request', 'priority must be an int32');
+      throw new KernelError('bad_request', 'priority must be an int32');
     }
   }
 
@@ -162,7 +171,7 @@ async function createRunIn(
   }>(`SELECT id, retry, concurrency_limit FROM tasks WHERE id = $1`, [args.taskId]);
   const task = taskRes.rows[0];
   if (!task && args.requireTask) {
-    throw new HttpError(404, 'not_found', `task ${args.taskId} not registered`);
+    throw new TaskNotFoundError(`task ${args.taskId} not registered`);
   }
 
   const policy = resolveRetryPolicy(args.retry ?? task?.retry ?? undefined);
@@ -174,11 +183,11 @@ async function createRunIn(
 
   const delayMs = opts.delay != null ? parseDuration(opts.delay) : 0;
   if (delayMs > MAX_DELAY_MS) {
-    throw new HttpError(400, 'bad_request', 'delay exceeds maximum of 10 years');
+    throw new KernelError('bad_request', 'delay exceeds maximum of 10 years');
   }
   const availableAt = new Date(Date.now() + delayMs);
   if (Number.isNaN(availableAt.getTime())) {
-    throw new HttpError(400, 'bad_request', 'delay produces an invalid date');
+    throw new KernelError('bad_request', 'delay produces an invalid date');
   }
 
   const id = genRunId();
@@ -222,11 +231,10 @@ async function createRunIn(
       return { runId: existing.rows[0].id, idempotent: true };
     }
     // Defensive: a DO NOTHING with no surviving row should not happen.
-    throw new HttpError(500, 'internal_error', 'failed to create run');
+    throw new Error('failed to create run');
   }
 
-  await enqueue({
-    client,
+  await enqueue(client, {
     runId: id,
     availableAt,
     priority: opts.priority ?? 0,
@@ -235,6 +243,60 @@ async function createRunIn(
   });
 
   return { runId: id, idempotent: false };
+}
+
+/* ---------------------------------------------------------------------------
+ * Client-side trigger / batchTrigger
+ * ------------------------------------------------------------------------- */
+
+export interface TriggerArgs {
+  taskId: string;
+  payload: unknown;
+  options?: TriggerOptions;
+}
+
+/** Create one 'api' run for a registered task (TaskNotFoundError otherwise). */
+export async function trigger(pool: Pool, args: TriggerArgs): Promise<CreatedRun> {
+  if (typeof args.taskId !== 'string' || args.taskId.length === 0) {
+    throw new KernelError('bad_request', 'taskId must be a non-empty string');
+  }
+  return createRun(pool, {
+    taskId: args.taskId,
+    payload: args.payload,
+    options: args.options,
+    triggerType: 'api',
+    requireTask: true,
+  });
+}
+
+/** Create N 'api' runs in one all-or-nothing transaction. */
+export async function batchTrigger(
+  pool: Pool,
+  items: TriggerItem[],
+): Promise<{ runIds: string[] }> {
+  if (!Array.isArray(items)) {
+    throw new KernelError('bad_request', 'items must be an array');
+  }
+  for (const item of items) {
+    if (typeof item?.taskId !== 'string' || item.taskId.length === 0) {
+      throw new KernelError('bad_request', 'item.taskId must be a non-empty string');
+    }
+  }
+  const runIds = await withTx(pool, async (client) => {
+    const ids: string[] = [];
+    for (const item of items) {
+      const created = await createRunIn(client, {
+        taskId: item.taskId,
+        payload: item.payload,
+        options: item.options,
+        triggerType: 'api',
+        requireTask: true,
+      });
+      ids.push(created.runId);
+    }
+    return ids;
+  });
+  return { runIds };
 }
 
 /* ---------------------------------------------------------------------------
@@ -253,16 +315,20 @@ export interface ReportStepArgs {
   startedAt: string;
   finishedAt: string;
   workerId: string;
+  fencingToken: number;
 }
 
-export async function reportStep(args: ReportStepArgs): Promise<void> {
-  await withTx(async (client) => {
-    await assertRunningOwnedBy(client, args.runId, args.workerId);
+/** Step-row payload without the fencing credentials. */
+type StepWriteArgs = Omit<ReportStepArgs, 'workerId' | 'fencingToken'>;
+
+export async function reportStep(pool: Pool, args: ReportStepArgs): Promise<void> {
+  await withTx(pool, async (client) => {
+    await assertOwnedRunning(client, args.runId, args.workerId, args.fencingToken);
     await upsertStep(client, args);
   });
 }
 
-async function upsertStep(client: PoolClient, args: ReportStepArgs): Promise<void> {
+async function upsertStep(client: PoolClient, args: StepWriteArgs): Promise<void> {
   await client.query(
     `INSERT INTO run_steps
        (run_id, seq, kind, label, status, output, error, attempt, started_at, finished_at)
@@ -295,24 +361,28 @@ async function upsertStep(client: PoolClient, args: ReportStepArgs): Promise<voi
  * Suspend (wait.for / wait.until)
  * ------------------------------------------------------------------------- */
 
-export interface SuspendArgs {
+export interface SuspendRunArgs {
   runId: string;
   seq: number;
   label?: string;
   kind: 'duration' | 'until';
   resumeAt: string;
   workerId: string;
+  fencingToken: number;
 }
 
 /**
  * If resumeAt is already past, synchronously complete the wait (write the step
- * row) and keep the run running with its queue lock held → { resumed: true }.
+ * row) and keep the run running with its claim held → { resumed: true }.
  * Otherwise insert a pending wait, flip the run to 'waiting' and drop the
  * queue row → { resumed: false }.
  */
-export async function suspend(args: SuspendArgs): Promise<{ resumed: boolean }> {
-  return withTx(async (client) => {
-    await assertRunningOwnedBy(client, args.runId, args.workerId);
+export async function suspendRun(
+  pool: Pool,
+  args: SuspendRunArgs,
+): Promise<{ resumed: boolean }> {
+  return withTx(pool, async (client) => {
+    await assertOwnedRunning(client, args.runId, args.workerId, args.fencingToken);
     const resumeAt = new Date(args.resumeAt);
 
     if (resumeAt.getTime() <= Date.now()) {
@@ -327,7 +397,6 @@ export async function suspend(args: SuspendArgs): Promise<{ resumed: boolean }> 
         attempt: 1,
         startedAt: new Date().toISOString(),
         finishedAt: new Date().toISOString(),
-        workerId: args.workerId,
       });
       return { resumed: true };
     }
@@ -341,16 +410,16 @@ export async function suspend(args: SuspendArgs): Promise<{ resumed: boolean }> 
       `UPDATE runs SET status = 'waiting', updated_at = now() WHERE id = $1`,
       [args.runId],
     );
-    await removeFromQueue(args.runId, client);
+    await removeFromQueue(client, args.runId);
     return { resumed: false };
   });
 }
 
 /* ---------------------------------------------------------------------------
- * triggerAndWait (wait-for-run)
+ * triggerAndWait (wait-for-child-run)
  * ------------------------------------------------------------------------- */
 
-export interface WaitForRunArgs {
+export interface WaitForChildRunArgs {
   runId: string;
   seq: number;
   label?: string;
@@ -358,11 +427,20 @@ export interface WaitForRunArgs {
   payload: unknown;
   options?: TriggerOptions;
   workerId: string;
+  fencingToken: number;
 }
 
-export async function waitForRun(args: WaitForRunArgs): Promise<{ childRunId: string }> {
-  return withTx(async (client) => {
-    const parent = await assertRunningOwnedBy(client, args.runId, args.workerId);
+export async function waitForChildRun(
+  pool: Pool,
+  args: WaitForChildRunArgs,
+): Promise<{ childRunId: string }> {
+  return withTx(pool, async (client) => {
+    const parent = await assertOwnedRunning(
+      client,
+      args.runId,
+      args.workerId,
+      args.fencingToken,
+    );
 
     // Idempotent on replay: a completed wait step at this seq means the child
     // already ran; the SDK should normally hit the snapshot, but guard anyway.
@@ -402,7 +480,7 @@ export async function waitForRun(args: WaitForRunArgs): Promise<{ childRunId: st
       `UPDATE runs SET status = 'waiting', updated_at = now() WHERE id = $1`,
       [args.runId],
     );
-    await removeFromQueue(args.runId, client);
+    await removeFromQueue(client, args.runId);
 
     return { childRunId: child.runId };
   });
@@ -412,19 +490,26 @@ export async function waitForRun(args: WaitForRunArgs): Promise<{ childRunId: st
  * batchTrigger (durable step)
  * ------------------------------------------------------------------------- */
 
-export interface BatchTriggerStepArgs {
+export interface BatchTriggerChildArgs {
   runId: string;
   seq: number;
   label?: string;
-  items: { taskId: string; payload: unknown; options?: TriggerOptions }[];
+  items: TriggerItem[];
   workerId: string;
+  fencingToken: number;
 }
 
-export async function batchTriggerStep(
-  args: BatchTriggerStepArgs,
+export async function batchTriggerChild(
+  pool: Pool,
+  args: BatchTriggerChildArgs,
 ): Promise<{ runIds: string[] }> {
-  return withTx(async (client) => {
-    const parent = await assertRunningOwnedBy(client, args.runId, args.workerId);
+  return withTx(pool, async (client) => {
+    const parent = await assertOwnedRunning(
+      client,
+      args.runId,
+      args.workerId,
+      args.fencingToken,
+    );
 
     // Idempotent: if the step row already exists, return its recorded runIds.
     const existing = await client.query<{ output: unknown }>(
@@ -459,7 +544,6 @@ export async function batchTriggerStep(
       attempt: 1,
       startedAt: new Date().toISOString(),
       finishedAt: new Date().toISOString(),
-      workerId: args.workerId,
     });
 
     return { runIds };
@@ -510,14 +594,13 @@ async function wakeParentIfWaiting(
   );
 
   // Re-enqueue the parent.
-  const parent = await getRun(client, wait.run_id);
+  const parent = await getRunRow(client, wait.run_id);
   if (parent && parent.status === 'waiting') {
     await client.query(
       `UPDATE runs SET status = 'queued', updated_at = now() WHERE id = $1`,
       [wait.run_id],
     );
-    await enqueue({
-      client,
+    await enqueue(client, {
       runId: wait.run_id,
       availableAt: new Date(),
       concurrencyKey: parent.concurrency_key,
@@ -526,35 +609,69 @@ async function wakeParentIfWaiting(
   }
 }
 
-export interface CompleteArgs {
+/**
+ * Shared terminal-failure wrap-up: flip the run to 'failed', drop its queue
+ * row, cancel its pending waits and wake a waiting parent. Used by failRun's
+ * no-retry branch and by the reaper's 'worker lost' path (so a child killed at
+ * max attempts never leaves its parent waiting forever).
+ */
+export async function terminalFail(
+  client: PoolClient,
+  run: RunRow,
+  error: SerializedError,
+): Promise<void> {
+  await client.query(
+    `UPDATE runs
+        SET status = 'failed', error = $2, finished_at = now(), updated_at = now()
+      WHERE id = $1`,
+    [run.id, JSON.stringify(error)],
+  );
+  await removeFromQueue(client, run.id);
+  await client.query(
+    `UPDATE waits SET status = 'canceled' WHERE run_id = $1 AND status = 'pending'`,
+    [run.id],
+  );
+  if (run.parent_run_id) {
+    await wakeParentIfWaiting(client, run.id, { ok: false, error });
+  }
+}
+
+export interface CompleteRunArgs {
   runId: string;
   output: unknown;
   workerId: string;
+  fencingToken: number;
 }
 
-export async function completeRun(args: CompleteArgs): Promise<void> {
-  await withTx(async (client) => {
-    const run = await assertRunningOwnedBy(client, args.runId, args.workerId);
+export async function completeRun(pool: Pool, args: CompleteRunArgs): Promise<void> {
+  await withTx(pool, async (client) => {
+    const run = await assertOwnedRunning(
+      client,
+      args.runId,
+      args.workerId,
+      args.fencingToken,
+    );
     await client.query(
       `UPDATE runs
           SET status = 'completed', output = $2, finished_at = now(), updated_at = now()
         WHERE id = $1`,
       [args.runId, JSON.stringify(args.output ?? null)],
     );
-    await removeFromQueue(args.runId, client);
+    await removeFromQueue(client, args.runId);
     if (run.parent_run_id) {
       await wakeParentIfWaiting(client, args.runId, { ok: true, output: args.output });
     }
   });
 }
 
-export interface FailArgs {
+export interface FailRunArgs {
   runId: string;
   error: SerializedError;
   stepSeq?: number;
   retry?: RetryPolicy;
   abort?: boolean;
   workerId: string;
+  fencingToken: number;
 }
 
 export interface FailResult {
@@ -562,24 +679,20 @@ export interface FailResult {
   nextAttemptAt?: string;
 }
 
-export async function failRun(args: FailArgs): Promise<FailResult> {
-  return withTx(async (client) => {
-    const run = await assertRunningOwnedBy(client, args.runId, args.workerId);
+export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult> {
+  return withTx(pool, async (client) => {
+    const run = await assertOwnedRunning(
+      client,
+      args.runId,
+      args.workerId,
+      args.fencingToken,
+    );
     const maxAttempts = args.retry?.maxAttempts ?? run.max_attempts;
 
     const willRetry = !args.abort && run.attempt < maxAttempts;
 
     if (!willRetry) {
-      await client.query(
-        `UPDATE runs
-            SET status = 'failed', error = $2, finished_at = now(), updated_at = now()
-          WHERE id = $1`,
-        [args.runId, JSON.stringify(args.error)],
-      );
-      await removeFromQueue(args.runId, client);
-      if (run.parent_run_id) {
-        await wakeParentIfWaiting(client, args.runId, { ok: false, error: args.error });
-      }
+      await terminalFail(client, run, args.error);
       return { willRetry: false };
     }
 
@@ -591,9 +704,10 @@ export async function failRun(args: FailArgs): Promise<FailResult> {
         WHERE id = $1`,
       [args.runId, JSON.stringify(args.error)],
     );
-    // Keep the queue row but unlock it and push availability out.
+    // Keep the queue row but release the claim (owner + lease) and push
+    // availability out. fencing_token stays — it only grows via claims.
     await client.query(
-      `UPDATE queue SET locked_by = NULL, locked_at = NULL, available_at = $2
+      `UPDATE queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = $2
         WHERE run_id = $1`,
       [args.runId, nextAt],
     );
@@ -601,10 +715,10 @@ export async function failRun(args: FailArgs): Promise<FailResult> {
   });
 }
 
-export async function cancelRun(runId: string): Promise<void> {
-  await withTx(async (client) => {
-    const run = await getRun(client, runId);
-    if (!run) throw new HttpError(404, 'not_found', `run ${runId} not found`);
+export async function cancelRun(pool: Pool, runId: string): Promise<void> {
+  await withTx(pool, async (client) => {
+    const run = await getRunRow(client, runId);
+    if (!run) throw new KernelError('not_found', `run ${runId} not found`);
     if (['completed', 'failed', 'canceled'].includes(run.status)) {
       // Already terminal — treat cancel as a no-op success.
       return;
@@ -614,7 +728,7 @@ export async function cancelRun(runId: string): Promise<void> {
         WHERE id = $1`,
       [runId],
     );
-    await removeFromQueue(runId, client);
+    await removeFromQueue(client, runId);
     await client.query(
       `UPDATE waits SET status = 'canceled' WHERE run_id = $1 AND status = 'pending'`,
       [runId],
@@ -628,12 +742,12 @@ export async function cancelRun(runId: string): Promise<void> {
   });
 }
 
-export async function retryRun(runId: string): Promise<{ runId: string }> {
-  return withTx(async (client) => {
-    const run = await getRun(client, runId);
-    if (!run) throw new HttpError(404, 'not_found', `run ${runId} not found`);
+export async function retryRun(pool: Pool, runId: string): Promise<{ runId: string }> {
+  return withTx(pool, async (client) => {
+    const run = await getRunRow(client, runId);
+    if (!run) throw new KernelError('not_found', `run ${runId} not found`);
     if (!['failed', 'canceled'].includes(run.status)) {
-      throw new HttpError(400, 'invalid_state', `run ${runId} is ${run.status}, not retryable`);
+      throw new KernelError('conflict', `run ${runId} is ${run.status}, not retryable`);
     }
     const created = await createRunIn(client, {
       taskId: run.task_id,
@@ -646,26 +760,22 @@ export async function retryRun(runId: string): Promise<{ runId: string }> {
 }
 
 /* ---------------------------------------------------------------------------
- * Logs (best effort, any run status)
+ * Logs (best effort, any run status — no fencing)
  * ------------------------------------------------------------------------- */
-
-export interface IncomingLog {
-  ts: string;
-  level: string;
-  message: string;
-  data?: unknown;
-  stepSeq?: number;
-}
 
 /** Rows per INSERT. 6 bind params each → 6000 params, well under pg's 65535. */
 const LOG_INSERT_CHUNK = 1000;
 
-export async function appendLogs(runId: string, entries: IncomingLog[]): Promise<void> {
+export async function appendLogs(
+  pool: Pool,
+  runId: string,
+  entries: LogEntry[],
+): Promise<void> {
   if (entries.length === 0) return;
-  const run = await getRun(pool, runId);
-  if (!run) throw new HttpError(404, 'not_found', `run ${runId} not found`);
+  const run = await getRunRow(pool, runId);
+  if (!run) throw new KernelError('not_found', `run ${runId} not found`);
 
-  // Chunk inserts so a single request can never exceed pg's 65535 bind-param
+  // Chunk inserts so a single call can never exceed pg's 65535 bind-param
   // limit (6 params/row → cap at LOG_INSERT_CHUNK rows per statement).
   for (let start = 0; start < entries.length; start += LOG_INSERT_CHUNK) {
     const chunk = entries.slice(start, start + LOG_INSERT_CHUNK);
@@ -687,5 +797,248 @@ export async function appendLogs(runId: string, entries: IncomingLog[]): Promise
       `INSERT INTO logs (run_id, step_seq, level, message, data, ts) VALUES ${values.join(',')}`,
       params,
     );
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Run reads: getRun / getRunDetail / waitForResult
+ * ------------------------------------------------------------------------- */
+
+const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
+const durationMs = (started: Date | null, finished: Date | null): number | null =>
+  started && finished ? finished.getTime() - started.getTime() : null;
+
+/** Full run record (camelCase, dates as ISO-8601 strings). */
+export interface RunRecord {
+  id: string;
+  taskId: string;
+  status: RunStatus;
+  trigger: TriggerType;
+  codeVersion: string | null;
+  env: string;
+  attempt: number;
+  maxAttempts: number;
+  /** finished − started for terminal runs; null while queued/running/waiting. */
+  durationMs: number | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  payload: unknown;
+  output: unknown;
+  error: SerializedError | null;
+  parentRunId: string | null;
+  idempotencyKey: string | null;
+  queuedAt: string | null;
+}
+
+export interface RunStepRecord {
+  seq: number;
+  kind: StepKind;
+  label: string | null;
+  status: StepStatus;
+  output: unknown;
+  error: SerializedError | null;
+  attempt: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface WaitRecord {
+  id: number;
+  stepSeq: number;
+  kind: WaitKind;
+  resumeAt: string | null;
+  childRunId: string | null;
+  status: 'pending' | 'completed' | 'canceled';
+}
+
+export interface LogRecord {
+  id: number;
+  stepSeq: number | null;
+  level: LogLevel;
+  message: string;
+  data: unknown;
+  ts: string;
+}
+
+export interface RunDetailResult {
+  run: RunRecord;
+  steps: RunStepRecord[];
+  waits: WaitRecord[];
+  logs: LogRecord[];
+}
+
+export async function getRunRecord(pool: Pool, runId: string): Promise<RunRecord> {
+  const runRes = await pool.query<{
+    id: string;
+    task_id: string;
+    status: string;
+    trigger_type: string;
+    code_version: string | null;
+    env: string;
+    attempt: number;
+    max_attempts: number;
+    payload: unknown;
+    output: unknown;
+    error: unknown;
+    parent_run_id: string | null;
+    idempotency_key: string | null;
+    queued_at: Date | null;
+    created_at: Date;
+    started_at: Date | null;
+    finished_at: Date | null;
+  }>(
+    `SELECT id, task_id, status, trigger_type, code_version, env, attempt, max_attempts,
+            payload, output, error, parent_run_id, idempotency_key,
+            queued_at, created_at, started_at, finished_at
+       FROM runs WHERE id = $1`,
+    [runId],
+  );
+  const r = runRes.rows[0];
+  if (!r) throw new KernelError('not_found', `run ${runId} not found`);
+
+  return {
+    id: r.id,
+    taskId: r.task_id,
+    status: r.status as RunStatus,
+    trigger: r.trigger_type as TriggerType,
+    codeVersion: r.code_version,
+    env: r.env,
+    attempt: r.attempt,
+    maxAttempts: r.max_attempts,
+    durationMs: durationMs(r.started_at, r.finished_at),
+    createdAt: r.created_at.toISOString(),
+    startedAt: iso(r.started_at),
+    finishedAt: iso(r.finished_at),
+    payload: r.payload,
+    output: r.output,
+    error: (r.error as SerializedError | null) ?? null,
+    parentRunId: r.parent_run_id,
+    idempotencyKey: r.idempotency_key,
+    queuedAt: iso(r.queued_at),
+  };
+}
+
+/** Run + steps + waits + logs (logs capped at 1000 rows, oldest first). */
+export async function getRunDetail(pool: Pool, runId: string): Promise<RunDetailResult> {
+  const run = await getRunRecord(pool, runId);
+
+  const stepsRes = await pool.query<{
+    seq: number;
+    kind: string;
+    label: string | null;
+    status: string;
+    output: unknown;
+    error: unknown;
+    attempt: number;
+    started_at: Date | null;
+    finished_at: Date | null;
+  }>(
+    `SELECT seq, kind, label, status, output, error, attempt, started_at, finished_at
+       FROM run_steps WHERE run_id = $1 ORDER BY seq ASC`,
+    [runId],
+  );
+  const steps: RunStepRecord[] = stepsRes.rows.map((s) => ({
+    seq: s.seq,
+    kind: s.kind as StepKind,
+    label: s.label,
+    status: s.status as StepStatus,
+    output: s.output,
+    error: (s.error as SerializedError | null) ?? null,
+    attempt: s.attempt,
+    startedAt: iso(s.started_at),
+    finishedAt: iso(s.finished_at),
+  }));
+
+  const waitsRes = await pool.query<{
+    id: number;
+    step_seq: number;
+    kind: string;
+    resume_at: Date | null;
+    child_run_id: string | null;
+    status: string;
+  }>(
+    `SELECT id, step_seq, kind, resume_at, child_run_id, status
+       FROM waits WHERE run_id = $1 ORDER BY id ASC`,
+    [runId],
+  );
+  const waits: WaitRecord[] = waitsRes.rows.map((w) => ({
+    id: Number(w.id),
+    stepSeq: w.step_seq,
+    kind: w.kind as WaitKind,
+    resumeAt: iso(w.resume_at),
+    childRunId: w.child_run_id,
+    status: w.status as WaitRecord['status'],
+  }));
+
+  const logsRes = await pool.query<{
+    id: number;
+    step_seq: number | null;
+    level: string;
+    message: string;
+    data: unknown;
+    ts: Date;
+  }>(
+    `SELECT id, step_seq, level, message, data, ts
+       FROM logs WHERE run_id = $1 ORDER BY id ASC LIMIT 1000`,
+    [runId],
+  );
+  const logs: LogRecord[] = logsRes.rows.map((l) => ({
+    id: Number(l.id),
+    stepSeq: l.step_seq,
+    level: l.level as LogLevel,
+    message: l.message,
+    data: l.data,
+    ts: l.ts.toISOString(),
+  }));
+
+  return { run, steps, waits, logs };
+}
+
+export interface WaitForResultOptions {
+  /** Give up after this long (default 30s). */
+  timeoutMs?: number;
+  /** Poll interval (default 250ms). */
+  pollMs?: number;
+}
+
+export interface WaitResult {
+  status: RunStatus;
+  output?: unknown;
+  error?: SerializedError;
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Poll a run until it reaches a terminal state. On timeout the latest
+ * (non-terminal) status is returned without output/error.
+ */
+export async function waitForResult(
+  pool: Pool,
+  runId: string,
+  opts: WaitForResultOptions = {},
+): Promise<WaitResult> {
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const pollMs = opts.pollMs ?? 250;
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    const res = await pool.query<{ status: string; output: unknown; error: unknown }>(
+      `SELECT status, output, error FROM runs WHERE id = $1`,
+      [runId],
+    );
+    const row = res.rows[0];
+    if (!row) throw new KernelError('not_found', `run ${runId} not found`);
+    const status = row.status as RunStatus;
+    if (status === 'completed' || status === 'failed' || status === 'canceled') {
+      return {
+        status,
+        output: row.output ?? undefined,
+        error: (row.error as SerializedError | null) ?? undefined,
+      };
+    }
+    if (Date.now() + pollMs >= deadline) return { status };
+    await sleep(pollMs);
   }
 }

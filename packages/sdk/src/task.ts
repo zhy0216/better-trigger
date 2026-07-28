@@ -8,18 +8,17 @@
 
    A TaskHandle exposes trigger / batchTrigger / triggerAndWait. When called
    inside a running task (detected via AsyncLocalStorage) these become durable
-   steps; outside, they hit the plain trigger endpoints.
+   steps; outside, they go through the default betterTrigger() instance.
    ============================================================================= */
 import type {
   CronConfig,
   RetryPolicy,
-  RunHandle,
   TaskManifest,
   TaskRunResult,
   TriggerOptions,
 } from '@better-trigger/core';
-import { HttpClient } from './client';
 import { currentExecutor, type RunCtx } from './context';
+import { makeRunHandle, requireDefaultInstance, type RunHandle } from './instance';
 import type { ExecutorTask } from './executor';
 import { isSchema, validateSchema, type AnySchema, type InferSchema } from './schema';
 
@@ -48,14 +47,15 @@ export interface TaskHandle<TPayload, TOutput> {
   readonly __definition: ResolvedTaskDefinition<TPayload, TOutput>;
 
   /**
-   * Trigger one run. Outside a task → POST /trigger. Inside a task → durable
-   * batch-trigger step (a 1-item batch). Returns a handle with the run id.
+   * Trigger one run. Outside a task → the default betterTrigger() instance.
+   * Inside a task → durable batch-trigger step (a 1-item batch). Returns a
+   * handle with the run id.
    */
   trigger(payload: TPayload, options?: TriggerOptions): Promise<RunHandle>;
 
   /**
-   * Trigger many runs. Outside a task → POST /batch-trigger. Inside → durable
-   * batch-trigger step. Returns one handle per item, in order.
+   * Trigger many runs. Outside a task → the default betterTrigger() instance.
+   * Inside → durable batch-trigger step. Returns one handle per item, in order.
    */
   batchTrigger(items: Array<BatchItem<TPayload>>): Promise<RunHandle[]>;
 
@@ -214,10 +214,9 @@ function makeHandle<TPayload, TOutput>(
           [{ taskId: def.id, payload, options: opts }],
           `trigger:${def.id}`,
         );
-        return { id: runIds[0] };
+        return makeRunHandle(runIds[0]);
       }
-      const res = await new HttpClient().trigger({ taskId: def.id, payload, options: opts });
-      return { id: res.runId };
+      return requireDefaultInstance().trigger(def.id, payload, opts);
     },
 
     async batchTrigger(items) {
@@ -232,10 +231,9 @@ function makeHandle<TPayload, TOutput>(
           triggerItems,
           `batchTrigger:${def.id}`,
         );
-        return runIds.map((id) => ({ id }));
+        return runIds.map((id) => makeRunHandle(id));
       }
-      const res = await new HttpClient().batchTrigger({ items: triggerItems });
-      return res.runIds.map((id) => ({ id }));
+      return requireDefaultInstance().batchTrigger(triggerItems);
     },
 
     async triggerAndWait(payload, options) {

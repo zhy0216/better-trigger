@@ -4,9 +4,12 @@
    · GET /workers. See docs/backend-contract.md §5.
    ============================================================================= */
 import { Hono } from 'hono';
+import type { Pool } from 'pg';
+import { nextCronAt } from '@better-trigger/core';
 import type {
   HealthResponse,
   LogRow,
+  OkResponse,
   RunDetail,
   RunDetailResponse,
   RunStepRow,
@@ -20,10 +23,8 @@ import type {
   WaitRow,
   WorkerSummary,
   WorkersResponse,
-} from '@better-trigger/core';
-import { pool } from '../db/index';
-import { computeTaskStats } from '../engine/stats';
-import { nextCronAt } from '../engine/orchestrator';
+} from '../types';
+import { computeTaskStats } from '../stats';
 
 const VERSION = '0.1.0';
 
@@ -31,7 +32,8 @@ const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 const durationMs = (started: Date | null, finished: Date | null): number | null =>
   started && finished ? finished.getTime() - started.getTime() : null;
 
-export function dashboardRoutes(): Hono {
+export function dashboardRoutes(deps: { pool: Pool }): Hono {
+  const { pool } = deps;
   const app = new Hono();
 
   /* -------------------------------------------------------- health */
@@ -51,7 +53,7 @@ export function dashboardRoutes(): Hono {
     }>(
       `SELECT id, name, file_path, trigger_source, cron_pattern FROM tasks ORDER BY name ASC`,
     );
-    const stats = await computeTaskStats();
+    const stats = await computeTaskStats(pool);
 
     const tasks: TaskSummary[] = taskRows.rows.map((t) => {
       const s = stats.get(t.id);
@@ -331,7 +333,7 @@ export function dashboardRoutes(): Hono {
       `UPDATE schedules SET enabled = $2, next_run_at = $3, updated_at = now() WHERE id = $1`,
       [id, body.enabled, nextRunAt],
     );
-    const res: OkResponseLike = { ok: true };
+    const res: OkResponse = { ok: true };
     return c.json(res);
   });
 
@@ -368,8 +370,4 @@ export function dashboardRoutes(): Hono {
   });
 
   return app;
-}
-
-interface OkResponseLike {
-  ok: true;
 }

@@ -7,10 +7,13 @@
   "scripts": {
     "worker": "bun src/worker.ts",
     "e2e": "bun scripts/e2e.ts",
+    "crash": "bun scripts/crash.ts",
+    "fencing": "bun scripts/fencing.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@better-trigger/core": "workspace:*",
+    "@better-trigger/db": "workspace:*",
     "better-trigger": "workspace:*",
     "zod": "^3.23"
   },

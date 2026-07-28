@@ -1,22 +1,20 @@
 /* =============================================================================
-   @better-trigger/core — HTTP protocol types.
-   Worker ↔ Server protocol + Trigger API + Dashboard API (docs/backend-contract.md §4–5).
-   All endpoints live under /api/v1 and speak camelCase JSON.
-   Dates travel as ISO-8601 strings.
+   @better-trigger/server — dashboard REST types.
+   Trigger API + Dashboard API response/request shapes (docs/backend-contract.md
+   §4–5). All endpoints live under /api/v1 and speak camelCase JSON.
+   Dates travel as ISO-8601 strings. apps/web mirrors these shapes locally.
    ============================================================================= */
 import type {
   LogLevel,
-  RetryPolicy,
   RunStatus,
   SerializedError,
   StepKind,
-  StepSnapshot,
   StepStatus,
-  TaskManifest,
+  TriggerItem,
   TriggerOptions,
   TriggerType,
   WaitKind,
-} from './types';
+} from '@better-trigger/core';
 
 /* ---------------------------------------------------------------------------
  * Shared envelope
@@ -33,147 +31,6 @@ export interface ApiErrorBody {
     code: string;
     message: string;
   };
-}
-
-/* ---------------------------------------------------------------------------
- * Worker protocol
- * ------------------------------------------------------------------------- */
-
-/** POST /api/v1/workers/register */
-export interface RegisterWorkerRequest {
-  name?: string;
-  codeVersion: string;
-  runtime: 'self-host';
-  concurrency: number;
-  tasks: TaskManifest[];
-}
-export interface RegisterWorkerResponse {
-  workerId: string;
-  heartbeatIntervalMs: number;
-  visibilityTimeoutMs: number;
-}
-
-/** POST /api/v1/workers/:id/heartbeat */
-export interface HeartbeatRequest {
-  /** Runs currently executing on this worker (locks get extended). */
-  runIds: string[];
-}
-export interface HeartbeatResponse {
-  ok: true;
-  /** Runs the server wants the worker to stop executing (canceled). */
-  cancelRunIds: string[];
-}
-
-/** GET /api/v1/dequeue?workerId=&timeoutMs= (long-poll) */
-export interface DequeuedRun {
-  id: string;
-  taskId: string;
-  payload: unknown;
-  attempt: number;
-  maxAttempts: number;
-  codeVersion: string | null;
-  env: string;
-  /** Memoized completed/failed steps for replay. */
-  steps: StepSnapshot[];
-}
-export interface DequeueResponse {
-  run: DequeuedRun | null;
-}
-
-/** POST /api/v1/runs/:id/steps */
-export interface ReportStepRequest {
-  seq: number;
-  kind: StepKind;
-  label?: string;
-  status: StepStatus;
-  output?: unknown;
-  error?: SerializedError;
-  attempt: number;
-  startedAt: string;
-  finishedAt: string;
-  workerId: string;
-}
-
-/** POST /api/v1/runs/:id/suspend */
-export interface SuspendRequest {
-  seq: number;
-  label?: string;
-  kind: 'duration' | 'until';
-  resumeAt: string;
-  workerId: string;
-}
-export interface SuspendResponse {
-  ok: true;
-  /**
-   * true → resumeAt was already in the past; the server recorded the wait as
-   * completed and the worker should continue executing WITHOUT suspending.
-   */
-  resumed: boolean;
-}
-
-/** POST /api/v1/runs/:id/wait-for-run (triggerAndWait) */
-export interface WaitForRunRequest {
-  seq: number;
-  label?: string;
-  taskId: string;
-  payload: unknown;
-  options?: TriggerOptions;
-  workerId: string;
-}
-export interface WaitForRunResponse {
-  childRunId: string;
-}
-
-export interface TriggerItem {
-  taskId: string;
-  payload: unknown;
-  options?: TriggerOptions;
-}
-
-/** POST /api/v1/runs/:id/batch-trigger (durable batchTrigger step) */
-export interface BatchTriggerStepRequest {
-  seq: number;
-  label?: string;
-  items: TriggerItem[];
-  workerId: string;
-}
-export interface BatchTriggerStepResponse {
-  runIds: string[];
-}
-
-/** POST /api/v1/runs/:id/complete */
-export interface CompleteRunRequest {
-  output: unknown;
-  workerId: string;
-}
-
-/** POST /api/v1/runs/:id/fail */
-export interface FailRunRequest {
-  error: SerializedError;
-  /** Seq of the step whose failure caused this, if any. */
-  stepSeq?: number;
-  /** Effective retry policy for this failure (step-level ?? task-level ?? default). */
-  retry?: RetryPolicy;
-  /** true → AbortError: fail immediately, no retry. */
-  abort?: boolean;
-  workerId: string;
-}
-export interface FailRunResponse {
-  ok: true;
-  willRetry: boolean;
-  nextAttemptAt?: string;
-}
-
-/** POST /api/v1/runs/:id/logs */
-export interface LogEntry {
-  ts: string;
-  level: LogLevel;
-  message: string;
-  data?: unknown;
-  stepSeq?: number;
-}
-export interface ReportLogsRequest {
-  logs: LogEntry[];
 }
 
 /* ---------------------------------------------------------------------------

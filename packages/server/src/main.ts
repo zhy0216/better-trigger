@@ -1,23 +1,23 @@
 /* =============================================================================
-   @better-trigger/server — process entry point.
-   migrate → orchestrator.start → serve. Graceful shutdown on SIGINT/SIGTERM.
+   @better-trigger/server — process entry point (dashboard API only).
+   pool → migrate → createKernel → createApp → serve. No orchestrator here —
+   background loops run inside embedded workers (betterTrigger().start()).
+   Graceful shutdown on SIGINT/SIGTERM.
    bin: better-trigger-server (see package.json + tsup banner).
    ============================================================================= */
 import { serve } from '@hono/node-server';
-import { migrate } from '@better-trigger/db';
+import { createKernel } from '@better-trigger/core';
+import { createPool, migrate } from '@better-trigger/db';
 import { createApp } from './app';
-import { pool } from './db/index';
-import { createOrchestrator } from './engine/orchestrator';
 
 const PORT = Number(process.env.PORT ?? 4848);
 
 async function main(): Promise<void> {
+  const pool = createPool(); // defaults to process.env.DATABASE_URL
   await migrate(pool);
 
-  const orchestrator = createOrchestrator();
-  orchestrator.start();
-
-  const app = createApp();
+  const kernel = createKernel({ pool });
+  const app = createApp({ kernel, pool });
   const server = serve({ fetch: app.fetch, port: PORT });
 
   console.log(`[better-trigger] server listening on http://localhost:${PORT}`);
@@ -27,7 +27,6 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[better-trigger] ${signal} received, shutting down...`);
-    orchestrator.stop();
     server.close();
     await pool.end().catch(() => {});
     process.exit(0);

@@ -1,31 +1,30 @@
 /* =============================================================================
    @better-trigger/server — trigger API (app code / dashboard).
    POST /trigger · POST /batch-trigger
+   Thin HTTP shims over the injected kernel (validation lives in the kernel;
+   bad shapes surface as KernelError('bad_request') → 400 via app.onError).
    See docs/backend-contract.md §4.
    ============================================================================= */
 import { Hono } from 'hono';
+import type { Kernel } from '@better-trigger/core';
 import type {
   BatchTriggerRequest,
   BatchTriggerResponse,
   TriggerRequest,
   TriggerResponse,
-} from '@better-trigger/core';
-import { createRun, HttpError, withTx } from '../engine/runs';
-import { assertArray, assertString } from '../validate';
+} from '../types';
 
-export function triggerRoutes(): Hono {
+export function triggerRoutes(deps: { kernel: Kernel }): Hono {
+  const { kernel } = deps;
   const app = new Hono();
 
   /* ---------------------------------------------------------- /trigger */
   app.post('/trigger', async (c) => {
     const body = await c.req.json<TriggerRequest>();
-    assertString(body.taskId, 'taskId');
-    const created = await createRun({
+    const created = await kernel.trigger({
       taskId: body.taskId,
       payload: body.payload,
       options: body.options,
-      triggerType: 'api',
-      requireTask: true,
     });
     const res: TriggerResponse = { runId: created.runId, idempotent: created.idempotent };
     return c.json(res);
@@ -34,30 +33,10 @@ export function triggerRoutes(): Hono {
   /* ---------------------------------------------------- /batch-trigger */
   app.post('/batch-trigger', async (c) => {
     const body = await c.req.json<BatchTriggerRequest>();
-    assertArray(body.items, 'items');
-    for (const item of body.items) {
-      assertString((item as { taskId?: unknown })?.taskId, 'item.taskId');
-    }
-    const runIds = await withTx(async (client) => {
-      const ids: string[] = [];
-      for (const item of body.items) {
-        const created = await createRun({
-          taskId: item.taskId,
-          payload: item.payload,
-          options: item.options,
-          triggerType: 'api',
-          requireTask: true,
-          client,
-        });
-        ids.push(created.runId);
-      }
-      return ids;
-    });
+    const { runIds } = await kernel.batchTrigger(body.items);
     const res: BatchTriggerResponse = { runIds };
     return c.json(res);
   });
 
   return app;
 }
-
-export { HttpError };

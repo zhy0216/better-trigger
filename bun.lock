@@ -39,6 +39,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@better-trigger/core": "workspace:*",
+        "@better-trigger/db": "workspace:*",
         "better-trigger": "workspace:*",
         "zod": "^3.23",
       },
@@ -50,7 +51,13 @@
     "packages/core": {
       "name": "@better-trigger/core",
       "version": "0.1.0",
+      "dependencies": {
+        "croner": "^9.0.0",
+        "pg": "^8.13.1",
+      },
       "devDependencies": {
+        "@types/node": "^22.7.4",
+        "@types/pg": "^8.11.10",
         "tsup": "^8.3.0",
         "typescript": "^5.6.2",
       },
@@ -75,9 +82,12 @@
       "version": "0.1.0",
       "dependencies": {
         "@better-trigger/core": "workspace:*",
+        "@better-trigger/db": "workspace:*",
+        "pg": "^8.13.1",
       },
       "devDependencies": {
         "@types/node": "^22.7.4",
+        "@types/pg": "^8.11.10",
         "tsup": "^8.3.0",
         "typescript": "^5.6.2",
       },
@@ -92,7 +102,6 @@
         "@better-trigger/core": "workspace:*",
         "@better-trigger/db": "workspace:*",
         "@hono/node-server": "^1.13.7",
-        "croner": "^9.0.0",
         "hono": "^4.6.13",
         "pg": "^8.13.1",
       },
