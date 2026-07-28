@@ -1,7 +1,7 @@
 # better-trigger v2 架构定案 — 嵌入式运行时(better-auth 形态)
 
-> 状态:**已定案**(2026-07-28 用户拍板嵌入式)。本文档定义 v2 目标架构与迁移计划。
-> 当前代码(M1+M2)仍是 `docs/backend-contract.md` 描述的 server 形态;P1 落地后以本文档为唯一基准。
+> 状态:**已定案**(2026-07-28 用户拍板嵌入式);**P1(内核内嵌)已落地**——HTTP worker 协议已删除,当前代码即嵌入式形态,本文档是唯一基准。
+> `docs/backend-contract.md` 仅作历史参考(它描述的 server 形态已不存在)。
 > contract 中与传输协议无关的引擎语义(位置 seq 重放、退避公式、并发限制、cron、suspend/resume 状态机)**继续有效**。
 > 来源:2026-07-28 架构笔记(gitmemo-r/notes/manual/better-trigger架构与实施计划.md)中采纳其嵌入式哲学与正确性/测试策略;不采纳其 Temporal API 表面与 event-history 执行模型。
 
@@ -83,7 +83,7 @@ App process
 | `core/src/protocol.ts` HTTP 协议类型 | 删除 |
 | `sdk/src/client.ts` + long-poll worker | 删除,worker 改为直连 claim 循环 |
 | `configure({ apiUrl, apiKey })` | 由实例绑定取代(task 定义保持 instance-free,触发经默认实例) |
-| `packages/server` | 降级改造为 `packages/studio`(可选 dashboard 工具,复用现有 REST 形状与 apps/web) |
+| `packages/server` | 降级改造为 `packages/studio`(可选 dashboard 工具,复用现有 REST 形状与 apps/web);它只跑 worker 无关的 sweep(lease reaper + worker 离线标记),**不跑 cron/waits/claim** —— 纯 bookkeeping,不是执行调度器 |
 | 500ms 内部轮询 | LISTEN/NOTIFY 降低唤醒延迟,轮询保底(NOTIFY 不是 durable queue) |
 
 **保留不动**:runs/run_steps/waits/schedules/logs 表与状态机、退避公式(`computeBackoffMs`)、位置 seq 重放语义、`ctx` 全部表面(step/wait/logger/now/random/uuid)、幂等键、并发限制、croner 调度、apps/web 与 adapter 层。
@@ -104,7 +104,8 @@ App process
 
 ## Schema 增量
 
-- `queue`:+ `fencing_token bigint`(claim 时 +1;一切写回校验)、`lease_until`(替代 locked_at+固定超时语义)
+- `runs`:+ `fencing_token bigint`(**每 run 单调递增计数器**,claim 时 +1,一切写回校验;放在 runs 行而非 queue 行,使 queue 行被删除/重建(重试、resume)也不会重置 token)
+- `queue`:+ `lease_until`(持久 lease,替代 locked_at+固定超时语义;queue 行只承载 lease,不承载 fencing 计数)
 - `run_steps`:+ `fingerprint text`(kind+label+inputHash;首跑写入,重放校验)
 - `workers`:语义改为「进程注册表」(嵌入实例直接写心跳),仅供 studio 展示
 - P3 新增:`events`(signal 语义:原子入库 + 唤醒,离线不丢,恰好消费一次)
@@ -130,6 +131,7 @@ apps/web            ← 不变(adapter 已隔离 REST 形状)
 
 ### P1 — 内核内嵌(1–1.5 周)
 「与 M1+M2 的差异」清单全部落地;examples/basic 改嵌入式(单文件可跑)。
+dashboard server(现 `packages/server`)保留为可选工具进程:orchestrator 循环按 flag 启动,它只开 lease reaper + worker 离线标记(worker 无关的 bookkeeping),cron/waits/claiming 全部关闭——执行调度只发生在嵌入式实例里。
 **验收**:零 HTTP 进程跑通现 e2e 全部场景(hello / 多 step / wait 挂起恢复 / triggerAndWait / batchTrigger / 幂等键 / 重试与 AbortError / cron);任意时刻 `kill -9` 进程,重启后恢复且无重复 step 行;人为拖延旧持有者后其迟到写被 fencing 拒绝。
 
 ### P2 — 正确性硬化(1 周)

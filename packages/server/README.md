@@ -87,6 +87,11 @@ codes map to statuses — `400 bad_request`, `404 not_found` / `task_not_found`,
 `409 run_not_running` / `stale_lease` / `conflict` (e.g. retrying a run that
 is not terminal) — everything else is `500 internal_error`.
 
+> **Error-code drift vs v1** (the pre-embedded server): retrying a run that is
+> not terminal now answers `409 conflict` (v1 said `400 invalid_state`), and
+> triggering an unknown task uses code `task_not_found` (404). The dashboard
+> (`apps/web`) tolerates both the old and new shapes.
+
 ## Layout
 
 ```

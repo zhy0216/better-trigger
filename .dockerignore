@@ -1,0 +1,8 @@
+# Keep host artifacts out of the Docker build context (packages/server/Dockerfile
+# builds from the repo root): deps are installed and dists built inside the image.
+node_modules
+**/node_modules
+**/dist
+.git
+.turbo
+**/.turbo

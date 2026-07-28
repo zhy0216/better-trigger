@@ -1,7 +1,8 @@
 /* =============================================================================
    Better Trigger — Onboarding / get started.
    The three steps mirror the real flow (see examples/basic): install the SDK
-   (`better-trigger`), declare a task(), then startWorker + trigger over HTTP.
+   (`better-trigger`), declare a task(), then start the embedded runtime
+   (betterTrigger({ database }) → trigger.start) and trigger straight to PG.
    ============================================================================= */
 import React from 'react';
 import { Icon, Button, Badge, IconButton } from '../components/primitives';
@@ -11,8 +12,8 @@ type Token = [string] | [string, string];
 
 const CODE_INSTALL: Token[] = [
   ['fn', 'npm i'], ['t', ' better-trigger'], ['nl'],
-  ['c', '# server: better-trigger-server + Postgres'], ['nl'],
-  ['fn', 'export'], ['t', ' BETTER_TRIGGER_API_URL=http://localhost:4848'],
+  ['c', '# Postgres is the only dependency — no server process'], ['nl'],
+  ['fn', 'export'], ['t', ' DATABASE_URL=postgres://localhost:5432/better_trigger'],
 ];
 
 const CODE_TASK: Token[] = [
@@ -31,17 +32,21 @@ const CODE_TASK: Token[] = [
 ];
 
 const CODE_WORKER: Token[] = [
-  ['kw', 'import'], ['t', ' { startWorker } '], ['kw', 'from'], ['s', ' "better-trigger"'], ['t', ';'], ['nl'],
+  ['kw', 'import'], ['t', ' { betterTrigger } '], ['kw', 'from'], ['s', ' "better-trigger"'], ['t', ';'], ['nl'],
   ['kw', 'import'], ['t', ' { processOrder } '], ['kw', 'from'], ['s', ' "./tasks"'], ['t', ';'], ['nl'],
   ['nl'],
-  ['kw', 'await'], ['fn', ' startWorker'], ['t', '({ tasks: [processOrder] });'],
+  ['kw', 'export const'], ['t', ' trigger = '], ['fn', 'betterTrigger'], ['t', '({'], ['nl'],
+  ['t', '  database: { connectionString: process.env.'], ['fn', 'DATABASE_URL'], ['t', ' },'], ['nl'],
+  ['t', '});'], ['nl'],
+  ['nl'],
+  ['c', '// your app process is the worker — claims runs straight from Postgres'], ['nl'],
+  ['kw', 'await'], ['t', ' trigger.'], ['fn', 'start'], ['t', '({ tasks: [processOrder] });'],
 ];
 
 const CODE_TRIGGER: Token[] = [
-  ['fn', 'bun'], ['t', ' src/worker.ts'], ['nl'],
-  ['fn', 'curl'], ['t', ' -s localhost:4848/api/v1/trigger \\'], ['nl'],
-  ['t', "  -H 'content-type: application/json' \\"], ['nl'],
-  ['t', "  -d '"], ['s', '{"taskId":"process-order","payload":{}}'], ['t', "'"],
+  ['c', '// anywhere in your app — no HTTP, writes straight to Postgres'], ['nl'],
+  ['kw', 'const'], ['t', ' handle = '], ['kw', 'await'], ['t', ' processOrder.'], ['fn', 'trigger'], ['t', '({ orderId: '], ['s', '"o_1"'], ['t', ' });'], ['nl'],
+  ['kw', 'const'], ['t', ' result = '], ['kw', 'await'], ['t', ' handle.'], ['fn', 'result'], ['t', '();'],
 ];
 
 const TOK: Record<string, string> = { kw: 'var(--st-frozen)', s: 'var(--green-primary)', fn: 'var(--accent)', c: 'var(--fg-faint)', t: 'var(--fg)' };
@@ -73,9 +78,9 @@ function CodeBlock({ tokens, title }: { tokens: Token[]; title: string }) {
 export function Onboarding({ setRoute }: { setRoute: (r: string) => void }) {
   const [step, setStep] = React.useState(1);
   const steps = [
-    { n: 1, title: 'Install the SDK', body: 'One package. It talks to your self-hosted server.' },
+    { n: 1, title: 'Install the SDK', body: 'One package. Postgres is the only dependency.' },
     { n: 2, title: 'Write a task', body: 'A plain async function with durable, replayable steps.' },
-    { n: 3, title: 'Run a worker & trigger', body: 'The worker registers tasks and long-polls for runs.' },
+    { n: 3, title: 'Start & trigger', body: 'Your app process runs tasks straight from Postgres.' },
   ];
   return (
     <Page>
@@ -118,7 +123,7 @@ export function Onboarding({ setRoute }: { setRoute: (r: string) => void }) {
             {step === 1 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <CodeBlock title="terminal" tokens={CODE_INSTALL} />
-                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>The server needs a Postgres database — migrations run automatically on startup.</p>
+                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>Better Trigger embeds in your process — no server to run. Migrations apply automatically on first use.</p>
               </div>
             )}
             {step === 2 && (
@@ -129,8 +134,8 @@ export function Onboarding({ setRoute }: { setRoute: (r: string) => void }) {
             )}
             {step === 3 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <CodeBlock title="src/worker.ts" tokens={CODE_WORKER} />
-                <CodeBlock title="terminal" tokens={CODE_TRIGGER} />
+                <CodeBlock title="src/trigger.ts" tokens={CODE_WORKER} />
+                <CodeBlock title="src/app.ts" tokens={CODE_TRIGGER} />
                 <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>Every run is traced automatically — open Runs to watch it stream live.</p>
               </div>
             )}
