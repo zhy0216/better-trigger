@@ -173,9 +173,11 @@ export class Executor {
       return { type: 'failed' };
     }
     if (this.abandoned) return { type: 'abandoned' };
-    // Error thrown between steps (not inside ctx.step): fail the run, no stepSeq.
+    // Error thrown between steps (not inside ctx.step): fail the run, no
+    // stepSeq. The task-level retry policy (own or inherited instance default)
+    // still governs the backoff, same as the step-failure path.
     const abort = isAbortError(err);
-    await this.failRun(serializeError(err), undefined, abort, undefined);
+    await this.failRun(serializeError(err), undefined, abort, abort ? undefined : this.task.retry);
     return this.abandoned ? { type: 'abandoned' } : { type: 'failed' };
   }
 

@@ -138,10 +138,18 @@ export function betterTrigger(options: BetterTriggerOptions): BetterTrigger {
   const kernel = createKernel({ pool });
   const migrations = options.migrations ?? 'auto';
 
-  /** Memoized readiness: auto-migrate exactly once before first use. */
+  /** Memoized readiness: auto-migrate once before first use. Success stays
+   *  cached; a rejection clears the memo so the next call retries instead of
+   *  poisoning the instance after one transient DB error. */
   let ready: Promise<void> | null = null;
   const ensureReady = (): Promise<void> => {
-    ready ??= migrations === 'auto' ? migrate(pool) : Promise.resolve();
+    if (!ready) {
+      const attempt = migrations === 'auto' ? migrate(pool) : Promise.resolve();
+      ready = attempt;
+      attempt.catch(() => {
+        if (ready === attempt) ready = null;
+      });
+    }
     return ready;
   };
 
@@ -154,30 +162,67 @@ export function betterTrigger(options: BetterTriggerOptions): BetterTrigger {
   };
 
   let worker: WorkerHandle | null = null;
+  /** Reserved synchronously by start() before any await; held until the worker
+   *  fully stops (or startup fails), so concurrent start() calls cannot both
+   *  pass the guard and spawn two runtimes. */
+  let startPromise: Promise<WorkerHandle> | null = null;
+  /** Memoized in-flight stop(), so a concurrent second stop() joins the drain
+   *  instead of skipping it and ending the pool mid-flight. */
+  let stopPromise: Promise<void> | null = null;
+
+  /** Runs once the worker runtime fully stopped (any stop path — handle.stop,
+   *  instance.stop, or a signal): release the start slot so a stopped instance
+   *  can start() again on a borrowed pool, then end an owned pool. */
+  const onWorkerStopped = async (): Promise<void> => {
+    worker = null;
+    startPromise = null;
+    await endOwnedPool();
+  };
 
   const instance: BetterTrigger = {
     async start(opts) {
-      await ensureReady();
-      if (worker) {
+      // Reserve the slot before any await (TOCTOU guard); a new lifecycle
+      // generation also gets a fresh stop memo so the next stop() really stops.
+      if (startPromise) {
         throw new Error('betterTrigger: worker already started on this instance');
       }
-      worker = await startWorkerRuntime(
-        {
-          kernel,
-          orchestrator: options.orchestrator,
-          defaultRetry: options.defaults?.retry,
-          onStopped: endOwnedPool,
-        },
-        opts,
-      );
-      return worker;
+      stopPromise = null;
+      const starting = (async () => {
+        await ensureReady();
+        const handle = await startWorkerRuntime(
+          {
+            kernel,
+            orchestrator: options.orchestrator,
+            defaultRetry: options.defaults?.retry,
+            onStopped: onWorkerStopped,
+          },
+          opts,
+        );
+        worker = handle;
+        return handle;
+      })();
+      startPromise = starting;
+      try {
+        return await starting;
+      } catch (err) {
+        // Failed startup releases the slot so start() can be retried.
+        if (startPromise === starting) startPromise = null;
+        throw err;
+      }
     },
 
     async stop() {
-      const h = worker;
-      worker = null;
-      if (h) await h.stop();
-      await endOwnedPool();
+      stopPromise ??= (async () => {
+        // Join an in-flight start() so its runtime gets stopped, not orphaned
+        // on an ended pool (a failed start yields nothing to stop).
+        const h = worker ?? (await startPromise?.then((w) => w, () => null)) ?? null;
+        worker = null;
+        // h.stop() drains in-flight runs, then onWorkerStopped ends an owned
+        // pool; idempotent with WorkerHandle.stop() (the runtime memoizes).
+        if (h) await h.stop();
+        await endOwnedPool();
+      })();
+      return stopPromise;
     },
 
     async trigger(taskOrId, payload, options) {

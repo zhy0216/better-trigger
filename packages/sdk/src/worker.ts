@@ -47,9 +47,11 @@ export interface WorkerDeps {
   kernel: Kernel;
   /** Orchestrator loop intervals (instance-level test knobs). */
   orchestrator?: OrchestratorOptions;
-  /** Instance default retry, applied to manifests of tasks without their own. */
+  /** Instance default retry, inherited by task definitions without their own
+   *  (feeds both registration manifests and executor-side backoff). */
   defaultRetry?: RetryPolicy;
-  /** Invoked after all loops stop; the instance ends its owned pool here. */
+  /** Invoked after all loops stop (any stop path); the instance releases its
+   *  worker slot and ends its owned pool here. */
   onStopped?: () => Promise<void>;
 }
 
@@ -67,16 +69,23 @@ export async function startWorkerRuntime(
   const concurrency = options.concurrency ?? 5;
   const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
 
-  const definitions = options.tasks.map((t) => t.__definition);
+  // Normalize once where definitions enter the runtime: a task without its own
+  // retry inherits the instance default (copied — the shared handle definition
+  // stays untouched), so the registration manifest (trigger-time max_attempts)
+  // and the executor-reported backoff agree instead of the executor silently
+  // falling back to the kernel DEFAULT_RETRY timing.
+  const definitions = options.tasks.map((t) => {
+    const def = t.__definition;
+    return def.retry === undefined && deps.defaultRetry !== undefined
+      ? { ...def, retry: deps.defaultRetry }
+      : def;
+  });
   const taskById = new Map<string, ResolvedTaskDefinition<any, any>>();
   for (const def of definitions) taskById.set(def.id, def);
   const taskIds = definitions.map((d) => d.id);
 
   const codeVersion = resolveCodeVersion(definitions);
   const manifests = definitions.map(toManifest);
-  if (deps.defaultRetry) {
-    for (const m of manifests) m.retry ??= deps.defaultRetry;
-  }
 
   const { workerId } = await kernel.registerWorker({
     name: options.name,

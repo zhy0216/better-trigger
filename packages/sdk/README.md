@@ -102,6 +102,9 @@ const trigger = betterTrigger({
 
 - `migrations: 'auto'` applies the packaged schema migrations on first use;
   `'manual'` assumes you ran them yourself (e.g. via `@better-trigger/db`).
+- `defaults.retry` is inherited by tasks that do not define their own `retry`
+  once a worker registers them: it sets both the trigger-time attempt budget
+  (`max_attempts` on new runs) and the executor-side backoff between attempts.
 - The **first** `betterTrigger()` call becomes the module-level default
   instance; `TaskHandle.trigger` / `batchTrigger` called outside a run use it
   (calling them with no instance created throws). A later instance can take
@@ -260,8 +263,9 @@ task({
 ```
 
 The effective retry policy for a step is `step options.retry ?? task retry ??
-default`. The default is `{ maxAttempts: 3, baseMs: 1000, factor: 2, maxMs: 300000 }`
-with `±20%` jitter. `AbortError` (and schema validation failures) skip retries.
+instance defaults.retry ?? default`. The default is
+`{ maxAttempts: 3, baseMs: 1000, factor: 2, maxMs: 300000 }` with `±20%`
+jitter. `AbortError` (and schema validation failures) skip retries.
 
 ---
 

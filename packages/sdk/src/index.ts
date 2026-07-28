@@ -38,6 +38,7 @@ export type { AnySchema, InferSchema } from './schema';
 export type {
   TaskRunResult,
   TriggerOptions,
+  TriggerItem,
   RetryPolicy,
   CronConfig,
   SerializedError,
@@ -47,4 +48,8 @@ export type {
   TriggerType,
   LogLevel,
   TaskManifest,
+  RunRecord,
+  RunDetailResult,
+  WaitResult,
+  WaitForResultOptions,
 } from '@better-trigger/core';
