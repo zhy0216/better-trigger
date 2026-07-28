@@ -226,6 +226,19 @@ export const everyMinute = task({
 });
 
 /* ---------------------------------------------------------------------------
+ * every-2s — a 6-field (seconds-granularity) cron task that actually FIRES
+ * during the e2e run: the pattern below means "every 2 seconds" (croner
+ * supports the leading seconds field; the SDK passes the pattern through
+ * verbatim). The e2e asserts at least one completed run with triggerType
+ * 'schedule' and that next_run_at advances past the fired slot.
+ * ------------------------------------------------------------------------- */
+export const everyTwoSeconds = task({
+  id: 'every-2s',
+  cron: '*/2 * * * * *',
+  run: async () => 'tick',
+});
+
+/* ---------------------------------------------------------------------------
  * The full set, exported for the worker entrypoint.
  * ------------------------------------------------------------------------- */
 export const allTasks = [
@@ -239,4 +252,5 @@ export const allTasks = [
   alwaysAborts,
   parallelSteps,
   everyMinute,
+  everyTwoSeconds,
 ];

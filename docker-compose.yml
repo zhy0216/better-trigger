@@ -2,10 +2,12 @@
 # better-trigger — local infra.
 #
 #   docker compose up -d                  # postgres only (for `bun run dev`)
-#   docker compose --profile server up    # postgres + the server image
+#   docker compose --profile server up    # postgres + the optional dashboard API
 #
-# The `server` service is gated behind a profile so the common path
-# (run Postgres in Docker, run the server/worker on the host) stays one command.
+# The `server` service is the OPTIONAL dashboard API (REST for apps/web) —
+# the embedded SDK talks to Postgres directly and never needs it. It is gated
+# behind a profile so the common path (run Postgres in Docker, run your app
+# on the host) stays one command.
 # =============================================================================
 services:
   postgres:

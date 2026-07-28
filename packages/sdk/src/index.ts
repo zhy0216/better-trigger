@@ -4,8 +4,7 @@
 
 /* ---- core functions ----------------------------------------------------- */
 export { task, unwrapResult } from './task';
-export { configure } from './config';
-export { startWorker } from './worker';
+export { betterTrigger } from './instance';
 
 /* ---- re-exported error / signal primitives from core -------------------- */
 export {
@@ -16,9 +15,6 @@ export {
   serializeError,
 } from '@better-trigger/core';
 
-/* ---- client error helpers ----------------------------------------------- */
-export { ApiError, isApiError, isRunNotRunning } from './client';
-
 /* ---- value + type exports ----------------------------------------------- */
 export type {
   TaskHandle,
@@ -27,8 +23,8 @@ export type {
   BatchItem,
   ResolvedTaskDefinition,
 } from './task';
-export type { SdkConfig } from './config';
-export type { StartWorkerOptions, WorkerHandle } from './worker';
+export type { BetterTrigger, BetterTriggerOptions, RunHandle } from './instance';
+export type { WorkerHandle } from './worker';
 export type {
   RunCtx,
   RunInfo,
@@ -42,8 +38,8 @@ export type { AnySchema, InferSchema } from './schema';
 export type {
   TaskRunResult,
   TriggerOptions,
+  TriggerItem,
   RetryPolicy,
-  RunHandle,
   CronConfig,
   SerializedError,
   RunStatus,
@@ -52,4 +48,8 @@ export type {
   TriggerType,
   LogLevel,
   TaskManifest,
+  RunRecord,
+  RunDetailResult,
+  WaitResult,
+  WaitForResultOptions,
 } from '@better-trigger/core';

@@ -1,17 +1,17 @@
 /* =============================================================================
-   @better-trigger/example-basic — worker entrypoint.
+   @better-trigger/example-basic — worker entrypoint (embedded runtime).
 
-   Registers every example task with the server, then long-polls for runs and
-   executes them via the replay engine. Heartbeat and graceful shutdown
-   (SIGINT/SIGTERM) are handled inside startWorker.
+   Registers every example task on the shared instance, then claims and
+   executes runs in-process — no server, no HTTP. Orchestrator loops
+   (waits / cron / reaper), heartbeat and graceful shutdown (SIGINT/SIGTERM)
+   are handled inside trigger.start().
 
-   Points at BETTER_TRIGGER_API_URL (default http://localhost:4848).
    Run with: bun src/worker.ts   (alias: bun run worker)
    ============================================================================= */
-import { startWorker } from 'better-trigger';
+import { trigger } from './trigger';
 import { allTasks } from './tasks';
 
-await startWorker({
+await trigger.start({
   tasks: allTasks,
   concurrency: 5,
 });

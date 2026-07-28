@@ -4,7 +4,7 @@
    runs), successRate (0-100), and a 12×2h run-count trend over the last 24h.
    One SQL pass per metric group; joined onto tasks in routes/dashboard.ts.
    ============================================================================= */
-import { pool } from '../db/index';
+import type { Pool } from 'pg';
 
 export interface TaskStats {
   taskId: string;
@@ -20,7 +20,7 @@ export interface TaskStats {
 const EMPTY_TREND = () => new Array<number>(12).fill(0);
 
 /** Aggregate stats for all tasks in one go; returns a map keyed by task id. */
-export async function computeTaskStats(): Promise<Map<string, TaskStats>> {
+export async function computeTaskStats(pool: Pool): Promise<Map<string, TaskStats>> {
   // Aggregate metrics over the last 24h window per task.
   const agg = await pool.query<{
     task_id: string;

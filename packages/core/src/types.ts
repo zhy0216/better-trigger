@@ -83,7 +83,7 @@ export interface TriggerOptions {
   delay?: string | number;
   /** Unique per task; re-triggering with the same key returns the existing run. */
   idempotencyKey?: string;
-  /** Higher dequeues first. Default 0. */
+  /** Higher-priority runs are claimed first. Default 0. */
   priority?: number;
   /** Concurrency grouping key. Defaults to the task id when the task has a limit. */
   concurrencyKey?: string;
@@ -100,7 +100,7 @@ export interface TaskRunResult<TOutput = unknown> {
   error?: SerializedError;
 }
 
-/** Memoized step snapshot shipped to workers on dequeue for replay. */
+/** Memoized step snapshot shipped to workers on claim for replay. */
 export interface StepSnapshot {
   seq: number;
   kind: StepKind;
@@ -113,4 +113,38 @@ export interface StepSnapshot {
 /** Returned by trigger / batchTrigger. */
 export interface RunHandle {
   id: string;
+}
+
+/** One trigger request item (trigger / batchTrigger / durable batch step). */
+export interface TriggerItem {
+  taskId: string;
+  payload: unknown;
+  options?: TriggerOptions;
+}
+
+/** A run handed to a worker for execution. */
+export interface DequeuedRun {
+  id: string;
+  taskId: string;
+  payload: unknown;
+  attempt: number;
+  maxAttempts: number;
+  codeVersion: string | null;
+  env: string;
+  /** Memoized completed/failed steps for replay. */
+  steps: StepSnapshot[];
+}
+
+/** A claimed run: the fencing token is the claim's write credential. */
+export interface ClaimedRun extends DequeuedRun {
+  fencingToken: number;
+}
+
+/** One structured log line reported by a worker. */
+export interface LogEntry {
+  ts: string;
+  level: LogLevel;
+  message: string;
+  data?: unknown;
+  stepSeq?: number;
 }

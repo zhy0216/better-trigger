@@ -1,23 +1,35 @@
 /* =============================================================================
-   @better-trigger/server — process entry point.
-   migrate → orchestrator.start → serve. Graceful shutdown on SIGINT/SIGTERM.
+   @better-trigger/server — process entry point (dashboard API only).
+   pool → migrate → createKernel → createApp → serve. Execution loops (waits /
+   cron) run inside embedded workers (betterTrigger().start()); this process
+   runs only the bookkeeping loops — lease reaper + worker offline marker — so
+   leases are reaped and dead workers marked offline even when every embedded
+   worker process is gone, without the server becoming an execution scheduler.
+   Graceful shutdown on SIGINT/SIGTERM.
    bin: better-trigger-server (see package.json + tsup banner).
    ============================================================================= */
 import { serve } from '@hono/node-server';
-import { migrate } from '@better-trigger/db';
+import { createKernel } from '@better-trigger/core';
+import { createPool, migrate } from '@better-trigger/db';
 import { createApp } from './app';
-import { pool } from './db/index';
-import { createOrchestrator } from './engine/orchestrator';
 
 const PORT = Number(process.env.PORT ?? 4848);
 
 async function main(): Promise<void> {
+  const pool = createPool(); // defaults to process.env.DATABASE_URL
   await migrate(pool);
 
-  const orchestrator = createOrchestrator();
-  orchestrator.start();
-
-  const app = createApp();
+  const kernel = createKernel({ pool });
+  // Bookkeeping loops only: reap expired leases and mark dead workers offline
+  // even when no embedded worker process is alive. waits/cron stay off — the
+  // dashboard server must not become an execution scheduler.
+  const orchestrator = kernel.startOrchestrator({
+    waits: false,
+    cron: false,
+    reaper: true,
+    workerOffline: true,
+  });
+  const app = createApp({ kernel, pool });
   const server = serve({ fetch: app.fetch, port: PORT });
 
   console.log(`[better-trigger] server listening on http://localhost:${PORT}`);

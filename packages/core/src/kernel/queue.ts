@@ -1,16 +1,15 @@
 /* =============================================================================
-   @better-trigger/server — queue engine.
-   Enqueue / SKIP-LOCKED dequeue (with per-task concurrency limiting) /
-   lock renewal / lock release. See docs/backend-contract.md §3.5.
+   @better-trigger/core — kernel queue engine.
+   Enqueue / SKIP-LOCKED claim (with per-task concurrency limiting + lease and
+   fencing token) / lease renewal. See docs/backend-contract.md §3.5.
    Implemented with raw SQL over a single pg connection/transaction so the
-   SELECT ... FOR UPDATE SKIP LOCKED semantics are exact.
+   SELECT ... FOR UPDATE SKIP LOCKED semantics are exact. The pool is injected
+   by createKernel() — no module-global connection.
    ============================================================================= */
-import type { PoolClient } from 'pg';
-import type { DequeuedRun, StepSnapshot } from '@better-trigger/core';
-import { pool } from '../db/index';
+import type { Pool, PoolClient } from 'pg';
+import type { ClaimedRun, StepSnapshot } from '../types';
 
 export interface EnqueueArgs {
-  client?: PoolClient;
   runId: string;
   availableAt: Date;
   priority?: number;
@@ -19,10 +18,15 @@ export interface EnqueueArgs {
   env?: string;
 }
 
-/** Insert (or move-back) a run into the queue. Idempotent on run_id. */
-export async function enqueue(args: EnqueueArgs): Promise<void> {
-  const q = args.client ?? pool;
-  await q.query(
+/**
+ * Insert (or move-back) a run into the queue. Idempotent on run_id.
+ * The conflict path clears locked_by/locked_at/lease_until (NULL lease =
+ * unoccupied). The fencing token lives on the runs row — queue rows are
+ * deleted and re-inserted across suspend/resume, so the watermark must not
+ * (and does not) travel with them.
+ */
+export async function enqueue(client: PoolClient, args: EnqueueArgs): Promise<void> {
+  await client.query(
     `INSERT INTO queue (run_id, available_at, priority, concurrency_key, project_id, env, locked_by, locked_at)
      VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL)
      ON CONFLICT (run_id) DO UPDATE
@@ -30,7 +34,8 @@ export async function enqueue(args: EnqueueArgs): Promise<void> {
            priority     = EXCLUDED.priority,
            concurrency_key = EXCLUDED.concurrency_key,
            locked_by    = NULL,
-           locked_at    = NULL`,
+           locked_at    = NULL,
+           lease_until  = NULL`,
     [
       args.runId,
       args.availableAt,
@@ -44,26 +49,36 @@ export async function enqueue(args: EnqueueArgs): Promise<void> {
 
 /** Remove a run's queue row (used on suspend / terminal). */
 export async function removeFromQueue(
+  db: Pool | PoolClient,
   runId: string,
-  client?: PoolClient,
 ): Promise<void> {
-  const q = client ?? pool;
-  await q.query(`DELETE FROM queue WHERE run_id = $1`, [runId]);
+  await db.query(`DELETE FROM queue WHERE run_id = $1`, [runId]);
+}
+
+export interface ClaimRunsArgs {
+  workerId: string;
+  /** Task ids this worker can execute (filtered in SQL). */
+  taskIds: string[];
+  /** Maximum runs to claim in this call. */
+  limit: number;
+  /** Lease duration granted per claimed run (renewed by heartbeat). */
+  leaseMs: number;
 }
 
 /**
- * Try to dequeue exactly one run for the given worker.
- * Single transaction:
- *   SELECT candidates FOR UPDATE SKIP LOCKED (available + unlocked, by priority),
- *   for each candidate skip if its task is not in the worker's task set or the
- *   concurrency limit is hit, otherwise lock it (locked_by/locked_at), flip the
- *   run to running and set started_at. Returns the dequeued run + step snapshot.
+ * Claim up to `limit` runs for the given worker. Single transaction:
+ *   SELECT candidates FOR UPDATE SKIP LOCKED (available + unclaimed, by
+ *   priority, task set filtered in SQL), for each candidate skip if the
+ *   concurrency limit is hit, otherwise claim it: take the lease on the queue
+ *   row (locked_by/locked_at + lease_until = now() + leaseMs), then flip the
+ *   run to running and bump runs.fencing_token — queue row locked before the
+ *   runs row, the canonical kernel lock order (see runs.ts header). Returns
+ *   claimed runs + step snapshots + the fencing token guarding each claim's
+ *   writes. Expired-lease recovery is the reaper's job alone — candidates here
+ *   stay `locked_by IS NULL`.
  */
-export async function dequeueOne(
-  workerIdValue: string,
-  taskIds: string[],
-): Promise<DequeuedRun | null> {
-  if (taskIds.length === 0) return null;
+export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<ClaimedRun[]> {
+  if (args.taskIds.length === 0 || args.limit <= 0) return [];
 
   const client = await pool.connect();
   try {
@@ -76,13 +91,19 @@ export async function dequeueOne(
     }>(
       `SELECT q.id, q.run_id, q.concurrency_key
          FROM queue q
-        WHERE q.available_at <= now() AND q.locked_at IS NULL
+         JOIN runs r ON r.id = q.run_id
+        WHERE q.available_at <= now() AND q.locked_by IS NULL
+          AND r.task_id = ANY($1::text[])
         ORDER BY q.priority DESC, q.id ASC
         LIMIT 10
-        FOR UPDATE SKIP LOCKED`,
+        FOR UPDATE OF q SKIP LOCKED`,
+      [args.taskIds],
     );
 
+    const claimed: ClaimedRun[] = [];
     for (const cand of candidates.rows) {
+      if (claimed.length >= args.limit) break;
+
       const runRes = await client.query<{
         id: string;
         task_id: string;
@@ -100,9 +121,6 @@ export async function dequeueOne(
       const run = runRes.rows[0];
       if (!run) continue;
 
-      // Skip if the worker does not handle this task.
-      if (!taskIds.includes(run.task_id)) continue;
-
       // Concurrency limit: read the task's limit; if set, count running runs
       // sharing the same concurrency_key (redundantly stored on runs).
       const taskRes = await client.query<{ concurrency_limit: number | null }>(
@@ -112,7 +130,7 @@ export async function dequeueOne(
       const limit = taskRes.rows[0]?.concurrency_limit ?? null;
       if (limit != null && limit > 0) {
         const key = run.concurrency_key ?? run.task_id;
-        // Serialize concurrent dequeues sharing this key: SKIP LOCKED does not
+        // Serialize concurrent claims sharing this key: SKIP LOCKED does not
         // serialize two workers picking different queue rows of the same key, so
         // the count-then-flip below could race and overshoot the limit. Take a
         // tx-level advisory lock on the key first; it releases at COMMIT/ROLLBACK
@@ -130,19 +148,31 @@ export async function dequeueOne(
         if (running >= limit) continue; // leave it in the queue
       }
 
-      // Lock it.
+      // Claim it: take the lease on the (already SKIP LOCKED-held) queue row,
+      // then bump the run's fencing token while flipping it to running. The
+      // returned token is the claim's write credential — any later claim
+      // invalidates it, and it survives suspend/resume because it lives on
+      // runs, not on the delete-and-reinserted queue row.
       await client.query(
-        `UPDATE queue SET locked_by = $1, locked_at = now() WHERE id = $2`,
-        [workerIdValue, cand.id],
+        `UPDATE queue
+            SET locked_by = $1,
+                locked_at = now(),
+                lease_until = now() + ($2::text || ' milliseconds')::interval
+          WHERE id = $3`,
+        [args.workerId, String(args.leaseMs), cand.id],
       );
-      await client.query(
+
+      const tokenRes = await client.query<{ fencing_token: string }>(
         `UPDATE runs
             SET status = 'running',
                 started_at = COALESCE(started_at, now()),
-                updated_at = now()
-          WHERE id = $1`,
+                updated_at = now(),
+                fencing_token = fencing_token + 1
+          WHERE id = $1
+          RETURNING fencing_token`,
         [run.id],
       );
+      const fencingToken = Number(tokenRes.rows[0]?.fencing_token ?? 0);
 
       const stepsRes = await client.query<{
         seq: number;
@@ -156,9 +186,6 @@ export async function dequeueOne(
            FROM run_steps WHERE run_id = $1 ORDER BY seq ASC`,
         [run.id],
       );
-
-      await client.query('COMMIT');
-
       const steps: StepSnapshot[] = stepsRes.rows.map((s) => ({
         seq: s.seq,
         kind: s.kind as StepSnapshot['kind'],
@@ -168,7 +195,7 @@ export async function dequeueOne(
         error: (s.error as StepSnapshot['error']) ?? undefined,
       }));
 
-      return {
+      claimed.push({
         id: run.id,
         taskId: run.task_id,
         payload: run.payload,
@@ -177,11 +204,12 @@ export async function dequeueOne(
         codeVersion: run.code_version,
         env: run.env,
         steps,
-      };
+        fencingToken,
+      });
     }
 
     await client.query('COMMIT');
-    return null;
+    return claimed;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
@@ -190,33 +218,42 @@ export async function dequeueOne(
   }
 }
 
+export interface HeartbeatArgs {
+  workerId: string;
+  /** Runs currently executing on this worker (leases get renewed). */
+  runIds: string[];
+  /** Lease duration to extend to (lease_until = now() + leaseMs). */
+  leaseMs: number;
+}
+
 /**
- * Refresh locks for the given runs owned by this worker (heartbeat).
+ * Renew leases for the given runs owned by this worker (heartbeat).
+ * locked_at keeps its claim-time semantics and is not refreshed.
  * Returns the run ids that have been canceled (so the worker can stop them).
  */
-export async function renewLocks(
-  workerIdValue: string,
-  runIds: string[],
-): Promise<string[]> {
-  // Extend locks for runs still locked by this worker.
-  if (runIds.length > 0) {
+export async function heartbeat(
+  pool: Pool,
+  args: HeartbeatArgs,
+): Promise<{ cancelRunIds: string[] }> {
+  // Extend leases for runs still owned by this worker.
+  if (args.runIds.length > 0) {
     await pool.query(
-      `UPDATE queue SET locked_at = now()
-        WHERE locked_by = $1 AND run_id = ANY($2::text[])`,
-      [workerIdValue, runIds],
+      `UPDATE queue SET lease_until = now() + ($1::text || ' milliseconds')::interval
+        WHERE locked_by = $2 AND run_id = ANY($3::text[])`,
+      [String(args.leaseMs), args.workerId, args.runIds],
     );
   }
   await pool.query(
     `UPDATE workers SET last_heartbeat_at = now(), status = 'online' WHERE id = $1`,
-    [workerIdValue],
+    [args.workerId],
   );
 
-  if (runIds.length === 0) return [];
+  if (args.runIds.length === 0) return { cancelRunIds: [] };
   // Any of the heartbeat's runs that are no longer 'running' → tell worker to drop.
   const res = await pool.query<{ id: string }>(
     `SELECT id FROM runs
       WHERE id = ANY($1::text[]) AND status = 'canceled'`,
-    [runIds],
+    [args.runIds],
   );
-  return res.rows.map((r) => r.id);
+  return { cancelRunIds: res.rows.map((r) => r.id) };
 }

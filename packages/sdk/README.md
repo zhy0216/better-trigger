@@ -1,15 +1,16 @@
 # better-trigger
 
-**Type-safe, self-hostable durable task orchestration for TypeScript.**
+**Type-safe, embedded durable task orchestration for TypeScript.**
 
 Declare background tasks as plain async functions, run durable steps, wait for
-seconds or days, retry with backoff, schedule with cron — all on top of a single
-server process and one Postgres database. No Redis, no ClickHouse, no Docker-in-Docker.
+seconds or days, retry with backoff, schedule with cron — all embedded in your
+own process on top of one Postgres database. No orchestration server, no Redis,
+no ClickHouse; `pg` is the only hard dependency.
 
 `better-trigger` uses a **replay** model instead of container snapshots: when a
-run suspends on a wait, the worker is released; when the wait expires the task
-function re-runs from the top, and already-completed steps return their cached
-results instantly. The code reads like a straight-line `async` function.
+run suspends on a wait, the worker slot is released; when the wait expires the
+task function re-runs from the top, and already-completed steps return their
+cached results instantly. The code reads like a straight-line `async` function.
 
 ---
 
@@ -20,14 +21,25 @@ npm install better-trigger
 # or: bun add better-trigger / pnpm add better-trigger
 ```
 
-Requires Node.js 18+. You also need a running [better-trigger server](#) and a
-Postgres database (`docker compose up` in the self-host setup).
+Requires Node.js 18+ (or Bun) and a reachable PostgreSQL database. That's the
+whole stack.
 
 ---
 
 ## Quick start
 
-### 1. Define a task
+### 1. Create the instance
+
+```ts
+// trigger.ts — the single configuration point
+import { betterTrigger } from "better-trigger";
+
+export const trigger = betterTrigger({
+  database: { connectionString: process.env.DATABASE_URL },
+});
+```
+
+### 2. Define a task
 
 ```ts
 // tasks.ts
@@ -42,47 +54,76 @@ export const sendEmail = task("send-email", async (payload: { to: string }) => {
 The payload type is inferred from the function parameter, and the return type
 flows through to `triggerAndWait`.
 
-### 2. Run a worker
+### 3. Start a worker
 
 ```ts
-// worker.ts
-import { startWorker } from "better-trigger";
+// worker.ts — any process (your app itself, or a dedicated one)
+import { trigger } from "./trigger";
 import { sendEmail } from "./tasks";
 
-await startWorker({ tasks: [sendEmail], concurrency: 5 });
+await trigger.start({ tasks: [sendEmail], concurrency: 5 });
 ```
 
-The worker registers its tasks, long-polls the server for work, replays each
-run, and reports results. `SIGINT` / `SIGTERM` drain in-flight runs gracefully.
+The worker registers its tasks, claims runs straight from Postgres
+(`FOR UPDATE SKIP LOCKED`), replays each run, and reports results back over
+the same pool. `SIGINT` / `SIGTERM` drain in-flight runs gracefully.
 
-### 3. Trigger from your app
+### 4. Trigger from your app
 
 ```ts
 import { sendEmail } from "./tasks";
 
 const run = await sendEmail.trigger({ to: "a@b.com" });
-//    ^ { id: "run_..." }
+//    ^ { id: "run_...", result(opts?) }
+
+const settled = await run.result();
+//    ^ { status: "completed", output: { delivered: true } }
 ```
 
 ---
 
 ## Configuration
 
-The SDK and worker resolve their target server from, in order:
-
-1. an explicit `configure({ apiUrl, apiKey })` call,
-2. the `apiUrl` / `apiKey` passed to `startWorker`,
-3. the `BETTER_TRIGGER_API_URL` / `BETTER_TRIGGER_API_KEY` environment variables,
-4. the default `http://localhost:4848` (no key — local unauthenticated mode).
+Everything is configured on the instance — there is no global config and no
+HTTP endpoint to point at:
 
 ```ts
-import { configure } from "better-trigger";
+import { betterTrigger } from "better-trigger";
 
-configure({
-  apiUrl: "https://trigger.internal.acme.com",
-  apiKey: process.env.MY_KEY,
+const trigger = betterTrigger({
+  // pg Pool (caller-owned) or { connectionString } (instance-owned, ended on stop)
+  database: { connectionString: process.env.DATABASE_URL },
+  migrations: "auto",                  // 'auto' (default) | 'manual'
+  defaults: { retry: { maxAttempts: 5 } },   // fallback retry for tasks without one
+  orchestrator: { reaperIntervalMs: 10_000 }, // loop intervals (test knobs)
+  plugins: [],                          // reserved (P1 accepts only [])
 });
 ```
+
+- `migrations: 'auto'` applies the packaged schema migrations on first use;
+  `'manual'` assumes you ran them yourself (e.g. via `@better-trigger/db`).
+- `defaults.retry` is inherited by tasks that do not define their own `retry`
+  once a worker registers them: it sets both the trigger-time attempt budget
+  (`max_attempts` on new runs) and the executor-side backoff between attempts.
+- The **first** `betterTrigger()` call becomes the module-level default
+  instance; `TaskHandle.trigger` / `batchTrigger` called outside a run use it
+  (calling them with no instance created throws). A later instance can take
+  over with `instance.setDefault()`.
+
+### Instance API
+
+| Member | Description |
+| --- | --- |
+| `start(opts)` | Start the embedded worker + orchestrator loops. → `WorkerHandle` |
+| `stop()` | Stop the worker (if started) and end the pool when instance-owned. |
+| `trigger(taskOrId, payload, opts?)` | Enqueue one run. → `RunHandle` |
+| `batchTrigger(items)` | Enqueue many runs in one transaction. → `RunHandle[]` |
+| `cancelRun(runId)` | Cancel a non-terminal run (terminal → no-op). |
+| `retryRun(runId)` | Re-run a failed/canceled run as a **new** run. → `{ runId }` |
+| `getRun(runId)` | Full run record. |
+| `getRunDetail(runId)` | `{ run, steps, waits, logs }` (logs capped at 1000). |
+| `waitForResult(runId, opts?)` | Poll to a terminal state. → `{ status, output?, error? }` |
+| `setDefault()` | Make this instance the module-level default. |
 
 ---
 
@@ -135,9 +176,9 @@ export const dailyReport = task({
 | Member | Description |
 | --- | --- |
 | `ctx.step(label, fn, opts?)` | Run a durable, memoized step. Returns `fn`'s result. Throwing triggers retries. |
-| `ctx.wait.for(duration)` | Suspend for a duration (`"24h"`, `"10m"`, or ms). The worker is released. |
+| `ctx.wait.for(duration)` | Suspend for a duration (`"24h"`, `"10m"`, or ms). The worker slot is released. |
 | `ctx.wait.until(date)` | Suspend until an absolute `Date`. |
-| `ctx.logger.{debug,info,warn,error}` | Structured logging, buffered and shipped to the server. |
+| `ctx.logger.{debug,info,warn,error}` | Structured logging, buffered and flushed to Postgres. |
 | `ctx.now()` | Deterministic `Date` — memoized for replay. |
 | `ctx.random()` | Deterministic number in `[0, 1)` — memoized. |
 | `ctx.uuid()` | Deterministic UUID v4 string — memoized. |
@@ -175,7 +216,7 @@ if (result.ok) {
 {
   delay?: string | number;   // "10m" or milliseconds
   idempotencyKey?: string;   // re-triggering with the same key returns the existing run
-  priority?: number;         // higher dequeues first
+  priority?: number;         // higher-priority runs are claimed first
   concurrencyKey?: string;   // overrides the concurrency.key() result
   env?: string;              // environment scope
 }
@@ -222,26 +263,37 @@ task({
 ```
 
 The effective retry policy for a step is `step options.retry ?? task retry ??
-default`. The default is `{ maxAttempts: 3, baseMs: 1000, factor: 2, maxMs: 300000 }`
-with `±20%` jitter. `AbortError` (and schema validation failures) skip retries.
+instance defaults.retry ?? default`. The default is
+`{ maxAttempts: 3, baseMs: 1000, factor: 2, maxMs: 300000 }` with `±20%`
+jitter. `AbortError` (and schema validation failures) skip retries.
 
 ---
 
 ## Worker
 
 ```ts
-await startWorker({
+const worker = await trigger.start({
   tasks: [hello, onboarding, daily],
-  concurrency: 5,         // concurrent execution slots
+  concurrency: 5,         // concurrent execution slots (default 5)
   name: "worker-1",       // optional, shown in the dashboard
-  apiUrl: "...",          // optional overrides
-  apiKey: "...",
+  leaseMs: 60_000,        // lease granted per claim, renewed by heartbeat (default 60s)
 });
+
+worker.workerId;          // registered worker id
+await worker.stop();      // drain in-flight runs, stop loops
 ```
 
-The worker spins up `concurrency` long-poll loops, heartbeats every 15 s
-(extending its run locks and honouring server-side cancellations), and exits
-gracefully on `SIGINT` / `SIGTERM` after draining in-flight runs (up to 30 s).
+`start()` registers the worker + tasks, starts the orchestrator loops
+(wait/cron/reaper timers) in-process, and spins up `concurrency` claim loops
+(idle polls back off 300ms → 2s with jitter). A heartbeat loop
+(`max(500, leaseMs / 3)` ms) renews claimed leases and honours cancellations.
+Every claim carries a **fencing token**; if a worker dies, the reaper releases
+the expired lease and any late writes from the zombie are rejected — steps stay
+exactly-once. `SIGINT` / `SIGTERM` drain in-flight runs, stop the loops, then
+end the instance-owned pool.
+
+Run any number of processes with the same tasks against the same database —
+they coordinate through Postgres row locks; no leader election.
 
 The code version reported on registration comes from
 `BETTER_TRIGGER_VERSION`, or a stable hash of the sorted task ids + cron config.
@@ -253,23 +305,23 @@ The code version reported on registration comes from
 ```ts
 import {
   task,
-  configure,
-  startWorker,
+  betterTrigger,
   unwrapResult,
   AbortError,
   SuspendSignal,
-  ApiError,
-  isApiError,
-  isRunNotRunning,
+  isAbortError,
+  isSuspendSignal,
 } from "better-trigger";
 
 import type {
+  BetterTrigger,
+  BetterTriggerOptions,
+  RunHandle,
   TaskHandle,
   RunCtx,
   TaskRunResult,
   TriggerOptions,
   RetryPolicy,
-  StartWorkerOptions,
   WorkerHandle,
 } from "better-trigger";
 ```

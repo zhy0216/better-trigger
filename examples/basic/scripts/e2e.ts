@@ -1,35 +1,44 @@
 /* =============================================================================
-   @better-trigger/example-basic — end-to-end smoke test (contract §8, item 3).
+   @better-trigger/example-basic — end-to-end smoke test (embedded runtime).
 
-   Assumes a server AND a worker are already running externally (see README:
-   three terminals — server / worker / e2e). This script only talks to the
-   server's HTTP API:
-     - POST /api/v1/trigger     (enqueue runs)
-     - GET  /api/v1/runs/:id    (poll a run; .steps asserts the durable ledger)
-     - GET  /api/v1/schedules   (assert cron registration)
-     - GET  /api/v1/tasks       (assert all tasks registered)
+   Fully self-contained: zero HTTP, one process. The script provisions its own
+   database (DROP/CREATE better_trigger_e2e against the <base>/postgres admin
+   db), starts an embedded worker via betterTrigger().start() and runs every
+   check through the instance API:
+     - trigger.trigger / handle.result   (enqueue + await runs)
+     - trigger.getRunDetail / getRun     (poll runs; .steps asserts the ledger)
+     - direct SQL on tasks / schedules   (registration + cron assertions)
 
    Each check prints ✓/✗ with its elapsed time; a final summary follows.
    Any failed assertion makes the process exit(1).
 
    Env:
-     BETTER_TRIGGER_API_URL  default http://localhost:4848
-     BETTER_TRIGGER_API_KEY  optional; sent as Bearer if set.
+     DATABASE_URL  base connection is derived from it (db name is replaced);
+                   default postgres://localhost:5432/better_trigger
+     BT_E2E_DB     override the provisioned database name (default
+                   better_trigger_e2e)
    ============================================================================= */
-import type {
-  RunDetailResponse,
-  RunStatus,
-  SchedulesResponse,
-  TasksResponse,
-  TriggerOptions,
-  TriggerResponse,
-} from '@better-trigger/core';
+import { createKernel } from '@better-trigger/core';
+import { createPool } from '@better-trigger/db';
+import { betterTrigger, type RunStatus, type TriggerOptions } from 'better-trigger';
+import type { RunDetailResult } from '@better-trigger/core';
+import { allTasks } from '../src/tasks';
 
 /* ---------------------------------------------------------------------------
- * Config
+ * Config + database provisioning
  * ------------------------------------------------------------------------- */
-const API_URL = (process.env.BETTER_TRIGGER_API_URL ?? 'http://localhost:4848').replace(/\/$/, '');
-const API_KEY = process.env.BETTER_TRIGGER_API_KEY;
+const RAW_URL = process.env.DATABASE_URL ?? 'postgres://localhost:5432/better_trigger';
+const E2E_DB = process.env.BT_E2E_DB ?? 'better_trigger_e2e';
+
+/** Strip the database path off a postgres URL → protocol://user@host:port */
+function baseUrl(u: string): string {
+  const url = new URL(u);
+  url.pathname = '';
+  return url.toString().replace(/\/+$/, '');
+}
+
+const BASE = baseUrl(RAW_URL);
+const DB_URL = `${BASE}/${E2E_DB}`;
 
 const TERMINAL: RunStatus[] = ['completed', 'failed', 'canceled'];
 const POLL_INTERVAL_MS = 250;
@@ -41,25 +50,6 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 let passed = 0;
 let failed = 0;
 const failures: string[] = [];
-
-function authHeaders(extra?: Record<string, string>): Record<string, string> {
-  const h: Record<string, string> = { ...(extra ?? {}) };
-  if (API_KEY) h.Authorization = `Bearer ${API_KEY}`;
-  return h;
-}
-
-async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
-    method,
-    headers: authHeaders(body !== undefined ? { 'content-type': 'application/json' } : undefined),
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`${method} ${path} → ${res.status}: ${text}`);
-  }
-  return (text ? JSON.parse(text) : {}) as T;
-}
 
 /** Run a named async check; record ✓/✗ with elapsed ms. */
 async function check(name: string, fn: () => Promise<void>): Promise<void> {
@@ -91,42 +81,49 @@ function assertEqual(actual: unknown, expected: unknown, label: string): void {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /* ---------------------------------------------------------------------------
+ * Provision the e2e database, then boot the embedded instance + worker
+ * ------------------------------------------------------------------------- */
+{
+  const admin = createPool(`${BASE}/postgres`);
+  await admin.query(`DROP DATABASE IF EXISTS ${E2E_DB} WITH (FORCE)`);
+  await admin.query(`CREATE DATABASE ${E2E_DB}`);
+  await admin.end();
+}
+
+const trigger = betterTrigger({ database: { connectionString: DB_URL } });
+const worker = await trigger.start({ tasks: allTasks, concurrency: 5 });
+
+/** Raw pool for assertions with no instance API (tasks / schedules tables). */
+const pool = createPool(DB_URL);
+/** Kernel client for the idempotency check (the facade's RunHandle hides the
+ *  `idempotent` flag the original assertion needs). */
+const kernel = createKernel({ pool });
+
+/* ---------------------------------------------------------------------------
  * Trigger + poll helpers
  * ------------------------------------------------------------------------- */
-async function trigger(
-  taskId: string,
-  payload: unknown,
-  options?: TriggerOptions,
-): Promise<TriggerResponse> {
-  return api<TriggerResponse>('POST', '/api/v1/trigger', { taskId, payload, options });
-}
-
-async function getRun(runId: string): Promise<RunDetailResponse> {
-  return api<RunDetailResponse>('GET', `/api/v1/runs/${runId}`);
-}
-
 interface PollResult {
-  detail: RunDetailResponse;
+  detail: RunDetailResult;
   /** Every distinct status observed while polling (incl. transient 'waiting'). */
   observed: Set<RunStatus>;
 }
 
 /**
- * Poll a run until it reaches a terminal state (or `expectStatus`, if given,
- * once seen alongside a terminal state). Returns the final detail plus the set
- * of statuses observed along the way (used to catch transient `waiting`).
+ * Poll a run until it reaches a terminal state. Returns the final detail plus
+ * the set of statuses observed along the way (used to catch transient
+ * `waiting`).
  */
 async function pollRun(
   runId: string,
-  opts: { expectStatus?: RunStatus; timeoutMs?: number } = {},
+  opts: { timeoutMs?: number } = {},
 ): Promise<PollResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
   const observed = new Set<RunStatus>();
-  let last: RunDetailResponse | undefined;
+  let last: RunDetailResult | undefined;
 
   while (Date.now() < deadline) {
-    last = await getRun(runId);
+    last = await trigger.getRunDetail(runId);
     observed.add(last.run.status);
     if (TERMINAL.includes(last.run.status)) {
       return { detail: last, observed };
@@ -143,8 +140,8 @@ async function triggerAndPoll(
   payload: unknown,
   opts: { expectStatus?: RunStatus; timeoutMs?: number; options?: TriggerOptions } = {},
 ): Promise<PollResult> {
-  const { runId } = await trigger(taskId, payload, opts.options);
-  const res = await pollRun(runId, { timeoutMs: opts.timeoutMs });
+  const handle = await trigger.trigger(taskId, payload, opts.options);
+  const res = await pollRun(handle.id, { timeoutMs: opts.timeoutMs });
   if (opts.expectStatus) {
     assertEqual(res.detail.run.status, opts.expectStatus, `${taskId} run status`);
   }
@@ -155,17 +152,21 @@ async function triggerAndPoll(
  * Checks
  * ------------------------------------------------------------------------- */
 
-async function checkHealth(): Promise<void> {
-  await check('server is reachable (GET /health)', async () => {
-    const h = await api<{ ok: boolean }>('GET', '/api/v1/health');
-    assert(h.ok === true, 'health.ok must be true');
+async function checkReady(): Promise<void> {
+  await check('embedded instance is ready (migrated db + worker registered)', async () => {
+    const h = await pool.query('SELECT 1 AS ok');
+    assert(h.rows[0]?.ok === 1, 'database must answer SELECT 1');
+    assert(
+      typeof worker.workerId === 'string' && worker.workerId.length > 0,
+      'trigger.start() must return a registered workerId',
+    );
   });
 }
 
 async function checkTasksRegistered(): Promise<void> {
-  await check('GET /tasks contains every example task', async () => {
-    const { tasks } = await api<TasksResponse>('GET', '/api/v1/tasks');
-    const ids = new Set(tasks.map((t) => t.id));
+  await check('tasks table contains every example task', async () => {
+    const res = await pool.query<{ id: string }>('SELECT id FROM tasks');
+    const ids = new Set(res.rows.map((t) => t.id));
     const expected = [
       'hello-world',
       'order-pipeline',
@@ -177,9 +178,10 @@ async function checkTasksRegistered(): Promise<void> {
       'always-aborts',
       'parallel-steps',
       'every-minute',
+      'every-2s',
     ];
     for (const id of expected) {
-      assert(ids.has(id), `task "${id}" missing from /tasks (worker not registered?)`);
+      assert(ids.has(id), `task "${id}" missing from tasks (worker not registered?)`);
     }
   });
 }
@@ -235,8 +237,8 @@ async function checkOrderPipeline(): Promise<void> {
 async function checkOnboardingWait(): Promise<void> {
   await check('onboarding-wait suspends (waiting) then resumes; total >= 3s', async () => {
     const t0 = Date.now();
-    const { runId } = await trigger('onboarding-wait', { userId: 'u-wait' });
-    const res = await pollRun(runId, { timeoutMs: DEFAULT_TIMEOUT_MS });
+    const handle = await trigger.trigger('onboarding-wait', { userId: 'u-wait' });
+    const res = await pollRun(handle.id, { timeoutMs: DEFAULT_TIMEOUT_MS });
     const elapsed = Date.now() - t0;
 
     assert(res.observed.has('waiting'), 'never observed a `waiting` status while polling');
@@ -273,9 +275,9 @@ async function checkVideoPipeline(): Promise<void> {
     assert(taw.length === 1, `expected 1 'trigger-and-wait' step, got ${taw.length}`);
 
     // The child run should be completed and parented to this run.
-    const child = await getRun(out.childRunId);
-    assertEqual(child.run.status, 'completed', 'extract-audio child status');
-    assertEqual(child.run.parentRunId, detail.run.id, 'child.parentRunId');
+    const child = await trigger.getRun(out.childRunId);
+    assertEqual(child.status, 'completed', 'extract-audio child status');
+    assertEqual(child.parentRunId, detail.run.id, 'child.parentRunId');
   });
 }
 
@@ -317,8 +319,18 @@ async function checkFanOut(): Promise<void> {
 async function checkIdempotency(): Promise<void> {
   await check('idempotency key: second trigger returns same runId + idempotent:true', async () => {
     const key = `idem-${Date.now()}`;
-    const first = await trigger('hello-world', { name: 'idem' }, { idempotencyKey: key });
-    const second = await trigger('hello-world', { name: 'idem' }, { idempotencyKey: key });
+    // The kernel client is used here on purpose: the facade's RunHandle only
+    // carries the run id, while this check also asserts the idempotent flag.
+    const first = await kernel.trigger({
+      taskId: 'hello-world',
+      payload: { name: 'idem' },
+      options: { idempotencyKey: key },
+    });
+    const second = await kernel.trigger({
+      taskId: 'hello-world',
+      payload: { name: 'idem' },
+      options: { idempotencyKey: key },
+    });
 
     assertEqual(second.runId, first.runId, 'idempotent runId should match the first');
     assert(second.idempotent === true, 'second trigger should report idempotent:true');
@@ -395,14 +407,18 @@ async function checkParallelSteps(): Promise<void> {
 }
 
 async function checkSchedules(): Promise<void> {
-  await check('GET /schedules has every-minute with nextRunAt within 61s', async () => {
-    const { schedules } = await api<SchedulesResponse>('GET', '/api/v1/schedules');
-    const row = schedules.find((s) => s.taskId === 'every-minute');
+  await check('schedules has every-minute with nextRunAt within 61s', async () => {
+    const res = await pool.query<{
+      task_id: string;
+      cron_pattern: string;
+      next_run_at: Date | null;
+    }>('SELECT task_id, cron_pattern, next_run_at FROM schedules');
+    const row = res.rows.find((s) => s.task_id === 'every-minute');
     assert(!!row, 'no schedule row for "every-minute"');
-    assertEqual(row!.cronPattern, '* * * * *', 'every-minute cron pattern');
-    assert(!!row!.nextRunAt, 'every-minute schedule has no nextRunAt');
+    assertEqual(row!.cron_pattern, '* * * * *', 'every-minute cron pattern');
+    assert(!!row!.next_run_at, 'every-minute schedule has no nextRunAt');
 
-    const next = new Date(row!.nextRunAt!).getTime();
+    const next = new Date(row!.next_run_at!).getTime();
     const delta = next - Date.now();
     assert(
       delta > 0 && delta <= 61_000,
@@ -411,24 +427,62 @@ async function checkSchedules(): Promise<void> {
   });
 }
 
+async function checkCronFires(): Promise<void> {
+  await check(`cron fires: every-2s (seconds pattern) completed a 'schedule' run`, async () => {
+    // The pattern fires every 2s and the cron loop scans every 1s, so at most
+    // ~3s should pass before a run exists + completes; allow 6s of polling.
+    // (In practice the earlier checks already gave the scheduler ample time.)
+    const deadline = Date.now() + 6_000;
+    let firedId: string | undefined;
+    for (;;) {
+      const res = await pool.query<{ id: string }>(
+        `SELECT id FROM runs
+          WHERE task_id = 'every-2s' AND trigger_type = 'schedule' AND status = 'completed'
+          ORDER BY created_at ASC
+          LIMIT 1`,
+      );
+      firedId = res.rows[0]?.id;
+      if (firedId || Date.now() >= deadline) break;
+      await sleep(POLL_INTERVAL_MS);
+    }
+    assert(firedId, `no completed schedule-triggered 'every-2s' run within 6s`);
+
+    // The instance API must agree on the trigger type.
+    const rec = await trigger.getRun(firedId);
+    assertEqual(rec.trigger, 'schedule', 'every-2s run triggerType');
+    assertEqual(rec.status, 'completed', 'every-2s run status');
+
+    // The schedule row must have advanced past the fired slot.
+    const s = await pool.query<{
+      cron_pattern: string;
+      last_run_at: Date | null;
+      last_run_id: string | null;
+      next_run_at: Date | null;
+    }>(
+      `SELECT cron_pattern, last_run_at, last_run_id, next_run_at
+         FROM schedules WHERE task_id = 'every-2s'`,
+    );
+    const row = s.rows[0];
+    assert(!!row, `no schedule row for 'every-2s'`);
+    assertEqual(row.cron_pattern, '*/2 * * * * *', 'every-2s cron pattern');
+    assert(!!row.last_run_at && !!row.last_run_id, 'fired schedule should record last_run_at + last_run_id');
+    assert(!!row.next_run_at, 'fired schedule should have a next_run_at');
+    assert(
+      row.next_run_at!.getTime() > row.last_run_at!.getTime(),
+      `next_run_at (${row.next_run_at!.toISOString()}) should advance past the fired slot ` +
+        `(last_run_at ${row.last_run_at!.toISOString()})`,
+    );
+  });
+}
+
 /* ---------------------------------------------------------------------------
  * Main
  * ------------------------------------------------------------------------- */
 async function main(): Promise<void> {
-  console.log(`\nbetter-trigger e2e smoke test → ${API_URL}\n`);
+  console.log(`\nbetter-trigger e2e smoke test (embedded) → ${DB_URL}\n`);
   const started = Date.now();
 
-  // Preflight: make sure the server is up before firing the suite.
-  try {
-    await api<{ ok: boolean }>('GET', '/api/v1/health');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`\nServer not reachable at ${API_URL}.`);
-    console.error('Start the server and worker first (see README). Detail:', msg, '\n');
-    process.exit(1);
-  }
-
-  await checkHealth();
+  await checkReady();
   await checkTasksRegistered();
   await checkHelloWorld();
   await checkOrderPipeline();
@@ -440,6 +494,10 @@ async function main(): Promise<void> {
   await checkFlakyTask();
   await checkParallelSteps();
   await checkSchedules();
+  await checkCronFires();
+
+  await trigger.stop();
+  await pool.end();
 
   const totalMs = Date.now() - started;
   console.log(`\n${'-'.repeat(48)}`);

@@ -1,5 +1,10 @@
 # better-trigger 后端契约(v1 / M1+M2)
 
+> ⚠️ **传输层已被取代**(P1 嵌入式,见 [`architecture.md`](./architecture.md)):§4 的 Worker HTTP 协议已移除,
+> worker 改为进程内直连 Postgres(claim + lease/fencing;fencing 语义见 architecture.md)。
+> `configure()`/`BETTER_TRIGGER_API_URL` 不复存在;server 降级为 dashboard-only API(§5 形状仍在用)。
+> **§3 引擎语义(重放不变量、退避公式、suspend/resume、cron、并发)继续有效且规范。**
+
 > 本文是实现的**唯一基准**。所有包必须严格对齐这里的接口、表结构与语义。
 > 类型的权威定义在 `packages/core/src/`(已写好,先读它)。本文解释语义与不变量。
 >

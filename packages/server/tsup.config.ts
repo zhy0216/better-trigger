@@ -8,7 +8,7 @@ export default defineConfig({
   clean: true,
   target: 'node18',
   // Keep heavy/native deps external so they resolve from node_modules at runtime.
-  external: ['pg', 'hono', '@hono/node-server', 'croner'],
+  external: ['pg', 'hono', '@hono/node-server'],
   banner: {
     js: '#!/usr/bin/env node',
   },

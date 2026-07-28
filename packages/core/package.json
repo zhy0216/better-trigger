@@ -1,7 +1,7 @@
 {
   "name": "@better-trigger/core",
   "version": "0.1.0",
-  "description": "Shared types, protocol and utilities for better-trigger",
+  "description": "better-trigger core — durable execution kernel (queue, runs, orchestrator) plus shared types and utilities",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -18,7 +18,13 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "croner": "^9.0.0",
+    "pg": "^8.13.1"
+  },
   "devDependencies": {
+    "@types/node": "^22.7.4",
+    "@types/pg": "^8.11.10",
     "tsup": "^8.3.0",
     "typescript": "^5.6.2"
   }
