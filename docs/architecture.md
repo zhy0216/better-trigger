@@ -1,36 +1,29 @@
-# better-trigger v2 架构定案 — 嵌入式运行时(better-auth 形态)
+# better-trigger 架构定案 — 客户端 / worker daemon 分离
 
-> 状态:**已定案**(2026-07-28 用户拍板嵌入式);**P1(内核内嵌)已落地**——HTTP worker 协议已删除,当前代码即嵌入式形态,本文档是唯一基准。
-> `docs/backend-contract.md` 仅作历史参考(它描述的 server 形态已不存在)。
-> contract 中与传输协议无关的引擎语义(位置 seq 重放、退避公式、并发限制、cron、suspend/resume 状态机)**继续有效**。
-> 来源:2026-07-28 架构笔记(gitmemo-r/notes/manual/better-trigger架构与实施计划.md)中采纳其嵌入式哲学与正确性/测试策略;不采纳其 Temporal API 表面与 event-history 执行模型。
+> 状态:**已定案**(2026-07-29 用户拍板)。本文档是唯一基准。
+> 形态:应用进程只装 `better-trigger`(定义 task + 通过 HTTP 触发,零运行时依赖、不碰 pg);
+> 执行、队列、编排、HTTP API 全部收在 `better-trigger-worker` 这一个 daemon 里。
+> **推翻**:2026-07-28 的「嵌入式 no-server(better-auth 形态)」定案(见 ADR 6)。
+> `docs/backend-contract.md` 的 §3 引擎语义(位置 seq 重放、退避公式、并发限制、cron、suspend/resume 状态机)**继续有效**;§4 的 worker HTTP 协议依旧作废——worker 与 kernel 现在同进程,不存在 worker 协议。
 
 ## 一句话定位
 
-一个 TypeScript-first、**嵌入应用进程**、PostgreSQL-backed 的 durable execution runtime,面向**纯本地多 AI agent 系统**:像 Better Auth 一样 `betterTrigger(options)` 一次配置得到完整实例,无独立 orchestration server;`pg` 是唯一硬依赖。
+一个 TypeScript-first、PostgreSQL-backed 的 durable execution runtime,面向**纯本地多 AI agent 系统**:跑一个本地 daemon(`better-trigger-worker --tasks ./src/tasks.ts`),它加载你的 task 模块、执行、并对外提供 HTTP;应用只用 `betterTrigger({ url })` 触发。Postgres 是唯一基础设施。
 
 ## 产品原则
 
-1. **像 Better Auth 一样嵌入和配置**:单一入口、小核心、强类型、plugin 扩展;不要求任何额外进程。
-2. **API 维持 trigger.dev/Inngest 风格**:`task()` + inline `ctx.step()` + 直线 async(2026-06-05 用户选定)。不采用 Temporal 的 `defineWorkflow` / `proxyActivities` 表面;`task('id')` 已满足「稳定名称」要求。
+1. **应用侧零负担**:`better-trigger` 只做两件事——`task()` 定义、`betterTrigger({url})` 触发。零运行时依赖,不打开数据库连接,可以安心 import 进 web server / CLI。
+2. **API 维持 trigger.dev/Inngest 风格**:`task()` + inline `ctx.step()` + 直线 async(2026-06-05 用户选定)。不采用 Temporal 的 `defineWorkflow` / `proxyActivities` 表面。
 3. **执行模型维持 step 记忆重放**(位置 seq + memoized 结果 + SuspendSignal),不重写为 event-history/command-matching;用 step fingerprint 硬化漂移检测。
-4. **v1 绑定 PostgreSQL、不绑定用户 ORM**:runtime 自管 `better_trigger` system schema(drizzle 迁移,init 时 auto-migrate,可关)。文档措辞:*PostgreSQL-backed and ORM-agnostic*,不说「数据库无关」。
-5. **Studio(dashboard)是可选工具进程**,不是架构组成部分;agent 原语(P5)建立在 signal/event 内核(P3)之上。
+4. **v1 绑定 PostgreSQL、不绑定用户 ORM**:runtime 自管 `better_trigger` system schema(drizzle 迁移,daemon 启动时 auto-migrate,`--no-migrate` 可关)。措辞:*PostgreSQL-backed and ORM-agnostic*,不说「数据库无关」。
+5. **Dashboard 由 daemon 直接托管**,不是独立组件;agent 原语(P5)建立在 signal/event 内核(P3)之上。
 
 ## 形态速写
 
 ```ts
-// trigger.ts — 应用里唯一的配置点
-import { betterTrigger } from "better-trigger";
-import { Pool } from "pg";
+// tasks.ts — daemon 和你的 app 都 import 它
+import { task } from "better-trigger";
 
-export const trigger = betterTrigger({
-  database: new Pool({ connectionString: process.env.DATABASE_URL }),
-  migrations: "auto",              // init 时自动迁移 system schema;可 "manual"
-  plugins: [],
-});
-
-// tasks.ts — API 不变
 export const onboarding = task({
   id: "user-onboarding",
   run: async (payload: { userId: string }, ctx) => {
@@ -39,54 +32,67 @@ export const onboarding = task({
     await ctx.step("send-tips", () => sendTips(u));
   },
 });
-
-// 应用进程内启动执行(应用进程就是 worker)
-await trigger.start({ tasks: [onboarding], concurrency: 5 });
-
-// 触发:直接走 PG,无 HTTP
-const handle = await onboarding.trigger({ userId: "u1" }, { idempotencyKey: "u1" });
-await handle.result();             // 轮询/NOTIFY 等待终态
-
-// 专用 worker 进程 = 另一个进程跑同一段配置(同一个库、同一个 PG),不是另一种组件
-// Studio(可选):bunx better-trigger studio → 本地 dashboard,连同一个 PG
 ```
+
+```bash
+# daemon:加载 tasks、迁移、执行、serve :4848
+DATABASE_URL=postgres://localhost:5432/better_trigger \
+  bunx --bun better-trigger-worker --tasks ./tasks.ts
+```
+
+```ts
+// app.ts — 只触发,不执行,不连库
+import { betterTrigger } from "better-trigger";
+import { onboarding } from "./tasks";
+
+betterTrigger({ url: "http://localhost:4848" }).setDefault();
+
+const handle = await onboarding.trigger({ userId: "u1" }, { idempotencyKey: "u1" });
+await handle.result();             // 服务端 long-poll 等待终态
+```
+
+**关键约束**:task 模块要被 daemon 独立 import,所以 `run` **不能闭包应用内部状态**(请求上下文、内存单例)。需要外部资源就在 `run` 里自行获取。
 
 **进程模型**
 
-- 单进程:app 内嵌 client + worker + orchestrator 循环,零额外进程。
-- 多进程:N 个进程各自内嵌、共享 PG;task claim 与 timer/cron 扫描全部 `FOR UPDATE SKIP LOCKED`,天然多进程安全,**无 leader 选举**。
-- 停机语义(诚实承诺):所有进程停止时**只保存状态,不执行任何 timer/cron/step**;恢复后尽快继续。cron 错过的窗口不补跑(与现契约一致)。
+- 单进程(默认):一个 daemon = 执行 + 编排 + API + dashboard。
+- 多进程:N 个 daemon 共享 PG;task claim 与 timer/cron 扫描全部 `FOR UPDATE SKIP LOCKED`,天然多进程安全,**无 leader 选举**。`--no-serve` 得到纯执行节点,不带 `--tasks` 得到纯 API/dashboard 节点(只跑 lease reaper + worker 离线标记,**不跑 cron/waits/claim**)。
+- 停机语义(诚实承诺):没有 daemon 在线时**只保存状态,不执行任何 timer/cron/step**;恢复后尽快继续。cron 错过的窗口不补跑。
 
 ## 目标架构(分层)
 
 ```
-App process
-  betterTrigger(config)              ← facade:校验连接/auto-migrate/注册 plugins
-    ├── runs client(trigger / batchTrigger / handle.result / cancel / retry)
-    ├── in-process worker(claim → 重放执行 → 直写结果)
-    ├── orchestrator loops(timer 恢复 / cron / lease reaper,SKIP LOCKED)
-    └── plugins / interceptors(P6 全量)
-  Task runtime(executor)            ← 位置 seq 重放、step 记忆、SuspendSignal、fingerprint
-  Durable kernel(packages/core)    ← claim CTE + lease + fencing、retry/backoff、
-                                       suspend/resume、cancel、并发限制、LISTEN/NOTIFY 唤醒(轮询保底)
-  Persistence(packages/db)         ← drizzle schema + 迁移 + pool(不变)
+应用进程
+  better-trigger                     ← task() 定义 + betterTrigger({url}) HTTP 客户端
+                                        零运行时依赖;不 import pg
+      │  HTTP /api/v1
+      ▼
+better-trigger-worker(daemon)
+  ├── task loader                    ← import --tasks 指向的模块,收集 TaskHandle
+  ├── 执行运行时(runtime.ts)        ← register → N 个 claim 槽 → 重放执行 → 直写结果
+  │     └── replay executor          ← 位置 seq 重放、step 记忆、SuspendSignal、fingerprint
+  ├── orchestrator loops             ← timer 恢复 / cron / lease reaper / worker 离线,SKIP LOCKED
+  └── Hono API                       ← trigger / batch-trigger / runs / schedules / workers / health
+  @better-trigger/kernel             ← claim CTE + lease + fencing、retry/backoff、suspend/resume、
+                                        cancel、并发限制(唯一 import pg 的库)
+  @better-trigger/db                 ← drizzle schema + 迁移 + pool
 ```
 
-## 与 M1+M2 的差异(P1 执行清单)
+`packages/core` 横跨两侧:共享类型、错误族(`KernelError` 的 code 在 HTTP 上原样往返)、duration/backoff 工具。**它必须保持零运行时依赖**——它在 SDK 的依赖路径上。
 
-| 现在(server 形态) | v2(嵌入式) |
+## 与 P1(嵌入式)的差异
+
+| P1 嵌入式(2026-07-28) | 现在(daemon) |
 |---|---|
-| worker HTTP long-poll `GET /dequeue` | 直接 PG claim:短事务 CTE + `FOR UPDATE SKIP LOCKED` |
-| step/suspend/complete/fail 走 HTTP 上报 | kernel 方法直写(与状态迁移同事务) |
-| visibility timeout + `locked_by` | 持久 lease(`lease_until`)+ 单调 **fencing token**;所有完成路径校验 token |
-| server 内 orchestrator 单点循环 | 每个实例内嵌循环,SKIP LOCKED 多进程安全 |
-| `core/src/protocol.ts` HTTP 协议类型 | 删除 |
-| `sdk/src/client.ts` + long-poll worker | 删除,worker 改为直连 claim 循环 |
-| `configure({ apiUrl, apiKey })` | 由实例绑定取代(task 定义保持 instance-free,触发经默认实例) |
-| `packages/server` | 降级改造为 `packages/studio`(可选 dashboard 工具,复用现有 REST 形状与 apps/web);它只跑 worker 无关的 sweep(lease reaper + worker 离线标记),**不跑 cron/waits/claim** —— 纯 bookkeeping,不是执行调度器 |
-| 500ms 内部轮询 | LISTEN/NOTIFY 降低唤醒延迟,轮询保底(NOTIFY 不是 durable queue) |
+| `betterTrigger({ database })` 在应用进程内建 kernel | `betterTrigger({ url })` 只是 HTTP 客户端 |
+| `trigger.start({ tasks })` 在应用进程跑 claim 循环 | `better-trigger-worker --tasks <module>` 在 daemon 跑 |
+| SDK 依赖 `pg` + `@better-trigger/db` | SDK 零运行时依赖 |
+| `packages/core` 含 kernel(拖 pg/croner) | 拆出 `packages/kernel`;core 归零依赖 |
+| `packages/server`(dashboard-only API) | `apps/worker`(执行 + 编排 + API 全在一起) |
+| 执行器 + worker 循环在 `packages/sdk` | 移到 `apps/worker` |
+| `handle.result()` 直接轮询 PG | `GET /runs/:id/result` 服务端 long-poll(≤30s/次,客户端按自己的 deadline 续) |
 
-**保留不动**:runs/run_steps/waits/schedules/logs 表与状态机、退避公式(`computeBackoffMs`)、位置 seq 重放语义、`ctx` 全部表面(step/wait/logger/now/random/uuid)、幂等键、并发限制、croner 调度、apps/web 与 adapter 层。
+**保留不动**:runs/run_steps/waits/schedules/logs 表与状态机、退避公式(`computeBackoffMs`)、位置 seq 重放语义、`ctx` 全部表面(step/wait/logger/now/random/uuid)、幂等键、并发限制、croner 调度、lease + fencing token 语义、apps/web 与 adapter 层、REST 形状。
 
 ## 语义边界(承诺表)
 
@@ -96,53 +102,61 @@ App process
 | step 结果记录 | 历史层 exactly-once(`(run_id, seq)` 唯一 + fencing) |
 | step 执行(外部副作用) | **at-least-once**;不承诺通用 exactly-once |
 | LLM / 工具调用 | 昂贵副作用:重放不重打(memoized);重试需幂等键,`ctx` 暴露 `idempotencyKey` / `attempt` |
-| wait / timer | deadline 持久化;无进程在线时不运行,恢复后尽快触发,只产生一次恢复 |
-| 进程 crash | lease 过期后由任意存活进程接管;旧 lease 持有者的迟到写被 fencing token 拒绝 |
-| step 间用户代码 | 必须确定性;fingerprint 不匹配 → `NonDeterminismError`(不再只 warn) |
+| wait / timer | deadline 持久化;无 daemon 在线时不运行,恢复后尽快触发,只产生一次恢复 |
+| daemon crash | lease 过期后由任意存活 daemon 接管;旧 lease 持有者的迟到写被 fencing token 拒绝 |
+| step 间用户代码 | 必须确定性;fingerprint 不匹配 → `NonDeterminismError`(P2) |
+| task 模块 | 必须可被 daemon 独立 import;不得闭包应用内部状态 |
 | PostgreSQL | v1 唯一生产存储;内部 repository 是模块边界,不是公开 adapter API |
-| 所有进程停止 | 只保存状态,不消耗任务("状态 durable,计算需要至少一个进程在线") |
+| 所有 daemon 停止 | 只保存状态,不消耗任务("状态 durable,计算需要至少一个 daemon 在线") |
 
-## Schema 增量
+## Schema
 
-- `runs`:+ `fencing_token bigint`(**每 run 单调递增计数器**,claim 时 +1,一切写回校验;放在 runs 行而非 queue 行,使 queue 行被删除/重建(重试、resume)也不会重置 token)
-- `queue`:+ `lease_until`(持久 lease,替代 locked_at+固定超时语义;queue 行只承载 lease,不承载 fencing 计数)
-- `run_steps`:+ `fingerprint text`(kind+label+inputHash;首跑写入,重放校验)
-- `workers`:语义改为「进程注册表」(嵌入实例直接写心跳),仅供 studio 展示
+- `runs`:`fencing_token bigint`(**每 run 单调递增计数器**,claim 时 +1,一切写回校验;放在 runs 行而非 queue 行,使 queue 行被删除/重建(重试、resume)也不会重置 token)
+- `queue`:`lease_until`(持久 lease;queue 行只承载 lease,不承载 fencing 计数)
+- `run_steps`:P2 增 `fingerprint text`(kind+label+inputHash;首跑写入,重放校验)
+- `workers`:daemon 注册表(执行节点写心跳),供 dashboard 展示
 - P3 新增:`events`(signal 语义:原子入库 + 唤醒,离线不丢,恰好消费一次)
-- 其余表不变
 
 ## 包布局
 
 ```
+apps/
+  worker/           ← @better-trigger/worker:daemon(loader + executor + runtime +
+                      orchestrator + Hono API),bin `better-trigger-worker`
+  web/              ← dashboard(Vite + React)
 packages/
-  better-trigger/   ← 现 sdk 更名/吸收:facade + task + ctx + executor + in-process worker + client
-  core/             ← 从「纯类型」升级为 durable kernel(吸收 server/src/engine/*);内部包
-  db/               ← 不变:drizzle schema / 迁移 / pool
-  studio/           ← 现 server 降级改造:dashboard REST(形状不变)+ 托管 web 构建产物;可选安装
+  sdk/              ← better-trigger:task() + ctx 类型 + HTTP 客户端。零运行时依赖
+                      `better-trigger/internal` 是给 daemon 的内部缝(ALS + 定义适配器),非公开 API
+  core/             ← 共享类型 / 错误族 / duration / backoff。**零运行时依赖(硬约束)**
+  kernel/           ← @better-trigger/kernel:PG 引擎(内部包)
+  db/               ← drizzle schema / 迁移 / pool
   testing/          ← P2/P3:虚拟时间、crash harness、correctness suite
   eslint-plugin/    ← P6:确定性 lint 规则
-apps/web            ← 不变(adapter 已隔离 REST 形状)
 ```
+
+### 一个实现细节:进程级 registry
+
+`ctx` 检测(「我是不是在 run 里?」)靠 `AsyncLocalStorage`。daemon 与用户 task 模块可能解析到**两份** `better-trigger`(不同 node_modules 树、bundle 与 link 并存),模块作用域的 ALS 会因此失效,表现为 `triggerAndWait()` 在 run 内抛「must be called inside a running task」。
+
+所以 ALS、默认客户端、`RunHandle.result()` 的 resolver 三者都挂在 `globalThis[Symbol.for('better-trigger.registry.v1')]` 上(`packages/sdk/src/registry.ts`)。副本再多也共享同一份。
 
 ## 分阶段计划
 
-### P0 — 定案与清场(0.5 天)
-本文档;提交 dashboard 接线改动;README/PRD 定位改写(PRD §11 SaaS/gVisor/M4 标记废弃)。
+### P1 — 内核落地(已完成)
+claim CTE + `FOR UPDATE SKIP LOCKED`、持久 lease、单调 fencing token、orchestrator 循环、重放执行器。
 
-### P1 — 内核内嵌(1–1.5 周)
-「与 M1+M2 的差异」清单全部落地;examples/basic 改嵌入式(单文件可跑)。
-dashboard server(现 `packages/server`)保留为可选工具进程:orchestrator 循环按 flag 启动,它只开 lease reaper + worker 离线标记(worker 无关的 bookkeeping),cron/waits/claiming 全部关闭——执行调度只发生在嵌入式实例里。
-**验收**:零 HTTP 进程跑通现 e2e 全部场景(hello / 多 step / wait 挂起恢复 / triggerAndWait / batchTrigger / 幂等键 / 重试与 AbortError / cron);任意时刻 `kill -9` 进程,重启后恢复且无重复 step 行;人为拖延旧持有者后其迟到写被 fencing 拒绝。
+### P1.5 — 客户端/daemon 分离(已完成,本文档)
+core 拆分(kernel 独立成包、core 归零依赖);`packages/server` → `apps/worker`;执行器与 worker 循环移入 daemon;SDK 改写为 HTTP 客户端;`--tasks` 加载器 + CLI(`--port/--concurrency/--lease-ms/--no-serve/--no-migrate/...`);`GET /runs/:id/record`、`GET /runs/:id/result` long-poll。
+**验收(已跑通,50 项)**:e2e 13 项(hello / 多 step / wait 挂起恢复 / triggerAndWait / batchTrigger / 幂等键 / 重试与 AbortError / cron)· fencing 20 项 · crash 11 项(3× SIGKILL,step 恰好一次)· worker-lost 6 项。
 
 ### P2 — 正确性硬化(1 周)
 fingerprint + `NonDeterminismError`;vitest + 真 PG 的 correctness suite;crash / fault-injection harness(在每个持久化边界注入 throw / abort / 连接中断 / 重复投递);不变量断言(seq 连续只追加、终态不再接受写、每个外部事件至多一个 outcome、旧 fencing 全路径无效);LISTEN/NOTIFY 唤醒。
-**验收**:移植 2026-07-28 笔记 Phase 2 验收条款。
 
 ### P3 — 交互原语(1–2 周)
 `event()` / `emit` / `wait.forEvent`(signal 级不变量:写入与唤醒原子、离线不丢、恰好消费一次);cancel 级联(父→子传播);`batchTriggerAndWait`(fan-out/fan-in);testing 包虚拟时间(测试里跳过数天 wait)。
 
-### P4 — Studio(0.5–1 周)
-server → studio 改造:`bunx better-trigger studio` 起本地 dashboard;手动触发/重试/取消直调内嵌实例;apps/web 零改动或微调。
+### P4 — Dashboard / CLI(0.5–1 周)
+daemon 托管 web 构建产物(`better-trigger-worker` 直接给出可用 dashboard,不再需要单独跑 vite);手动触发/重试/取消已在 REST 上;`better-trigger-worker migrate` 子命令。
 
 ### P5 — Agent 层 MVP(2–3 周)
 第一批**只做 3 个连接点 + 1 个步骤类型**(吸取 2026-06-06 废弃草案「9 原语没立住」的教训):
@@ -151,31 +165,35 @@ server → studio 改造:`bunx better-trigger studio` 起本地 dashboard;手动
 - `ctx.requestApproval`(human-in-the-loop,基于 wait.forEvent)
 - `ctx.llm`(memoized LLM 步骤:记录 model/params/usage,重放不重打)
 - `continueAsNew`(agent 长循环防 run_steps 无限增长)
-- dashboard agent 视图(handoff/会话图;顺手处理 Deployments 遗产页);examples/multi-agent。
+- dashboard agent 视图(handoff/会话图);examples/multi-agent。
 
 ### P6 — 打磨(持续)
-plugin interceptors 全量(client/step/worker/persistence 四类)、eslint-plugin、可挂载 HTTP handler(better-auth 式 `trigger.handler`,供跨服务触发/远程 studio)、query(观察运行中状态)、CLI(`migrate` / `studio`)。
+plugin interceptors 全量(client/step/worker/persistence 四类)、eslint-plugin、query(观察运行中状态)、鉴权超出单一 Bearer key。
 
 ## 北极星 demo(P5 验收)
 
-planner fan-out 3 个 researcher → `gather` 汇总 → `requestApproval` 人工审批 → writer 产出;在任意边界 `kill -9` 进程;重启后 **LLM 调用不重复计费、审批不丢、历史无重复 step、结果正确**。
+planner fan-out 3 个 researcher → `gather` 汇总 → `requestApproval` 人工审批 → writer 产出;在任意边界 `kill -9` daemon;重启后 **LLM 调用不重复计费、审批不丢、历史无重复 step、结果正确**。
 
 ## 风险
 
 | 风险 | 应对 |
 |---|---|
-| 嵌入进程与业务共享事件循环/连接池 | kernel 全部短事务;pool 上限可配;文档写明「专用 worker 进程」模式(同库同配置,只是单独跑) |
-| 「没进程在线就没人调度」被误解 | README/文档使用承诺表原文;studio 显示「无在线进程」警示 |
-| 与业务共库干扰 | 独立 `better_trigger` schema;建议独立 Pool |
+| task 模块必须可独立 import(不能闭包 app 状态) | 文档写在承诺表里;loader 报错信息明确;示例全部按此写 |
+| 多一个进程要运维 | 单命令启动、auto-migrate、`--no-serve`/无 `--tasks` 覆盖多节点形态;docker-compose 直接给出 |
+| 「没 daemon 在线就没人调度」被误解 | README/文档使用承诺表原文;dashboard 显示「无在线 worker」警示 |
+| daemon 与业务共库干扰 | 独立 `better_trigger` schema;建议独立数据库 |
 | step 非幂等 + at-least-once → 副作用重复 | `ctx.idempotencyKey` 自动提供;文档强调;LLM 步骤给出幂等实践 |
 | 确定性被违反 | fingerprint 硬检测 + eslint-plugin + `ctx.now/random/uuid`;VM sandbox 明确为远期(本地跑可信代码) |
 | run_steps 无限增长(agent 长循环) | `continueAsNew` + 长度警告;不做 snapshot(与代码版本兼容复杂) |
 | 代码升级致重放漂移 | 保留 code_version 锁定;远期 `ctx.patched()` |
+| daemon 在 node 下无法 import `.ts` | 文档写明:bun/tsx 跑源码,或 `--tasks` 指向编译产物 |
 
 ## ADR 摘要
 
-1. **嵌入式 no-server(better-auth 形态)** — 2026-07-28 定案;独立 server 取消,studio 为可选工具进程。推翻:backend-contract.md 的 HTTP worker 协议。
+1. ~~**嵌入式 no-server(better-auth 形态)** — 2026-07-28 定案~~ → **已被 ADR 6 推翻**。
 2. **step 记忆重放,而非 event-history/command-matching** — 已实现、语义够用;以 fingerprint + correctness suite 硬化,不重写。
 3. **API 维持 task/step/wait(Inngest 风格)** — 2026-06-05 用户选定;不采纳 Temporal 表面(defineWorkflow/proxyActivities/WorkflowHandle)。
 4. **PG-only v1** — 内部 repository 只是模块边界与测试 seam,不承诺公开 adapter;第二种数据库落地前不抽象。
 5. **多 agent 是产品层** — 建立在 P3 signal/event 内核上;第一批仅 handoff/gather/requestApproval + ctx.llm。
+6. **客户端 / worker daemon 分离** — 2026-07-29 定案,推翻 ADR 1。理由:应用进程不该为了触发一个任务而拿到数据库连接池和一整套执行循环;`pg` 也不该出现在一个「只想 `await hello.trigger()`」的包的依赖树里。代价是多一个进程和「task 模块必须可独立 import」的约束,两者都写进承诺表。
+7. **进程级 registry(`Symbol.for`)承载 ALS** — 让 `better-trigger` 的重复副本不再破坏 `ctx` 检测;代价是一个全局符号,收益是去掉「必须恰好一份副本」这条隐性前提。

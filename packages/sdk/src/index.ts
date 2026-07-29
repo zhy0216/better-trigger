@@ -1,14 +1,22 @@
 /* =============================================================================
    better-trigger — public entry point.
+
+   Two things live here: how you DEFINE tasks (`task()`) and how you TRIGGER
+   them (`betterTrigger({ url })`, over HTTP). Running them is the worker
+   daemon's job — see @better-trigger/worker / `better-trigger-worker`.
    ============================================================================= */
 
 /* ---- core functions ----------------------------------------------------- */
 export { task, unwrapResult } from './task';
 export { betterTrigger } from './instance';
 
+/* ---- transport ---------------------------------------------------------- */
+export { HttpError } from './client';
+
 /* ---- re-exported error / signal primitives from core -------------------- */
 export {
   AbortError,
+  KernelError,
   SuspendSignal,
   isAbortError,
   isSuspendSignal,
@@ -24,7 +32,6 @@ export type {
   ResolvedTaskDefinition,
 } from './task';
 export type { BetterTrigger, BetterTriggerOptions, RunHandle } from './instance';
-export type { WorkerHandle } from './worker';
 export type {
   RunCtx,
   RunInfo,
@@ -42,14 +49,19 @@ export type {
   RetryPolicy,
   CronConfig,
   SerializedError,
+  KernelErrorCode,
   RunStatus,
   StepKind,
   StepStatus,
   TriggerType,
   LogLevel,
   TaskManifest,
+  CreatedRun,
   RunRecord,
+  RunStepRecord,
   RunDetailResult,
+  WaitRecord,
+  LogRecord,
   WaitResult,
   WaitForResultOptions,
 } from '@better-trigger/core';

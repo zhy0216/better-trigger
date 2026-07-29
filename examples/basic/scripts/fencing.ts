@@ -13,6 +13,8 @@
    which no longer authorizes writes.
 
    Fully self-contained: provisions its own database (better_trigger_fencing).
+   No daemon and no HTTP — this one drives @better-trigger/kernel directly,
+   because the invariant under test lives below the transport.
 
    Env:
      DATABASE_URL    base connection derived from it; default
@@ -20,7 +22,7 @@
      BT_FENCING_DB   override the provisioned database name (default
                      better_trigger_fencing)
    ============================================================================= */
-import { createKernel, StaleLeaseError } from '@better-trigger/core';
+import { createKernel, StaleLeaseError } from '@better-trigger/kernel';
 import { createPool, migrate } from '@better-trigger/db';
 
 /* ---------------------------------------------------------------------------

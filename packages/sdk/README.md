@@ -1,15 +1,19 @@
 # better-trigger
 
-**Type-safe, embedded durable task orchestration for TypeScript.**
+**Type-safe durable task orchestration for TypeScript.**
 
 Declare background tasks as plain async functions, run durable steps, wait for
-seconds or days, retry with backoff, schedule with cron — all embedded in your
-own process on top of one Postgres database. No orchestration server, no Redis,
-no ClickHouse; `pg` is the only hard dependency.
+seconds or days, retry with backoff, schedule with cron — on top of one Postgres
+database. No Redis, no ClickHouse.
+
+This package is the **client half**: it defines tasks and triggers them over
+HTTP. It has zero runtime dependencies and never opens a database connection.
+The **worker daemon** (`better-trigger-worker`, from `@better-trigger/worker`)
+owns Postgres, imports your task modules and executes them.
 
 `better-trigger` uses a **replay** model instead of container snapshots: when a
-run suspends on a wait, the worker slot is released; when the wait expires the
-task function re-runs from the top, and already-completed steps return their
+run suspends on a wait, the execution slot is released; when the wait expires
+the task function re-runs from the top, and already-completed steps return their
 cached results instantly. The code reads like a straight-line `async` function.
 
 ---
@@ -17,8 +21,8 @@ cached results instantly. The code reads like a straight-line `async` function.
 ## Install
 
 ```bash
-npm install better-trigger
-# or: bun add better-trigger / pnpm add better-trigger
+npm install better-trigger              # your app
+npm install -D @better-trigger/worker   # the daemon (wherever you run it)
 ```
 
 Requires Node.js 18+ (or Bun) and a reachable PostgreSQL database. That's the
@@ -28,21 +32,10 @@ whole stack.
 
 ## Quick start
 
-### 1. Create the instance
+### 1. Define a task
 
 ```ts
-// trigger.ts — the single configuration point
-import { betterTrigger } from "better-trigger";
-
-export const trigger = betterTrigger({
-  database: { connectionString: process.env.DATABASE_URL },
-});
-```
-
-### 2. Define a task
-
-```ts
-// tasks.ts
+// tasks.ts — imported by the daemon AND by your app
 import { task } from "better-trigger";
 
 export const sendEmail = task("send-email", async (payload: { to: string }) => {
@@ -54,27 +47,38 @@ export const sendEmail = task("send-email", async (payload: { to: string }) => {
 The payload type is inferred from the function parameter, and the return type
 flows through to `triggerAndWait`.
 
-### 3. Start a worker
+> Task modules are imported by the daemon in its own process, so they must be
+> importable standalone — a `run` function may not close over your app's
+> request state or in-memory singletons.
 
-```ts
-// worker.ts — any process (your app itself, or a dedicated one)
-import { trigger } from "./trigger";
-import { sendEmail } from "./tasks";
+### 2. Run the daemon
 
-await trigger.start({ tasks: [sendEmail], concurrency: 5 });
+```bash
+DATABASE_URL=postgres://localhost:5432/better_trigger \
+  bunx --bun better-trigger-worker --tasks ./tasks.ts
 ```
 
-The worker registers its tasks, claims runs straight from Postgres
-(`FOR UPDATE SKIP LOCKED`), replays each run, and reports results back over
-the same pool. `SIGINT` / `SIGTERM` drain in-flight runs gracefully.
+It applies migrations, registers the tasks, claims runs straight from Postgres
+(`FOR UPDATE SKIP LOCKED`), replays them, and serves the API on `:4848`.
+`SIGINT` / `SIGTERM` drain in-flight runs gracefully. Under plain `node`, point
+`--tasks` at compiled JavaScript (or use a loader such as `tsx`).
 
-### 4. Trigger from your app
+### 3. Point the client at it
+
+```ts
+// trigger.ts — the single configuration point in your app
+import { betterTrigger } from "better-trigger";
+
+export const trigger = betterTrigger({ url: "http://localhost:4848" });
+```
+
+### 4. Trigger
 
 ```ts
 import { sendEmail } from "./tasks";
 
 const run = await sendEmail.trigger({ to: "a@b.com" });
-//    ^ { id: "run_...", result(opts?) }
+//    ^ { id: "run_...", idempotent, result(opts?) }
 
 const settled = await run.result();
 //    ^ { status: "completed", output: { delivered: true } }
@@ -84,46 +88,45 @@ const settled = await run.result();
 
 ## Configuration
 
-Everything is configured on the instance — there is no global config and no
-HTTP endpoint to point at:
-
 ```ts
 import { betterTrigger } from "better-trigger";
 
 const trigger = betterTrigger({
-  // pg Pool (caller-owned) or { connectionString } (instance-owned, ended on stop)
-  database: { connectionString: process.env.DATABASE_URL },
-  migrations: "auto",                  // 'auto' (default) | 'manual'
-  defaults: { retry: { maxAttempts: 5 } },   // fallback retry for tasks without one
-  orchestrator: { reaperIntervalMs: 10_000 }, // loop intervals (test knobs)
-  plugins: [],                          // reserved (P1 accepts only [])
+  url: "http://localhost:4848",   // default: BETTER_TRIGGER_URL, then localhost:4848
+  apiKey: process.env.MY_KEY,     // default: BETTER_TRIGGER_API_KEY
+  timeoutMs: 30_000,              // per-request timeout (long-polls manage their own)
+  fetch: myFetch,                 // injectable fetch (tests, proxies, custom agents)
 });
 ```
 
-- `migrations: 'auto'` applies the packaged schema migrations on first use;
-  `'manual'` assumes you ran them yourself (e.g. via `@better-trigger/db`).
-- `defaults.retry` is inherited by tasks that do not define their own `retry`
-  once a worker registers them: it sets both the trigger-time attempt budget
-  (`max_attempts` on new runs) and the executor-side backoff between attempts.
+- `apiKey` is required when the daemon runs with `BETTER_TRIGGER_API_KEY` set;
+  it is sent as `Authorization: Bearer <key>`.
 - The **first** `betterTrigger()` call becomes the module-level default
   instance; `TaskHandle.trigger` / `batchTrigger` called outside a run use it
   (calling them with no instance created throws). A later instance can take
   over with `instance.setDefault()`.
+- Retry defaults, concurrency and orchestrator intervals are daemon-side
+  concerns — see `better-trigger-worker --help`.
 
 ### Instance API
 
 | Member | Description |
 | --- | --- |
-| `start(opts)` | Start the embedded worker + orchestrator loops. → `WorkerHandle` |
-| `stop()` | Stop the worker (if started) and end the pool when instance-owned. |
 | `trigger(taskOrId, payload, opts?)` | Enqueue one run. → `RunHandle` |
 | `batchTrigger(items)` | Enqueue many runs in one transaction. → `RunHandle[]` |
 | `cancelRun(runId)` | Cancel a non-terminal run (terminal → no-op). |
 | `retryRun(runId)` | Re-run a failed/canceled run as a **new** run. → `{ runId }` |
 | `getRun(runId)` | Full run record. |
 | `getRunDetail(runId)` | `{ run, steps, waits, logs }` (logs capped at 1000). |
-| `waitForResult(runId, opts?)` | Poll to a terminal state. → `{ status, output?, error? }` |
+| `waitForResult(runId, opts?)` | Wait for a terminal state. → `{ status, output?, error? }` |
+| `health()` | Daemon liveness probe. → `{ ok, version }` |
 | `setDefault()` | Make this instance the module-level default. |
+| `url` | The base URL this instance talks to. |
+
+Failures the daemon reports with a kernel error code (`task_not_found`,
+`run_not_running`, `stale_lease`, …) arrive as `KernelError` with that same
+`code`. Transport failures, auth failures and 5xx arrive as `HttpError` with
+`status` and `code`.
 
 ---
 
@@ -269,34 +272,34 @@ jitter. `AbortError` (and schema validation failures) skip retries.
 
 ---
 
-## Worker
+## The worker daemon
 
-```ts
-const worker = await trigger.start({
-  tasks: [hello, onboarding, daily],
-  concurrency: 5,         // concurrent execution slots (default 5)
-  name: "worker-1",       // optional, shown in the dashboard
-  leaseMs: 60_000,        // lease granted per claim, renewed by heartbeat (default 60s)
-});
-
-worker.workerId;          // registered worker id
-await worker.stop();      // drain in-flight runs, stop loops
+```bash
+better-trigger-worker --tasks ./tasks.ts \
+  --port 4848 --concurrency 5 --name worker-1 --lease-ms 60000
 ```
 
-`start()` registers the worker + tasks, starts the orchestrator loops
-(wait/cron/reaper timers) in-process, and spins up `concurrency` claim loops
-(idle polls back off 300ms → 2s with jitter). A heartbeat loop
+The daemon registers itself + its tasks, starts the orchestrator loops
+(wait / cron / reaper timers), and spins up `--concurrency` claim loops (idle
+polls back off 300ms → 2s with jitter). A heartbeat loop
 (`max(500, leaseMs / 3)` ms) renews claimed leases and honours cancellations.
-Every claim carries a **fencing token**; if a worker dies, the reaper releases
+Every claim carries a **fencing token**; if a daemon dies, the reaper releases
 the expired lease and any late writes from the zombie are rejected — steps stay
-exactly-once. `SIGINT` / `SIGTERM` drain in-flight runs, stop the loops, then
-end the instance-owned pool.
+exactly-once.
 
-Run any number of processes with the same tasks against the same database —
-they coordinate through Postgres row locks; no leader election.
+`--tasks` and `--no-serve` are independent, so one binary covers every shape:
 
-The code version reported on registration comes from
-`BETTER_TRIGGER_VERSION`, or a stable hash of the sorted task ids + cron config.
+| Command | Role |
+| --- | --- |
+| `better-trigger-worker --tasks ./tasks.ts` | all-in-one: executes + serves (default) |
+| `better-trigger-worker` | API + dashboard only; runs the reaper, executes nothing |
+| `better-trigger-worker --tasks ./tasks.ts --no-serve` | executor-only node |
+
+Run any number of daemons against the same database — they coordinate through
+Postgres row locks; no leader election.
+
+The code version reported on registration comes from `BETTER_TRIGGER_VERSION`,
+or a stable hash of the sorted task ids + cron config.
 
 ---
 
@@ -308,6 +311,8 @@ import {
   betterTrigger,
   unwrapResult,
   AbortError,
+  HttpError,
+  KernelError,
   SuspendSignal,
   isAbortError,
   isSuspendSignal,
@@ -319,12 +324,18 @@ import type {
   RunHandle,
   TaskHandle,
   RunCtx,
+  RunRecord,
+  RunDetailResult,
   TaskRunResult,
   TriggerOptions,
   RetryPolicy,
-  WorkerHandle,
+  WaitResult,
 } from "better-trigger";
 ```
+
+`better-trigger/internal` also exists. It is the seam the worker daemon uses to
+reach the executor storage and the normalized task definitions — **not** a
+public API, and not covered by semver.
 
 ---
 

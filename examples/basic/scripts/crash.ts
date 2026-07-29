@@ -1,15 +1,23 @@
 /* =============================================================================
    @better-trigger/example-basic — crash-recovery e2e (lease/fencing/reaper).
 
-   Fully self-contained: provisions its own database (better_trigger_crash),
-   spawns crash-worker.ts as a child process and SIGKILLs it at three points:
+   Fully self-contained: provisions its own database (better_trigger_crash) and
+   runs two daemons —
+
+     · an API node (no --tasks) that serves HTTP and runs the lease reaper. It
+       survives every kill, so the harness's client keeps answering and leases
+       still get reaped while no executor is alive.
+     · an executor node (--tasks crash-tasks.ts --no-serve) that claims and
+       runs. This is the one that gets SIGKILLed.
+
+   The executor is SIGKILLed at three points:
 
      ① after "step1" hits the marker file (mid pure-sleep, run 'running')
      ② after the run is observed 'waiting'  (suspended on wait.for("2s"))
      ③ after a restart brings the run back to 'running' (post-resume sleep)
 
-   After every kill a fresh worker process is spawned; the reaper (500ms) must
-   release the expired lease (3s) so the new worker can reclaim under a bumped
+   After every kill a fresh executor is spawned; a reaper (500ms) must release
+   the expired lease (3s) so the new executor can reclaim under a bumped
    fencing token. Final assertions prove exactly-once durable steps:
 
      - run completed, output echoes the payload
@@ -26,14 +34,15 @@
                    postgres://localhost:5432/better_trigger
      BT_CRASH_DB   override the provisioned database name (default
                    better_trigger_crash)
+     BT_CRASH_PORT port the API node listens on (default 4902)
    ============================================================================= */
-import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createPool, migrate } from '@better-trigger/db';
 import { betterTrigger, type RunStatus } from 'better-trigger';
+import { spawnDaemon, startDaemon, type Daemon } from './daemon';
 
 /* ---------------------------------------------------------------------------
  * Config + database provisioning
@@ -49,9 +58,9 @@ function baseUrl(u: string): string {
 
 const BASE = baseUrl(RAW_URL);
 const DB_URL = `${BASE}/${CRASH_DB}`;
+const PORT = Number(process.env.BT_CRASH_PORT ?? 4902);
 
-const scriptsDir = fileURLToPath(new URL('.', import.meta.url));
-const workerScript = join(scriptsDir, 'crash-worker.ts');
+const tasksModule = fileURLToPath(new URL('./crash-tasks.ts', import.meta.url));
 const markerFile = join(mkdtempSync(join(tmpdir(), 'bt-crash-')), 'marker.txt');
 writeFileSync(markerFile, '');
 
@@ -73,25 +82,18 @@ function ok(msg: string): void {
 }
 
 /* ---------------------------------------------------------------------------
- * Worker process control
+ * Executor node control (short lease + fast reaper keep recovery quick)
  * ------------------------------------------------------------------------- */
-function spawnWorker(): ChildProcess {
-  const proc = spawn('bun', [workerScript], {
-    env: { ...process.env, DATABASE_URL: DB_URL, BT_MARKER_FILE: markerFile },
-    stdio: ['ignore', 'inherit', 'inherit'],
+function spawnExecutor(): Daemon {
+  return spawnDaemon({
+    databaseUrl: DB_URL,
+    tasks: tasksModule,
+    serve: false,
+    concurrency: 1,
+    leaseMs: 3_000,
+    reaperIntervalMs: 500,
+    env: { BT_MARKER_FILE: markerFile },
   });
-  proc.on('error', (err) => fail(`failed to spawn crash-worker: ${err.message}`));
-  return proc;
-}
-
-function waitExit(proc: ChildProcess): Promise<void> {
-  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
-  return new Promise((r) => proc.once('exit', () => r()));
-}
-
-async function sigkill(proc: ChildProcess): Promise<void> {
-  proc.kill('SIGKILL');
-  await waitExit(proc);
 }
 
 /* ---------------------------------------------------------------------------
@@ -124,19 +126,22 @@ console.log(`\nbetter-trigger crash-recovery e2e → ${DB_URL}\n`);
   await admin.end();
 }
 
-// Migrate up front so the client instance and the spawned worker never race
-// on migrations.
+// Migrate up front so the daemons never race on migrations.
 const pool = createPool(DB_URL);
 await migrate(pool);
 
-// Client-only instance: triggers + polls, never start()s a worker (so the only
-// orchestrator/reaper in play lives inside the crash-worker processes).
-const client = betterTrigger({ database: { connectionString: DB_URL }, migrations: 'manual' });
+// The API node: serves the client and keeps a reaper alive across every kill.
+const api = await startDaemon({
+  databaseUrl: DB_URL,
+  port: PORT,
+  reaperIntervalMs: 500,
+});
+const client = betterTrigger({ url: api.url! });
 
 const runStatus = async (runId: string): Promise<RunStatus> => (await client.getRun(runId)).status;
 
-/* -- boot worker #1 and trigger the run ----------------------------------- */
-let proc = spawnWorker();
+/* -- boot executor #1 and trigger the run --------------------------------- */
+let proc = spawnExecutor();
 
 await waitFor('crash-test task registered', 30_000, async () => {
   try {
@@ -146,7 +151,7 @@ await waitFor('crash-test task registered', 30_000, async () => {
     return false;
   }
 });
-ok('worker #1 up, crash-test registered');
+ok('executor #1 up, crash-test registered');
 
 const payload = { note: 'survive-the-crash' };
 const handle = await client.trigger('crash-test', payload);
@@ -157,17 +162,17 @@ await waitFor('"step1" marker line (durable step committed)', 30_000, async () =
   markerLines('step1') >= 1,
 );
 await sleep(1_000); // stay inside the 4s sleep window, past the step commit
-await sigkill(proc);
+await proc.kill();
 ok('kill ① — SIGKILL during post-step1 sleep (run running, lease held)');
 
-/* -- worker #2: reclaim after reap, run to 'waiting', kill ② -------------- */
-proc = spawnWorker();
+/* -- executor #2: reclaim after reap, run to 'waiting', kill ② -------------- */
+proc = spawnExecutor();
 await waitFor(`run 'waiting' (suspended on wait.for)`, 60_000, async () =>
   (await runStatus(handle.id)) === 'waiting',
 );
 
 // Kill-① recovery must have cost exactly ONE attempt bump: reap → attempt 2,
-// reclaim + replay by worker #2 (no further bumps up to the suspend).
+// reclaim + replay by executor #2 (no further bumps up to the suspend).
 {
   const mid = await client.getRunDetail(handle.id);
   assert(
@@ -188,19 +193,19 @@ await waitFor(`run 'waiting' (suspended on wait.for)`, 60_000, async () =>
   ok(`no queue row while 'waiting' (suspend released the claim)`);
 }
 
-await sigkill(proc);
+await proc.kill();
 ok(`kill ② — SIGKILL while run is 'waiting' (worker held no claim)`);
 
-/* -- worker #3: resume the wait, back to 'running', kill ③ ---------------- */
-proc = spawnWorker();
+/* -- executor #3: resume the wait, back to 'running', kill ③ ---------------- */
+proc = spawnExecutor();
 await waitFor(`run back to 'running' after resume`, 60_000, async () =>
   (await runStatus(handle.id)) === 'running',
 );
-await sigkill(proc);
+await proc.kill();
 ok(`kill ③ — SIGKILL during post-resume sleep (run running again)`);
 
-/* -- worker #4: reclaim and finish ---------------------------------------- */
-proc = spawnWorker();
+/* -- executor #4: reclaim and finish ---------------------------------------- */
+proc = spawnExecutor();
 const result = await client.waitForResult(handle.id, { timeoutMs: 60_000 });
 
 /* -- final assertions ------------------------------------------------------ */
@@ -234,13 +239,8 @@ assert(
 ok(`attempt = ${detail.run.attempt} (>= 3)`);
 
 /* -- teardown -------------------------------------------------------------- */
-proc.kill('SIGTERM'); // graceful: drain + stop loops
-const graceful = Promise.race([waitExit(proc).then(() => true), sleep(10_000).then(() => false)]);
-if (!(await graceful)) {
-  proc.kill('SIGKILL');
-  await waitExit(proc);
-}
-await client.stop();
+await proc.stop(); // graceful: drain + stop loops
+await api.stop();
 await pool.end();
 
 console.log(`\nAll ${passed} crash-recovery checks passed.\n`);

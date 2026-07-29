@@ -1,7 +1,9 @@
 # better-trigger PRD
 
-> ⚠️ **SUPERSEDED — 本文档已被 [`docs/architecture.md`](./docs/architecture.md) 取代**(2026-07-28 嵌入式架构定案)。
-> 产品形态改为嵌入应用进程的 runtime(better-auth 形态),不再有独立 orchestration server;
+> ⚠️ **SUPERSEDED — 本文档已被 [`docs/architecture.md`](./docs/architecture.md) 取代**(2026-07-29 定案)。
+> 产品形态是**客户端 / worker daemon 分离**:应用只装 `better-trigger`(定义 task + HTTP 触发,不碰 pg),
+> 执行/队列/编排/API 全在 `better-trigger-worker` 一个进程里。
+> (中途 2026-07-28 曾定案「嵌入式无 server」,已于 2026-07-29 推翻,见 architecture.md ADR 6。)
 > §11 托管算力 SaaS / gVisor 与里程碑 M4 **废弃**。本文仅作历史背景保留,不再维护。
 
 > 一个**更简单、更易自托管**的 trigger.dev 替代品。

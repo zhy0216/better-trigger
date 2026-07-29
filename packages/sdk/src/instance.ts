@@ -1,58 +1,60 @@
 /* =============================================================================
-   better-trigger — betterTrigger() instance facade (embedded runtime).
-   One instance = one Postgres pool + one kernel. The facade owns readiness
-   (memoized auto-migrations from @better-trigger/db), exposes the client API
-   (trigger / batchTrigger / cancel / retry / reads) by delegating to the
-   kernel, and starts the embedded worker (claim slots + orchestrator loops)
-   via start(). The first instance created becomes the module-level default
-   that instance-free TaskHandles route through when triggered outside a run.
+   better-trigger — betterTrigger() client facade.
+
+   One instance = one worker daemon URL. Everything here is HTTP: this package
+   never opens a database connection, and it does not execute tasks. Execution
+   lives in the daemon (`better-trigger-worker --tasks ./src/tasks.ts`), which
+   loads the same task modules your app imports.
+
+   The first instance created becomes the module-level default that
+   instance-free TaskHandles route through when triggered outside a run.
    ============================================================================= */
-import type { Pool } from 'pg';
-import {
-  createKernel,
-  type OrchestratorOptions,
-  type RetryPolicy,
-  type RunDetailResult,
-  type RunRecord,
-  type TriggerItem,
-  type TriggerOptions,
-  type WaitForResultOptions,
-  type WaitResult,
+import type {
+  CreatedRun,
+  RunDetailResult,
+  RunRecord,
+  RunStatus,
+  TriggerItem,
+  TriggerOptions,
+  WaitForResultOptions,
+  WaitResult,
 } from '@better-trigger/core';
-import { createPool, migrate } from '@better-trigger/db';
+import { HttpClient, type HttpClientOptions } from './client';
+import { registry } from './registry';
 import type { TaskHandle } from './task';
-import { startWorkerRuntime, type StartOptions, type WorkerHandle } from './worker';
 
 /** Returned by trigger / batchTrigger: the run id plus a result() poller. */
 export interface RunHandle {
   /** Run id. */
   id: string;
-  /** Poll the run to a terminal state (timeout → latest non-terminal status). */
+  /**
+   * true when an idempotencyKey matched an existing run, so this call returned
+   * that run instead of creating one. Only set by trigger() — undefined on
+   * handles minted anywhere else.
+   */
+  idempotent?: boolean;
+  /** Wait for the run to reach a terminal state (timeout → latest status). */
   result(opts?: WaitForResultOptions): Promise<WaitResult>;
 }
 
 export interface BetterTriggerOptions {
   /**
-   * A pg Pool (caller-owned, never ended by the instance) or a
-   * { connectionString } (the instance creates and owns the pool, ending it
-   * on stop). Detection is duck-typed on the presence of query().
+   * Worker daemon base URL. Defaults to BETTER_TRIGGER_URL, then
+   * http://localhost:4848.
    */
-  database: Pool | { connectionString: string };
-  /** 'auto' (default) applies @better-trigger/db migrations before first use. */
-  migrations?: 'auto' | 'manual';
-  /** Instance-level defaults applied to tasks that do not define their own. */
-  defaults?: { retry?: RetryPolicy };
-  /** Orchestrator loop intervals (test knobs; defaults 1s / 1s / 10s). */
-  orchestrator?: OrchestratorOptions;
-  /** Plugin interceptors — reserved; only an empty array is accepted in P1. */
-  plugins?: unknown[];
+  url?: string;
+  /** Bearer token; required when the daemon sets BETTER_TRIGGER_API_KEY.
+   *  Defaults to the BETTER_TRIGGER_API_KEY env var. */
+  apiKey?: string;
+  /** Injectable fetch (tests, proxies, custom agents). Defaults to global fetch. */
+  fetch?: HttpClientOptions['fetch'];
+  /** Per-request timeout in ms (default 30s). Long-polls manage their own. */
+  timeoutMs?: number;
 }
 
 export interface BetterTrigger {
-  /** Start the embedded worker (claim slots + orchestrator) on this instance. */
-  start(opts: StartOptions): Promise<WorkerHandle>;
-  /** Stop the worker (if started) and end the pool when this instance owns it. */
-  stop(): Promise<void>;
+  /** Base URL this instance talks to. */
+  readonly url: string;
 
   /** Trigger one run of a task (by handle or id). */
   trigger<TPayload = unknown>(
@@ -70,39 +72,71 @@ export interface BetterTrigger {
   getRun(runId: string): Promise<RunRecord>;
   /** Run + steps + waits + logs (logs capped at 1000). */
   getRunDetail(runId: string): Promise<RunDetailResult>;
-  /** Poll a run to a terminal state (timeout → latest non-terminal status). */
+  /** Wait for a run to reach a terminal state (timeout → latest status). */
   waitForResult(runId: string, opts?: WaitForResultOptions): Promise<WaitResult>;
+  /** Daemon liveness probe. */
+  health(): Promise<{ ok: boolean; version: string }>;
 
   /** Make this instance the module-level default used by TaskHandle triggers. */
   setDefault(): void;
 }
 
+const DEFAULT_URL = 'http://localhost:4848';
+/** Cap on a single long-poll request; longer waits are looped client-side so
+ *  no single HTTP request sits open long enough for a proxy to cut it. */
+const MAX_LONGPOLL_MS = 25_000;
+const TERMINAL: readonly RunStatus[] = ['completed', 'failed', 'canceled'];
+
 /* ---------------------------------------------------------------------------
- * Default-instance registry
+ * Default-instance registry (process-wide — see ./registry)
  * ------------------------------------------------------------------------- */
 
-/** First betterTrigger() instance, or the last one to call setDefault(). */
-let defaultInstance: BetterTrigger | null = null;
+/** Anything able to poll a run to a terminal state. */
+export interface RunResultResolver {
+  waitForResult(runId: string, opts?: WaitForResultOptions): Promise<WaitResult>;
+}
+
+/**
+ * Overrides where RunHandle.result() reads from. The worker daemon installs a
+ * kernel-backed resolver at startup, so handles minted inside a run resolve
+ * against the database directly instead of looping back over HTTP.
+ */
+export function setResultResolver(resolver: RunResultResolver | null): void {
+  registry.resultResolver = resolver;
+}
 
 /** The default instance instance-free TaskHandles use outside a run. */
 export function requireDefaultInstance(): BetterTrigger {
-  if (!defaultInstance) {
+  if (!registry.defaultInstance) {
     throw new Error(
-      'No betterTrigger instance registered — call betterTrigger({...}) first',
+      'No betterTrigger instance registered — call betterTrigger({ url }) first',
     );
   }
-  return defaultInstance;
+  return registry.defaultInstance;
 }
 
 /**
  * Build a RunHandle. Handles minted by an instance bind result() to it;
- * handles minted inside a run (durable trigger paths) resolve the module
- * default lazily at result() call time.
+ * handles minted inside a run resolve the installed resolver (worker) or the
+ * default instance lazily, at result() call time.
  */
-export function makeRunHandle(id: string, instance?: BetterTrigger): RunHandle {
+export function makeRunHandle(
+  id: string,
+  instance?: BetterTrigger,
+  idempotent?: boolean,
+): RunHandle {
   return {
     id,
-    result: (opts) => (instance ?? requireDefaultInstance()).waitForResult(id, opts),
+    idempotent,
+    result: (opts) => {
+      const target = instance ?? registry.resultResolver ?? registry.defaultInstance;
+      if (!target) {
+        throw new Error(
+          `run ${id}: cannot await a result — no betterTrigger instance registered`,
+        );
+      }
+      return target.waitForResult(id, opts);
+    },
   };
 }
 
@@ -110,123 +144,28 @@ export function makeRunHandle(id: string, instance?: BetterTrigger): RunHandle {
  * Factory
  * ------------------------------------------------------------------------- */
 
-/** Duck-typed Pool detection ('query' in x) — no instanceof, so a Pool from a
- *  different pg copy still counts. */
-function isPoolLike(db: BetterTriggerOptions['database']): db is Pool {
-  return typeof db === 'object' && db !== null && 'query' in db;
+function env(name: string): string | undefined {
+  return (globalThis as { process?: { env?: Record<string, string | undefined> } }).process
+    ?.env?.[name];
 }
 
 /**
- * Create a better-trigger instance bound to a Postgres database. Returns
- * synchronously; migrations (when 'auto') run lazily, memoized, before the
- * first operation that touches the database.
+ * Create a better-trigger client bound to a worker daemon. Returns
+ * synchronously; nothing is contacted until the first call.
  */
-export function betterTrigger(options: BetterTriggerOptions): BetterTrigger {
-  if (options?.database == null) {
-    throw new Error(
-      'betterTrigger: "database" is required (a pg Pool or { connectionString })',
-    );
-  }
-  if (options.plugins && options.plugins.length > 0) {
-    throw new Error('betterTrigger: plugins are not implemented yet');
-  }
-
-  const ownsPool = !isPoolLike(options.database);
-  const pool = isPoolLike(options.database)
-    ? options.database
-    : createPool(options.database.connectionString);
-  const kernel = createKernel({ pool });
-  const migrations = options.migrations ?? 'auto';
-
-  /** Memoized readiness: auto-migrate once before first use. Success stays
-   *  cached; a rejection clears the memo so the next call retries instead of
-   *  poisoning the instance after one transient DB error. */
-  let ready: Promise<void> | null = null;
-  const ensureReady = (): Promise<void> => {
-    if (!ready) {
-      const attempt = migrations === 'auto' ? migrate(pool) : Promise.resolve();
-      ready = attempt;
-      attempt.catch(() => {
-        if (ready === attempt) ready = null;
-      });
-    }
-    return ready;
-  };
-
-  /** Idempotent owned-pool teardown (no-op when the caller owns the pool). */
-  let poolEnded: Promise<void> | null = null;
-  const endOwnedPool = (): Promise<void> => {
-    if (!ownsPool) return Promise.resolve();
-    poolEnded ??= pool.end();
-    return poolEnded;
-  };
-
-  let worker: WorkerHandle | null = null;
-  /** Reserved synchronously by start() before any await; held until the worker
-   *  fully stops (or startup fails), so concurrent start() calls cannot both
-   *  pass the guard and spawn two runtimes. */
-  let startPromise: Promise<WorkerHandle> | null = null;
-  /** Memoized in-flight stop(), so a concurrent second stop() joins the drain
-   *  instead of skipping it and ending the pool mid-flight. */
-  let stopPromise: Promise<void> | null = null;
-
-  /** Runs once the worker runtime fully stopped (any stop path — handle.stop,
-   *  instance.stop, or a signal): release the start slot so a stopped instance
-   *  can start() again on a borrowed pool, then end an owned pool. */
-  const onWorkerStopped = async (): Promise<void> => {
-    worker = null;
-    startPromise = null;
-    await endOwnedPool();
-  };
+export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger {
+  const url = options.url ?? env('BETTER_TRIGGER_URL') ?? DEFAULT_URL;
+  const http = new HttpClient({
+    url,
+    apiKey: options.apiKey ?? env('BETTER_TRIGGER_API_KEY'),
+    fetch: options.fetch,
+    timeoutMs: options.timeoutMs,
+  });
 
   const instance: BetterTrigger = {
-    async start(opts) {
-      // Reserve the slot before any await (TOCTOU guard); a new lifecycle
-      // generation also gets a fresh stop memo so the next stop() really stops.
-      if (startPromise) {
-        throw new Error('betterTrigger: worker already started on this instance');
-      }
-      stopPromise = null;
-      const starting = (async () => {
-        await ensureReady();
-        const handle = await startWorkerRuntime(
-          {
-            kernel,
-            orchestrator: options.orchestrator,
-            defaultRetry: options.defaults?.retry,
-            onStopped: onWorkerStopped,
-          },
-          opts,
-        );
-        worker = handle;
-        return handle;
-      })();
-      startPromise = starting;
-      try {
-        return await starting;
-      } catch (err) {
-        // Failed startup releases the slot so start() can be retried.
-        if (startPromise === starting) startPromise = null;
-        throw err;
-      }
-    },
-
-    async stop() {
-      stopPromise ??= (async () => {
-        // Join an in-flight start() so its runtime gets stopped, not orphaned
-        // on an ended pool (a failed start yields nothing to stop).
-        const h = worker ?? (await startPromise?.then((w) => w, () => null)) ?? null;
-        worker = null;
-        // h.stop() drains in-flight runs, then onWorkerStopped ends an owned
-        // pool; idempotent with WorkerHandle.stop() (the runtime memoizes).
-        if (h) await h.stop();
-        await endOwnedPool();
-      })();
-      return stopPromise;
-    },
+    url: http.baseUrl,
 
     async trigger(taskOrId, payload, options) {
-      await ensureReady();
       let taskId: string;
       let opts = options;
       if (typeof taskOrId === 'string') {
@@ -235,53 +174,72 @@ export function betterTrigger(options: BetterTriggerOptions): BetterTrigger {
         // Same concurrency-key derivation as TaskHandle: explicit option wins.
         taskId = taskOrId.id;
         const key =
-          options?.concurrencyKey ??
-          taskOrId.__definition.concurrency?.key?.(payload);
+          options?.concurrencyKey ?? taskOrId.__definition.concurrency?.key?.(payload);
         if (key !== undefined) opts = { ...options, concurrencyKey: key };
       }
-      const created = await kernel.trigger({ taskId, payload, options: opts });
-      return makeRunHandle(created.runId, instance);
+      const created = await http.request<CreatedRun>('/trigger', {
+        method: 'POST',
+        body: { taskId, payload, options: opts },
+      });
+      return makeRunHandle(created.runId, instance, created.idempotent);
     },
 
     async batchTrigger(items) {
-      await ensureReady();
-      const res = await kernel.batchTrigger(items);
+      const res = await http.request<{ runIds: string[] }>('/batch-trigger', {
+        method: 'POST',
+        body: { items },
+      });
       return res.runIds.map((id) => makeRunHandle(id, instance));
     },
 
     async cancelRun(runId) {
-      await ensureReady();
-      await kernel.cancelRun(runId);
+      await http.request(`/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
     },
 
-    async retryRun(runId) {
-      await ensureReady();
-      return kernel.retryRun(runId);
+    retryRun(runId) {
+      return http.request<{ runId: string }>(`/runs/${encodeURIComponent(runId)}/retry`, {
+        method: 'POST',
+      });
     },
 
-    async getRun(runId) {
-      await ensureReady();
-      return kernel.getRun(runId);
+    getRun(runId) {
+      return http.request<RunRecord>(`/runs/${encodeURIComponent(runId)}/record`);
     },
 
-    async getRunDetail(runId) {
-      await ensureReady();
-      return kernel.getRunDetail(runId);
+    getRunDetail(runId) {
+      return http.request<RunDetailResult>(`/runs/${encodeURIComponent(runId)}`);
     },
 
     async waitForResult(runId, opts) {
-      await ensureReady();
-      return kernel.waitForResult(runId, opts);
+      const deadline = Date.now() + (opts?.timeoutMs ?? 30_000);
+      const pollMs = opts?.pollMs;
+      for (;;) {
+        // Each hop long-polls server-side for at most MAX_LONGPOLL_MS; the
+        // remaining budget can be 0, which asks for a single immediate read.
+        const slice = Math.max(0, Math.min(deadline - Date.now(), MAX_LONGPOLL_MS));
+        const query = new URLSearchParams({ timeoutMs: String(slice) });
+        if (pollMs !== undefined) query.set('pollMs', String(pollMs));
+        const res = await http.request<WaitResult>(
+          `/runs/${encodeURIComponent(runId)}/result?${query}`,
+          // Give the request headroom over the server-side wait it asked for.
+          { timeoutMs: slice + 10_000 },
+        );
+        if (TERMINAL.includes(res.status) || Date.now() >= deadline) return res;
+      }
+    },
+
+    health() {
+      return http.request<{ ok: boolean; version: string }>('/health');
     },
 
     setDefault() {
-      defaultInstance = instance;
+      registry.defaultInstance = instance;
     },
   };
 
-  // The first instance becomes the module default (P1: no multi-instance
-  // routing; later instances may take over explicitly via setDefault()).
-  defaultInstance ??= instance;
+  // The first instance becomes the default (later instances may take over
+  // explicitly via setDefault()).
+  registry.defaultInstance ??= instance;
 
   return instance;
 }

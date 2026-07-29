@@ -1,10 +1,10 @@
 /* =============================================================================
-   @better-trigger/example-basic — end-to-end smoke test (embedded runtime).
+   @better-trigger/example-basic — end-to-end smoke test.
 
-   Fully self-contained: zero HTTP, one process. The script provisions its own
-   database (DROP/CREATE better_trigger_e2e against the <base>/postgres admin
-   db), starts an embedded worker via betterTrigger().start() and runs every
-   check through the instance API:
+   Fully self-contained. The script provisions its own database (DROP/CREATE
+   better_trigger_e2e against the <base>/postgres admin db), spawns a worker
+   daemon over src/tasks.ts, and runs every check through the HTTP client —
+   exactly the path an application takes:
      - trigger.trigger / handle.result   (enqueue + await runs)
      - trigger.getRunDetail / getRun     (poll runs; .steps asserts the ledger)
      - direct SQL on tasks / schedules   (registration + cron assertions)
@@ -17,18 +17,25 @@
                    default postgres://localhost:5432/better_trigger
      BT_E2E_DB     override the provisioned database name (default
                    better_trigger_e2e)
+     BT_E2E_PORT   port the daemon listens on (default 4901)
    ============================================================================= */
-import { createKernel } from '@better-trigger/core';
+import { fileURLToPath } from 'node:url';
 import { createPool } from '@better-trigger/db';
-import { betterTrigger, type RunStatus, type TriggerOptions } from 'better-trigger';
-import type { RunDetailResult } from '@better-trigger/core';
-import { allTasks } from '../src/tasks';
+import {
+  betterTrigger,
+  type RunDetailResult,
+  type RunStatus,
+  type TriggerOptions,
+} from 'better-trigger';
+import { startDaemon } from './daemon';
 
 /* ---------------------------------------------------------------------------
  * Config + database provisioning
  * ------------------------------------------------------------------------- */
 const RAW_URL = process.env.DATABASE_URL ?? 'postgres://localhost:5432/better_trigger';
 const E2E_DB = process.env.BT_E2E_DB ?? 'better_trigger_e2e';
+const PORT = Number(process.env.BT_E2E_PORT ?? 4901);
+const TASKS_MODULE = fileURLToPath(new URL('../src/tasks.ts', import.meta.url));
 
 /** Strip the database path off a postgres URL → protocol://user@host:port */
 function baseUrl(u: string): string {
@@ -81,7 +88,7 @@ function assertEqual(actual: unknown, expected: unknown, label: string): void {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /* ---------------------------------------------------------------------------
- * Provision the e2e database, then boot the embedded instance + worker
+ * Provision the e2e database, then boot the worker daemon
  * ------------------------------------------------------------------------- */
 {
   const admin = createPool(`${BASE}/postgres`);
@@ -90,14 +97,20 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   await admin.end();
 }
 
-const trigger = betterTrigger({ database: { connectionString: DB_URL } });
-const worker = await trigger.start({ tasks: allTasks, concurrency: 5 });
+// One daemon: it migrates, loads src/tasks.ts, executes, and serves the API.
+const daemon = await startDaemon({
+  databaseUrl: DB_URL,
+  port: PORT,
+  tasks: TASKS_MODULE,
+  concurrency: 5,
+  migrate: true,
+});
 
-/** Raw pool for assertions with no instance API (tasks / schedules tables). */
+/** The client under test — HTTP only, exactly what an app would hold. */
+const trigger = betterTrigger({ url: daemon.url! });
+
+/** Raw pool for assertions with no client API (tasks / schedules tables). */
 const pool = createPool(DB_URL);
-/** Kernel client for the idempotency check (the facade's RunHandle hides the
- *  `idempotent` flag the original assertion needs). */
-const kernel = createKernel({ pool });
 
 /* ---------------------------------------------------------------------------
  * Trigger + poll helpers
@@ -153,13 +166,17 @@ async function triggerAndPoll(
  * ------------------------------------------------------------------------- */
 
 async function checkReady(): Promise<void> {
-  await check('embedded instance is ready (migrated db + worker registered)', async () => {
+  await check('daemon is ready (health + migrated db + worker registered)', async () => {
+    const health = await trigger.health();
+    assert(health.ok === true, 'GET /health must report ok');
+
     const h = await pool.query('SELECT 1 AS ok');
     assert(h.rows[0]?.ok === 1, 'database must answer SELECT 1');
-    assert(
-      typeof worker.workerId === 'string' && worker.workerId.length > 0,
-      'trigger.start() must return a registered workerId',
+
+    const w = await pool.query<{ id: string; status: string }>(
+      `SELECT id, status FROM workers WHERE status = 'online'`,
     );
+    assert(w.rows.length === 1, `expected 1 online worker row, got ${w.rows.length}`);
   });
 }
 
@@ -319,20 +336,11 @@ async function checkFanOut(): Promise<void> {
 async function checkIdempotency(): Promise<void> {
   await check('idempotency key: second trigger returns same runId + idempotent:true', async () => {
     const key = `idem-${Date.now()}`;
-    // The kernel client is used here on purpose: the facade's RunHandle only
-    // carries the run id, while this check also asserts the idempotent flag.
-    const first = await kernel.trigger({
-      taskId: 'hello-world',
-      payload: { name: 'idem' },
-      options: { idempotencyKey: key },
-    });
-    const second = await kernel.trigger({
-      taskId: 'hello-world',
-      payload: { name: 'idem' },
-      options: { idempotencyKey: key },
-    });
+    const opts: TriggerOptions = { idempotencyKey: key };
+    const first = await trigger.trigger('hello-world', { name: 'idem' }, opts);
+    const second = await trigger.trigger('hello-world', { name: 'idem' }, opts);
 
-    assertEqual(second.runId, first.runId, 'idempotent runId should match the first');
+    assertEqual(second.id, first.id, 'idempotent runId should match the first');
     assert(second.idempotent === true, 'second trigger should report idempotent:true');
 
     // (first.idempotent should be false — it created the run.)
@@ -479,7 +487,7 @@ async function checkCronFires(): Promise<void> {
  * Main
  * ------------------------------------------------------------------------- */
 async function main(): Promise<void> {
-  console.log(`\nbetter-trigger e2e smoke test (embedded) → ${DB_URL}\n`);
+  console.log(`\nbetter-trigger e2e smoke test → ${daemon.url} (db ${DB_URL})\n`);
   const started = Date.now();
 
   await checkReady();
@@ -496,7 +504,7 @@ async function main(): Promise<void> {
   await checkSchedules();
   await checkCronFires();
 
-  await trigger.stop();
+  await daemon.stop();
   await pool.end();
 
   const totalMs = Date.now() - started;

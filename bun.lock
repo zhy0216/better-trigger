@@ -34,16 +34,40 @@
         "vite": "^5.4.8",
       },
     },
+    "apps/worker": {
+      "name": "@better-trigger/worker",
+      "version": "0.1.0",
+      "bin": {
+        "better-trigger-worker": "./dist/main.js",
+      },
+      "dependencies": {
+        "@better-trigger/core": "workspace:*",
+        "@better-trigger/db": "workspace:*",
+        "@better-trigger/kernel": "workspace:*",
+        "@hono/node-server": "^1.13.7",
+        "better-trigger": "workspace:*",
+        "hono": "^4.6.13",
+        "pg": "^8.13.1",
+      },
+      "devDependencies": {
+        "@types/node": "^22.7.4",
+        "@types/pg": "^8.11.10",
+        "tsup": "^8.3.0",
+        "typescript": "^5.6.2",
+      },
+    },
     "examples/basic": {
       "name": "@better-trigger/example-basic",
       "version": "0.1.0",
       "dependencies": {
-        "@better-trigger/core": "workspace:*",
-        "@better-trigger/db": "workspace:*",
         "better-trigger": "workspace:*",
         "zod": "^3.23",
       },
       "devDependencies": {
+        "@better-trigger/core": "workspace:*",
+        "@better-trigger/db": "workspace:*",
+        "@better-trigger/kernel": "workspace:*",
+        "@better-trigger/worker": "workspace:*",
         "@types/node": "^22.7.4",
         "typescript": "^5.6.2",
       },
@@ -51,13 +75,8 @@
     "packages/core": {
       "name": "@better-trigger/core",
       "version": "0.1.0",
-      "dependencies": {
-        "croner": "^9.0.0",
-        "pg": "^8.13.1",
-      },
       "devDependencies": {
         "@types/node": "^22.7.4",
-        "@types/pg": "^8.11.10",
         "tsup": "^8.3.0",
         "typescript": "^5.6.2",
       },
@@ -77,12 +96,12 @@
         "typescript": "^5.6.2",
       },
     },
-    "packages/sdk": {
-      "name": "better-trigger",
+    "packages/kernel": {
+      "name": "@better-trigger/kernel",
       "version": "0.1.0",
       "dependencies": {
         "@better-trigger/core": "workspace:*",
-        "@better-trigger/db": "workspace:*",
+        "croner": "^9.0.0",
         "pg": "^8.13.1",
       },
       "devDependencies": {
@@ -92,22 +111,14 @@
         "typescript": "^5.6.2",
       },
     },
-    "packages/server": {
-      "name": "@better-trigger/server",
+    "packages/sdk": {
+      "name": "better-trigger",
       "version": "0.1.0",
-      "bin": {
-        "better-trigger-server": "./dist/main.js",
-      },
       "dependencies": {
         "@better-trigger/core": "workspace:*",
-        "@better-trigger/db": "workspace:*",
-        "@hono/node-server": "^1.13.7",
-        "hono": "^4.6.13",
-        "pg": "^8.13.1",
       },
       "devDependencies": {
         "@types/node": "^22.7.4",
-        "@types/pg": "^8.11.10",
         "tsup": "^8.3.0",
         "typescript": "^5.6.2",
       },
@@ -160,9 +171,11 @@
 
     "@better-trigger/example-basic": ["@better-trigger/example-basic@workspace:examples/basic"],
 
-    "@better-trigger/server": ["@better-trigger/server@workspace:packages/server"],
+    "@better-trigger/kernel": ["@better-trigger/kernel@workspace:packages/kernel"],
 
     "@better-trigger/web": ["@better-trigger/web@workspace:apps/web"],
+
+    "@better-trigger/worker": ["@better-trigger/worker@workspace:apps/worker"],
 
     "@drizzle-team/brocli": ["@drizzle-team/brocli@0.10.2", "https://registry.npmmirror.com/@drizzle-team/brocli/-/brocli-0.10.2.tgz", {}, "sha512-z33Il7l5dKjUgGULTqBsQBQwckHh5AbIuxhdsIxDDiZAzBOrZO6q9ogcWC65kU382AfynTfgNumVcNIjuIua6w=="],
 

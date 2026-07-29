@@ -1,7 +1,7 @@
 {
   "name": "better-trigger",
   "version": "0.1.0",
-  "description": "Type-safe, self-hostable durable task orchestration for TypeScript. Declare tasks, run durable steps, wait for hours or days, all on top of a single server and Postgres.",
+  "description": "Type-safe, self-hostable durable task orchestration for TypeScript. Declare tasks, run durable steps, wait for hours or days. Your app only speaks HTTP — the worker daemon owns Postgres.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -11,6 +11,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./internal": {
+      "types": "./dist/internal.d.ts",
+      "import": "./dist/internal.js",
+      "require": "./dist/internal.cjs"
     }
   },
   "files": ["dist", "README.md"],
@@ -33,13 +38,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@better-trigger/core": "workspace:*",
-    "@better-trigger/db": "workspace:*",
-    "pg": "^8.13.1"
+    "@better-trigger/core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
-    "@types/pg": "^8.11.10",
     "tsup": "^8.3.0",
     "typescript": "^5.6.2"
   }

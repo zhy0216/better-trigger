@@ -1,10 +1,19 @@
 /* =============================================================================
    better-trigger — run context (RunCtx) shape + the AsyncLocalStorage that
    carries the active replay executor across user code.
+
+   The executor itself lives in @better-trigger/worker (it needs the kernel and
+   therefore Postgres); this package only declares the contract it fills. That
+   is the whole seam between "define + trigger tasks" (this package, HTTP only)
+   and "execute tasks" (the worker daemon).
    ============================================================================= */
-import { AsyncLocalStorage } from 'node:async_hooks';
-import type { RetryPolicy, TaskRunResult, TriggerOptions } from '@better-trigger/core';
-import type { Executor } from './executor';
+import type {
+  RetryPolicy,
+  TaskRunResult,
+  TriggerItem,
+  TriggerOptions,
+} from '@better-trigger/core';
+import { registry } from './registry';
 
 /** Per-step options. */
 export interface StepOptions {
@@ -70,10 +79,41 @@ export interface RunCtx {
 /** Re-export for convenience at the public surface. */
 export type { TaskRunResult, TriggerOptions };
 
-/** AsyncLocalStorage holding the executor for the currently running task fn. */
-export const executorStorage = new AsyncLocalStorage<Executor>();
+/* ---------------------------------------------------------------------------
+ * The executor contract (implemented by @better-trigger/worker)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The slice of the replay executor a TaskHandle calls when it is invoked from
+ * inside a run — the two paths that must become durable steps rather than
+ * plain HTTP triggers.
+ */
+export interface RunExecutor {
+  /** Durable batch-trigger step; returns the created child run ids. */
+  durableBatchTrigger(items: TriggerItem[], label: string): Promise<string[]>;
+  /** Durable trigger + suspend until the child reaches a terminal state. */
+  triggerAndWait<TOutput>(
+    taskId: string,
+    payload: unknown,
+    label: string,
+    options?: TriggerOptions,
+  ): Promise<TaskRunResult<TOutput>>;
+}
+
+/** The minimal shape of a task definition the executor consumes. */
+export interface ExecutorTask {
+  id: string;
+  retry?: RetryPolicy;
+  run: (payload: any, ctx: RunCtx) => unknown | Promise<unknown>;
+  /** Validate/parse the raw payload; throws SchemaValidationError on bad input. */
+  validate?: (payload: unknown) => Promise<unknown> | unknown;
+}
+
+/** AsyncLocalStorage holding the executor for the currently running task fn.
+ *  Process-wide (see ./registry) so it survives duplicate package copies. */
+export const executorStorage = registry.executorStorage;
 
 /** Returns the active executor if called inside a running task, else undefined. */
-export function currentExecutor(): Executor | undefined {
+export function currentExecutor(): RunExecutor | undefined {
   return executorStorage.getStore();
 }

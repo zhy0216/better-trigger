@@ -7,8 +7,9 @@
                            otherwise from the `run` function's first parameter.
 
    A TaskHandle exposes trigger / batchTrigger / triggerAndWait. When called
-   inside a running task (detected via AsyncLocalStorage) these become durable
-   steps; outside, they go through the default betterTrigger() instance.
+   inside a running task (detected via AsyncLocalStorage — i.e. inside the
+   worker daemon) these become durable steps; outside, they go over HTTP
+   through the default betterTrigger() instance.
    ============================================================================= */
 import type {
   CronConfig,
@@ -17,9 +18,8 @@ import type {
   TaskRunResult,
   TriggerOptions,
 } from '@better-trigger/core';
-import { currentExecutor, type RunCtx } from './context';
+import { currentExecutor, type ExecutorTask, type RunCtx } from './context';
 import { makeRunHandle, requireDefaultInstance, type RunHandle } from './instance';
-import type { ExecutorTask } from './executor';
 import { isSchema, validateSchema, type AnySchema, type InferSchema } from './schema';
 
 /** Concurrency config: a numeric limit plus an optional per-payload key fn. */

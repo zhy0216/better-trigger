@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "worker": "bun src/worker.ts",
+    "worker": "bunx --bun better-trigger-worker --tasks src/tasks.ts",
     "e2e": "bun scripts/e2e.ts",
     "crash": "bun scripts/crash.ts",
     "worker-lost": "bun scripts/worker-lost.ts",
@@ -13,12 +13,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@better-trigger/core": "workspace:*",
-    "@better-trigger/db": "workspace:*",
     "better-trigger": "workspace:*",
     "zod": "^3.23"
   },
   "devDependencies": {
+    "@better-trigger/core": "workspace:*",
+    "@better-trigger/db": "workspace:*",
+    "@better-trigger/kernel": "workspace:*",
+    "@better-trigger/worker": "workspace:*",
     "@types/node": "^22.7.4",
     "typescript": "^5.6.2"
   }

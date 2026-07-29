@@ -6,13 +6,17 @@
    that has NO retry budget left, the child must be failed as 'worker lost'
    AND its waiting parent must be woken (not left 'waiting' forever).
 
-   Flow: spawn worker-lost-worker.ts → trigger wl-parent (which triggerAndWaits
-   wl-child, retry { maxAttempts: 1 }) → SIGKILL the worker while the child is
-   'running' (parent 'waiting') → restart a worker. The new process's reaper
-   (500ms, lease 3s) finds the child's expired lease at max attempts →
-   terminalFail: child 'failed' with error 'worker lost', parent re-queued.
-   The new worker replays the parent; the cached trigger-and-wait step yields
-   ok:false and the parent completes.
+   Two daemons: an API node (no --tasks) that serves the harness's client and
+   keeps a reaper alive, plus an executor node (--tasks worker-lost-tasks.ts
+   --no-serve) that gets killed.
+
+   Flow: spawn the executor → trigger wl-parent (which triggerAndWaits
+   wl-child, retry { maxAttempts: 1 }) → SIGKILL the executor while the child
+   is 'running' (parent 'waiting') → restart an executor. A reaper (500ms,
+   lease 3s) finds the child's expired lease at max attempts → terminalFail:
+   child 'failed' with error 'worker lost', parent re-queued. The new executor
+   replays the parent; the cached trigger-and-wait step yields ok:false and the
+   parent completes.
 
    Asserts:
      - child ends 'failed' with error.message 'worker lost', attempt still 1
@@ -24,12 +28,12 @@
                         postgres://localhost:5432/better_trigger
      BT_WORKER_LOST_DB  override the provisioned database name (default
                         better_trigger_worker_lost)
+     BT_WORKER_LOST_PORT  port the API node listens on (default 4904)
    ============================================================================= */
-import { spawn, type ChildProcess } from 'node:child_process';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createPool, migrate } from '@better-trigger/db';
 import { betterTrigger } from 'better-trigger';
+import { spawnDaemon, startDaemon, type Daemon } from './daemon';
 
 /* ---------------------------------------------------------------------------
  * Config + database provisioning
@@ -45,9 +49,9 @@ function baseUrl(u: string): string {
 
 const BASE = baseUrl(RAW_URL);
 const DB_URL = `${BASE}/${WL_DB}`;
+const PORT = Number(process.env.BT_WORKER_LOST_PORT ?? 4904);
 
-const scriptsDir = fileURLToPath(new URL('.', import.meta.url));
-const workerScript = join(scriptsDir, 'worker-lost-worker.ts');
+const tasksModule = fileURLToPath(new URL('./worker-lost-tasks.ts', import.meta.url));
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -67,25 +71,17 @@ function ok(msg: string): void {
 }
 
 /* ---------------------------------------------------------------------------
- * Worker process control
+ * Executor node control (short lease + fast reaper keep recovery quick)
  * ------------------------------------------------------------------------- */
-function spawnWorker(): ChildProcess {
-  const proc = spawn('bun', [workerScript], {
-    env: { ...process.env, DATABASE_URL: DB_URL },
-    stdio: ['ignore', 'inherit', 'inherit'],
+function spawnExecutor(): Daemon {
+  return spawnDaemon({
+    databaseUrl: DB_URL,
+    tasks: tasksModule,
+    serve: false,
+    concurrency: 2,
+    leaseMs: 3_000,
+    reaperIntervalMs: 500,
   });
-  proc.on('error', (err) => fail(`failed to spawn worker-lost-worker: ${err.message}`));
-  return proc;
-}
-
-function waitExit(proc: ChildProcess): Promise<void> {
-  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
-  return new Promise((r) => proc.once('exit', () => r()));
-}
-
-async function sigkill(proc: ChildProcess): Promise<void> {
-  proc.kill('SIGKILL');
-  await waitExit(proc);
 }
 
 async function waitFor(label: string, timeoutMs: number, cond: () => Promise<boolean>): Promise<void> {
@@ -109,17 +105,20 @@ console.log(`\nbetter-trigger worker-lost e2e → ${DB_URL}\n`);
   await admin.end();
 }
 
-// Migrate up front so the client instance and the spawned worker never race
-// on migrations.
+// Migrate up front so the daemons never race on migrations.
 const pool = createPool(DB_URL);
 await migrate(pool);
 
-// Client-only instance: triggers + polls, never start()s a worker (the only
-// orchestrator/reaper in play lives inside the worker processes).
-const client = betterTrigger({ database: { connectionString: DB_URL }, migrations: 'manual' });
+// The API node: serves the client and keeps a reaper alive across the kill.
+const api = await startDaemon({
+  databaseUrl: DB_URL,
+  port: PORT,
+  reaperIntervalMs: 500,
+});
+const client = betterTrigger({ url: api.url! });
 
-/* -- boot worker #1 and trigger the parent --------------------------------- */
-let proc = spawnWorker();
+/* -- boot executor #1 and trigger the parent ------------------------------- */
+let proc = spawnExecutor();
 
 await waitFor('wl-parent + wl-child registered', 30_000, async () => {
   try {
@@ -131,7 +130,7 @@ await waitFor('wl-parent + wl-child registered', 30_000, async () => {
     return false;
   }
 });
-ok('worker #1 up, wl-parent + wl-child registered');
+ok(`executor #1 up, wl-parent + wl-child registered`);
 
 const handle = await client.trigger('wl-parent', { note: 'lose-the-worker' });
 console.log(`  parent run: ${handle.id}`);
@@ -155,11 +154,11 @@ assert(
   parentAtKill.status === 'waiting',
   `parent should be 'waiting' at kill time, got '${parentAtKill.status}'`,
 );
-await sigkill(proc);
+await proc.kill();
 ok(`SIGKILL while child ${childRunId} is 'running' (parent 'waiting')`);
 
 /* -- restart: reaper terminal-fails the child, parent wakes + completes ----- */
-proc = spawnWorker();
+proc = spawnExecutor();
 const result = await client.waitForResult(handle.id, { timeoutMs: 60_000 });
 
 assert(result.status === 'completed', `parent should complete, got '${result.status}'`);
@@ -201,13 +200,8 @@ assert(taw.length === 1, `expected 1 completed 'trigger-and-wait' step, got ${ta
 ok(`parent has exactly 1 completed 'trigger-and-wait' step`);
 
 /* -- teardown -------------------------------------------------------------- */
-proc.kill('SIGTERM'); // graceful: drain + stop loops
-const graceful = Promise.race([waitExit(proc).then(() => true), sleep(10_000).then(() => false)]);
-if (!(await graceful)) {
-  proc.kill('SIGKILL');
-  await waitExit(proc);
-}
-await client.stop();
+await proc.stop(); // graceful: drain + stop loops
+await api.stop();
 await pool.end();
 
 console.log(`\nAll ${passed} worker-lost checks passed.\n`);

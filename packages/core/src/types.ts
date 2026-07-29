@@ -148,3 +148,93 @@ export interface LogEntry {
   data?: unknown;
   stepSeq?: number;
 }
+
+/* ---------------------------------------------------------------------------
+ * Read models
+ *
+ * The shapes the worker returns from its read endpoints. They are declared
+ * here (not next to the SQL that builds them) because both sides of the wire
+ * need them: the kernel produces them, the SDK parses them out of JSON.
+ * Dates are ISO-8601 strings, keys are camelCase — the JSON is these types.
+ * ------------------------------------------------------------------------- */
+
+/** Result of trigger(): the run id, plus whether an idempotency key hit. */
+export interface CreatedRun {
+  runId: string;
+  idempotent: boolean;
+}
+
+/** Full run record (camelCase, dates as ISO-8601 strings). */
+export interface RunRecord {
+  id: string;
+  taskId: string;
+  status: RunStatus;
+  trigger: TriggerType;
+  codeVersion: string | null;
+  env: string;
+  attempt: number;
+  maxAttempts: number;
+  /** finished − started for terminal runs; null while queued/running/waiting. */
+  durationMs: number | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  payload: unknown;
+  output: unknown;
+  error: SerializedError | null;
+  parentRunId: string | null;
+  idempotencyKey: string | null;
+  queuedAt: string | null;
+}
+
+export interface RunStepRecord {
+  seq: number;
+  kind: StepKind;
+  label: string | null;
+  status: StepStatus;
+  output: unknown;
+  error: SerializedError | null;
+  attempt: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface WaitRecord {
+  id: number;
+  stepSeq: number;
+  kind: WaitKind;
+  resumeAt: string | null;
+  childRunId: string | null;
+  status: 'pending' | 'completed' | 'canceled';
+}
+
+export interface LogRecord {
+  id: number;
+  stepSeq: number | null;
+  level: LogLevel;
+  message: string;
+  data: unknown;
+  ts: string;
+}
+
+/** Run + its full ledger (logs capped at 1000). */
+export interface RunDetailResult {
+  run: RunRecord;
+  steps: RunStepRecord[];
+  waits: WaitRecord[];
+  logs: LogRecord[];
+}
+
+export interface WaitForResultOptions {
+  /** Give up after this long (default 30s). */
+  timeoutMs?: number;
+  /** Poll interval (default 250ms). */
+  pollMs?: number;
+}
+
+/** Terminal outcome of a run — or its latest non-terminal status on timeout. */
+export interface WaitResult {
+  status: RunStatus;
+  output?: unknown;
+  error?: SerializedError;
+}

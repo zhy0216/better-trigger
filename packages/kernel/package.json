@@ -1,7 +1,7 @@
 {
-  "name": "@better-trigger/core",
+  "name": "@better-trigger/kernel",
   "version": "0.1.0",
-  "description": "better-trigger core — shared domain types, errors and duration/backoff utilities. Zero runtime dependencies (the Postgres kernel lives in @better-trigger/kernel).",
+  "description": "better-trigger kernel — durable execution engine over Postgres (queue, runs, orchestrator). Internal: consumed by apps/worker, never by the SDK.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -18,8 +18,14 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@better-trigger/core": "workspace:*",
+    "croner": "^9.0.0",
+    "pg": "^8.13.1"
+  },
   "devDependencies": {
     "@types/node": "^22.7.4",
+    "@types/pg": "^8.11.10",
     "tsup": "^8.3.0",
     "typescript": "^5.6.2"
   }

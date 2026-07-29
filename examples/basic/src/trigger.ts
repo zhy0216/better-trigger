@@ -1,17 +1,17 @@
 /* =============================================================================
-   @better-trigger/example-basic — the embedded better-trigger instance.
+   @better-trigger/example-basic — the better-trigger client.
 
-   One instance = one Postgres pool + one kernel. Every entrypoint (worker,
-   scripts) imports this shared instance; migrations run automatically before
-   the first operation that touches the database.
+   This is what application code holds: an HTTP client pointed at the worker
+   daemon. No database connection, no execution loop. Start the daemon with
 
-   Points at DATABASE_URL (default postgres://localhost:5432/better_trigger).
+     bun run worker        # better-trigger-worker --tasks src/tasks.ts
+
+   and it will load ./tasks.ts and run whatever this client triggers.
+
+   Points at BETTER_TRIGGER_URL (default http://localhost:4848).
    ============================================================================= */
 import { betterTrigger } from 'better-trigger';
 
 export const trigger = betterTrigger({
-  database: {
-    connectionString:
-      process.env.DATABASE_URL ?? 'postgres://localhost:5432/better_trigger',
-  },
+  url: process.env.BETTER_TRIGGER_URL ?? 'http://localhost:4848',
 });
