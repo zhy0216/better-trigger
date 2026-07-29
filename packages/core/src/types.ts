@@ -25,6 +25,17 @@ export type StepKind =
 /** Terminal state of a memoized step row. A 'failed' row is re-executed on replay. */
 export type StepStatus = 'completed' | 'failed';
 
+/**
+ * How strictly replay checks that a cached step row belongs to the call site
+ * that reached its seq.
+ *   'lenient' (default) — kind/label mismatch logs a warning, cache still used.
+ *   'strict'            — mismatch fails the run with a non-retryable
+ *                         AbortError instead of feeding a foreign row to the
+ *                         call site. Recommended for tasks with long waits,
+ *                         where an in-flight ledger can outlive several deploys.
+ */
+export type ReplayMode = 'lenient' | 'strict';
+
 /** What a suspended run is waiting on. */
 export type WaitKind = 'duration' | 'until' | 'run';
 

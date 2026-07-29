@@ -56,7 +56,9 @@ runs         id text PK ('run_'+随机) · task_id text · status text
              ('queued'|'running'|'waiting'|'completed'|'failed'|'canceled')
              · payload jsonb · output jsonb · error jsonb({message,stack?,name?})
              · trigger_type text('api'|'schedule'|'subtask'|'retry'|'dashboard')
-             · parent_run_id text · code_version text · idempotency_key text
+             · parent_run_id text · idempotency_key text
+             · code_version text(创建时从 tasks.latest_code_version 盖章;**不是 pin**,
+               claim 不按它过滤,仅用于事后追溯"这份账本是按哪版代码写的")
              · attempt int DEFAULT 1 · max_attempts int(锁定触发时的策略)
              · queued_at/started_at/finished_at/created_at/updated_at timestamptz
              UNIQUE (task_id, idempotency_key)(部分索引 WHERE idempotency_key IS NOT NULL)
@@ -89,8 +91,11 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 
 ### 3.1 重放与位置键
 - 每次执行 task 函数,SDK 维护一个**单调递增 seq 计数器**(从 0 开始),`ctx.step/wait/triggerAndWait/batchTrigger/now/random/uuid` **每调用一次消耗一个 seq**。
-- dequeue 响应携带该 run 已完成 steps 快照;执行到 seq 时若快照中存在 `status='completed'` 的行 → **直接返回缓存 output,不执行 fn**。label 不一致只 `logger.warn`(软漂移),不报错。
+- dequeue 响应携带该 run 已完成 steps 快照;执行到 seq 时若快照中存在 `status='completed'` 的行 → **直接返回缓存 output,不执行 fn**。
 - 快照中 `status='failed'` 的行视为未完成(重试时重新执行,结果 upsert 覆盖)。
+- **漂移检查**:命中缓存前比对该行与调用点。`kind` 不一致(如 wait 行落到 `ctx.step()` 上)是硬信号——它由原语推导,不来自用户文本;`label` 不一致是软信号(改名无害,插入有害)。
+  - `replay:'lenient'`(默认):`logger.warn` 一条 `replay drift at seq N: ...`,仍使用该缓存行。
+  - `replay:'strict'`(task 级声明):抛 `AbortError` 终态失败,不重试(重试只会重放同一份错位账本)。含长 `ctx.wait` 的 task 建议开启——其账本可能跨越多次发版。
 
 ### 3.2 挂起(Suspend)
 - `wait.for(d)` / `wait.until(date)`:SDK 先 `POST /runs/:id/suspend {seq, kind, resumeAt}`,成功后抛内部 `SuspendSignal`;执行器捕获后**静默结束本次执行**(不算失败),继续 poll 下一个 run。
@@ -143,7 +148,7 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 
 | 方法路径 | 请求体 → 响应 |
 |---|---|
-| `POST /workers/register` | `{ name?, codeVersion, runtime:'self-host', concurrency, tasks: TaskManifest[] }` → `{ workerId, heartbeatIntervalMs:15000, visibilityTimeoutMs:60000 }`。同时 upsert tasks 表 + schedules。 |
+| `POST /workers/register` | `{ name?, codeVersion, runtime:'self-host', concurrency, tasks: TaskManifest[] }` → `{ workerId, heartbeatIntervalMs:15000, visibilityTimeoutMs:60000 }`。同时 upsert tasks 表 + schedules。`codeVersion` 取 `BETTER_TRIGGER_VERSION`,否则由「task id + cron + **run 函数体源码指纹**」哈希得出——改实现即变版本(打包器/压缩器不同也会变;要稳定就显式设环境变量)。 |
 | `POST /workers/:id/heartbeat` | `{ runIds: string[] }` → `{ ok:true, cancelRunIds: string[] }` |
 | `GET /dequeue?workerId=&timeoutMs=` | → `{ run: null }` 或 `{ run: { id, taskId, payload, attempt, maxAttempts, codeVersion, env, steps: StepSnapshot[] } }` |
 | `POST /runs/:id/steps` | `{ seq, kind, label, status:'completed'\|'failed', output?, error?, attempt, startedAt, finishedAt, workerId }` → `{ ok:true }`;run 非 running → 409 `{code:'run_not_running'}` |
@@ -182,6 +187,7 @@ export const onboarding = task({
   id: "user-onboarding",
   schema,                      // 可选,Standard Schema 或 {parse}/{safeParse} 鸭子类型(zod 兼容,不强依赖)
   retry: { maxAttempts: 5 },
+  replay: "strict",            // 可选,默认 'lenient';账本与调用点错位时终态失败而非套用旧行(见 3.1)
   concurrency: { limit: 10, key: (p) => p.userId },   // key 仅在 SDK 侧触发时生效
   run: async (payload, ctx) => {
     const u = await ctx.step("create-user", () => createUser(payload));

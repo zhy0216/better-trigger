@@ -207,15 +207,53 @@ export class Executor implements RunExecutor {
     return this.seq++;
   }
 
-  /** A snapshot row counts as a cache hit only if it completed. */
-  private cached(seq: number, expectedLabel: string | null): StepSnapshot | undefined {
+  /**
+   * A snapshot row counts as a cache hit only if it completed.
+   *
+   * Before handing the row back, check that it actually belongs to this call
+   * site. Replay keys steps by position alone, so a run() edited while runs are
+   * in flight (the long-wait case: a ledger can outlive several deploys) will
+   * happily feed seq N's row to whatever primitive now sits at seq N. `kind` is
+   * the reliable signal — it is derived from the primitive, not from user text,
+   * so a wait row arriving at a ctx.step() call is unambiguous corruption.
+   * `label` is the softer one (renames are innocent, inserts are not).
+   *
+   * Under replay:'strict' either mismatch aborts the run; the default stays
+   * lenient (warn + use the row) for backward compatibility.
+   */
+  private cached(
+    seq: number,
+    expectedKind: StepKind,
+    expectedLabel: string | null,
+  ): StepSnapshot | undefined {
     const snap = this.snapshot.get(seq);
     if (!snap || snap.status !== 'completed') return undefined;
-    if (expectedLabel != null && snap.label != null && snap.label !== expectedLabel) {
-      // Soft drift: label changed but position matched. Warn, do not fail.
-      this.log('warn', `step label drift at seq ${seq}: "${snap.label}" → "${expectedLabel}"`);
+
+    if (snap.kind !== expectedKind) {
+      this.onReplayDrift(seq, `kind '${snap.kind}' → '${expectedKind}'`);
+    } else if (expectedLabel != null && snap.label != null && snap.label !== expectedLabel) {
+      this.onReplayDrift(seq, `label "${snap.label}" → "${expectedLabel}"`);
     }
     return snap;
+  }
+
+  /**
+   * Snapshot row and call site disagree at the same seq. Strict → non-retryable
+   * AbortError (retrying replays the same mismatched ledger, so a backoff loop
+   * would only delay the same wrong answer). Lenient → warn and carry on.
+   */
+  private onReplayDrift(seq: number, detail: string): void {
+    const summary = `replay drift at seq ${seq}: ${detail}`;
+    if (this.task.replay === 'strict') {
+      throw new AbortError(
+        `${summary} — the recorded ledger no longer matches this task's code ` +
+          `(a durable primitive was inserted, removed or reordered). ` +
+          `task "${this.task.id}" declares replay:'strict', so run ${this.run.id} is failed ` +
+          `instead of replaying a foreign step row. Retry it under a new task id, ` +
+          `or cancel it if the work is obsolete.`,
+      );
+    }
+    this.log('warn', summary);
   }
 
   private checkCanceled(): void {
@@ -254,7 +292,7 @@ export class Executor implements RunExecutor {
     this.assertNotNested(`ctx.step("${label}")`);
     const seq = this.nextSeq();
 
-    const hit = this.cached(seq, label);
+    const hit = this.cached(seq, 'step', label);
     if (hit) return hit.output as T;
 
     this.checkCanceled();
@@ -359,7 +397,7 @@ export class Executor implements RunExecutor {
     this.assertNotNested(`ctx.wait.${kind === 'duration' ? 'for' : 'until'}()`);
     const seq = this.nextSeq();
 
-    if (this.cached(seq, null)) return; // already resumed on a prior replay
+    if (this.cached(seq, 'wait', null)) return; // already resumed on a prior replay
     this.checkCanceled();
 
     let resumed: boolean;
@@ -397,7 +435,7 @@ export class Executor implements RunExecutor {
     this.assertNotNested(`triggerAndWait("${taskId}")`);
     const seq = this.nextSeq();
 
-    const hit = this.cached(seq, label);
+    const hit = this.cached(seq, 'trigger-and-wait', label);
     if (hit) return hit.output as TaskRunResult<TOutput>;
     this.checkCanceled();
 
@@ -432,7 +470,7 @@ export class Executor implements RunExecutor {
     this.assertNotNested(`trigger/batchTrigger (${label})`);
     const seq = this.nextSeq();
 
-    const hit = this.cached(seq, label);
+    const hit = this.cached(seq, 'batch-trigger', label);
     if (hit) {
       const out = hit.output as { runIds?: string[] } | string[];
       return Array.isArray(out) ? out : (out.runIds ?? []);
@@ -470,7 +508,7 @@ export class Executor implements RunExecutor {
     this.assertNotNested(`ctx.${kind}()`);
     const seq = this.nextSeq();
 
-    const hit = this.cached(seq, null);
+    const hit = this.cached(seq, kind, null);
     if (hit) {
       if (kind === 'now') return new Date(hit.output as string);
       return hit.output as number | string;

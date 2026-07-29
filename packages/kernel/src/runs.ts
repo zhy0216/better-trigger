@@ -223,12 +223,17 @@ export async function createRunIn(
     }
   }
 
-  // Resolve task config (retry policy, concurrency limit/key default).
+  // Resolve task config (retry policy, concurrency limit/key default, and the
+  // code version currently registered for the task — stamped on the run below).
   const taskRes = await client.query<{
     id: string;
     retry: RetryPolicy | null;
     concurrency_limit: number | null;
-  }>(`SELECT id, retry, concurrency_limit FROM tasks WHERE id = $1`, [args.taskId]);
+    latest_code_version: string | null;
+  }>(
+    `SELECT id, retry, concurrency_limit, latest_code_version FROM tasks WHERE id = $1`,
+    [args.taskId],
+  );
   const task = taskRes.rows[0];
   if (!task && args.requireTask) {
     throw new TaskNotFoundError(`task ${args.taskId} not registered`);
@@ -259,14 +264,16 @@ export async function createRunIn(
   const insertSql = opts.idempotencyKey
     ? `INSERT INTO runs
          (id, task_id, status, payload, trigger_type, parent_run_id,
-          idempotency_key, concurrency_key, attempt, max_attempts, env, queued_at, created_at, updated_at)
-       VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,1,$8,$9, now(), now(), now())
+          idempotency_key, concurrency_key, attempt, max_attempts, env, code_version,
+          queued_at, created_at, updated_at)
+       VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,1,$8,$9,$10, now(), now(), now())
        ON CONFLICT (task_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING id`
     : `INSERT INTO runs
          (id, task_id, status, payload, trigger_type, parent_run_id,
-          idempotency_key, concurrency_key, attempt, max_attempts, env, queued_at, created_at, updated_at)
-       VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,1,$8,$9, now(), now(), now())
+          idempotency_key, concurrency_key, attempt, max_attempts, env, code_version,
+          queued_at, created_at, updated_at)
+       VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,1,$8,$9,$10, now(), now(), now())
        RETURNING id`;
   const inserted = await client.query<{ id: string }>(insertSql, [
     id,
@@ -278,6 +285,11 @@ export async function createRunIn(
     concurrencyKey,
     policy.maxAttempts,
     env,
+    // The version registered when the run was created — NOT a pin: claimRuns
+    // does not filter on it, so a redeployed worker still picks this run up.
+    // It exists so "which code shape was this run's ledger written against?"
+    // is answerable after the fact (dashboard, drift post-mortems).
+    task?.latest_code_version ?? null,
   ]);
 
   // No row returned ⇒ idempotency conflict: return the pre-existing run and do

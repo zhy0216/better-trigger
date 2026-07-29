@@ -13,6 +13,7 @@
    ============================================================================= */
 import type {
   CronConfig,
+  ReplayMode,
   RetryPolicy,
   TaskManifest,
   TaskRunResult,
@@ -74,6 +75,7 @@ export interface ResolvedTaskDefinition<TPayload, TOutput> {
   filePath?: string;
   cron?: CronConfig;
   retry?: RetryPolicy;
+  replay?: ReplayMode;
   concurrency?: ConcurrencyConfig<TPayload>;
   schema?: AnySchema<TPayload>;
   run: (payload: TPayload, ctx: RunCtx) => TOutput | Promise<TOutput>;
@@ -89,6 +91,12 @@ interface TaskConfigWithSchema<TSchema extends AnySchema, TOutput> {
   filePath?: string;
   cron?: CronInput;
   retry?: RetryPolicy;
+  /**
+   * Replay strictness (default 'lenient'). 'strict' fails the run instead of
+   * feeding a cached step row to a call site whose kind/label no longer match —
+   * use it on tasks whose runs can outlive a deploy (long ctx.wait).
+   */
+  replay?: ReplayMode;
   schema: TSchema;
   concurrency?: ConcurrencyConfig<InferSchema<TSchema>>;
   run: (payload: InferSchema<TSchema>, ctx: RunCtx) => TOutput | Promise<TOutput>;
@@ -102,6 +110,8 @@ interface TaskConfigNoSchema<TPayload, TOutput> {
   filePath?: string;
   cron?: CronInput;
   retry?: RetryPolicy;
+  /** Replay strictness (default 'lenient'). See TaskConfigWithSchema.replay. */
+  replay?: ReplayMode;
   schema?: undefined;
   concurrency?: ConcurrencyConfig<TPayload>;
   run: (payload: TPayload, ctx: RunCtx) => TOutput | Promise<TOutput>;
@@ -159,6 +169,13 @@ function normalizeDefinition(
       `task("${id}"): "schema" must implement Standard Schema (~standard) or expose parse/safeParse`,
     );
   }
+  if (
+    config.replay !== undefined &&
+    config.replay !== 'lenient' &&
+    config.replay !== 'strict'
+  ) {
+    throw new Error(`task("${id}"): "replay" must be 'lenient' or 'strict'`);
+  }
 
   return {
     id,
@@ -167,6 +184,7 @@ function normalizeDefinition(
     filePath: config.filePath as string | undefined,
     cron: normalizeCron(config.cron as CronInput | undefined),
     retry: config.retry as RetryPolicy | undefined,
+    replay: config.replay as ReplayMode | undefined,
     concurrency: config.concurrency as ConcurrencyConfig<any> | undefined,
     schema: config.schema as AnySchema<any> | undefined,
     run: config.run as (payload: any, ctx: RunCtx) => unknown,
@@ -260,6 +278,7 @@ export function toExecutorTask(
   return {
     id: def.id,
     retry: def.retry,
+    replay: def.replay,
     run: def.run,
     validate: def.schema
       ? (payload: unknown) => validateSchema(def.schema!, payload)

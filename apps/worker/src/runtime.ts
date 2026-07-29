@@ -190,8 +190,19 @@ export async function startWorkerRuntime(
 }
 
 /**
- * Derive a stable code version from env or from a hash of sorted task ids + cron.
- * Same task set + cron config → same version across processes.
+ * Derive a stable code version from env, or from a hash of the task set: ids +
+ * cron config + **a fingerprint of each run function's source**.
+ *
+ * The body hash is the point: replay keys steps by position, so editing a run()
+ * — inserting a step, moving a wait — is exactly what invalidates in-flight
+ * ledgers, and a version that ignores the body reports "same code" across
+ * precisely the deploy that could corrupt them. Same source on two processes →
+ * same version; a changed body → a new version, visible on runs.code_version
+ * and workers.code_version.
+ *
+ * Caveat: source text also changes under a different bundler/minifier without
+ * any semantic change, so a rebuild can churn the version. Set
+ * BETTER_TRIGGER_VERSION (git sha, image tag) to take over completely.
  */
 export function resolveCodeVersion(
   definitions: Array<ResolvedTaskDefinition<any, any>>,
@@ -203,12 +214,19 @@ export function resolveCodeVersion(
   const signature = definitions
     .map((d) => {
       const cron = d.cron ? `${d.cron.pattern}@${d.cron.timezone ?? ''}` : '';
-      return `${d.id}|${cron}`;
+      return `${d.id}|${cron}|${fingerprintFn(d.run)}`;
     })
     .sort()
     .join('\n');
   const hash = createHash('sha256').update(signature).digest('hex').slice(0, 12);
   return `v_${hash}`;
+}
+
+/** Short hash of a function's source. Native/bound fns hash their placeholder
+ *  source ("[native code]") — stable, just not discriminating. */
+function fingerprintFn(fn: unknown): string {
+  const source = typeof fn === 'function' ? Function.prototype.toString.call(fn) : String(fn);
+  return createHash('sha256').update(source).digest('hex').slice(0, 16);
 }
 
 /** Multiply a delay by [0.8, 1.2) so idle slots do not poll in lockstep. */

@@ -10,6 +10,7 @@
     "crash": "bun scripts/crash.ts",
     "worker-lost": "bun scripts/worker-lost.ts",
     "fencing": "bun scripts/fencing.ts",
+    "replay-drift": "bun scripts/replay-drift.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

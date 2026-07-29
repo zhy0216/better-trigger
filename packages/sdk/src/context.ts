@@ -8,6 +8,7 @@
    and "execute tasks" (the worker daemon).
    ============================================================================= */
 import type {
+  ReplayMode,
   RetryPolicy,
   TaskRunResult,
   TriggerItem,
@@ -104,6 +105,8 @@ export interface RunExecutor {
 export interface ExecutorTask {
   id: string;
   retry?: RetryPolicy;
+  /** Replay strictness for snapshot/call-site mismatches. Default 'lenient'. */
+  replay?: ReplayMode;
   run: (payload: any, ctx: RunCtx) => unknown | Promise<unknown>;
   /** Validate/parse the raw payload; throws SchemaValidationError on bad input. */
   validate?: (payload: unknown) => Promise<unknown> | unknown;
