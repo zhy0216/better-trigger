@@ -22,7 +22,7 @@ function stubFetch(res: Response | (() => Response | Promise<Response>)) {
   return { fetch: fn as unknown as typeof globalThis.fetch, calls };
 }
 
-/** JSON error envelope, exactly what apps/worker's onError emits. */
+/** JSON error envelope, exactly what apps/worker's onError emits (dev branch). */
 function errorResponse(status: number, code: string, message: string): Response {
   return new Response(JSON.stringify({ error: { code, message } }), {
     status,
@@ -87,6 +87,7 @@ describe('HttpClient — error mapping', () => {
     ['stale_lease', 409],
     ['task_not_found', 404],
     ['bad_request', 400],
+    ['payload_too_large', 413],
     ['conflict', 409],
   ] as const;
 
@@ -122,6 +123,33 @@ describe('HttpClient — error mapping', () => {
     expect((err as HttpError).status).toBe(500);
     expect((err as HttpError).code).toBe('internal_error');
     expect((err as HttpError).message).toBe('unhandled error');
+  });
+
+  it('keeps the requestId a production 500 carries, so the log can be grepped', async () => {
+    // What apps/worker emits under NODE_ENV=production: fixed message + the id
+    // that also tags the server-side log line. Losing it here would leave SDK
+    // callers with no way to match a failure against the daemon's log.
+    const { fetch } = stubFetch(
+      new Response(
+        JSON.stringify({
+          error: { code: 'internal_error', message: 'internal error', requestId: 'req_abc123' },
+        }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+    const err = await client(fetch).request('/runs').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).requestId).toBe('req_abc123');
+    expect((err as HttpError).message).toContain('req_abc123');
+  });
+
+  it('leaves requestId null when the server did not send one', async () => {
+    const { fetch } = stubFetch(errorResponse(500, 'internal_error', 'boom: pg relation "runs"'));
+    const err = await client(fetch).request('/runs').catch((e: unknown) => e);
+
+    expect((err as HttpError).requestId).toBeNull();
+    expect((err as HttpError).message).toBe('boom: pg relation "runs"');
   });
 
   it('does not promote an unknown code to a KernelError, whatever the status', async () => {

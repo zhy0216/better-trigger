@@ -126,7 +126,10 @@ const trigger = betterTrigger({
 Failures the daemon reports with a kernel error code (`task_not_found`,
 `run_not_running`, `stale_lease`, …) arrive as `KernelError` with that same
 `code`. Transport failures, auth failures and 5xx arrive as `HttpError` with
-`status` and `code`.
+`status` and `code`. A daemon running with `NODE_ENV=production` answers a 500
+with a generic message and a correlation id instead of the internal error text;
+that id shows up as `HttpError.requestId` (and inside `err.message`) — grep the
+daemon's log for it to get the real error.
 
 ---
 

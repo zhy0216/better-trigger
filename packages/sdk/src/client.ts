@@ -6,10 +6,10 @@
    kernel, nothing that has to run in the same process as the queue.
 
    Error mapping is the point of interest. The daemon answers failures with
-   { error: { code, message } }; codes that belong to the kernel error family
-   are rethrown as KernelError so `err.code === 'task_not_found'` reads the
-   same whether it crossed a wire or not. Everything else (transport failures,
-   401s, 5xx) becomes HttpError.
+   { error: { code, message, requestId? } }; codes that belong to the kernel
+   error family are rethrown as KernelError so `err.code === 'task_not_found'`
+   reads the same whether it crossed a wire or not. Everything else (transport
+   failures, 401s, 5xx) becomes HttpError.
    ============================================================================= */
 import { KernelError, type KernelErrorCode } from '@better-trigger/core';
 
@@ -21,8 +21,16 @@ export class HttpError extends Error {
     /** Machine-readable code from the error envelope, when the server sent one. */
     readonly code: string | null,
     message: string,
+    /**
+     * Correlation id the daemon puts on a production `internal_error`, where
+     * the message is generic: grep the server log for it to get the real error.
+     * Null whenever the server sent none.
+     */
+    readonly requestId: string | null = null,
   ) {
-    super(message);
+    // Carried in the message too — a caller that only logs `err.message` still
+    // ends up with something it can match against the daemon's log.
+    super(requestId ? `${message} (requestId: ${requestId})` : message);
     this.name = 'HttpError';
   }
 }
@@ -34,6 +42,7 @@ const KERNEL_CODES = new Set<string>([
   'stale_lease',
   'task_not_found',
   'bad_request',
+  'payload_too_large',
   'conflict',
 ]);
 
@@ -132,17 +141,23 @@ export class HttpClient {
 async function toError(res: Response): Promise<Error> {
   let message = res.statusText || `HTTP ${res.status}`;
   let code: string | null = null;
+  let requestId: string | null = null;
   try {
-    const body = (await res.json()) as { error?: { code?: string; message?: string } };
+    const body = (await res.json()) as {
+      error?: { code?: string; message?: string; requestId?: string };
+    };
     if (body?.error && typeof body.error === 'object') {
       if (typeof body.error.message === 'string') message = body.error.message;
       if (typeof body.error.code === 'string') code = body.error.code;
+      if (typeof body.error.requestId === 'string') requestId = body.error.requestId;
     }
   } catch {
     /* non-JSON error body — keep the status line */
   }
   if (code && KERNEL_CODES.has(code)) {
+    // KernelError messages are the daemon's own and never get redacted, so the
+    // server has no reason to stamp a requestId on this branch.
     return new KernelError(code as KernelErrorCode, message);
   }
-  return new HttpError(res.status, code, message);
+  return new HttpError(res.status, code, message, requestId);
 }

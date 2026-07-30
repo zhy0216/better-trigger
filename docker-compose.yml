@@ -41,8 +41,18 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/better_trigger
       PORT: '4848'
       # BETTER_TRIGGER_API_KEY: change-me   # uncomment to require Bearer auth
+      # The image binds 0.0.0.0 (a container has to), so the daemon wants an
+      # API key before it starts. Safe here only because the port below is
+      # published to the host's loopback: nothing outside this machine can
+      # reach it. Drop this line if you set BETTER_TRIGGER_API_KEY.
+      BETTER_TRIGGER_ALLOW_UNAUTHENTICATED: '1'
+      # Browsers only get CORS headers for loopback origins (any port), which
+      # covers the dashboard. Serving it from somewhere else? List that origin:
+      # BETTER_TRIGGER_CORS_ORIGIN: https://ops.example.com
     ports:
-      - '4848:4848'
+      # Host side stays on loopback — publishing '4848:4848' would put an
+      # unauthenticated task-trigger API on every interface of this machine.
+      - '127.0.0.1:4848:4848'
     # To execute your tasks, mount them in and point the daemon at the module:
     # volumes:
     #   - ./tasks.js:/app/tasks.js:ro

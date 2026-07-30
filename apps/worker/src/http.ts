@@ -8,12 +8,42 @@
    read off a body or query string: a value with the wrong type must never reach
    pg (where it lands as a NOT NULL violation or an `invalid input syntax`
    error, i.e. a 500 blaming the server for the client's typo).
+   safeJson also insists on `Content-Type: application/json` — see below, that
+   one is the CORS allowlist's other half rather than a validation nicety.
    ============================================================================= */
 import type { Context } from 'hono';
 import { KernelError } from '@better-trigger/kernel';
 
+/**
+ * Refuse a body that is not announced as JSON.
+ *
+ * This is a security check, not politeness. CORS only ever gets a say when the
+ * browser sends a preflight, and a cross-origin POST is a *simple request* —
+ * no preflight at all — as long as its Content-Type is `text/plain`,
+ * `application/x-www-form-urlencoded` or `multipart/form-data`. So any page the
+ * user visits can POST JSON *text* to http://localhost:4848/api/v1/trigger
+ * under `text/plain`: the browser withholds the response (no
+ * Access-Control-Allow-Origin), but the request has already arrived and the
+ * task has already run. Requiring application/json takes the shape away —
+ * asking for that Content-Type forces a preflight, and the preflight is where
+ * middleware.ts's allowedOrigin() refuses.
+ *
+ * Callers that send no Origin (the SDK, curl, the dashboard) already send
+ * application/json, so nothing legitimate changes. Rejected as `bad_request`
+ * (400) rather than 415 to keep one error family on the wire.
+ */
+function requireJsonContentType(c: Context): void {
+  // `application/json; charset=utf-8` is the same media type as the bare form;
+  // the parameters after the `;` are not ours to police.
+  const type = (c.req.header('Content-Type') ?? '').split(';')[0]!.trim().toLowerCase();
+  if (type !== 'application/json') {
+    throw new KernelError('bad_request', 'Content-Type must be application/json');
+  }
+}
+
 /** Parse the request body as a JSON object; anything else → bad_request (400). */
 export async function safeJson<T>(c: Context): Promise<T> {
+  requireJsonContentType(c);
   let parsed: unknown;
   try {
     parsed = await c.req.json<unknown>();

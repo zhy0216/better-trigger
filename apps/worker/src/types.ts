@@ -42,6 +42,11 @@ export interface ApiErrorBody {
     /** Stable machine-readable code, e.g. 'run_not_running', 'task_not_found'. */
     code: string;
     message: string;
+    /**
+     * Present on a production `internal_error`, where the message is generic:
+     * the same id tags the server log line carrying the real error.
+     */
+    requestId?: string;
   };
 }
 

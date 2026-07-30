@@ -3,7 +3,7 @@
    Transport-neutral domain errors raised by kernel operations. Hosts that
    expose the kernel over HTTP map codes to statuses (run_not_running /
    stale_lease / conflict → 409, not_found / task_not_found → 404,
-   bad_request → 400, anything else → 500).
+   bad_request → 400, payload_too_large → 413, anything else → 500).
    ============================================================================= */
 
 export type KernelErrorCode =
@@ -12,6 +12,13 @@ export type KernelErrorCode =
   | 'stale_lease'
   | 'task_not_found'
   | 'bad_request'
+  /**
+   * The request body exceeded the host's cap (BETTER_TRIGGER_BODY_LIMIT). Raised
+   * by the HTTP host rather than by a kernel call — it lives in this union so
+   * clients see one error family: a caller that sends too much gets a
+   * KernelError with a stable code, not a bare transport failure.
+   */
+  | 'payload_too_large'
   | 'conflict';
 
 export class KernelError extends Error {

@@ -37,11 +37,27 @@
 |---|---|---|
 | `DATABASE_URL` | `postgres://localhost:5432/better_trigger` | server 连接串 |
 | `PORT` | `4848` | server 监听端口 |
+| `BETTER_TRIGGER_HOST` | `127.0.0.1` | server 监听地址(等价 `--host`);默认只绑 loopback,仅本机可达 |
+| `BETTER_TRIGGER_ALLOW_UNAUTHENTICATED` | (空) | `1`/`true` 等价 `--allow-unauthenticated`:允许非 loopback 监听且不设 API key |
+| `BETTER_TRIGGER_CORS_ORIGIN` | (空) | 额外放行的浏览器来源,逗号分隔(等价 `--cors-origin`);默认只放行 loopback |
 | `BETTER_TRIGGER_API_KEY` | (空) | server 端设置后,所有 API 要求 `Authorization: Bearer <key>`;不设置 = 本地模式不鉴权 |
+| `BETTER_TRIGGER_BODY_LIMIT` | `1048576`(1 MiB) | 单个请求体字节上限;超出 `413 payload_too_large` |
+| `BETTER_TRIGGER_MAX_BATCH` | `500` | 单次 batchTrigger 的 items 条数上限;超出 `400 bad_request` |
+| `BETTER_TRIGGER_MAX_PAYLOAD_BYTES` | `262144`(256 KiB) | 单个 run 序列化后的 payload 字节上限;超出 `400 bad_request` |
 | `BETTER_TRIGGER_API_URL` | `http://localhost:4848` | SDK / worker 指向的 server |
 | `VITE_BT_API_URL` | `http://localhost:4848` | 前端指向的 server;**不设置时前端用 mock 数据** |
 
-SDK 侧也可用 `configure({ apiUrl, apiKey })` 显式覆盖。server 开启 CORS(`hono/cors`,允许任意 origin,v1 本地工具)。
+SDK 侧也可用 `configure({ apiUrl, apiKey })` 显式覆盖。
+
+CORS(`hono/cors`):默认只放行 dashboard 自己的来源 —— http/https + `localhost` / `127.0.0.0/8` / `[::1]` + 任意端口(dev vite 端口不固定,所以做函数式 origin 校验:`new URL()` 解析后比对 host,`http://localhost.evil.com` 不算 loopback)。其余来源不回 `Access-Control-Allow-Origin`,浏览器丢弃响应。`--cors-origin <origin>`(可重复 / 逗号分隔,`*` 表示全放开)显式加白。不带 `Origin` 的调用方(SDK、curl)不受影响。
+
+媒体类型:CORS 只管"响应交不交给页面",挡不住**简单请求** —— `Content-Type` 是 `text/plain` / `application/x-www-form-urlencoded` / `multipart/form-data` 的跨域 POST 不发预检,请求照样到达路由、任务照样执行。所以所有读 body 的路由要求 `Content-Type: application/json`(可带 `; charset=utf-8` 等参数),否则 `400 bad_request`:要发 `application/json` 就必须预检,预检才轮得到上面的 origin 校验。无 body 的 POST(`/runs/:id/cancel`、`/runs/:id/retry`)不受影响;SDK / dashboard 本来就发 `application/json`,curl 需要显式带 `-H 'Content-Type: application/json'`。
+
+监听姿态:默认 `127.0.0.1`。`--host` 指向非 loopback 地址时,若未设 `BETTER_TRIGGER_API_KEY`,daemon **拒绝启动**(需显式 `--allow-unauthenticated` 覆盖,启动后打印醒目警告)。容器内必须绑 `0.0.0.0`(镜像已设 `BETTER_TRIGGER_HOST`),宿主侧只发布到 loopback(`docker-compose.yml`:`127.0.0.1:4848:4848`)。
+
+鉴权:设了 `BETTER_TRIGGER_API_KEY` 时,bearer token 先比字节长度、再用 `crypto.timingSafeEqual` 比较(`===` 会在第一个不同字节短路,响应时间会泄漏猜对了多长的前缀)。未设 key 仍是本地默认姿态,但启动时会打印一行说明(带实际绑定地址),让"不鉴权"是被知晓的状态。
+
+输入上限:请求体由 `hono/body-limit` 在任何缓冲之前挡下(超出 → `413 payload_too_large`,路由不进入);`batchTrigger` 的 `items.length` 上限在开事务之前校验(超出 → `400 bad_request`,**调用方需自行分批**,一次请求最多 `BETTER_TRIGGER_MAX_BATCH` 条),因为每条 item 是同一个事务里的两条 INSERT,无上限的数组会把一个长写事务压在 queue 行上、堵住所有 claim;单个 payload 的字节上限在 `createRunIn` 最前面校验(超出 → `400 bad_request`,大对象放对象存储、payload 里只传引用)。三个值都可用上表的环境变量覆盖;缺失 / 非正整数 / 无法解析时回落默认值,而不是关掉上限。
 
 ## 2. 数据库 schema(Drizzle,Postgres)
 
@@ -163,7 +179,7 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 
 **触发 API(给应用代码 / dashboard)**:
 - `POST /trigger` `{ taskId, payload, options?: { delay?: string|number(ms), idempotencyKey?, priority?, concurrencyKey?, env? } }` → `{ runId, idempotent: boolean }`(命中幂等键返回已有 run)。taskId 未注册 → 404。
-- `POST /batch-trigger` `{ items: [{taskId, payload, options?}] }` → `{ runIds }`。
+- `POST /batch-trigger` `{ items: [{taskId, payload, options?}] }` → `{ runIds }`。`items` 超过 `BETTER_TRIGGER_MAX_BATCH`(默认 500)→ 400 `bad_request`;更大的扇出由调用方切成多次请求。
 
 ## 5. Dashboard API(`/api/v1`)
 
@@ -179,6 +195,31 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 - `GET /schedules` → `{ schedules: [{ id, taskId, cronPattern, cronTz, enabled, nextRunAt, lastRunAt, lastRunStatus(查 last_run_id 的 status) }] }`
 - `PATCH /schedules/:id` `{ enabled }` → 更新(enable 时重算 next_run_at)
 - `GET /workers` → `{ workers: [{ id, name, codeVersion, runtime, tasks, concurrency, status, startedAt, lastHeartbeatAt }] }`
+
+### 5.1 错误信封与错误码
+
+所有非 2xx 走同一个信封:`{ error: { code, message } }`(生产下的 500 多一个 `requestId`,见下)。`code` 是稳定的机器可读值,SDK(`packages/sdk/src/client.ts` 的 `KERNEL_CODES`)把属于 kernel 错误家族的 code 还原成 `KernelError`(`err.code` 跨不跨网线读起来一样),其余落成 `HttpError`。union 的权威定义在 `packages/core/src/kernel-errors.ts` 的 `KernelErrorCode`;信封本身的权威定义是 `apps/worker/src/types.ts` 的 `ApiErrorBody`。
+
+| code | 状态码 | 含义 | KernelError |
+|---|---|---|---|
+| `bad_request` | 400 | 入参不合法;也包括 `items` 超过 `BETTER_TRIGGER_MAX_BATCH`、payload 超过 `BETTER_TRIGGER_MAX_PAYLOAD_BYTES` | ✓ |
+| `unauthorized` | 401 | 设了 `BETTER_TRIGGER_API_KEY` 但 bearer token 缺失/不匹配 | — |
+| `not_found` | 404 | run / schedule 等不存在,或路由不存在 | ✓ |
+| `task_not_found` | 404 | 触发的 taskId 未注册 | ✓ |
+| `run_not_running` | 409 | run 已不在 running(被 cancel / 重新入队 / 已终态) | ✓ |
+| `stale_lease` | 409 | 上报方的 fencing token 过期(run 已被别人重新 claim) | ✓ |
+| `conflict` | 409 | 状态不允许该操作(如 retry 一个非终态 run) | ✓ |
+| `payload_too_large` | 413 | 请求体超过 `BETTER_TRIGGER_BODY_LIMIT`;由中间件在进入路由之前答复 | ✓ |
+| `internal_error` | 500 | 未预期的错误;生产环境 message 固定为 `internal error`,另带 `requestId` 与服务端日志对应 | — |
+
+**500 的响应形状按 `NODE_ENV=production` 分叉**(`apps/worker/src/app.ts` 的 `app.onError`)。非 `KernelError` 的 message 是 pg / 连接层原样产出的东西:表名、列名、约束名,有时还有主机名或连接串片段。本地开发正需要这些细节;一旦按「多机共享一个 Postgres」部署,这就是白送的内部结构泄漏。所以生产下响应只给固定 message + 一个 `requestId`,完整错误(含 stack)只写服务端日志,两边用同一个 id:
+
+| `NODE_ENV` | 500 响应体 | 服务端日志 |
+|---|---|---|
+| 其余(本地开发) | `{ error: { code: 'internal_error', message: <真实 message> } }` | `[server] unhandled error: …` |
+| `production` | `{ error: { code: 'internal_error', message: 'internal error', requestId: 'req_…' } }` | `[server] unhandled error (req_…): …` |
+
+`requestId` 只在生产这条分支上出现,一次失败请求一个;拿到用户报上来的 id 直接 `grep req_…` daemon 日志就能对上那条完整错误。**`KernelError` 分支(4xx / 409 / 413)两种模式下完全一致、从不脱敏** —— 那些 message 是我们自己写给调用方看的。SDK 侧这个 id 不会丢:落到 `HttpError.requestId`,同时也拼进 `err.message`。
 
 ## 6. SDK 公开 API(`better-trigger`)
 

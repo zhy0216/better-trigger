@@ -7,10 +7,10 @@
    would become a 500 or a corrupted row. The stub client answers the single
    tasks lookup these paths reach; no INSERT is ever attempted.
    ============================================================================= */
-import type { PoolClient } from 'pg';
-import { describe, expect, it } from 'vitest';
+import type { Pool, PoolClient } from 'pg';
+import { afterEach, describe, expect, it } from 'vitest';
 import { KernelError } from '@better-trigger/core';
-import { createRunIn } from '../src/runs';
+import { batchTrigger, createRunIn } from '../src/runs';
 
 /** Answers the `SELECT ... FROM tasks` lookup and records every statement. */
 const makeClient = () => {
@@ -26,13 +26,13 @@ const makeClient = () => {
   return { client, sqls };
 };
 
-const create = (options: unknown) => {
+const create = (options: unknown, payload: unknown = null) => {
   const { client, sqls } = makeClient();
   return {
     sqls,
     run: createRunIn(client, {
       taskId: 't',
-      payload: null,
+      payload,
       options: options as never,
       triggerType: 'api',
     }),
@@ -103,5 +103,105 @@ describe('createRunIn option validation', () => {
   it('keeps rejecting an out-of-range priority (unchanged)', async () => {
     await expectBadRequest({ priority: 2 ** 40 }, 'priority must be an int32');
     await expectBadRequest({ priority: '3' }, 'priority must be an int32');
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * Size limits (S4)
+ * ------------------------------------------------------------------------- */
+
+/** A pool that proves the caller never opened a transaction. */
+const sentinel = new Error('connect() reached');
+const refusingPool = {
+  connect: async () => {
+    throw sentinel;
+  },
+} as unknown as Pool;
+
+const item = { taskId: 't', payload: null };
+
+afterEach(() => {
+  delete process.env.BETTER_TRIGGER_MAX_BATCH;
+  delete process.env.BETTER_TRIGGER_MAX_PAYLOAD_BYTES;
+});
+
+describe('batchTrigger item cap', () => {
+  it('rejects more than 500 items before opening a transaction', async () => {
+    const items = Array.from({ length: 501 }, () => item);
+    // bad_request is what app.ts maps to 400 — the point of the whole check is
+    // that 501 items is the caller's mistake, not a dead daemon and a 500.
+    await expect(batchTrigger(refusingPool, items)).rejects.toMatchObject({
+      code: 'bad_request',
+      message: 'items must contain at most 500 entries (split larger fan-outs into batches)',
+    });
+    await expect(batchTrigger(refusingPool, items)).rejects.toBeInstanceOf(KernelError);
+  });
+
+  it('lets a batch at the cap through untouched', async () => {
+    // Reaching connect() is proof the guard passed; the sentinel stands in for
+    // the transaction we do not want to run here.
+    await expect(
+      batchTrigger(refusingPool, Array.from({ length: 500 }, () => item)),
+    ).rejects.toBe(sentinel);
+    await expect(batchTrigger(refusingPool, [item])).rejects.toBe(sentinel);
+    await expect(batchTrigger(refusingPool, [])).rejects.toBe(sentinel);
+  });
+
+  it('honours BETTER_TRIGGER_MAX_BATCH', async () => {
+    process.env.BETTER_TRIGGER_MAX_BATCH = '2';
+    await expect(batchTrigger(refusingPool, [item, item, item])).rejects.toMatchObject({
+      code: 'bad_request',
+      message: 'items must contain at most 2 entries (split larger fan-outs into batches)',
+    });
+    await expect(batchTrigger(refusingPool, [item, item])).rejects.toBe(sentinel);
+  });
+
+  it('falls back to the default when the env value is garbage', async () => {
+    for (const raw of ['0', '-5', 'many', '1.5']) {
+      process.env.BETTER_TRIGGER_MAX_BATCH = raw;
+      await expect(batchTrigger(refusingPool, [item, item])).rejects.toBe(sentinel);
+    }
+  });
+});
+
+describe('payload size cap', () => {
+  /** Serializes to a little over `bytes` (the quotes add two). */
+  const blob = (bytes: number) => 'x'.repeat(bytes);
+
+  it('rejects a payload over 256KB before it reaches pg', async () => {
+    const { run, sqls } = create({}, blob(256 * 1024));
+    await expect(run).rejects.toBeInstanceOf(KernelError);
+    await run.catch((err: KernelError) => {
+      expect(err.code).toBe('bad_request');
+      expect(err.message).toMatch(/payload must serialize to at most 262144 bytes/);
+    });
+    // Not even the tasks lookup — the check runs before the first query.
+    expect(sqls).toEqual([]);
+  });
+
+  it('still accepts a payload under the cap', async () => {
+    const { run, sqls } = create({}, { note: blob(1000) });
+    await run.catch(() => {});
+    expect(sqls.some((s) => /INSERT INTO runs/.test(s))).toBe(true);
+  });
+
+  it('honours BETTER_TRIGGER_MAX_PAYLOAD_BYTES', async () => {
+    process.env.BETTER_TRIGGER_MAX_PAYLOAD_BYTES = '16';
+    const small = create({}, blob(64));
+    await expect(small.run).rejects.toMatchObject({ code: 'bad_request' });
+    expect(small.sqls).toEqual([]);
+
+    const ok = create({}, 'x');
+    await ok.run.catch(() => {});
+    expect(ok.sqls.some((s) => /INSERT INTO runs/.test(s))).toBe(true);
+  });
+
+  it('measures bytes, not characters', async () => {
+    // 3 bytes per char in UTF-8: 100 chars is 300 bytes, past a 128-byte cap
+    // that a naive .length check would have let through.
+    process.env.BETTER_TRIGGER_MAX_PAYLOAD_BYTES = '128';
+    const { run, sqls } = create({}, '中'.repeat(100));
+    await expect(run).rejects.toMatchObject({ code: 'bad_request' });
+    expect(sqls).toEqual([]);
   });
 });

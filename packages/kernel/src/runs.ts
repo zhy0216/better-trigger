@@ -71,6 +71,48 @@ import { enqueue, removeFromQueue } from './queue';
 /** Upper bound for a delay before a run becomes available: 10 years in ms. */
 const MAX_DELAY_MS = 315_576_000_000;
 
+/* Input size limits. Both are enforced here rather than only at the HTTP edge
+   because child runs (triggerAndWait / batchTriggerChild) never cross HTTP at
+   all — the kernel is the one boundary every created run passes through.
+   The payload lands verbatim in a jsonb column and is re-read on every attempt,
+   so an unbounded one is a memory *and* a storage problem; big objects belong
+   in object storage with only a reference in the payload (the usual durable
+   execution advice). The batch cap is about the transaction: every item is two
+   INSERTs inside ONE tx, so an unbounded array parks a long write tx on top of
+   the queue rows and stalls every claim behind it. */
+const DEFAULT_MAX_BATCH_ITEMS = 500;
+const DEFAULT_MAX_PAYLOAD_BYTES = 256 * 1024;
+
+/**
+ * Read a positive-integer limit from the environment; absent or unparseable
+ * falls back to the default rather than disabling the limit.
+ * Read per call rather than captured at import time: the daemon owns no config
+ * object down here, and parsing an int is nothing next to the INSERT it guards.
+ */
+function envLimit(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n > 0 ? n : fallback;
+}
+
+/** Max items accepted by one batchTrigger (BETTER_TRIGGER_MAX_BATCH). */
+const maxBatchItems = () => envLimit('BETTER_TRIGGER_MAX_BATCH', DEFAULT_MAX_BATCH_ITEMS);
+/** Max serialized payload size for one run (BETTER_TRIGGER_MAX_PAYLOAD_BYTES). */
+const maxPayloadBytes = () =>
+  envLimit('BETTER_TRIGGER_MAX_PAYLOAD_BYTES', DEFAULT_MAX_PAYLOAD_BYTES);
+
+/** Shared by both batch entry points; checked before any tx is opened. */
+function assertBatchSize(items: TriggerItem[]): void {
+  const max = maxBatchItems();
+  if (items.length > max) {
+    throw new KernelError(
+      'bad_request',
+      `items must contain at most ${max} entries (split larger fan-outs into batches)`,
+    );
+  }
+}
+
 /* ---------------------------------------------------------------------------
  * Small helpers
  * ------------------------------------------------------------------------- */
@@ -251,6 +293,21 @@ export async function createRunIn(
     }
   }
 
+  // Serialize the payload once, up front: it is what actually reaches pg, so it
+  // is what has to be measured, and doing it before the first query means an
+  // oversized body costs one JSON.stringify instead of a round trip plus a row.
+  // (JSON.stringify returns undefined for a function / symbol payload; pg binds
+  // that as NULL, so keep the same meaning with an explicit 'null'.)
+  const payloadJson = JSON.stringify(args.payload ?? null) ?? 'null';
+  const payloadLimit = maxPayloadBytes();
+  if (Buffer.byteLength(payloadJson) > payloadLimit) {
+    throw new KernelError(
+      'bad_request',
+      `payload must serialize to at most ${payloadLimit} bytes ` +
+        `(store large objects elsewhere and pass a reference)`,
+    );
+  }
+
   // Resolve task config (retry policy, concurrency limit/key default, and the
   // code version currently registered for the task — stamped on the run below).
   const taskRes = await client.query<{
@@ -315,7 +372,7 @@ export async function createRunIn(
   const inserted = await client.query<{ id: string }>(insertSql, [
     id,
     args.taskId,
-    JSON.stringify(args.payload ?? null),
+    payloadJson,
     args.triggerType,
     args.parentRunId ?? null,
     opts.idempotencyKey ?? null,
@@ -386,6 +443,9 @@ export async function batchTrigger(
   if (!Array.isArray(items)) {
     throw new KernelError('bad_request', 'items must be an array');
   }
+  // Before the per-item walk: an array with 100k entries should not be iterated
+  // twice just to be refused.
+  assertBatchSize(items);
   for (const item of items) {
     if (typeof item?.taskId !== 'string' || item.taskId.length === 0) {
       throw new KernelError('bad_request', 'item.taskId must be a non-empty string');
@@ -612,6 +672,9 @@ export async function batchTriggerChild(
   pool: Pool,
   args: BatchTriggerChildArgs,
 ): Promise<{ runIds: string[] }> {
+  // Same single-tx exposure as the client-side batchTrigger — a fan-out from
+  // inside a task can park exactly the same long write tx on the queue.
+  assertBatchSize(args.items);
   return withTx(pool, async (client) => {
     const parent = await assertOwnedRunning(
       client,

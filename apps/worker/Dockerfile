@@ -46,6 +46,12 @@ FROM oven/bun:1.3-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=4848
+# A container must bind 0.0.0.0 or the published port reaches nothing — the
+# host is where the exposure is decided (publish to 127.0.0.1, see
+# docker-compose.yml). Without BETTER_TRIGGER_API_KEY the daemon then refuses
+# to start unless BETTER_TRIGGER_ALLOW_UNAUTHENTICATED=1 (or
+# --allow-unauthenticated) says the exposure is intended.
+ENV BETTER_TRIGGER_HOST=0.0.0.0
 
 # Root store + the per-package symlink trees for the packages we actually run.
 COPY --from=build /app/node_modules ./node_modules
