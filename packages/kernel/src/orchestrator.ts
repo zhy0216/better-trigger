@@ -47,8 +47,36 @@ export interface OrchestratorOptions {
   workerOffline?: boolean;
 }
 
+/**
+ * Live loop counters for whoever exports metrics (apps/worker's /metrics route,
+ * todos/03-operability.md O4). Monotonic totals on a plain object, handed out
+ * on the handle: the kernel keeps no registry and the reader keeps no copy, so
+ * "how many runs did the reaper recover this hour" is a subtraction of two
+ * scrapes rather than a query.
+ */
+export interface OrchestratorCounters {
+  /** Expired-lease claims handed back to the queue (the run gets another attempt). */
+  reaperRequeued: number;
+  /** Expired-lease claims out of attempts → terminal 'worker lost'. */
+  reaperFailed: number;
+  /** Loop iterations that threw, per loop. Each one is logged too, but a rate
+   *  is what says "the cron loop has been failing all afternoon". */
+  loopErrors: { waits: number; cron: number; reaper: number; workers: number };
+}
+
+export function createOrchestratorCounters(): OrchestratorCounters {
+  return {
+    reaperRequeued: 0,
+    reaperFailed: 0,
+    loopErrors: { waits: 0, cron: 0, reaper: 0, workers: 0 },
+  };
+}
+
 export interface OrchestratorHandle {
   stop(): void;
+  /** Loop counters, live for the lifetime of this handle. Read, never written,
+   *  by whoever exports metrics. */
+  counters: OrchestratorCounters;
 }
 
 export function startOrchestrator(
@@ -62,6 +90,7 @@ export function startOrchestrator(
 
   const timers: NodeJS.Timeout[] = [];
   const running = { waits: false, cron: false, reaper: false, workers: false };
+  const counters = createOrchestratorCounters();
   let stopped = false;
 
   function loop(
@@ -76,6 +105,7 @@ export function startOrchestrator(
         await fn();
       } catch (err) {
         // Keep loops alive; surface for debugging.
+        counters.loopErrors[key] += 1;
         logger.error(`[orchestrator:${key}]`, err);
       } finally {
         running[key] = false;
@@ -190,6 +220,11 @@ export function startOrchestrator(
   /* ----------------------------------------------------------------- reaper */
   async function reap(): Promise<void> {
     const client = await pool.connect();
+    // Tallied locally and folded into the shared counters only after COMMIT —
+    // a tx that rolls back recovered nothing, and a metric that counts the
+    // attempt would report recoveries that never happened.
+    let requeued = 0;
+    let failed = 0;
     try {
       await client.query('BEGIN');
       const stale = await client.query<{
@@ -215,6 +250,7 @@ export function startOrchestrator(
           // Terminal 'worker lost' — same wrap-up as failRun so a waiting
           // parent gets woken instead of hanging forever.
           await terminalFail(client, run, { message: 'worker lost' });
+          failed += 1;
         } else {
           await client.query(
             `UPDATE runs
@@ -230,9 +266,12 @@ export function startOrchestrator(
               WHERE id = $1`,
             [q.id],
           );
+          requeued += 1;
         }
       }
       await client.query('COMMIT');
+      counters.reaperRequeued += requeued;
+      counters.reaperFailed += failed;
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       throw err;
@@ -263,5 +302,6 @@ export function startOrchestrator(
       for (const t of timers) clearInterval(t);
       timers.length = 0;
     },
+    counters,
   };
 }

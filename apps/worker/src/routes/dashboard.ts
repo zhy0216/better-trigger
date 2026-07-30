@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import type { Pool } from 'pg';
 import { KernelError, nextCronAt } from '@better-trigger/kernel';
 import type {
+  HealthPoolStats,
   HealthResponse,
   LogRow,
   OkResponse,
@@ -29,18 +30,78 @@ import { intQuery, requireBoolean, safeJson } from '../http';
 
 const VERSION = '0.1.0';
 
+/** Deadline for the deep probe's SELECT 1 — a hung DB must not hang the probe. */
+const DEEP_PROBE_TIMEOUT_MS = 2000;
+
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 const durationMs = (started: Date | null, finished: Date | null): number | null =>
   started && finished ? finished.getTime() - started.getTime() : null;
+
+/**
+ * `SELECT 1` under a deadline. Postgres being unreachable is not always a
+ * refused connection: a dead peer, a saturated pool or a paused container all
+ * leave the query pending forever, and a probe that waits with it is no better
+ * than no probe at all — a timeout counts as unhealthy.
+ */
+async function probeDb(pool: Pool): Promise<NonNullable<HealthResponse['db']>> {
+  // Both outcomes are folded into a value so the race's winner *is* the answer
+  // — 'ok' | 'query_failed' | 'timeout' — instead of one of the three arriving
+  // as a throw. This is presentation, not safety: `Promise.race` subscribes to
+  // every input, so the loser rejecting after the deadline is still an
+  // *observed* rejection and never becomes an unhandledRejection.
+  const query = pool.query('SELECT 1').then(
+    () => 'ok' as const,
+    () => 'query_failed' as const,
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), DEEP_PROBE_TIMEOUT_MS);
+  });
+  try {
+    const outcome = await Promise.race([query, deadline]);
+    return outcome === 'ok' ? { ok: true } : { ok: false, error: outcome };
+  } finally {
+    // A pending timer holds the event loop open, so a probe that answered in a
+    // millisecond would still pin the process for the full deadline — and a
+    // SIGTERM landing right after a healthcheck would wait on it.
+    clearTimeout(timer);
+  }
+}
+
+/** pg's own counters; a pool stub (tests, embedded use) may not carry them. */
+function poolStats(pool: Pool): HealthPoolStats {
+  const n = (v: unknown): number => (typeof v === 'number' ? v : 0);
+  return { total: n(pool.totalCount), idle: n(pool.idleCount), waiting: n(pool.waitingCount) };
+}
 
 export function dashboardRoutes(deps: { pool: Pool }): Hono {
   const { pool } = deps;
   const app = new Hono();
 
   /* -------------------------------------------------------- health */
-  app.get('/health', (c) => {
-    const res: HealthResponse = { ok: true, version: VERSION };
-    return c.json(res);
+  /**
+   * Two probes on one path:
+   *
+   *   GET /health          liveness — the process answers, nothing else asked
+   *   GET /health?deep=1   readiness — SELECT 1 + pool counts, 503 when the DB
+   *                        is unreachable (container healthcheck, k8s readiness)
+   *
+   * One path because middleware.ts opens exactly '/api/v1/health' to
+   * unauthenticated callers and a healthcheck has no API key to send. Which
+   * also means the deep body answers anyone, so it carries no DB error text:
+   * pg messages name the host ('connect ECONNREFUSED 10.0.0.4:5432') and
+   * sometimes the connection string. Counters are numbers — they say
+   * "saturated" without saying where.
+   */
+  app.get('/health', async (c) => {
+    const deep = c.req.query('deep');
+    if (deep !== '1' && deep !== 'true') {
+      const res: HealthResponse = { ok: true, version: VERSION };
+      return c.json(res);
+    }
+    const db = await probeDb(pool);
+    const res: HealthResponse = { ok: db.ok, version: VERSION, db, pool: poolStats(pool) };
+    return c.json(res, db.ok ? 200 : 503);
   });
 
   /* --------------------------------------------------------- tasks */

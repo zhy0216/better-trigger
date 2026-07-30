@@ -9,7 +9,11 @@
    ============================================================================= */
 import { createHash } from 'node:crypto';
 import type { ClaimedRun, RetryPolicy } from '@better-trigger/core';
-import type { Kernel, OrchestratorOptions } from '@better-trigger/kernel';
+import type {
+  Kernel,
+  OrchestratorCounters,
+  OrchestratorOptions,
+} from '@better-trigger/kernel';
 import type { TaskHandle } from 'better-trigger';
 import {
   toExecutorTask,
@@ -17,6 +21,13 @@ import {
   type ResolvedTaskDefinition,
 } from 'better-trigger/internal';
 import { Executor } from './executor';
+import {
+  createThrottledLogger,
+  createWorkerCounters,
+  errorKey,
+  type WorkerCounters,
+  type WorkerLogger,
+} from './observability';
 
 /** Options accepted by startWorkerRuntime(). */
 export interface StartOptions {
@@ -35,6 +46,16 @@ export interface WorkerHandle {
   workerId: string;
   /** Resolves once the worker has fully drained and exited its loops. */
   stop(): Promise<void>;
+  /** Run ids executing right now. Snapshot — the daemon reports it when it
+   *  crashes, so "which runs died with the process" is in the log. */
+  inFlightRunIds(): string[];
+  /** Live counters: execution outcomes plus the swallowed-error paths
+   *  (heartbeat / claim / execute / report). Read, never written, by whoever
+   *  exports metrics. */
+  counters: WorkerCounters;
+  /** Counters of the orchestrator loops this runtime started (reaper
+   *  recoveries, loop errors) — the daemon has no other handle on them. */
+  orchestratorCounters: OrchestratorCounters;
   /** Promise that resolves when the claim loops exit. */
   done: Promise<void>;
 }
@@ -42,6 +63,12 @@ export interface WorkerHandle {
 /** What the daemon injects into the worker runtime. */
 export interface WorkerDeps {
   kernel: Kernel;
+  /** Where the best-effort catches report (see observability.ts). Defaults to
+   *  console; an embedded host passes the same sink it gives the kernel. */
+  logger?: WorkerLogger;
+  /** Quiet window for repeated errors of one kind. Test knob; see
+   *  DEFAULT_LOG_THROTTLE_MS. */
+  logThrottleMs?: number;
   /** Orchestrator loop intervals (test knobs). */
   orchestrator?: OrchestratorOptions;
   /** Daemon-level default retry, inherited by task definitions without their
@@ -64,6 +91,8 @@ export async function startWorkerRuntime(
   const { kernel } = deps;
   const concurrency = options.concurrency ?? 5;
   const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
+  const counters = createWorkerCounters();
+  const log = createThrottledLogger(deps.logger ?? console, deps.logThrottleMs);
 
   // Normalize once where definitions enter the runtime: a task without its own
   // retry inherits the instance default (copied — the shared handle definition
@@ -109,29 +138,54 @@ export async function startWorkerRuntime(
           runIds: [...inFlight.keys()],
           leaseMs,
         });
+        counters.consecutiveHeartbeatErrors = 0;
         for (const runId of res.cancelRunIds) {
           inFlight.get(runId)?.markCanceled();
         }
         // C2 (todos/01-correctness.md) plugs in right here: when the heartbeat
         // starts reporting runs whose lease we lost, loop them into
         // `inFlight.get(runId)?.markLost()` so ctx.signal aborts too.
-      } catch {
-        // best-effort; the lease reaper protects correctness
+      } catch (err) {
+        // Still best-effort — the lease reaper protects correctness, so this
+        // must not take the loop down. But a heartbeat that keeps missing means
+        // every lease this worker holds is drifting towards being reaped out
+        // from under it, and that is not something to find out from the run
+        // table hours later.
+        counters.heartbeatErrors += 1;
+        counters.consecutiveHeartbeatErrors += 1;
+        log.warn(
+          `heartbeat:${errorKey(err)}`,
+          `heartbeat failed ${counters.consecutiveHeartbeatErrors}x in a row ` +
+            `(worker=${workerId}, in-flight=${inFlight.size}); leases are not being renewed`,
+          err,
+        );
       }
     })();
   }, heartbeatMs);
   (heartbeatTimer as { unref?: () => void }).unref?.();
 
   /* ---- one claim-and-execute loop (a single concurrency slot) ----------- */
-  async function claimLoop(): Promise<void> {
+  async function claimLoop(slot: number): Promise<void> {
     let idleBackoff = IDLE_POLL_BASE_MS;
     while (!stopping) {
       let run: ClaimedRun | undefined;
       try {
         const claimed = await kernel.claimRuns({ workerId, taskIds, limit: 1, leaseMs });
+        counters.consecutiveClaimErrors = 0;
         run = claimed[0];
-      } catch {
+      } catch (err) {
+        counters.claimErrors += 1;
+        counters.consecutiveClaimErrors += 1;
         if (stopping) break;
+        // A failing claim is indistinguishable from an idle queue from the
+        // outside — the dashboard just never moves. Say it out loud (throttled:
+        // a dead DB would otherwise print once per poll, per slot).
+        log.warn(
+          `claim:${errorKey(err)}`,
+          `claim failed ${counters.consecutiveClaimErrors}x in a row ` +
+            `(worker=${workerId}, slot=${slot}); no runs are being picked up`,
+          err,
+        );
         // DB hiccup: back off like an idle poll before retrying.
         await sleep(jittered(idleBackoff));
         idleBackoff = Math.min(IDLE_POLL_MAX_MS, idleBackoff * 2);
@@ -153,19 +207,37 @@ export async function startWorkerRuntime(
         continue;
       }
 
-      const executor = new Executor(kernel, toExecutorTask(def), run, workerId);
+      const executor = new Executor(kernel, toExecutorTask(def), run, workerId, {
+        log,
+        counters,
+      });
       inFlight.set(run.id, executor);
       try {
-        await executor.execute();
-      } catch {
-        // Executor handles its own errors; this guards the loop only.
+        const result = await executor.execute();
+        // The one place every execution pass funnels through, so it is where
+        // the outcome mix gets counted. Indexed by the Executor's own result
+        // type: a new variant there fails to compile here rather than going
+        // uncounted.
+        counters.runOutcomes[result.type] += 1;
+      } catch (err) {
+        // Executor handles its own errors; this guards the loop only. Reaching
+        // here means it did not — a bug in the executor, or a kernel write that
+        // failed for a reason it does not classify. The run keeps its lease and
+        // comes back through the reaper, so name it before it disappears.
+        counters.executorErrors += 1;
+        log.warn(
+          `executor:${errorKey(err)}`,
+          `executor threw out of run ${run.id} (task=${run.taskId}, attempt=${run.attempt}, ` +
+            `slot=${slot}); the run is left to the lease reaper`,
+          err,
+        );
       } finally {
         inFlight.delete(run.id);
       }
     }
   }
 
-  const loops = Array.from({ length: concurrency }, () => claimLoop());
+  const loops = Array.from({ length: concurrency }, (_, slot) => claimLoop(slot));
   const loopsDone = Promise.all(loops).then(() => undefined);
 
   /* ---- graceful shutdown ------------------------------------------------ */
@@ -195,6 +267,9 @@ export async function startWorkerRuntime(
   return {
     workerId,
     stop,
+    inFlightRunIds: () => [...inFlight.keys()],
+    counters,
+    orchestratorCounters: orchestrator.counters,
     done: loopsDone,
   };
 }

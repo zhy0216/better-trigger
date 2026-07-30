@@ -75,10 +75,26 @@ export interface BatchTriggerResponse {
  * Dashboard API
  * ------------------------------------------------------------------------- */
 
-/** GET /api/v1/health */
+/** pg Pool counters as of a deep health probe — numbers only, no host. */
+export interface HealthPoolStats {
+  /** Clients the pool currently holds open. */
+  total: number;
+  /** Of those, the ones sitting idle. */
+  idle: number;
+  /** Callers queued waiting for a client (> 0 means the pool is saturated). */
+  waiting: number;
+}
+
+/**
+ * GET /api/v1/health (liveness) · GET /api/v1/health?deep=1 (readiness).
+ * `db` and `pool` are present on the deep probe only, where `ok: false` is
+ * answered with 503.
+ */
 export interface HealthResponse {
-  ok: true;
+  ok: boolean;
   version: string;
+  db?: { ok: true } | { ok: false; error: 'timeout' | 'query_failed' };
+  pool?: HealthPoolStats;
 }
 
 /** GET /api/v1/tasks */

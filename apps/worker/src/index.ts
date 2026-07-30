@@ -5,6 +5,7 @@
    The runnable process entry is src/main.ts (bin: better-trigger-worker).
    ============================================================================= */
 export { createApp, type AppDeps } from './app';
+export { type MetricsSources } from './routes/metrics';
 export { loadTasks, type LoadedTasks } from './loader';
 export {
   startWorkerRuntime,
@@ -14,5 +15,10 @@ export {
   type WorkerHandle,
 } from './runtime';
 export { Executor, type ExecutionResult } from './executor';
+export {
+  DEFAULT_LOG_THROTTLE_MS,
+  type WorkerCounters,
+  type WorkerLogger,
+} from './observability';
 export { createPool, DEFAULT_DATABASE_URL, migrate, schema } from '@better-trigger/db';
 export * from './types';

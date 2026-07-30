@@ -7,8 +7,12 @@
 export { createKernel } from './kernel';
 export type { Kernel, KernelLogger, KernelOptions } from './kernel';
 
-export { nextCronAt } from './orchestrator';
-export type { OrchestratorHandle, OrchestratorOptions } from './orchestrator';
+export { createOrchestratorCounters, nextCronAt } from './orchestrator';
+export type {
+  OrchestratorCounters,
+  OrchestratorHandle,
+  OrchestratorOptions,
+} from './orchestrator';
 
 export type { ClaimRunsArgs, HeartbeatArgs } from './queue';
 export type { RegisterWorkerArgs } from './workers';

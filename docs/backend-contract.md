@@ -187,7 +187,8 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 > Dashboard read models 两节)。`apps/worker/src/types.ts` 与 `apps/web/src/api/client.ts`
 > 都只是同名 alias,不再各自手写一份。
 
-- `GET /health` → `{ ok:true, version }`
+- `GET /health` → `{ ok:true, version }`(存活探针,不碰 DB)
+- `GET /health?deep=1` → `{ ok, version, db:{ ok, error? }, pool:{ total, idle, waiting } }`(就绪探针:`SELECT 1`,2s 超时;DB 不通 → 503。与浅层同路径以保持免鉴权;body 不含 pg 错误原文/主机名)
 - `GET /tasks` → `{ tasks: [{ id, name, filePath, triggerSource, cronPattern, runs24h, p50Ms, p95Ms, successRate(0-100, 无运行=null), trend: number[12](近 24h 每 2h 运行数), lastRunAt }] }`(stats 用 `percentile_cont` 一次 SQL 聚合)
 - `GET /runs?env=&taskId=&status=&limit=50&cursor=` → `{ runs: [{ id, taskId, status, trigger: trigger_type, codeVersion, env, attempt, durationMs(终态=finished-started; running=null), createdAt, startedAt, finishedAt }], nextCursor }`(按 created_at desc,cursor = 上页最后 run 的 created_at+id)
 - `GET /runs/:id` → `{ run:{...全字段含 payload/output/error}, steps:[run_steps 全字段], waits:[...], logs:[{id, stepSeq, level, message, data, ts}] }`(logs 上限 1000 条)
@@ -195,6 +196,9 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 - `GET /schedules` → `{ schedules: [{ id, taskId, cronPattern, cronTz, enabled, nextRunAt, lastRunAt, lastRunStatus(查 last_run_id 的 status) }] }`
 - `PATCH /schedules/:id` `{ enabled }` → 更新(enable 时重算 next_run_at)
 - `GET /workers` → `{ workers: [{ id, name, codeVersion, runtime, tasks, concurrency, status, startedAt, lastHeartbeatAt }] }`
+- `GET /metrics` → Prometheus 文本格式(`text/plain; version=0.0.4`),**不是 JSON**。指标名一律 `better_trigger_` 前缀:`db_up`、`queue_depth{state=available|scheduled|claimed}`、`inflight_runs`(全库 `runs.status='running'`)、`worker_inflight_runs`(本进程)、`runs_total{outcome=completed|failed|suspended|abandoned}`(**注意标签是 `outcome` 而不是 `status`**,见下)、`claim_errors_total` / `claim_errors_consecutive`、`heartbeat_errors_total` / `heartbeat_errors_consecutive`、`executor_errors_total`、`step_report_errors_total`、`fail_report_errors_total`、`log_flush_errors_total`、`reaper_recovered_total{outcome=requeued|failed}`、`orchestrator_errors_total{loop}`。两个 SQL gauge 一次往返、2s 超时;DB 不通时**照样 200**,但 `db_up 0` 且省略 queue/inflight 两族(0 与「不知道」不能长得一样)。与 `/health` 不同,这个端点**跟着 `authMiddleware` 走**(设了 `BETTER_TRIGGER_API_KEY` 就需要 bearer):它暴露队列规模与吞吐,而 scraper 有地方放 token。
+
+> `runs_total` 的 `outcome` 标签是 **Executor 对单次执行 pass 的判定,不是 `runs.status`**:`failed` 指这一次尝试被上报为失败(kernel 之后很可能还会重试),`suspended` 是 pass 停在了 wait 上(run 还活着),`abandoned` 是 lease 丢失后交还的 claim —— 后两个根本不是 `runs.status` 的取值。它同时是**按进程、按生命周期**计的:重启归零,换台 daemon 重试的 run 记在那一台上。要问「现在有多少 run 处于状态 X」请查 `runs` 表(或看 dashboard 的 `/tasks` 聚合);这里刻意不提供对应指标 —— 那是对无界历史做聚合而不是计数器,每次 scrape 都要扫表。
 
 ### 5.1 错误信封与错误码
 

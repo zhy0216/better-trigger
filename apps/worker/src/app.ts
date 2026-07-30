@@ -14,12 +14,17 @@ import { authMiddleware, corsMiddleware } from './middleware';
 import { triggerRoutes } from './routes/trigger';
 import { runRoutes } from './routes/runs';
 import { dashboardRoutes } from './routes/dashboard';
+import { metricsRoutes, type MetricsSources } from './routes/metrics';
 
 export interface AppDeps {
   /** The kernel backing trigger/cancel/retry (owned by the caller). */
   kernel: Kernel;
   /** The pg Pool for dashboard read queries (owned by the caller). */
   pool: Pool;
+  /** Live counters /metrics reads off the runtime and the orchestrator. Absent
+   *  when the caller has neither (an embedded app, a test): the endpoint then
+   *  reports the database gauges and zeros. */
+  metrics?: MetricsSources;
 }
 
 /** HTTP status per kernel error code; anything unknown falls through to 500. */
@@ -87,6 +92,7 @@ export function createApp(deps: AppDeps): Hono {
   v1.route('/', triggerRoutes(deps));
   v1.route('/', runRoutes(deps));
   v1.route('/', dashboardRoutes(deps));
+  v1.route('/', metricsRoutes(deps));
 
   app.route('/api/v1', v1);
 

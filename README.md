@@ -27,10 +27,33 @@ is the only infrastructure.
 
 ## Quick start
 
+One command. `docker compose up` starts Postgres **and** a daemon already
+running the example tasks in [`examples/basic`](./examples/basic) — including a
+cron task that fires every two seconds, so there is something executing from the
+first command. The example is baked into the worker image, so nothing needs to
+be installed or built on your machine first:
+
+```bash
+docker compose up -d   # postgres:16 + the daemon on 127.0.0.1:4848
+
+curl localhost:4848/api/v1/tasks   # the example tasks, registered
+curl localhost:4848/api/v1/runs    # …and the cron runs they are already producing
+curl -X POST localhost:4848/api/v1/trigger \
+  -H 'Content-Type: application/json' \
+  -d '{"taskId":"hello-world","payload":{"name":"ada"}}'
+```
+
+The [dashboard](#dashboard) points at `http://localhost:4848` and shows all of
+it. To run your own tasks in the container instead, mount your module and point
+`--tasks` at it — the commented `volumes` / `command` pair on the `worker`
+service in [`docker-compose.yml`](./docker-compose.yml) shows the shape.
+
+Or keep the daemon on your machine:
+
 ```bash
 bun install && bun run build
 
-# Postgres (any of: local install, or `docker compose up -d` for postgres:16)
+# Postgres (any of: local install, or `docker compose up -d postgres`)
 createdb better_trigger
 ```
 
@@ -104,7 +127,7 @@ better-trigger-worker --tasks ./tasks.ts --no-serve       # executor-only node
 ├── docs/
 │   ├── architecture.md        # architecture & roadmap (the source of truth)
 │   └── backend-contract.md    # engine semantics (§3 normative)
-└── docker-compose.yml   # postgres + the worker daemon
+└── docker-compose.yml   # postgres + the worker daemon, running examples/basic
 ```
 
 Only `apps/worker` and `packages/kernel` import `pg`. That boundary is the

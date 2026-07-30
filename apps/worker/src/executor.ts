@@ -49,6 +49,7 @@ import {
   type ExecutorTask,
   type RunExecutor,
 } from 'better-trigger/internal';
+import { errorKey, type ExecutorDiagnostics } from './observability';
 
 /** Thrown internally to unwind the run() stack after a fatal failure was reported. */
 class ExecutionDone extends Error {
@@ -115,6 +116,13 @@ export class Executor implements RunExecutor {
     private readonly task: ExecutorTask,
     private readonly run: ClaimedRun,
     private readonly workerId: string,
+    /** Sink + counters for the catches below that report nothing to the kernel
+     *  (a failed-step row that never landed, a failure that never landed,
+     *  dropped logs). Required, and explicitly nullable: `null` opts out (a
+     *  unit test constructing an Executor directly does not need one), but a
+     *  future second construction site has to say so rather than degrade to
+     *  silence by leaving an optional argument off. */
+    private readonly diagnostics: ExecutorDiagnostics | null,
   ) {
     for (const s of run.steps) this.snapshot.set(s.seq, s);
     const runInfo: RunInfo = {
@@ -420,7 +428,21 @@ export class Executor implements RunExecutor {
         this.abandoned = true;
         throw new ExecutionDone();
       }
-      // Non-fatal: still try to fail the run below.
+      // Non-fatal: still try to fail the run below. The run does land as
+      // failed, so this is not silent from the outside — but the step row that
+      // says *where* it failed is gone, and a run whose timeline stops before
+      // the failing step reads as a task that failed for no reason.
+      const d = this.diagnostics;
+      if (d) {
+        d.counters.stepReportErrors += 1;
+        d.log.warn(
+          `step-report:${errorKey(e)}`,
+          `failed-step report failed for run ${this.run.id} ` +
+            `(task=${this.run.taskId}, seq=${seq}, label=${label ?? kind}); ` +
+            'the run still fails, but this step is missing from its timeline',
+          e,
+        );
+      }
     }
 
     const effectiveRetry = abort ? undefined : (stepRetry ?? this.task.retry);
@@ -627,6 +649,20 @@ export class Executor implements RunExecutor {
         return;
       }
       // Swallow: failing to report a failure should not crash the worker loop.
+      // It does mean the run stays 'running' with a failure nobody recorded
+      // until the lease reaper requeues it, so the reason it did not land is
+      // the only trace of what happened to this attempt.
+      const d = this.diagnostics;
+      if (d) {
+        d.counters.failReportErrors += 1;
+        d.log.warn(
+          `fail-report:${errorKey(err)}`,
+          `failRun report failed for run ${this.run.id} ` +
+            `(task=${this.run.taskId}, attempt=${this.run.attempt}); ` +
+            'the failure was not recorded — the lease reaper will requeue it',
+          err,
+        );
+      }
     }
   }
 
@@ -663,8 +699,19 @@ export class Executor implements RunExecutor {
     this.logBuffer = [];
     try {
       await this.kernel.appendLogs(this.run.id, logs);
-    } catch {
-      // best-effort: logs are not critical, drop on failure
+    } catch (err) {
+      // best-effort: logs are not critical, drop on failure — but say how many
+      // lines went missing, or a run detail page silently short of its logs
+      // reads as a task that never logged.
+      const d = this.diagnostics;
+      if (d) {
+        d.counters.logFlushErrors += 1;
+        d.log.warn(
+          `log-flush:${errorKey(err)}`,
+          `dropped ${logs.length} log line(s) for run ${this.run.id} (task=${this.run.taskId})`,
+          err,
+        );
+      }
     }
   }
 }

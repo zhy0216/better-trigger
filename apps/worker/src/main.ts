@@ -18,15 +18,17 @@
    --allow-unauthenticated says the exposure is deliberate.
 
    Graceful shutdown on SIGINT/SIGTERM: stop claiming, drain in-flight runs,
-   stop the loops, close the server, end the pool.
+   stop the loops, close the server, end the pool. An escaping rejection or an
+   uncaught exception takes that same path and then exits non-zero.
    ============================================================================= */
 import { createPool, migrate } from '@better-trigger/db';
-import { createKernel } from '@better-trigger/kernel';
+import { createKernel, type OrchestratorCounters } from '@better-trigger/kernel';
 import { setResultResolver } from 'better-trigger/internal';
 import { createApp } from './app';
 import { startHttpServer } from './listen';
 import { parseOriginList, setCorsOrigins } from './middleware';
 import { loadTasks } from './loader';
+import { describeError, formatCrashContext } from './observability';
 import { startWorkerRuntime, type WorkerHandle } from './runtime';
 
 const USAGE = `better-trigger-worker — durable task daemon
@@ -252,6 +254,178 @@ function parseArgs(argv: string[]): Options {
   return opts;
 }
 
+/* =============================================================================
+   Exit paths.
+
+   Signals and crashes converge on one function, `handoff()`. main() fills the
+   `daemon` record in as each piece comes up, so a fault at any point during
+   boot still hands back whatever already exists — and the crash handlers can
+   be installed at module load, before there is anything to hand back.
+
+   C3 (todos/01-correctness.md) adds releaseClaims() / deregisterWorker() to
+   the kernel. It belongs inside handoff(); once it lands, every exit path —
+   SIGINT, SIGTERM, unhandledRejection, uncaughtException — inherits the claim
+   release and the offline mark without another change here.
+   ============================================================================= */
+
+/** Pieces to hand back on the way out, in the order they are created. */
+interface Daemon {
+  server: { close(): void } | null;
+  worker: WorkerHandle | null;
+  stopOrchestrator: (() => void) | null;
+  pool: { end(): Promise<void> } | null;
+}
+const daemon: Daemon = { server: null, worker: null, stopOrchestrator: null, pool: null };
+
+/** One exit at a time: a second signal (or a crash mid-drain) must not restart it. */
+let exiting = false;
+
+/**
+ * A fatal fault happened at some point, whoever ends up owning the exit. A
+ * crash that lands *during* a signal drain has nothing left to do — `exiting`
+ * is already true — but the process must not then leave with 0 as if the
+ * shutdown had been clean. This is that memory.
+ */
+let fatal = false;
+
+/** How long the crash path waits for the handoff before giving up on it. */
+const CRASH_HANDOFF_MS = 10_000;
+
+/**
+ * The handoff runs exactly once, and everyone who asks for it awaits the same
+ * attempt. Signals, crashes and a failed boot can all reach it, sometimes at
+ * the same time (a crash while a SIGTERM drain is in flight, or main().catch()
+ * firing while the crash handler already drains) — and a second `pool.end()`
+ * throws "Called end on pool more than once", i.e. the fallback path would be
+ * the thing that breaks the exit.
+ */
+let handoffOnce: Promise<void> | null = null;
+function handoff(): Promise<void> {
+  handoffOnce ??= runHandoff();
+  return handoffOnce;
+}
+
+/**
+ * A handoff step threw. It stays swallowed — one piece failing to hand itself
+ * back must cost neither the remaining pieces their turn nor the process its
+ * exit — but a `(failed)` marker in the closing line says only *that* it broke.
+ * This says which step and why, which is all anyone gets: the process is gone
+ * a moment later, and whatever it failed to hand back (in-flight runs, held
+ * leases, open connections) is now the reaper's problem.
+ *
+ * console.error straight to stderr, like the crash path above it: nothing of
+ * ours buffers between the failure and a `process.exit` that may be
+ * milliseconds away.
+ */
+function handoffStepFailed(step: string, err: unknown): void {
+  console.error(`[better-trigger] handoff step "${step}" failed: ${describeError(err)}`);
+}
+
+/**
+ * Stop accepting new work, drain, drop the connections. Never throws: this runs
+ * on the crash path too, where a failing handoff step must not swallow the exit.
+ * The closing line names the steps that actually ran — proof, in the log of a
+ * process that is about to be gone, that the exit went through the handoff
+ * rather than straight out.
+ */
+async function runHandoff(): Promise<void> {
+  const steps: string[] = [];
+  if (daemon.server) {
+    try {
+      daemon.server.close();
+      steps.push('server');
+    } catch (err) {
+      handoffStepFailed('server', err);
+      steps.push('server(failed)');
+    }
+  }
+  if (daemon.worker) {
+    try {
+      await daemon.worker.stop();
+      steps.push('worker');
+    } catch (err) {
+      handoffStepFailed('worker', err);
+      steps.push('worker(failed)');
+    }
+  }
+  if (daemon.stopOrchestrator) {
+    try {
+      daemon.stopOrchestrator();
+      steps.push('orchestrator');
+    } catch (err) {
+      handoffStepFailed('orchestrator', err);
+      steps.push('orchestrator(failed)');
+    }
+  }
+  if (daemon.pool) {
+    try {
+      await daemon.pool.end();
+      steps.push('pool');
+    } catch (err) {
+      handoffStepFailed('pool', err);
+      steps.push('pool(failed)');
+    }
+  }
+  console.log(
+    `[better-trigger] handoff complete: ${steps.length > 0 ? steps.join(' ') : 'nothing to hand back'}`,
+  );
+}
+
+async function shutdown(signal: string): Promise<void> {
+  if (exiting) return;
+  exiting = true;
+  console.log(`[better-trigger] ${signal} received, draining...`);
+  await handoff();
+  // A crash can land mid-drain: crash() reports it and steps aside so this
+  // drain finishes, which leaves this the only exit left to carry the code.
+  process.exit(fatal ? 1 : 0);
+}
+
+/**
+ * An escaped rejection or an uncaught exception. Node's default is to print a
+ * bare stack and vanish, which leaves the leases this process holds to expire
+ * on their own and says nothing about what was running. Continuing to serve is
+ * not an option after an uncaught exception — but the exit gets the context and
+ * the handoff first.
+ */
+function crash(kind: string, err: unknown): void {
+  // Before the early return below: whichever exit path ends up running, it has
+  // to leave non-zero now.
+  fatal = true;
+  console.error(
+    formatCrashContext(kind, daemon.worker?.workerId, daemon.worker?.inFlightRunIds() ?? []),
+  );
+  // The whole error, not `.message`: this is the only record of the fault.
+  console.error(describeError(err));
+
+  // Already on the way out (a signal drain, or an earlier crash): reported, and
+  // the exit code is taken care of — restarting the handoff would only cut the
+  // one already running short.
+  if (exiting) return;
+  exiting = true;
+
+  // A wedged handoff must not turn "crashed" into "hung". The backstop stays
+  // referenced on purpose: it is what guarantees an exit code here, rather than
+  // the loop draining empty and the process leaving with 0.
+  const backstop = setTimeout(() => {
+    console.error(`[better-trigger] handoff exceeded ${CRASH_HANDOFF_MS}ms, exiting now`);
+    process.exit(1);
+  }, CRASH_HANDOFF_MS);
+  void handoff().then(
+    () => {
+      clearTimeout(backstop);
+      process.exit(1);
+    },
+    () => {
+      clearTimeout(backstop);
+      process.exit(1);
+    },
+  );
+}
+
+process.on('unhandledRejection', (reason) => crash('unhandledRejection', reason));
+process.on('uncaughtException', (err) => crash('uncaughtException', err));
+
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
   if (!opts.serve && opts.tasks.length === 0) {
@@ -279,6 +453,7 @@ async function main(): Promise<void> {
   const loaded = opts.tasks.length > 0 ? await loadTasks(opts.tasks) : null;
 
   const pool = createPool(opts.databaseUrl); // falls back to DATABASE_URL
+  daemon.pool = pool;
   if (opts.migrate) await migrate(pool);
 
   const kernel = createKernel({ pool });
@@ -288,12 +463,17 @@ async function main(): Promise<void> {
   setResultResolver({ waitForResult: (runId, o) => kernel.waitForResult(runId, o) });
 
   let worker: WorkerHandle | null = null;
-  let stopOrchestrator: (() => void) | null = null;
+  // Whichever orchestrator this process ends up owning — the runtime's, or the
+  // bookkeeping-only one below. /metrics reads its reaper counters.
+  let orchestratorCounters: OrchestratorCounters | null = null;
 
   if (loaded) {
     worker = await startWorkerRuntime(
       {
         kernel,
+        // One sink for the whole daemon: the runtime's best-effort catches
+        // (heartbeat / claim / execute) report here rather than nowhere.
+        logger: console,
         orchestrator: {
           timerIntervalMs: opts.timerIntervalMs,
           cronIntervalMs: opts.cronIntervalMs,
@@ -307,6 +487,8 @@ async function main(): Promise<void> {
         leaseMs: opts.leaseMs,
       },
     );
+    daemon.worker = worker;
+    orchestratorCounters = worker.orchestratorCounters;
   } else {
     // No tasks: bookkeeping only. waits/cron stay off so an API-only process
     // never resumes work that nothing in it is able to execute.
@@ -317,7 +499,8 @@ async function main(): Promise<void> {
       workerOffline: true,
       reaperIntervalMs: opts.reaperIntervalMs,
     });
-    stopOrchestrator = () => orchestrator.stop();
+    daemon.stopOrchestrator = () => orchestrator.stop();
+    orchestratorCounters = orchestrator.counters;
   }
 
   let server: { close(): void } | null = null;
@@ -326,8 +509,13 @@ async function main(): Promise<void> {
     // time and asks for the list on every request, but the CLI is the only
     // place that knows about --cors-origin.
     setCorsOrigins(opts.corsOrigins);
-    const app = createApp({ kernel, pool });
+    const app = createApp({
+      kernel,
+      pool,
+      metrics: { worker, orchestrator: orchestratorCounters },
+    });
     server = startHttpServer(app, { port: opts.port, host: opts.host });
+    daemon.server = server;
   }
 
   if (loaded && worker) {
@@ -336,8 +524,12 @@ async function main(): Promise<void> {
         loaded.tasks.map((t) => t.id).join(', '),
     );
   } else {
+    // A deliberate shape (the API/dashboard node of a multi-daemon setup), but
+    // also what someone gets by forgetting a flag — so say how to leave it.
     console.log(
-      '[better-trigger] no --tasks given: serving the API only, executing nothing',
+      '[better-trigger] no --tasks given: serving the API only, executing nothing. ' +
+        'Pass --tasks <module> to execute (the image bakes in ' +
+        '/app/examples/basic/src/tasks.ts if you just want something to run).',
     );
   }
   console.log(
@@ -363,24 +555,19 @@ async function main(): Promise<void> {
     );
   }
 
-  let shuttingDown = false;
-  const shutdown = async (signal: string): Promise<void> => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.log(`[better-trigger] ${signal} received, draining...`);
-    // Stop accepting new work first, then drain, then drop the connections.
-    server?.close();
-    await worker?.stop();
-    stopOrchestrator?.();
-    await pool.end().catch(() => {});
-    process.exit(0);
-  };
-
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error('[better-trigger] fatal:', err instanceof Error ? err.message : err);
+  // Boot can fail after the pool, the worker or the server already exist (a
+  // failed migration, a port in use), so this exits through the same handoff —
+  // half a daemon still has something to hand back. If a crash handler is
+  // already draining, handoff() hands back its in-flight attempt rather than
+  // starting a second one.
+  fatal = true;
+  exiting = true;
+  await handoff();
   process.exit(1);
 });

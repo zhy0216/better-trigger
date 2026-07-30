@@ -5,9 +5,11 @@
 #   docker compose up -d postgres         # postgres only (run the daemon on the host)
 #
 # The `worker` service is the daemon: it owns Postgres, executes tasks and
-# serves the API that the SDK and apps/web talk to. It starts with no --tasks,
-# so out of the box it serves the API and executes nothing — mount your task
-# module and add `--tasks` (see the commented lines below) to execute.
+# serves the API that the SDK and apps/web talk to. Out of the box it runs
+# examples/basic — a real task set, including a cron task that fires every two
+# seconds — so `up` gives you a daemon with runs to look at rather than an idle
+# process. Nothing has to be installed or built on the host first: the example
+# lives inside the image.
 # =============================================================================
 services:
   postgres:
@@ -53,10 +55,15 @@ services:
       # Host side stays on loopback — publishing '4848:4848' would put an
       # unauthenticated task-trigger API on every interface of this machine.
       - '127.0.0.1:4848:4848'
-    # To execute your tasks, mount them in and point the daemon at the module:
-    # volumes:
-    #   - ./tasks.js:/app/tasks.js:ro
-    # command: ['bun', 'apps/worker/dist/main.js', '--tasks', '/app/tasks.js']
+    # /app/examples/basic is baked into the image (see apps/worker/Dockerfile),
+    # so this resolves without a host `bun install` and without a bind mount.
+    # The image runs bun, so --tasks points straight at TypeScript — no build
+    # step. To run your own tasks instead, mount the module together with the
+    # node_modules that resolves its imports and point --tasks at it:
+    #   volumes:
+    #     - ./my-tasks:/app/my-tasks:ro
+    #   command: ['bun', 'apps/worker/dist/main.js', '--tasks', '/app/my-tasks/tasks.ts']
+    command: ['bun', 'apps/worker/dist/main.js', '--tasks', '/app/examples/basic/src/tasks.ts']
 
 volumes:
   better-trigger-pgdata:

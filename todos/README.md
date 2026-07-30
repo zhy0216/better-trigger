@@ -24,7 +24,7 @@
 |---|---|---|
 | P0 | ✅ 没有 CI / 没有测试框架,验收无法重跑 | [done/05-tests-and-dx.md](done/05-tests-and-dx.md#t1) |
 | P0 | ✅ 默认绑 `0.0.0.0` + `CORS: *` + 默认无鉴权 | [done/04-security.md](done/04-security.md#s1) |
-| P0 | pg Pool 没有 `error` 监听 → 空闲连接被断开时进程崩溃 | [03-operability.md](03-operability.md#o1) |
+| P0 | ✅ pg Pool 没有 `error` 监听 → 空闲连接被断开时进程崩溃 | [done/03-operability.md](done/03-operability.md#o1) |
 | P0 | 关停不释放 claim、不标记 worker offline | [01-correctness.md](01-correctness.md#c3) |
 | P1 | `migrate()` 无 advisory lock,多 daemon 同时启动会打架 | [01-correctness.md](01-correctness.md#c5) |
 | P1 | reaper 全表扫 queue(缺 `lease_until` 索引)且扫描无 `LIMIT` | [02-performance.md](02-performance.md#pf1) |
@@ -37,6 +37,6 @@
 
 - [01-correctness.md](01-correctness.md) — 正确性与竞态(8 条)
 - [02-performance.md](02-performance.md) — 索引、claim 路径、保留策略(7 条)
-- [03-operability.md](03-operability.md) — 进程生命周期、可观测性(6 条)
+- ✅ [done/03-operability.md](done/03-operability.md) — 进程生命周期、可观测性(6 条,全部完成)
 - ✅ [done/04-security.md](done/04-security.md) — 默认姿态、输入边界(5 条,全部完成)
 - ✅ [done/05-tests-and-dx.md](done/05-tests-and-dx.md) — 测试 / CI / 开发体验(8 条,全部完成)

@@ -80,7 +80,7 @@ function blockingTask(onStart: () => void): ExecutorTask {
 describe('ctx.signal', () => {
   it('is present and un-aborted before anything happens', () => {
     const { kernel } = fakeKernel();
-    const ex = new Executor(kernel, blockingTask(() => {}), claimed(), 'w1');
+    const ex = new Executor(kernel, blockingTask(() => {}), claimed(), 'w1', null);
     expect(ex.ctx.signal).toBeInstanceOf(AbortSignal);
     expect(ex.ctx.signal.aborted).toBe(false);
     expect(ex.ctx.signal.reason).toBeUndefined();
@@ -92,7 +92,7 @@ describe('ctx.signal', () => {
       id: 'demo',
       run: (_payload, ctx) => ctx.step('quick', () => 'ok'),
     };
-    const ex = new Executor(kernel, task, claimed(), 'w1');
+    const ex = new Executor(kernel, task, claimed(), 'w1', null);
     expect(await ex.execute()).toEqual({ type: 'completed', output: 'ok' });
     expect(ex.ctx.signal.aborted).toBe(false);
     expect(calls.completeRun).toHaveLength(1);
@@ -101,7 +101,7 @@ describe('ctx.signal', () => {
   it('aborts with reason "canceled" when a heartbeat reports a cancel', async () => {
     const { kernel, calls } = fakeKernel();
     const started = deferred();
-    const ex = new Executor(kernel, blockingTask(started.resolve), claimed(), 'w1');
+    const ex = new Executor(kernel, blockingTask(started.resolve), claimed(), 'w1', null);
 
     const running = ex.execute();
     await started.promise; // the step fn is in flight
@@ -121,7 +121,7 @@ describe('ctx.signal', () => {
   it('aborts with reason "shutting_down" and burns no attempt', async () => {
     const { kernel, calls } = fakeKernel();
     const started = deferred();
-    const ex = new Executor(kernel, blockingTask(started.resolve), claimed(), 'w1');
+    const ex = new Executor(kernel, blockingTask(started.resolve), claimed(), 'w1', null);
 
     const running = ex.execute();
     await started.promise;
@@ -137,7 +137,7 @@ describe('ctx.signal', () => {
   it('aborts with reason "lease_lost" via the C2 seam (markLost)', async () => {
     const { kernel, calls } = fakeKernel();
     const started = deferred();
-    const ex = new Executor(kernel, blockingTask(started.resolve), claimed(), 'w1');
+    const ex = new Executor(kernel, blockingTask(started.resolve), claimed(), 'w1', null);
 
     const running = ex.execute();
     await started.promise;
@@ -152,7 +152,7 @@ describe('ctx.signal', () => {
   it('keeps the first reason when abort fires twice', async () => {
     const { kernel } = fakeKernel();
     const started = deferred();
-    const ex = new Executor(kernel, blockingTask(started.resolve), claimed(), 'w1');
+    const ex = new Executor(kernel, blockingTask(started.resolve), claimed(), 'w1', null);
 
     const running = ex.execute();
     await started.promise;
@@ -174,7 +174,7 @@ describe('ctx.signal', () => {
         return untilAborted(ctx.signal);
       },
     };
-    const ex = new Executor(kernel, task, claimed(), 'w1');
+    const ex = new Executor(kernel, task, claimed(), 'w1', null);
 
     const running = ex.execute();
     await started.promise;
@@ -197,7 +197,7 @@ describe('ctx.signal', () => {
           return 'done anyway';
         }),
     };
-    const ex = new Executor(kernel, task, claimed(), 'w1');
+    const ex = new Executor(kernel, task, claimed(), 'w1', null);
 
     const running = ex.execute();
     await started.promise;
@@ -223,7 +223,7 @@ describe('ctx.signal', () => {
         return 'never';
       },
     };
-    const ex = new Executor(kernel, task, claimed(), 'w1');
+    const ex = new Executor(kernel, task, claimed(), 'w1', null);
 
     const running = ex.execute();
     await started.promise;
@@ -252,7 +252,7 @@ describe('ctx.signal', () => {
     const snapshot: StepSnapshot[] = [
       { seq: 0, kind: 'step', label: 'cached-one', status: 'completed', output: 'memoized' },
     ];
-    const ex = new Executor(kernel, task, claimed(snapshot), 'w1');
+    const ex = new Executor(kernel, task, claimed(snapshot), 'w1', null);
 
     const running = ex.execute();
     await started.promise;

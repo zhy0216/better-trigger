@@ -23,6 +23,10 @@ DATABASE_URL=postgres://localhost:5432/better_trigger \
   bunx --bun better-trigger-worker --tasks ./src/tasks.ts
 ```
 
+`docker compose up -d` (no service name) skips both steps: it also starts this
+daemon in a container with `--tasks /app/examples/basic/src/tasks.ts`, published
+on `127.0.0.1:4848`.
+
 On boot it imports the `--tasks` modules, applies pending migrations from
 `@better-trigger/db` (drizzle-kit-generated SQL, tracked in the
 `drizzle.__drizzle_migrations` journal), registers itself and its tasks, starts
@@ -236,13 +240,64 @@ SDK also parses are aliases of the read models in `@better-trigger/core`.
 
 | Method · Path | Response |
 |---|---|
-| `GET /health` | `{ ok, version }` (always open, no auth) |
+| `GET /health` | `{ ok, version }` — liveness, never touches the DB (always open, no auth) |
+| `GET /health?deep=1` | readiness: `SELECT 1` (2s deadline) + `{ db, pool: { total, idle, waiting } }`; 503 when the DB does not answer. Also open — a container healthcheck has no key. This is what the image's `HEALTHCHECK` runs. |
 | `GET /tasks` | `{ tasks: TaskSummary[] }` (runs24h, p50/p95, successRate, 12×2h trend) |
 | `GET /runs?env=&taskId=&status=&limit=&cursor=` | `{ runs: RunSummary[], nextCursor }` (keyset on `created_at + id`) |
 | `GET /runs/:id` | `{ run, steps, waits, logs }` (logs capped at 1000) |
 | `GET /schedules` | `{ schedules: ScheduleSummary[] }` |
 | `PATCH /schedules/:id` | `{ enabled }` → `{ ok }` (re-computes `nextRunAt` when enabling) |
 | `GET /workers` | `{ workers: WorkerSummary[] }` |
+| `GET /metrics` | Prometheus text (`text/plain; version=0.0.4`), not JSON — see below |
+
+Point a **readiness** probe at `?deep=1`, never a **liveness** one. The deep
+probe borrows a client from the pool (pg defaults to `max: 10`), so when the
+pool is saturated it queues behind the work and can hit its own 2s deadline —
+a busy daemon would be killed and restarted for being busy. Liveness is the
+plain `/health`, which answers without touching Postgres for exactly this
+reason.
+
+### Metrics
+
+`GET /api/v1/metrics` exposes the numbers the dashboard cannot: how deep the
+queue is, whether anything is executing, and whether the loops that swallow
+their errors have been swallowing them all afternoon. Everything is prefixed
+`better_trigger_`.
+
+| Metric | Type | What it answers |
+|---|---|---|
+| `db_up` | gauge | Did this scrape reach Postgres? When `0`, the two DB gauges below are **absent** rather than zero — "empty queue" and "unknown queue" must not look alike |
+| `queue_depth{state=available\|scheduled\|claimed}` | gauge | Backlog: due-and-waiting, delayed, currently leased |
+| `inflight_runs` | gauge | Runs in `running`, across every worker on this database |
+| `worker_inflight_runs` | gauge | Runs executing in *this* process |
+| `runs_total{outcome=completed\|failed\|suspended\|abandoned}` | counter | Throughput and outcome mix of this process — **`outcome`, not `status`; see the note below** |
+| `claim_errors_total`, `claim_errors_consecutive` | counter, gauge | The "daemon looks idle but is actually failing to claim" case |
+| `heartbeat_errors_total`, `heartbeat_errors_consecutive` | counter, gauge | Leases drifting towards being reaped |
+| `executor_errors_total`, `fail_report_errors_total`, `log_flush_errors_total` | counter | The other best-effort catches |
+| `reaper_recovered_total{outcome=requeued\|failed}` | counter | How much work the lease reaper had to rescue |
+| `orchestrator_errors_total{loop}` | counter | Background loop iterations that threw |
+
+Two gauges come from one SQL round trip (2s deadline); everything else is a
+live in-process counter, so a scrape stays cheap. The endpoint answers `200`
+even with the database down — a successful scrape reporting `db_up 0` says more
+than a failed scrape, and the counters are what say how long it has been wrong.
+
+> **`runs_total` is labelled `outcome`, and it is not `runs.status`.** The label
+> carries the *executor's verdict on one execution pass*: `failed` there is an
+> attempt the executor reported as failed, which the kernel may well retry, so
+> `sum(runs_total{outcome="failed"})` is attempts-that-failed, not runs that
+> ended failed. `suspended` is a pass that parked on a wait (the run is alive),
+> `abandoned` is a claim handed back after the lease was lost — neither is a
+> `runs.status` value at all. It is also **per process and per lifetime**: a
+> restart resets it, and a run retried on another daemon is counted there.
+> For "how many runs are in status X right now", query the `runs` table (or
+> read the dashboard's `/tasks` stats); there is deliberately no metric for it,
+> because that is an aggregate over unbounded history rather than a counter,
+> and it would cost a table scan on every scrape.
+
+Unlike `/health`, this path is **not** exempt from auth: queue size and
+throughput describe your workload, and a scraper has somewhere to put a bearer
+token. Set `BETTER_TRIGGER_API_KEY` and it closes with the rest of the API.
 
 Errors use a uniform envelope: `{ error: { code, message } }` (plus a
 `requestId` on one branch, below). Kernel error codes map to statuses —
@@ -295,5 +350,6 @@ src/
 └── routes/
     ├── trigger.ts        # /trigger /batch-trigger
     ├── runs.ts           # cancel / retry / record / result
-    └── dashboard.ts      # health / tasks / runs / schedules / workers
+    ├── dashboard.ts      # health / tasks / runs / schedules / workers
+    └── metrics.ts        # /metrics (Prometheus text)
 ```
