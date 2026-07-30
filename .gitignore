@@ -28,3 +28,6 @@ yarn-error.log*
 
 # Vite
 .vite/
+
+# Claude Code local overrides
+.claude/settings.local.json
