@@ -1,19 +1,19 @@
 /* =============================================================================
-   @better-trigger/example-basic — worker daemon control for the acceptance
-   harnesses.
+   @better-trigger/testing — worker daemon control.
 
-   Every harness needs the same three things: start a `better-trigger-worker`
+   Every scenario needs the same three things: start a `better-trigger-worker`
    child, wait until it is actually up, and kill it (rudely or politely). The
    daemon is run through bun so it can import TypeScript task modules directly.
 
-   Two daemon shapes are used across the harnesses:
-     - an API node (`--no-tasks`, i.e. no --tasks flag) that serves HTTP and
-       runs the lease reaper — it survives the kills, so the harness's client
-       keeps working while executors die;
+   Two daemon shapes are used across the scenarios:
+     - an API node (no --tasks flag) that serves HTTP and runs the lease reaper —
+       it survives the kills, so the scenario's client keeps working while
+       executors die;
      - executor nodes (`--tasks <module> --no-serve`) that claim and run.
    ============================================================================= */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { sleep, waitFor } from './poll';
 
 /** apps/worker's entry, run from source so `.ts` task modules just work. */
 const WORKER_ENTRY =
@@ -32,25 +32,21 @@ export interface DaemonOptions {
   name?: string;
   /** Default true. */
   serve?: boolean;
-  /** Default false — harnesses migrate once, up front, to avoid a race. */
+  /** Default false — scenarios migrate once, up front, to avoid a race. */
   migrate?: boolean;
   /** Extra environment for the child. */
   env?: Record<string, string>;
-  /** Prefix for the child's stdio, so interleaved logs stay readable. */
-  label?: string;
 }
 
 export interface Daemon {
   proc: ChildProcess;
   /** Base URL, when this daemon serves HTTP. */
   url: string | null;
-  /** SIGKILL and wait for the process to be gone. */
-  kill(): Promise<void>;
+  /** Signal (SIGKILL by default) and wait for the process to be gone. */
+  kill(signal?: NodeJS.Signals): Promise<void>;
   /** SIGTERM, then SIGKILL if it has not exited within `graceMs`. */
   stop(graceMs?: number): Promise<void>;
 }
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 function waitExit(proc: ChildProcess): Promise<void> {
   if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
@@ -84,8 +80,8 @@ export function spawnDaemon(opts: DaemonOptions): Daemon {
   return {
     proc,
     url: serve ? `http://localhost:${opts.port}` : null,
-    async kill() {
-      proc.kill('SIGKILL');
+    async kill(signal: NodeJS.Signals = 'SIGKILL') {
+      proc.kill(signal);
       await waitExit(proc);
     },
     async stop(graceMs = 10_000) {
@@ -104,26 +100,42 @@ export function spawnDaemon(opts: DaemonOptions): Daemon {
 
 /** Poll GET /api/v1/health until the daemon answers, or throw. */
 export async function waitForHealth(url: string, timeoutMs = 30_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastError = 'no attempt made';
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`${url}/api/v1/health`);
-      if (res.ok) return;
-      lastError = `HTTP ${res.status}`;
-    } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
-    }
-    await sleep(150);
-  }
-  throw new Error(`daemon at ${url} never became healthy (${lastError})`);
+  await waitFor(
+    `daemon at ${url} to become healthy`,
+    timeoutMs,
+    async () => (await fetch(`${url}/api/v1/health`)).ok,
+    { intervalMs: 150 },
+  );
 }
 
 /** Spawn a daemon and wait for its HTTP surface to answer. */
-export async function startDaemon(
-  opts: DaemonOptions & { port: number },
-): Promise<Daemon> {
+export async function startDaemon(opts: DaemonOptions & { port: number }): Promise<Daemon> {
   const daemon = spawnDaemon(opts);
   await waitForHealth(daemon.url!);
   return daemon;
+}
+
+/**
+ * Scoped daemon: start it, run `fn`, and always stop it — even when `fn`
+ * throws. For scenarios that keep one daemon alive for their whole body
+ * (as opposed to swapping executors under an API node).
+ */
+export async function withDaemon<T>(
+  opts: DaemonOptions & { port: number },
+  fn: (daemon: Daemon) => Promise<T>,
+): Promise<T> {
+  const daemon = await startDaemon(opts);
+  try {
+    return await fn(daemon);
+  } finally {
+    await daemon.stop();
+  }
+}
+
+/**
+ * Kill a daemon (SIGKILL by default) and wait for it to be gone — the
+ * fault-injection primitive the crash scenarios are built on.
+ */
+export async function killDaemon(daemon: Daemon, signal: NodeJS.Signals = 'SIGKILL'): Promise<void> {
+  await daemon.kill(signal);
 }

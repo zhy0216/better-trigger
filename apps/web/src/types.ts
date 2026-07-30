@@ -1,7 +1,16 @@
 /* =============================================================================
-   Better Trigger — shared domain types.
+   Better Trigger — dashboard view-model types.
+   These are presentation shapes (pre-formatted strings, waterfall spans), not
+   the wire contract: the server JSON shapes come from @better-trigger/core via
+   api/client.ts, and api/adapter.ts maps one onto the other.
    ============================================================================= */
+import type { SerializedError } from '@better-trigger/core';
 
+/**
+ * UI status vocabulary — deliberately not core's `RunStatus`: it adds 'warning'
+ * (no server equivalent) and renames the server states the badges care about
+ * (completed→success, waiting→frozen). adapter.ts owns the mapping.
+ */
 export type RunStatus =
   | 'running'
   | 'queued'
@@ -37,11 +46,8 @@ export interface Run {
   ts: number;
 }
 
-export interface SpanError {
-  message: string;
-  stack?: string;
-  name?: string;
-}
+/** Same shape the server stores in runs.error / run_steps.error. */
+export type SpanError = SerializedError;
 
 export interface Span {
   id: string;

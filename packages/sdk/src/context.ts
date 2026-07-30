@@ -44,6 +44,44 @@ export interface RunLogger {
   error(message: string, data?: unknown): void;
 }
 
+/**
+ * Why `ctx.signal` aborted:
+ *   - 'canceled'       — the run was canceled (dashboard / API); its output is
+ *                        already discarded, so stop paying for it.
+ *   - 'shutting_down'  — the worker is draining; this attempt is handed back and
+ *                        replayed by whoever picks the run up next.
+ *   - 'lease_lost'     — this claim's lease expired, another worker may already
+ *                        own the run; nothing this attempt writes will be
+ *                        accepted (see 01-correctness.md C2).
+ */
+export type RunAbortReason = 'canceled' | 'shutting_down' | 'lease_lost';
+
+/**
+ * The value in `ctx.signal.reason` once the run is aborted. Deliberately an
+ * Error: `fetch(url, { signal })` rejects with the reason verbatim, so user code
+ * gets a throwable with a message rather than a bare string.
+ *
+ * Distinct from core's `AbortError` — that one is thrown BY user code to fail a
+ * run without retries; this one is handed TO user code to stop work in flight.
+ */
+export class RunAbortedError extends Error {
+  readonly isBetterTriggerRunAborted = true;
+  constructor(readonly reason: RunAbortReason) {
+    super(`run aborted: ${reason}`);
+    this.name = 'RunAbortedError';
+  }
+}
+
+/** Brand check (survives duplicate copies of this package, like isAbortError). */
+export function isRunAborted(err: unknown): err is RunAbortedError {
+  return (
+    err instanceof RunAbortedError ||
+    (typeof err === 'object' &&
+      err !== null &&
+      (err as Record<string, unknown>).isBetterTriggerRunAborted === true)
+  );
+}
+
 /** Wait primitives. */
 export interface RunWait {
   /** Suspend the run for a duration ("24h", "10m", 5000ms). */
@@ -75,6 +113,20 @@ export interface RunCtx {
   uuid(): Promise<string>;
   /** Run metadata. */
   run: RunInfo;
+  /**
+   * Aborted when this attempt's work becomes worthless: the run was canceled,
+   * the worker started shutting down, or the claim's lease was lost. Pass it to
+   * `fetch(url, { signal: ctx.signal })` / any SDK that takes one so a long call
+   * (an LLM request, a tool call) is cut off instead of running to completion
+   * for an output nobody will read. `ctx.signal.reason` is a `RunAbortedError`
+   * whose `.reason` says which of the three happened.
+   *
+   * Cancellation is still enforced at durable-primitive boundaries regardless
+   * (see the executor's checkCanceled): ignoring this signal is safe, honoring
+   * it is just faster. One signal per execution — a replayed run gets its own,
+   * and memoized steps that never re-run simply never observe it.
+   */
+  signal: AbortSignal;
 }
 
 /** Re-export for convenience at the public surface. */

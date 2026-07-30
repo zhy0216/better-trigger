@@ -147,7 +147,7 @@ claim CTE + `FOR UPDATE SKIP LOCKED`、持久 lease、单调 fencing token、orc
 
 ### P1.5 — 客户端/daemon 分离(已完成,本文档)
 core 拆分(kernel 独立成包、core 归零依赖);`packages/server` → `apps/worker`;执行器与 worker 循环移入 daemon;SDK 改写为 HTTP 客户端;`--tasks` 加载器 + CLI(`--port/--concurrency/--lease-ms/--no-serve/--no-migrate/...`);`GET /runs/:id/record`、`GET /runs/:id/result` long-poll。
-**验收(已跑通,50 项)**:e2e 13 项(hello / 多 step / wait 挂起恢复 / triggerAndWait / batchTrigger / 幂等键 / 重试与 AbortError / cron)· fencing 20 项 · crash 11 项(3× SIGKILL,step 恰好一次)· worker-lost 6 项。
+**验收(已跑通,79 项;`bun run test:acceptance` 一键重跑,CI 每个 PR 都跑)**:e2e 18 项(hello / 多 step / wait 挂起恢复 / triggerAndWait / batchTrigger / 幂等键 / 重试与 AbortError / cron)· fencing 22 项 · replay-drift 17 项 · crash 14 项(3× SIGKILL,step 恰好一次)· worker-lost 8 项。场景全部跑在 `packages/testing` 的 harness 上,不变量断言(seq 连续只追加、终态冻结)由 harness 统一提供。
 
 ### P2 — 正确性硬化(1 周)
 fingerprint + `NonDeterminismError`;vitest + 真 PG 的 correctness suite;crash / fault-injection harness(在每个持久化边界注入 throw / abort / 连接中断 / 重复投递);不变量断言(seq 连续只追加、终态不再接受写、每个外部事件至多一个 outcome、旧 fencing 全路径无效);LISTEN/NOTIFY 唤醒。

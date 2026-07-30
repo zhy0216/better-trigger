@@ -1,0 +1,83 @@
+# =============================================================================
+# CI — packaging guards, build, typecheck, unit tests, then the acceptance
+# harnesses.
+#
+# The acceptance suite (examples/basic/scripts) is the project's real
+# correctness evidence and needs a live Postgres, hence the service container.
+# `bun run test` is the DB-free half (pure functions) and runs first so a broken
+# unit-level invariant fails fast, before ~minutes of fault injection.
+#
+# The two packaging guards bracket the build because that is what they need:
+# `check:deps` only reads package.json (so it runs first, failing in ms), while
+# `check:exports` resolves the actual dist/ artifacts and therefore has to run
+# after it.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: build + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: better_trigger
+        ports:
+          - 5432:5432
+        # The harnesses connect immediately on start; wait for a real handshake.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # Each harness derives its own database name from this base URL and
+      # provisions it via the admin `postgres` database (DROP/CREATE).
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/better_trigger
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # core must stay at zero runtime dependencies and the SDK must depend on
+      # nothing but core — see docs/architecture.md on the client/daemon split.
+      - name: Dependency guard
+        run: bun run check:deps
+
+      - name: Build
+        run: bun run build
+
+      # publint + attw on the built tarballs: the dual ESM/CJS maps and the
+      # ./internal subpath are the kind of thing that only breaks after publish.
+      - name: Package exports
+        run: bun run check:exports
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun run test
+
+      - name: Acceptance harnesses
+        run: bun run test:acceptance

@@ -167,6 +167,10 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 
 ## 5. Dashboard API(`/api/v1`)
 
+> 下面这些形状的权威 TS 定义在 `packages/core/src/types.ts`(Read models /
+> Dashboard read models 两节)。`apps/worker/src/types.ts` 与 `apps/web/src/api/client.ts`
+> 都只是同名 alias,不再各自手写一份。
+
 - `GET /health` → `{ ok:true, version }`
 - `GET /tasks` → `{ tasks: [{ id, name, filePath, triggerSource, cronPattern, runs24h, p50Ms, p95Ms, successRate(0-100, 无运行=null), trend: number[12](近 24h 每 2h 运行数), lastRunAt }] }`(stats 用 `percentile_cont` 一次 SQL 聚合)
 - `GET /runs?env=&taskId=&status=&limit=50&cursor=` → `{ runs: [{ id, taskId, status, trigger: trigger_type, codeVersion, env, attempt, durationMs(终态=finished-started; running=null), createdAt, startedAt, finishedAt }], nextCursor }`(按 created_at desc,cursor = 上页最后 run 的 created_at+id)

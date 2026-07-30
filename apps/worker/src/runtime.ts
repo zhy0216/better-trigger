@@ -112,6 +112,9 @@ export async function startWorkerRuntime(
         for (const runId of res.cancelRunIds) {
           inFlight.get(runId)?.markCanceled();
         }
+        // C2 (todos/01-correctness.md) plugs in right here: when the heartbeat
+        // starts reporting runs whose lease we lost, loop them into
+        // `inFlight.get(runId)?.markLost()` so ctx.signal aborts too.
       } catch {
         // best-effort; the lease reaper protects correctness
       }
@@ -171,6 +174,13 @@ export async function startWorkerRuntime(
     if (stopPromise) return stopPromise;
     stopPromise = (async () => {
       stopping = true;
+      // Tell every in-flight step it can stop: ctx.signal aborts with reason
+      // 'shutting_down', so a fetch / SDK call wired to it fails immediately
+      // rather than holding the drain window open for a result this process will
+      // never report. Those runs keep their 'running' row and their lease and
+      // are requeued by the reaper — the SIGKILL recovery path, minus the wait.
+      // Steps that ignore the signal still get the full drain window.
+      for (const executor of inFlight.values()) executor.markShuttingDown();
       // Claim loops exit at the next check; in-flight runs drain, bounded by
       // SHUTDOWN_DRAIN_MS. The heartbeat stays alive during the drain so
       // leases keep renewing while runs finish.

@@ -186,6 +186,15 @@ export const dailyReport = task({
 | `ctx.random()` | Deterministic number in `[0, 1)` — memoized. |
 | `ctx.uuid()` | Deterministic UUID v4 string — memoized. |
 | `ctx.run` | `{ id, taskId, attempt, maxAttempts, env }` run metadata. |
+| `ctx.signal` | `AbortSignal`, aborted when the run is canceled, the worker shuts down, or the lease is lost. |
+
+> **Cancellation:** pass `ctx.signal` to anything that accepts one
+> (`fetch(url, { signal: ctx.signal })`, an LLM SDK, a child process) so a long
+> call is cut off the moment its output stops mattering. `ctx.signal.reason` is a
+> `RunAbortedError` whose `.reason` is `'canceled' | 'shutting_down' |
+> 'lease_lost'` (`isRunAborted(err)` recognizes it). Ignoring the signal is safe
+> — cancellation is still enforced at the next durable primitive — it just costs
+> you the wait.
 
 > **Determinism:** code *between* steps re-runs on every replay, so it must be
 > deterministic. Put side effects, time, and randomness inside `ctx.step` or use

@@ -236,6 +236,93 @@ export interface RunDetailResult {
   logs: LogRecord[];
 }
 
+/* ---------------------------------------------------------------------------
+ * Dashboard read models
+ *
+ * List/summary projections behind the dashboard endpoints (backend-contract §5).
+ * They live here for the same reason as the run ledger above: the worker builds
+ * the JSON from them and apps/web parses it back, so one declaration keeps both
+ * ends of the wire honest.
+ * ------------------------------------------------------------------------- */
+
+/** How a task gets its runs — derived from the manifest (cron present or not). */
+export type TriggerSource = 'api' | 'schedule';
+
+/** Whether a worker's heartbeat is still current. */
+export type WorkerStatus = 'online' | 'offline';
+
+/** GET /tasks */
+export interface TaskSummary {
+  id: string;
+  name: string;
+  filePath: string | null;
+  triggerSource: TriggerSource;
+  cronPattern: string | null;
+  runs24h: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  /** 0–100; null when the task has no finished runs. */
+  successRate: number | null;
+  /** 12 buckets × 2h of run counts over the last 24h, oldest first. */
+  trend: number[];
+  lastRunAt: string | null;
+}
+export interface TasksResponse {
+  tasks: TaskSummary[];
+}
+
+/** GET /runs — the run row without payload/output/error (see RunRecord). */
+export interface RunSummary {
+  id: string;
+  taskId: string;
+  status: RunStatus;
+  trigger: TriggerType;
+  codeVersion: string | null;
+  env: string;
+  attempt: number;
+  /** finished − started for terminal runs; null while queued/running/waiting. */
+  durationMs: number | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+export interface RunsResponse {
+  runs: RunSummary[];
+  /** "<createdAt ISO>|<id>" of the last row; null on the final page. */
+  nextCursor: string | null;
+}
+
+/** GET /schedules */
+export interface ScheduleSummary {
+  id: string;
+  taskId: string;
+  cronPattern: string;
+  cronTz: string | null;
+  enabled: boolean;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastRunStatus: RunStatus | null;
+}
+export interface SchedulesResponse {
+  schedules: ScheduleSummary[];
+}
+
+/** GET /workers */
+export interface WorkerSummary {
+  id: string;
+  name: string | null;
+  codeVersion: string;
+  runtime: string;
+  tasks: string[];
+  concurrency: number;
+  status: WorkerStatus;
+  startedAt: string;
+  lastHeartbeatAt: string;
+}
+export interface WorkersResponse {
+  workers: WorkerSummary[];
+}
+
 export interface WaitForResultOptions {
   /** Give up after this long (default 30s). */
   timeoutMs?: number;

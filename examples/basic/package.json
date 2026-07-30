@@ -4,6 +4,7 @@
   "description": "better-trigger SDK usage examples + e2e smoke test",
   "type": "module",
   "private": true,
+  "license": "MIT",
   "scripts": {
     "worker": "bunx --bun better-trigger-worker --tasks src/tasks.ts",
     "e2e": "bun scripts/e2e.ts",
@@ -11,6 +12,7 @@
     "worker-lost": "bun scripts/worker-lost.ts",
     "fencing": "bun scripts/fencing.ts",
     "replay-drift": "bun scripts/replay-drift.ts",
+    "test:acceptance": "bun scripts/acceptance.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -21,6 +23,7 @@
     "@better-trigger/core": "workspace:*",
     "@better-trigger/db": "workspace:*",
     "@better-trigger/kernel": "workspace:*",
+    "@better-trigger/testing": "workspace:*",
     "@better-trigger/worker": "workspace:*",
     "@types/node": "^22.7.4",
     "typescript": "^5.6.2"

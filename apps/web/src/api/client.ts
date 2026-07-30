@@ -1,10 +1,28 @@
 /* =============================================================================
    Better Trigger — dashboard HTTP client.
    Thin fetch wrapper over the server's /api/v1 surface (backend-contract §5).
-   Response shapes are hand-written interfaces mirroring the server JSON
-   (camelCase, ISO date strings) — deliberately NOT importing @better-trigger/core
-   so the web app stays a self-contained vite build with zero node deps.
+   Response shapes are the read models from @better-trigger/core — the same
+   declarations the server builds its JSON from, so a contract change cannot
+   drift past the type checker here. core is zero-dependency and these are
+   `import type` only, so nothing lands in the vite bundle.
    ============================================================================= */
+import type {
+  LogRecord,
+  RunDetailResult,
+  RunRecord,
+  RunsResponse as RunsResponseModel,
+  RunStatus,
+  RunStepRecord,
+  RunSummary as RunSummaryModel,
+  SchedulesResponse as SchedulesResponseModel,
+  ScheduleSummary as ScheduleSummaryModel,
+  SerializedError,
+  TasksResponse as TasksResponseModel,
+  TaskSummary as TaskSummaryModel,
+  WaitRecord,
+  WorkersResponse as WorkersResponseModel,
+  WorkerSummary as WorkerSummaryModel,
+} from '@better-trigger/core';
 
 export const API_BASE_URL: string =
   (import.meta.env.VITE_BT_API_URL as string | undefined) ?? 'http://localhost:4848';
@@ -64,145 +82,33 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 
 /* ---- server JSON shapes (backend-contract §5) ---------------------------- */
 
-export type ServerRunStatus =
-  | 'queued'
-  | 'running'
-  | 'waiting'
-  | 'completed'
-  | 'failed'
-  | 'canceled';
+/*
+ * The run ledger is core's read models verbatim — local aliases keep the names
+ * the dashboard already uses (and `ServerRunStatus` keeps the wire vocabulary
+ * distinguishable from the UI one in src/types.ts, which is also `RunStatus`).
+ */
+export type ServerRunStatus = RunStatus;
+export type RunErrorJson = SerializedError;
+export type RunFull = RunRecord;
+export type RunStep = RunStepRecord;
+export type RunWait = WaitRecord;
+export type RunLog = LogRecord;
+export type RunDetailResponse = RunDetailResult;
 
-export interface TaskSummary {
-  id: string;
-  name: string;
-  filePath: string | null;
-  triggerSource: string | null;
-  cronPattern: string | null;
-  runs24h: number;
-  p50Ms: number | null;
-  p95Ms: number | null;
-  successRate: number | null; // 0-100, null = no runs
-  trend: number[]; // 12 buckets, runs per 2h over last 24h
-  lastRunAt: string | null;
-}
-
-export interface TasksResponse {
-  tasks: TaskSummary[];
-}
-
-export interface RunSummary {
-  id: string;
-  taskId: string;
-  status: ServerRunStatus;
-  trigger: string; // trigger_type
-  codeVersion: string | null;
-  env: string;
-  attempt: number;
-  durationMs: number | null; // null while running
-  createdAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-}
-
-export interface RunsResponse {
-  runs: RunSummary[];
-  nextCursor: string | null;
-}
-
-export interface RunErrorJson {
-  message: string;
-  stack?: string;
-  name?: string;
-}
-
-export interface RunFull {
-  id: string;
-  taskId: string;
-  status: ServerRunStatus;
-  payload: unknown;
-  output: unknown;
-  error: RunErrorJson | null;
-  trigger: string;
-  parentRunId: string | null;
-  codeVersion: string | null;
-  env: string;
-  attempt: number;
-  maxAttempts: number | null;
-  idempotencyKey: string | null;
-  queuedAt: string | null;
-  startedAt: string | null;
-  finishedAt: string | null;
-  createdAt: string;
-}
-
-export interface RunStep {
-  seq: number;
-  kind: string; // 'step'|'wait'|'trigger-and-wait'|'batch-trigger'|'now'|'random'|'uuid'
-  label: string | null;
-  status: string; // 'completed'|'failed'
-  output: unknown;
-  error: RunErrorJson | null;
-  attempt: number;
-  startedAt: string | null;
-  finishedAt: string | null;
-}
-
-export interface RunWait {
-  id: number;
-  stepSeq: number | null;
-  kind: string; // 'duration'|'until'|'run'
-  resumeAt: string | null;
-  childRunId: string | null;
-  status: string; // 'pending'|'completed'|'canceled'
-  createdAt: string | null;
-}
-
-export interface RunLog {
-  id: number;
-  stepSeq: number | null;
-  level: string; // 'debug'|'info'|'warn'|'error'
-  message: string;
-  data: unknown;
-  ts: string;
-}
-
-export interface RunDetailResponse {
-  run: RunFull;
-  steps: RunStep[];
-  waits: RunWait[];
-  logs: RunLog[];
-}
-
-export interface ScheduleSummary {
-  id: string;
-  taskId: string;
-  cronPattern: string;
-  cronTz: string | null;
-  enabled: boolean;
-  nextRunAt: string | null;
-  lastRunAt: string | null;
-  lastRunStatus: ServerRunStatus | null;
-}
-
-export interface SchedulesResponse {
-  schedules: ScheduleSummary[];
-}
-
-export interface WorkerSummary {
-  id: string;
-  name: string | null;
-  codeVersion: string | null;
-  runtime: string;
-  tasks: string[];
-  concurrency: number;
-  status: string; // 'online'|'offline'
-  startedAt: string | null;
-  lastHeartbeatAt: string | null;
-}
-
-export interface WorkersResponse {
-  workers: WorkerSummary[];
-}
+/*
+ * The list/summary projections are core's read models too, so the dashboard's
+ * enums (task trigger source, worker status, run status) are the server's own
+ * unions instead of bare `string` — comparing against a value that is no longer
+ * in the contract is now a type error.
+ */
+export type TaskSummary = TaskSummaryModel;
+export type TasksResponse = TasksResponseModel;
+export type RunSummary = RunSummaryModel;
+export type RunsResponse = RunsResponseModel;
+export type ScheduleSummary = ScheduleSummaryModel;
+export type SchedulesResponse = SchedulesResponseModel;
+export type WorkerSummary = WorkerSummaryModel;
+export type WorkersResponse = WorkersResponseModel;
 
 export interface RunFilters {
   env?: string;

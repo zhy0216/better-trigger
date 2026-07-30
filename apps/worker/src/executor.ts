@@ -37,7 +37,13 @@ import {
   type TriggerOptions,
 } from '@better-trigger/core';
 import type { Kernel } from '@better-trigger/kernel';
-import type { RunCtx, RunInfo, StepOptions } from 'better-trigger';
+import {
+  RunAbortedError,
+  type RunAbortReason,
+  type RunCtx,
+  type RunInfo,
+  type StepOptions,
+} from 'better-trigger';
 import {
   executorStorage,
   type ExecutorTask,
@@ -91,6 +97,16 @@ export class Executor implements RunExecutor {
   private abandoned = false;
   /** Set by the worker when a heartbeat reports a cancel for this run. */
   private canceled = false;
+  /**
+   * Backs ctx.signal: aborted the moment this attempt's work stops being worth
+   * anything, so a step fn blocked on an LLM / tool call can bail out instead of
+   * running to completion for an output that is already discarded. Cancellation
+   * itself is still enforced at step boundaries (checkCanceled) — the signal is
+   * a cooperative fast path, never the mechanism.
+   */
+  private readonly aborter = new AbortController();
+  /** Non-null once `aborter` fired; also the discriminator for "our own abort". */
+  private abortReason: RunAbortReason | null = null;
 
   readonly ctx: RunCtx;
 
@@ -114,6 +130,48 @@ export class Executor implements RunExecutor {
   /** Worker calls this on the heartbeat cancel path; checked at step boundaries. */
   markCanceled(): void {
     this.canceled = true;
+    this.abort('canceled');
+  }
+
+  /**
+   * Worker calls this when the daemon starts draining (runtime.stop()). Only
+   * ctx.signal is touched: the run keeps its 'running' row and its lease, and is
+   * requeued by the lease reaper exactly as it would be after a SIGKILL — we
+   * just stop waiting out SHUTDOWN_DRAIN_MS for a call whose result this process
+   * will never report.
+   */
+  markShuttingDown(): void {
+    this.abort('shutting_down');
+  }
+
+  /**
+   * Lease-loss seam for todos/01-correctness.md C2: once the heartbeat response
+   * carries lostRunIds, runtime.ts's heartbeat loop calls this for each of them
+   * (next to the existing markCanceled() call). Nothing detects lease loss yet,
+   * so nothing calls this — deliberately: C2 owns the detection side.
+   */
+  markLost(): void {
+    this.abort('lease_lost');
+  }
+
+  /** First reason wins: an abort already delivered is not re-labelled. */
+  private abort(reason: RunAbortReason): void {
+    if (this.abortReason !== null) return;
+    this.abortReason = reason;
+    this.aborter.abort(new RunAbortedError(reason));
+  }
+
+  /**
+   * The error we are about to report is really our own abort landing in user
+   * code, so do not write it as a step/run failure: for 'canceled' the kernel
+   * would reject the write anyway, and for 'shutting_down' / 'lease_lost' a
+   * failed row would burn an attempt on a handover. Abandon silently instead.
+   */
+  private abandonIfAborted(): void {
+    if (this.abortReason !== null) {
+      this.abandoned = true;
+      throw new ExecutionDone();
+    }
   }
 
   /* ---- execution entry point ------------------------------------------- */
@@ -167,10 +225,15 @@ export class Executor implements RunExecutor {
       return { type: 'suspended' };
     }
     // ExecutionDone: a step failure path already reported fail() — just unwind.
+    // The abandonment paths (kernel rejection, cancel, ctx.signal abort) unwind
+    // the same way but reported nothing, so keep them distinguishable.
     if (err instanceof ExecutionDone || (err as any)?.isBetterTriggerExecutionDone) {
-      return { type: 'failed' };
+      return this.abandoned ? { type: 'abandoned' } : { type: 'failed' };
     }
     if (this.abandoned) return { type: 'abandoned' };
+    // Our own abort surfacing between steps (canceled / draining / lease lost):
+    // same reasoning as abandonIfAborted() — hand the attempt back, do not fail.
+    if (this.abortReason !== null) return { type: 'abandoned' };
     // Error thrown between steps (not inside ctx.step): fail the run, no
     // stepSeq. The task-level retry policy (own or inherited instance default)
     // still governs the backoff, same as the step-failure path.
@@ -195,6 +258,9 @@ export class Executor implements RunExecutor {
         warn: (m, d) => this.log('warn', m, d),
         error: (m, d) => this.log('error', m, d),
       },
+      // One signal per execution: built here, so a replayed run gets a fresh one
+      // and memoized steps (which never re-run) simply never observe it.
+      signal: this.aborter.signal,
       now: () => this.doDeterministic('now'),
       random: () => this.doDeterministic('random'),
       uuid: () => this.doDeterministic('uuid'),
@@ -328,6 +394,9 @@ export class Executor implements RunExecutor {
     stepRetry: RetryPolicy | undefined,
     startedAt: string,
   ): Promise<void> {
+    // ctx.signal fired mid-step: the throw is the abort, not a step failure.
+    this.abandonIfAborted();
+
     const serialized = serializeError(err);
     const abort = isAbortError(err);
 

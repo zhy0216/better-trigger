@@ -2,6 +2,12 @@
   "name": "better-trigger",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhy0216/better-trigger.git"
+  },
+  "homepage": "https://github.com/zhy0216/better-trigger#readme",
   "packageManager": "bun@1.3.14",
   "workspaces": [
     "apps/*",
@@ -12,11 +18,18 @@
     "dev": "turbo run dev",
     "build": "turbo run build",
     "lint": "turbo run lint",
-    "typecheck": "turbo run typecheck"
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:acceptance": "turbo run test:acceptance",
+    "check:deps": "node scripts/check-deps.mjs",
+    "check:exports": "publint --strict packages/core && publint --strict packages/sdk && attw --pack packages/core && attw --pack packages/sdk"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "publint": "^0.3.22",
     "turbo": "^2.1.3",
-    "typescript": "^5.6.2"
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.8"
   },
   "engines": {
     "node": ">=18"

@@ -15,11 +15,17 @@ daemon (and the harnesses' direct-SQL assertions) ever sees `DATABASE_URL`.
 |---|---|
 | `src/tasks.ts` | The example task set (one feature per task — see table below). Loaded via `--tasks`. |
 | `src/trigger.ts` | `betterTrigger({ url })` — the shared HTTP client. |
-| `scripts/daemon.ts` | Spawn / health-wait / kill helpers used by every harness. |
 | `scripts/e2e.ts` | End-to-end assertions through the HTTP client (self-provisions its db, spawns one daemon). |
 | `scripts/crash.ts` + `scripts/crash-tasks.ts` | Crash recovery: 3 SIGKILLs of the executor node, exactly-once durable steps. |
 | `scripts/fencing.ts` | Kernel-level lease/fencing test (no daemon, no HTTP): 6 fenced ops rejected with zero state change, token monotonic across suspend/resume. |
+| `scripts/replay-drift.ts` + `scripts/replay-drift-tasks-v{1,2}.ts` | Mid-flight redeploy: `code_version` stamping, body fingerprinting, `replay: 'strict'` refusing a drifted ledger. |
 | `scripts/worker-lost.ts` + `scripts/worker-lost-tasks.ts` | Reaper terminal-fail: child dies of `worker lost` at max attempts, waiting parent is woken with `ok: false`. |
+
+The scaffolding every scenario shares — database provisioning, daemon spawn /
+health-wait / SIGKILL, polling, the marker-file probe, the scenario runner and
+the durable-execution invariant assertions — lives in
+[`@better-trigger/testing`](../../packages/testing), not in this directory. A
+new scenario is a `runScenario()` call, not a copy of a neighbouring script.
 
 ### Example tasks (`src/tasks.ts`)
 
@@ -66,15 +72,19 @@ needs on its own port, and exits non-zero on any failed assertion:
 ```bash
 export DATABASE_URL=postgres://localhost:5432/better_trigger
 
-bun run --filter @better-trigger/example-basic e2e          # 13 checks · db _e2e · :4901
-bun run --filter @better-trigger/example-basic crash        # 11 checks · db _crash · :4902
-bun run --filter @better-trigger/example-basic fencing      # 20 checks · db _fencing · no daemon
-bun run --filter @better-trigger/example-basic worker-lost  #  6 checks · db _worker_lost · :4904
+bun run --filter @better-trigger/example-basic e2e           # 18 checks · db _e2e · :4901
+bun run --filter @better-trigger/example-basic fencing       # 22 checks · db _fencing · no daemon
+bun run --filter @better-trigger/example-basic replay-drift  # 17 checks · db _drift · :4903
+bun run --filter @better-trigger/example-basic crash         # 14 checks · db _crash · :4902
+bun run --filter @better-trigger/example-basic worker-lost   #  8 checks · db _worker_lost · :4904
+
+bun run test:acceptance                                      # all five, one exit code
 ```
 
-`crash` and `worker-lost` run **two** daemons: an API node (no `--tasks`) that
-serves the harness's client and keeps a lease reaper alive across every kill,
-plus an executor node (`--tasks ... --no-serve`) that is the one being killed.
+`crash`, `worker-lost` and `replay-drift` run **two** daemons: an API node (no
+`--tasks`) that serves the scenario's client and keeps a lease reaper alive
+across every kill, plus an executor node (`--tasks ... --no-serve`) that is the
+one being killed.
 
 Each check prints `✓`/`✗` with its elapsed time and a final summary.
 

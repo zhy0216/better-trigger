@@ -14,6 +14,13 @@
     }
   },
   "files": ["dist", "migrations"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhy0216/better-trigger.git",
+    "directory": "packages/db"
+  },
+  "homepage": "https://github.com/zhy0216/better-trigger#readme",
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",

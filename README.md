@@ -146,7 +146,15 @@ bun run dev          # turbo run dev
 bun run build        # build all packages (tsup) + web (tsc + vite)
 bun run typecheck    # tsc --noEmit everywhere
 bun run lint
+bun run test         # vitest unit tests (pure functions — no Postgres needed)
+bun run test:acceptance   # the 5 acceptance harnesses — REQUIRES a live Postgres
 ```
+
+`test:acceptance` runs `examples/basic/scripts/acceptance.ts`, which drives the
+e2e / fencing / replay-drift / crash / worker-lost harnesses in sequence (each
+provisions its own database from `DATABASE_URL`) and exits non-zero if any of
+them fails. Pass names to run a subset: `bun scripts/acceptance.ts fencing`.
+Both entries run on every PR — see [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
 ## Status / roadmap
 
@@ -161,3 +169,7 @@ Roadmap: see [`docs/architecture.md`](./docs/architecture.md) **P2–P6** —
 correctness hardening (step fingerprints, LISTEN/NOTIFY), events
 (`wait.forEvent`), CLI, agent-layer primitives
 (`handoff`/`gather`/`requestApproval`/`ctx.llm`), plugins.
+
+## License
+
+MIT — see [`LICENSE`](./LICENSE).

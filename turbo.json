@@ -13,6 +13,20 @@
     "lint": {},
     "typecheck": {
       "dependsOn": ["^build"]
+    },
+    "test": {
+      "dependsOn": ["^build"]
+    },
+    "test:acceptance": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      // Turbo's strict env mode would otherwise hide DATABASE_URL from the
+      // scenarios, which then silently fall back to the default local URL —
+      // i.e. CI would gate on whatever database happened to be reachable,
+      // and pointing DATABASE_URL at a broken host would still exit 0.
+      // BT_* covers the per-scenario BT_*_DB / BT_*_PORT / BT_WORKER_ENTRY
+      // overrides documented in each script's header.
+      "passThroughEnv": ["DATABASE_URL", "BT_*"]
     }
   }
 }

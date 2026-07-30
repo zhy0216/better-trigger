@@ -1,0 +1,30 @@
+{
+  "name": "@better-trigger/testing",
+  "version": "0.1.0",
+  "description": "better-trigger testing harness — scenario runner, per-scenario database provisioning, worker-daemon control and the durable-execution invariant assertions the acceptance suite runs on. Private: consumed from source, never published.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhy0216/better-trigger.git",
+    "directory": "packages/testing"
+  },
+  "homepage": "https://github.com/zhy0216/better-trigger#readme",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@better-trigger/db": "workspace:*",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.6.2"
+  }
+}

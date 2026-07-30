@@ -13,6 +13,9 @@ export { betterTrigger } from './instance';
 /* ---- transport ---------------------------------------------------------- */
 export { HttpError } from './client';
 
+/* ---- run-abort signalling (ctx.signal) ---------------------------------- */
+export { RunAbortedError, isRunAborted } from './context';
+
 /* ---- re-exported error / signal primitives from core -------------------- */
 export {
   AbortError,
@@ -37,6 +40,7 @@ export type {
   RunInfo,
   RunLogger,
   RunWait,
+  RunAbortReason,
   StepOptions,
 } from './context';
 export type { AnySchema, InferSchema } from './schema';

@@ -14,9 +14,17 @@
     }
   },
   "files": ["dist"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhy0216/better-trigger.git",
+    "directory": "packages/kernel"
+  },
+  "homepage": "https://github.com/zhy0216/better-trigger#readme",
   "scripts": {
     "build": "tsup",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@better-trigger/core": "workspace:*",
@@ -27,6 +35,7 @@
     "@types/node": "^22.7.4",
     "@types/pg": "^8.11.10",
     "tsup": "^8.3.0",
-    "typescript": "^5.6.2"
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.8"
   }
 }

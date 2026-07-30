@@ -13,6 +13,7 @@ import type {
   TriggerRequest,
   TriggerResponse,
 } from '../types';
+import { safeJson } from '../http';
 
 export function triggerRoutes(deps: { kernel: Kernel }): Hono {
   const { kernel } = deps;
@@ -20,7 +21,7 @@ export function triggerRoutes(deps: { kernel: Kernel }): Hono {
 
   /* ---------------------------------------------------------- /trigger */
   app.post('/trigger', async (c) => {
-    const body = await c.req.json<TriggerRequest>();
+    const body = await safeJson<TriggerRequest>(c);
     const created = await kernel.trigger({
       taskId: body.taskId,
       payload: body.payload,
@@ -32,7 +33,7 @@ export function triggerRoutes(deps: { kernel: Kernel }): Hono {
 
   /* ---------------------------------------------------- /batch-trigger */
   app.post('/batch-trigger', async (c) => {
-    const body = await c.req.json<BatchTriggerRequest>();
+    const body = await safeJson<BatchTriggerRequest>(c);
     const { runIds } = await kernel.batchTrigger(body.items);
     const res: BatchTriggerResponse = { runIds };
     return c.json(res);

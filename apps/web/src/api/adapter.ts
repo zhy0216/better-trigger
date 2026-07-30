@@ -4,6 +4,7 @@
    in src/types.ts. All status / duration / relative-time formatting lives here
    so screens stay presentation-only.
    ============================================================================= */
+import type { StepKind } from '@better-trigger/core';
 import type {
   Task,
   Run,
@@ -137,14 +138,26 @@ export function adaptRuns(runs: RunSummary[], now: number = Date.now()): Run[] {
 
 /* ---- run detail (RunDetailResponse → Trace + per-span logs) --------------- */
 
-const STEP_SPAN_KIND: Record<string, SpanKind> = {
+/*
+ * step kind → span kind, exhaustive over core's `StepKind`: `null` marks the
+ * deterministic stand-ins, which are not shown as spans (contract §7). Adding a
+ * step kind in core breaks this literal until it has been classified, so a new
+ * kind cannot silently appear as (or vanish from) the waterfall.
+ */
+const STEP_SPAN_KIND: Record<StepKind, SpanKind | null> = {
   step: 'fn',
   wait: 'fn',
   'trigger-and-wait': 'task',
   'batch-trigger': 'task',
+  now: null,
+  random: null,
+  uuid: null,
 };
-// kinds that are deterministic stand-ins; not shown as spans (contract §7).
-const HIDDEN_STEP_KINDS = new Set(['now', 'random', 'uuid']);
+
+/** A kind an older dashboard has never heard of stays visible, as a plain fn span. */
+function isHiddenStepKind(kind: StepKind): boolean {
+  return STEP_SPAN_KIND[kind] === null;
+}
 
 function stepSpanStatus(st: RunStep): RunStatus {
   return st.status === 'failed' ? 'failed' : 'success';
@@ -183,7 +196,7 @@ export function adaptRunDetail(detail: RunDetailResponse, now: number = Date.now
   const t0 = candidates.length ? Math.min(...candidates) : (parseTs(run.createdAt) ?? now);
 
   // ---- visible steps → level-1 spans, keyed by seq for log grouping ----
-  const visibleSteps = steps.filter((st) => !HIDDEN_STEP_KINDS.has(st.kind));
+  const visibleSteps = steps.filter((st) => !isHiddenStepKind(st.kind));
   const seqToSpanId = new Map<number, string>();
   const spans: Span[] = [];
 

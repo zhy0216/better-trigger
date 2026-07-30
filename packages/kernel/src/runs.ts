@@ -208,6 +208,11 @@ export async function createRunIn(
   client: PoolClient,
   args: CreateRunArgs,
 ): Promise<CreatedRun> {
+  // A non-object `options` (a JSON string, an array) would otherwise have every
+  // key read as undefined — the run silently loses the caller's intent.
+  if (args.options != null && (typeof args.options !== 'object' || Array.isArray(args.options))) {
+    throw new KernelError('bad_request', 'options must be an object');
+  }
   const opts = args.options ?? {};
 
   // Validate priority up front (covers trigger / batch-trigger / wait-for-run /
@@ -220,6 +225,29 @@ export async function createRunIn(
       opts.priority > 2147483647
     ) {
       throw new KernelError('bad_request', 'priority must be an int32');
+    }
+  }
+
+  // Same for the options that land in text columns: pg does not type-check them
+  // (it JSON.stringifies an object into the column), so a wrong-typed key would
+  // silently corrupt idempotency / concurrency grouping instead of failing.
+  // Empty strings are refused too, and not just for tidiness: `''` is falsy but
+  // non-null, so it slips between the two ways this function reads these keys —
+  // the INSERT picks its branch on truthiness (no ON CONFLICT target) while the
+  // bound value is chosen with `??` (the empty string survives as non-NULL), so
+  // a second trigger with idempotencyKey '' hits the partial unique index
+  // runs_task_idempotency_uniq without a DO NOTHING to absorb it → pg 23505,
+  // which is not a KernelError and would surface as a 500. Same class of
+  // mismatch for concurrencyKey (all '' runs silently share one group) and env
+  // (a run parked in an environment no filter names). No key has a meaningful
+  // empty spelling, so reject early rather than let it reach the database.
+  for (const key of ['idempotencyKey', 'concurrencyKey', 'env'] as const) {
+    if (opts[key] == null) continue;
+    if (typeof opts[key] !== 'string') {
+      throw new KernelError('bad_request', `${key} must be a string`);
+    }
+    if (opts[key] === '') {
+      throw new KernelError('bad_request', `${key} must not be empty`);
     }
   }
 
@@ -246,7 +274,16 @@ export async function createRunIn(
     : opts.concurrencyKey ?? null;
   const env = opts.env ?? args.env ?? 'prod';
 
-  const delayMs = opts.delay != null ? parseDuration(opts.delay) : 0;
+  // parseDuration throws a plain Error on garbage ("soon", {}) — at an API
+  // boundary that is the caller's mistake, so translate it to bad_request.
+  let delayMs = 0;
+  if (opts.delay != null) {
+    try {
+      delayMs = parseDuration(opts.delay);
+    } catch {
+      throw new KernelError('bad_request', 'delay must be ms or a duration like "10m"');
+    }
+  }
   if (delayMs > MAX_DELAY_MS) {
     throw new KernelError('bad_request', 'delay exceeds maximum of 10 years');
   }

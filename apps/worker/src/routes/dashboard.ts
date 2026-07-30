@@ -5,7 +5,7 @@
    ============================================================================= */
 import { Hono } from 'hono';
 import type { Pool } from 'pg';
-import { nextCronAt } from '@better-trigger/kernel';
+import { KernelError, nextCronAt } from '@better-trigger/kernel';
 import type {
   HealthResponse,
   LogRow,
@@ -25,6 +25,7 @@ import type {
   WorkersResponse,
 } from '../types';
 import { computeTaskStats } from '../stats';
+import { intQuery, requireBoolean, safeJson } from '../http';
 
 const VERSION = '0.1.0';
 
@@ -80,7 +81,9 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
     const env = c.req.query('env');
     const taskId = c.req.query('taskId');
     const status = c.req.query('status');
-    const limit = Math.min(Number(c.req.query('limit') ?? 50) || 50, 200);
+    // limit goes straight into LIMIT $n, so it must be a positive integer before
+    // pg sees it ("LIMIT must not be negative" / bigint syntax error → 500).
+    const limit = intQuery(c, 'limit', { min: 1, max: 200, fallback: 50 });
     const cursor = c.req.query('cursor');
 
     const where: string[] = [];
@@ -94,18 +97,22 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
     if (taskId) add('task_id = $?', taskId);
     if (status) add('status = $?', status);
 
-    // Keyset cursor = "<createdAtIso>|<id>"; page strictly older.
+    // Keyset cursor = "<createdAtIso>|<id>"; page strictly older. Only cursors
+    // we minted are valid: the timestamp half is compared against created_at,
+    // so anything unparseable would surface as pg's "invalid input syntax for
+    // type timestamp with time zone" → 500. Re-serialize it to be sure.
     if (cursor) {
       const sep = cursor.lastIndexOf('|');
-      if (sep > 0) {
-        const cAt = cursor.slice(0, sep);
-        const cId = cursor.slice(sep + 1);
-        params.push(cAt);
-        const p1 = params.length;
-        params.push(cId);
-        const p2 = params.length;
-        where.push(`(created_at < $${p1} OR (created_at = $${p1} AND id < $${p2}))`);
+      const cAt = new Date(sep > 0 ? cursor.slice(0, sep) : '');
+      const cId = sep > 0 ? cursor.slice(sep + 1) : '';
+      if (cId === '' || Number.isNaN(cAt.getTime())) {
+        throw new KernelError('bad_request', 'cursor must be "<createdAt ISO>|<id>"');
       }
+      params.push(cAt.toISOString());
+      const p1 = params.length;
+      params.push(cId);
+      const p2 = params.length;
+      where.push(`(created_at < $${p1} OR (created_at = $${p1} AND id < $${p2}))`);
     }
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -316,7 +323,10 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
 
   app.patch('/schedules/:id', async (c) => {
     const id = c.req.param('id');
-    const body = await c.req.json<UpdateScheduleRequest>();
+    const body = await safeJson<Partial<UpdateScheduleRequest>>(c);
+    // enabled is NOT NULL in schedules; validate before any query so a bad body
+    // costs nothing and cannot reach the UPDATE as NULL.
+    const enabled = requireBoolean(body.enabled, 'enabled');
 
     const existing = await pool.query<{ cron_pattern: string; cron_tz: string | null }>(
       `SELECT cron_pattern, cron_tz FROM schedules WHERE id = $1`,
@@ -325,13 +335,13 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
     const sched = existing.rows[0];
     if (!sched) return c.json({ error: { code: 'not_found', message: 'schedule not found' } }, 404);
 
-    const nextRunAt = body.enabled
+    const nextRunAt = enabled
       ? nextCronAt(sched.cron_pattern, sched.cron_tz ?? undefined)
       : null;
 
     await pool.query(
       `UPDATE schedules SET enabled = $2, next_run_at = $3, updated_at = now() WHERE id = $1`,
-      [id, body.enabled, nextRunAt],
+      [id, enabled, nextRunAt],
     );
     const res: OkResponse = { ok: true };
     return c.json(res);

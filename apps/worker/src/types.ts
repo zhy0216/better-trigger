@@ -2,23 +2,30 @@
    @better-trigger/worker — REST types.
    Trigger API + Dashboard API response/request shapes (docs/backend-contract.md
    §4–5). All endpoints live under /api/v1 and speak camelCase JSON.
-   Dates travel as ISO-8601 strings. apps/web mirrors these shapes locally.
+   Dates travel as ISO-8601 strings.
 
-   Shapes shared with the SDK are aliases of the read models in
-   @better-trigger/core — the wire format has exactly one definition, so a
-   change to either side cannot drift past the type checker.
+   Every response shape here is an alias of a read model in
+   @better-trigger/core — the wire format has exactly one definition, and
+   apps/web aliases the same core types, so a change to any of them cannot
+   drift past the type checker on either end.
    ============================================================================= */
 import type {
   CreatedRun,
   LogRecord,
   RunDetailResult,
   RunRecord,
-  RunStatus,
   RunStepRecord,
+  RunsResponse as RunsResponseModel,
+  RunSummary as RunSummaryModel,
+  SchedulesResponse as SchedulesResponseModel,
+  ScheduleSummary as ScheduleSummaryModel,
+  TasksResponse as TasksResponseModel,
+  TaskSummary as TaskSummaryModel,
   TriggerItem,
   TriggerOptions,
-  TriggerType,
   WaitRecord,
+  WorkersResponse as WorkersResponseModel,
+  WorkerSummary as WorkerSummaryModel,
 } from '@better-trigger/core';
 
 /* ---------------------------------------------------------------------------
@@ -70,44 +77,12 @@ export interface HealthResponse {
 }
 
 /** GET /api/v1/tasks */
-export interface TaskSummary {
-  id: string;
-  name: string;
-  filePath: string | null;
-  triggerSource: 'api' | 'schedule';
-  cronPattern: string | null;
-  runs24h: number;
-  p50Ms: number | null;
-  p95Ms: number | null;
-  /** 0–100; null when the task has no finished runs. */
-  successRate: number | null;
-  /** 12 buckets × 2h of run counts over the last 24h, oldest first. */
-  trend: number[];
-  lastRunAt: string | null;
-}
-export interface TasksResponse {
-  tasks: TaskSummary[];
-}
+export type TaskSummary = TaskSummaryModel;
+export type TasksResponse = TasksResponseModel;
 
 /** GET /api/v1/runs */
-export interface RunSummary {
-  id: string;
-  taskId: string;
-  status: RunStatus;
-  trigger: TriggerType;
-  codeVersion: string | null;
-  env: string;
-  attempt: number;
-  /** finished − started for terminal runs; null while queued/running/waiting. */
-  durationMs: number | null;
-  createdAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-}
-export interface RunsResponse {
-  runs: RunSummary[];
-  nextCursor: string | null;
-}
+export type RunSummary = RunSummaryModel;
+export type RunsResponse = RunsResponseModel;
 
 /** GET /api/v1/runs/:id */
 export type RunDetail = RunRecord;
@@ -122,36 +97,13 @@ export interface RetryRunResponse {
 }
 
 /** GET /api/v1/schedules */
-export interface ScheduleSummary {
-  id: string;
-  taskId: string;
-  cronPattern: string;
-  cronTz: string | null;
-  enabled: boolean;
-  nextRunAt: string | null;
-  lastRunAt: string | null;
-  lastRunStatus: RunStatus | null;
-}
-export interface SchedulesResponse {
-  schedules: ScheduleSummary[];
-}
+export type ScheduleSummary = ScheduleSummaryModel;
+export type SchedulesResponse = SchedulesResponseModel;
 /** PATCH /api/v1/schedules/:id */
 export interface UpdateScheduleRequest {
   enabled: boolean;
 }
 
 /** GET /api/v1/workers */
-export interface WorkerSummary {
-  id: string;
-  name: string | null;
-  codeVersion: string;
-  runtime: string;
-  tasks: string[];
-  concurrency: number;
-  status: 'online' | 'offline';
-  startedAt: string;
-  lastHeartbeatAt: string;
-}
-export interface WorkersResponse {
-  workers: WorkerSummary[];
-}
+export type WorkerSummary = WorkerSummaryModel;
+export type WorkersResponse = WorkersResponseModel;
