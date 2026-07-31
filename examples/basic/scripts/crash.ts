@@ -24,12 +24,14 @@
      - run completed, output echoes the payload
      - marker file has exactly 1 "step1" line and exactly 1 "step2" line
      - step ledger is exactly [step, wait, step], with a gap-free seq prefix
-     - attempt >= 3 (one bump per reaped kill; the 'waiting' kill costs none)
+     - attempt is STILL 1 and recoveries >= 2 (one recovery per reaped kill;
+       the 'waiting' kill costs none). Losing a worker is infrastructure, so it
+       spends the recovery budget and not the user's retries (C4).
 
    Mid-flight (while 'waiting', before kill-②) it also asserts that kill-①
-   recovery cost exactly one attempt bump (attempt === 2), that the suspend
-   released the claim (zero queue rows for the run), and it snapshots the ledger
-   so the shared append-only invariant covers the two remaining kills.
+   recovery cost exactly one recovery and no attempt, that the suspend released
+   the claim (zero queue rows for the run), and it snapshots the ledger so the
+   shared append-only invariant covers the two remaining kills.
 
    Env:
      DATABASE_URL  base connection derived from it; default
@@ -84,6 +86,14 @@ async function main(s: Scenario): Promise<void> {
   s.cleanup(() => api.stop());
   const client = betterTrigger({ url: api.url! });
 
+  /** runs.recoveries — engine bookkeeping, not part of the public run record. */
+  const recoveriesOf = async (runId: string): Promise<number> =>
+    (
+      await s.pool.query<{ recoveries: number }>(`SELECT recoveries FROM runs WHERE id = $1`, [
+        runId,
+      ])
+    ).rows[0]!.recoveries;
+
   /* -- boot executor #1 and trigger the run -------------------------------- */
   let proc = spawnExecutor();
   // Whatever the body does, the last executor must not outlive the scenario.
@@ -110,15 +120,20 @@ async function main(s: Scenario): Promise<void> {
   proc = spawnExecutor();
   await waitForStatus(client, handle.id, 'waiting', { timeoutMs: 60_000 });
 
-  // Kill-① recovery must have cost exactly ONE attempt bump: reap → attempt 2,
-  // reclaim + replay by executor #2 (no further bumps up to the suspend).
+  // Kill-① recovery must have cost exactly ONE recovery and NO attempt (C4):
+  // reap → recoveries 1, reclaim + replay by executor #2 on the same attempt.
   {
     const mid = await client.getRunDetail(handle.id);
     s.assert(
-      mid.run.attempt === 2,
-      `attempt should be exactly 2 after kill-① reap+reclaim, got ${mid.run.attempt}`,
+      mid.run.attempt === 1,
+      `a SIGKILLed worker must not spend an attempt, got ${mid.run.attempt}`,
     );
-    s.ok('kill-① recovery cost exactly one attempt bump (attempt = 2)');
+    const midRecoveries = await recoveriesOf(handle.id);
+    s.assert(
+      midRecoveries === 1,
+      `kill-① should have cost exactly 1 recovery, got ${midRecoveries}`,
+    );
+    s.ok('kill-① recovery cost exactly one recovery, attempt untouched (1)');
 
     // Suspend must have released the claim: no queue row while 'waiting'.
     const queued = await countQueueRows(s.pool, handle.id);
@@ -172,10 +187,15 @@ async function main(s: Scenario): Promise<void> {
 
   const detail = await client.getRunDetail(handle.id);
   s.assert(
-    detail.run.attempt >= 3,
-    `attempt should be >= 3 after two reaped kills, got ${detail.run.attempt}`,
+    detail.run.attempt === 1,
+    `three SIGKILLs must not spend a single attempt, got ${detail.run.attempt}`,
   );
-  s.ok(`attempt = ${detail.run.attempt} (>= 3)`);
+  const finalRecoveries = await recoveriesOf(handle.id);
+  s.assert(
+    finalRecoveries >= 2,
+    `recoveries should be >= 2 after two reaped kills, got ${finalRecoveries}`,
+  );
+  s.ok(`attempt = 1, recoveries = ${finalRecoveries} (>= 2)`);
 
   // Last: the terminal run must stop moving even though a reaper is still alive
   // on the API node and executor #4 is still draining.

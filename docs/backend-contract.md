@@ -44,6 +44,7 @@
 | `BETTER_TRIGGER_BODY_LIMIT` | `1048576`(1 MiB) | 单个请求体字节上限;超出 `413 payload_too_large` |
 | `BETTER_TRIGGER_MAX_BATCH` | `500` | 单次 batchTrigger 的 items 条数上限;超出 `400 bad_request` |
 | `BETTER_TRIGGER_MAX_PAYLOAD_BYTES` | `262144`(256 KiB) | 单个 run 序列化后的 payload 字节上限;超出 `400 bad_request` |
+| `BETTER_TRIGGER_MAX_RECOVERIES` | `10` | 创建 run 时盖章的 `max_recoveries`:reaper 最多为这个 run 接管几次(worker 消失)。**与 `maxAttempts` 是两本账**(见 §3.5);`0` 合法,表示"lease 一过期就判死",非整数 / 负数回落默认值 |
 | `BETTER_TRIGGER_API_URL` | `http://localhost:4848` | SDK / worker 指向的 server |
 | `VITE_BT_API_URL` | `http://localhost:4848` | 前端指向的 server;**不设置时前端用 mock 数据** |
 
@@ -76,6 +77,16 @@ runs         id text PK ('run_'+随机) · task_id text · status text
              · code_version text(创建时从 tasks.latest_code_version 盖章;**不是 pin**,
                claim 不按它过滤,仅用于事后追溯"这份账本是按哪版代码写的")
              · attempt int DEFAULT 1 · max_attempts int(锁定触发时的策略)
+             · recoveries int DEFAULT 0 · max_recoveries int DEFAULT 10
+               (基础设施接管预算,与 attempt 分开记账;见 §3.5)
+             · concurrency_key text(见 §3.5)· priority int DEFAULT 0
+               (**调度器不读这两列**,它读的是 queue 行上的同名列;这里是创建时的
+                冗余副本 —— queue 行在终态/挂起时就被删了,而"这个 run 当初是按什么
+                配置触发的"要在 run 死后 / 挂起期间仍然可答。**每一处重新 INSERT
+                queue 行的路径都必须从这里读回 priority**:手动重试(§3.7)、定时
+                wait 到期恢复、以及父 run 被子 run 唤醒 —— 这三条都是先删 queue 行
+                再重建,写死 0 就等于"等过一次就掉到队尾"。失败重试 / reaper 接管 /
+                优雅关停归还走的是 UPDATE,queue 行还在,priority 自然保住)
              · queued_at/started_at/finished_at/created_at/updated_at timestamptz
              UNIQUE (task_id, idempotency_key)(部分索引 WHERE idempotency_key IS NOT NULL)
 
@@ -129,6 +140,7 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 - step fn 抛错 → SDK 上报 `POST /runs/:id/fail { error, stepSeq, retry: <生效策略> }`。生效策略 = step 级 `options.retry` ?? task 级 ?? 默认。server:`attempt < retry.maxAttempts` → `attempt+1`、status='queued'、入队(available_at=now+backoff);否则 status='failed'。
 - step 之间的用户代码抛错(不在 step 内)同样走 run fail 路径(stepSeq 省略)。
 - `AbortError`(core 导出)→ 上报 `{ error, abort: true }` → 直接 failed,不重试。
+- **`attempt` 只由本节的失败路径推进**:worker 消失走 `recoveries`(§3.5),优雅关停两本账都不动。用户看到 `attempt = 2` 就等于"我的代码失败过一次",与基础设施抖动无关。
 - worker 上报任何接口若收到 `409 {code:'run_not_running'}`(run 已被 cancel 等)→ SDK 放弃该 run 的执行,不再上报。
 
 ### 3.5 队列与并发(SKIP LOCKED)
@@ -142,8 +154,10 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
   对每个候选:若其 run 的 task 不在该 worker 注册列表 → 跳过;若 task 有 `concurrency_limit`:统计 `runs.status='running' AND concurrency_key 相同` 的数量(join queue 已锁行或 runs 表计数,用 runs 表:`SELECT count(*) FROM runs r JOIN queue... ` 简化为对 runs 计数 WHERE status='running' AND task 同 concurrency_key —— 把 concurrency_key 冗余存到 runs 行避免 join)≥ limit → 跳过(留队列)。
   - 因此 **runs 表也加 `concurrency_key text` 列**。默认 key = task_id;trigger options 可覆盖。
 - 取中第一个可执行的:`locked_by=workerId, locked_at=now()`,`runs.status='running', started_at=coalesce(started_at, now())`,提交,返回 run + steps 快照。
-- **可见性超时** 60s:reaper(每 10s)扫 `locked_at < now()-60s` 的 queue 行 → 释放锁、`attempt+1`、`runs.status='queued'`;若 attempt 已超 max_attempts → failed(error='worker lost')。
-- 心跳每 15s:`POST /workers/:id/heartbeat {runIds}` → 刷新这些 run 的 `queue.locked_at = now()` 与 worker `last_heartbeat_at`;响应含 `cancelRunIds`(server 发现已 cancel 的 run)。worker 2 分钟无心跳 → 编排器标记 `offline`。
+- **可见性超时** 60s:reaper(每 10s)扫 `lease_until <= now()` 的 queue 行 → 释放锁、**`recoveries+1`**、`runs.status='queued'`;若 `recoveries` 已达 `max_recoveries` → failed。
+- **两本预算分开记**(C4):`attempt/max_attempts` 是**用户代码**的失败预算(只有 failRun 会花),`recoveries/max_recoveries` 是**基础设施**接管预算(只有 reaper 会花,默认 10,`BETTER_TRIGGER_MAX_RECOVERIES` 在创建 run 时盖章)。worker 消失(部署、OOM、机器休眠)属于后者:`maxAttempts: 3` 的语义是"我的代码可以失败 3 次",三次部署不该把它耗光。因此 lease 过期的恢复**不动 `attempt`**,run 在**同一个 attempt** 上按账本继续重放;而 `max_recoveries` 仍然兜住"每个 claim 它的 worker 都会死"的无限循环。两种耗尽的终态错误文案必须可区分:reaper 写 `{ name: 'WorkerLostError', message: "worker lost: recovery budget exhausted (R/M infrastructure recoveries used; attempt A/N unaffected)" }`,用户代码耗尽 attempt 写的是用户自己的错误。`recoveries` 跨 attempt 累计,不重置。
+- 心跳每 15s:`POST /workers/:id/heartbeat {runIds}` → 刷新这些 run 的 `queue.locked_at = now()` 与 worker `last_heartbeat_at`;响应含 `cancelRunIds`(server 发现已 cancel 的 run)与 `lostRunIds`(请求续期但已不再持有 claim 的 run —— 被 reaper 收走或已终态)。两个集合互斥;收到 `lostRunIds` 的 executor 立刻 abort `ctx.signal`(reason `lease_lost`),不再为一份注定被 fencing 拒绝的结果空跑。worker 2 分钟无心跳 → 编排器标记 `offline`。
+- **优雅关停**是主动交接,不是失败:daemon 排干后停掉心跳,把自己名下没排完的 claim 一次性归还(`locked_by/locked_at/lease_until = NULL`、`available_at = now()`、`runs.status='queued'`),并立刻把 workers 行标成 `offline`。**`attempt` 不递增**(一次部署不该花掉用户的重试预算),`fencing_token` 也不动 —— 释放 `locked_by` 已经让旧 executor 的迟到写立即被 `assertOwnedRunning` 拒掉,下一次 claim 的 token++ 再永久作废它们。因此正常重启的接管是秒级的,不用等可见性超时 + reaper。
 - **长轮询**:`GET /dequeue` 挂住最多 `timeoutMs`(默认 20s,上限 30s),内部每 500ms 查一次,无任务到时返回 `{run: null}`。
 
 ### 3.6 cron 调度
@@ -154,6 +168,8 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 ### 3.7 取消 / 手动重试
 - `POST /api/v1/runs/:id/cancel`:queued/waiting/running → status='canceled', finished_at=now(),删 queue 行,waits 置 canceled;若它是某父的子 run → 父的 wait 以 `{ok:false, error:{message:'child canceled'}}` 回填并恢复父。running 状态下 worker 通过心跳响应 / 409 感知后放弃。
 - `POST /api/v1/runs/:id/retry`:仅 failed/canceled;**创建新 run**(同 payload,trigger_type='retry',attempt=1,无缓存 steps),返回 `{runId}`。
+  - **调度配置跟着走**(C7):`priority` 与 `concurrency_key` 从源 run 行复制到新 run(priority 读 `runs.priority` 这个冗余列 —— 源 run 已终态,queue 行早被删了)。否则从 dashboard 重试一个高优先级、单独限流的 run,重试出来的那个会掉回 priority 0、并挤进 task 默认的配额桶。
+  - **`idempotency_key` 故意不跟着走**:复用它会撞上源 run 自己的部分唯一索引,`/retry` 会把「被重试的那个 run 的 id」原样还回来。`env` 跟着走,`attempt`/`recoveries` 从头计。
 
 ### 3.8 确定性替身
 `ctx.now()` 返回 Date(首跑记 ISO 字符串,重放反序列化);`ctx.random()` 返回 number;`ctx.uuid()` 返回 string。三者都是 memoized 迷你 step(kind 对应),由 SDK 在**本地执行后异步上报**(与普通 step 相同上报接口,kind 不同)。
@@ -165,7 +181,7 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 | 方法路径 | 请求体 → 响应 |
 |---|---|
 | `POST /workers/register` | `{ name?, codeVersion, runtime:'self-host', concurrency, tasks: TaskManifest[] }` → `{ workerId, heartbeatIntervalMs:15000, visibilityTimeoutMs:60000 }`。同时 upsert tasks 表 + schedules。`codeVersion` 取 `BETTER_TRIGGER_VERSION`,否则由「task id + cron + **run 函数体源码指纹**」哈希得出——改实现即变版本(打包器/压缩器不同也会变;要稳定就显式设环境变量)。 |
-| `POST /workers/:id/heartbeat` | `{ runIds: string[] }` → `{ ok:true, cancelRunIds: string[] }` |
+| `POST /workers/:id/heartbeat` | `{ runIds: string[] }` → `{ ok:true, cancelRunIds: string[], lostRunIds: string[] }` |
 | `GET /dequeue?workerId=&timeoutMs=` | → `{ run: null }` 或 `{ run: { id, taskId, payload, attempt, maxAttempts, codeVersion, env, steps: StepSnapshot[] } }` |
 | `POST /runs/:id/steps` | `{ seq, kind, label, status:'completed'\|'failed', output?, error?, attempt, startedAt, finishedAt, workerId }` → `{ ok:true }`;run 非 running → 409 `{code:'run_not_running'}` |
 | `POST /runs/:id/suspend` | `{ seq, label?, kind:'duration'\|'until', resumeAt, workerId }` → `{ ok:true, resumed:false }` 或 `{ ok:true, resumed:true }`(已到期,见 3.2) |
@@ -173,7 +189,7 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 | `POST /runs/:id/batch-trigger` | `{ seq, label?, items:[{taskId,payload,options?}], workerId }` → `{ runIds: string[] }`(server 创建 N 子 run + 写 step 行 kind='batch-trigger' output={runIds},**同事务幂等**:若 step 行已存在直接返回其 output) |
 | `POST /runs/:id/complete` | `{ output, workerId }` → `{ ok:true }`(终态;若有父在等,回填并唤醒) |
 | `POST /runs/:id/fail` | `{ error:{message,stack?,name?}, stepSeq?, retry?, abort?, workerId }` → `{ ok:true, willRetry:boolean, nextAttemptAt? }` |
-| `POST /runs/:id/logs` | `{ logs: [{ts, level:'debug'\|'info'\|'warn'\|'error', message, data?, stepSeq?}] }` → `{ ok:true }`(尽力而为,run 任何状态都接受) |
+| `POST /runs/:id/logs` | `{ logs: [{ts, level:'debug'\|'info'\|'warn'\|'error', message, data?, stepSeq?}] }` → `{ ok:true }`(尽力而为、不 fencing;run 不存在或已终态则静默写 0 行,不报错) |
 
 `TaskManifest = { id, name?, filePath?, cron?: { pattern, timezone? }, retry?: RetryPolicy, concurrencyLimit?, description? }`
 

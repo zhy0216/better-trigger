@@ -68,7 +68,7 @@ function fakeKernel(b: Behavior = {}) {
     heartbeat: async () => {
       calls.heartbeats += 1;
       if (b.heartbeatFails) throw new Error('connection refused');
-      return { cancelRunIds: [] };
+      return { cancelRunIds: [], lostRunIds: [] };
     },
     reportStep: async () => {
       calls.reportStep += 1;

@@ -47,7 +47,7 @@ function fakeKernel(b: Behavior = {}) {
       handedOut = true;
       return [RUN];
     },
-    heartbeat: async () => ({ cancelRunIds: [] }),
+    heartbeat: async () => ({ cancelRunIds: [], lostRunIds: [] }),
     reportStep: async () => {},
     completeRun: async () => {
       calls.completeRun += 1;
@@ -154,7 +154,7 @@ describe('runs_total sources', () => {
       registerWorker: async () => ({ workerId: 'w1' }),
       startOrchestrator: () => ({ stop: () => {} }),
       claimRuns: async () => [],
-      heartbeat: async () => ({ cancelRunIds: [] }),
+      heartbeat: async () => ({ cancelRunIds: [], lostRunIds: [] }),
     } as unknown as Kernel;
 
     const handle = await startWorkerRuntime(

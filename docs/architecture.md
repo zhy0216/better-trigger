@@ -104,7 +104,9 @@ better-trigger-worker(daemon)
 | LLM / 工具调用 | 昂贵副作用:重放不重打(memoized);重试需幂等键,`ctx` 暴露 `idempotencyKey` / `attempt` |
 | wait / timer | deadline 持久化;无 daemon 在线时不运行,恢复后尽快触发,只产生一次恢复 |
 | daemon crash | lease 过期后由任意存活 daemon 接管;旧 lease 持有者的迟到写被 fencing token 拒绝 |
+| 接管的代价 | 接管消耗 run 的 `recoveries`(上限 `max_recoveries`,默认 10),**不消耗 `attempt`** —— `maxAttempts` 是"我的代码可以失败几次",部署 / OOM / 机器休眠不该花它;优雅关停两本都不动。恢复在**同一个 attempt** 上按账本继续。`max_recoveries` 耗尽 → 终态 `worker lost`,错误文案里写明耗尽的是哪本预算 |
 | step 间用户代码 | 必须确定性;fingerprint 不匹配 → `NonDeterminismError`(P2) |
+| durable primitive 的异常 | **不要用 catch-all 包裹** `ctx.wait` / `ctx.step` / `triggerAndWait`:挂起与结束是靠抛异常传递的,吞掉它意味着 run 已经 `waiting`/终态而代码还在跑(副作用真发生、恢复后再发生一次)。捕获必须 `catch (err) { if (isControlFlowSignal(err)) throw err; ... }`(从 `better-trigger` 导出,同时认得挂起信号与结束信号;只判 `isSuspendSignal` 会漏掉 step 失败那条路径);运行时会在下一个 durable primitive 处以 `AbortError` + 一条 `warn` 日志抓住它 |
 | task 模块 | 必须可被 daemon 独立 import;不得闭包应用内部状态 |
 | PostgreSQL | v1 唯一生产存储;内部 repository 是模块边界,不是公开 adapter API |
 | 所有 daemon 停止 | 只保存状态,不消耗任务("状态 durable,计算需要至少一个 daemon 在线") |
@@ -112,6 +114,7 @@ better-trigger-worker(daemon)
 ## Schema
 
 - `runs`:`fencing_token bigint`(**每 run 单调递增计数器**,claim 时 +1,一切写回校验;放在 runs 行而非 queue 行,使 queue 行被删除/重建(重试、resume)也不会重置 token)
+- `runs`:`recoveries int` / `max_recoveries int`(reaper 接管计数,与 `attempt`/`max_attempts` 分开;创建时按 `BETTER_TRIGGER_MAX_RECOVERIES` 盖章,默认 10)
 - `queue`:`lease_until`(持久 lease;queue 行只承载 lease,不承载 fencing 计数)
 - `run_steps`:P2 增 `fingerprint text`(kind+label+inputHash;首跑写入,重放校验)
 - `workers`:daemon 注册表(执行节点写心跳),供 dashboard 展示

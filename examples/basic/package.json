@@ -12,6 +12,7 @@
     "worker-lost": "bun scripts/worker-lost.ts",
     "fencing": "bun scripts/fencing.ts",
     "replay-drift": "bun scripts/replay-drift.ts",
+    "graceful-restart": "bun scripts/graceful-restart.ts",
     "test:acceptance": "bun scripts/acceptance.ts",
     "typecheck": "tsc --noEmit"
   },

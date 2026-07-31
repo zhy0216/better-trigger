@@ -46,8 +46,22 @@ import {
   type TriggerArgs,
   type WaitForChildRunArgs,
 } from './runs';
-import { claimRuns, heartbeat, type ClaimRunsArgs, type HeartbeatArgs } from './queue';
-import { registerWorker, type RegisterWorkerArgs } from './workers';
+import {
+  claimRuns,
+  heartbeat,
+  releaseClaims,
+  type ClaimRunsArgs,
+  type HeartbeatArgs,
+  type HeartbeatResult,
+  type ReleaseClaimsArgs,
+  type ReleaseClaimsResult,
+} from './queue';
+import {
+  deregisterWorker,
+  registerWorker,
+  type DeregisterWorkerArgs,
+  type RegisterWorkerArgs,
+} from './workers';
 
 export interface KernelLogger {
   warn(...args: unknown[]): void;
@@ -81,8 +95,14 @@ export interface Kernel {
   /* ------------------------------------------------------------- worker */
   /** Register a worker: workers row + task upserts + schedule sync (one tx). */
   registerWorker(args: RegisterWorkerArgs): Promise<{ workerId: string }>;
-  /** Renew leases for in-flight runs; returns runs canceled server-side. */
-  heartbeat(args: HeartbeatArgs): Promise<{ cancelRunIds: string[] }>;
+  /** Mark this worker offline on shutdown (ahead of the offline marker loop). */
+  deregisterWorker(args: DeregisterWorkerArgs): Promise<void>;
+  /** Renew leases for in-flight runs; returns runs canceled server-side and
+   *  runs whose claim this worker has lost (reaped away, or gone terminal). */
+  heartbeat(args: HeartbeatArgs): Promise<HeartbeatResult>;
+  /** Hand this worker's undrained claims back to the queue on shutdown:
+   *  claimable at once, attempt untouched (a handover, not a failure). */
+  releaseClaims(args: ReleaseClaimsArgs): Promise<ReleaseClaimsResult>;
   /** Claim up to `limit` due runs (lease + fencing token per claim). */
   claimRuns(args: ClaimRunsArgs): Promise<ClaimedRun[]>;
   /** Record a memoized step row (fenced). */
@@ -97,7 +117,8 @@ export interface Kernel {
   completeRun(args: CompleteRunArgs): Promise<void>;
   /** Failure: retry with backoff or terminal fail + parent wakeup (fenced). */
   failRun(args: FailRunArgs): Promise<FailResult>;
-  /** Best-effort log append, any run status (no fencing). */
+  /** Best-effort log append, any non-terminal run status (no fencing); a run
+   *  that is gone or already finished absorbs nothing and raises nothing. */
   appendLogs(runId: string, entries: LogEntry[]): Promise<void>;
 
   /* ------------------------------------------------------ orchestration */
@@ -120,7 +141,9 @@ export function createKernel(opts: KernelOptions): Kernel {
     waitForResult: (runId, o) => waitForResult(pool, runId, o),
 
     registerWorker: (args) => registerWorker(pool, args),
+    deregisterWorker: (args) => deregisterWorker(pool, args),
     heartbeat: (args) => heartbeat(pool, args),
+    releaseClaims: (args) => releaseClaims(pool, args),
     claimRuns: (args) => claimRuns(pool, args),
     reportStep: (args) => reportStep(pool, args),
     suspendRun: (args) => suspendRun(pool, args),

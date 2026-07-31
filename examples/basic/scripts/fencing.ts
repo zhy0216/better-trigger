@@ -3,11 +3,15 @@
 
    Two workers race over one run, straight against createKernel (no SDK
    executor): worker A claims with a tiny lease and never heartbeats; the
-   reaper releases the expired claim; worker B reclaims and the fencing token
-   increments by exactly 1. Every fenced mutation A attempts with its stale
+   reaper releases the expired claim (spending a `recovery`, not an attempt —
+   C4); worker B reclaims and the fencing token increments by exactly 1. Every fenced mutation A attempts with its stale
    token (reportStep / completeRun / suspendRun / failRun retry-shaped +
    abort / waitForChildRun / batchTriggerChild) must be rejected with
    StaleLeaseError AND zero state change, while B's writes land normally.
+   Logs are the one write that is NOT fenced (best effort by design), so they
+   get the complementary check: the same stale A may keep appending while the
+   run lives, but its flush after the run goes terminal writes 0 rows and still
+   raises nothing (C8).
    A second run then pins token monotonicity across suspend/resume: the
    post-resume claim's token is strictly greater than the pre-suspend token,
    which no longer authorizes writes.
@@ -23,6 +27,7 @@
      BT_FENCING_DB   override the provisioned database name (default
                      better_trigger_fencing)
    ============================================================================= */
+import type { LogEntry } from '@better-trigger/core';
 import { createKernel, StaleLeaseError } from '@better-trigger/kernel';
 import { runScenario, sleep, waitForStatus, type Scenario } from '@better-trigger/testing';
 
@@ -150,11 +155,17 @@ async function main(s: Scenario): Promise<void> {
   await sleep(1_500); // lease long expired; reaper has run several times
 
   const reaped = await kernel.getRun(runId);
+  // Since C4 the reaper charges the run a *recovery*, not an attempt: A
+  // vanishing is infrastructure, and the run resumes on the same attempt.
+  const reapedRecoveries = (
+    await pool.query<{ recoveries: number }>(`SELECT recoveries FROM runs WHERE id = $1`, [runId])
+  ).rows[0]!.recoveries;
   s.assert(
-    reaped.status === 'queued' && reaped.attempt === 2,
-    `reaper should requeue the run as attempt 2, got status='${reaped.status}' attempt=${reaped.attempt}`,
+    reaped.status === 'queued' && reaped.attempt === 1 && reapedRecoveries === 1,
+    `reaper should requeue the run on attempt 1 with 1 recovery, got status='${reaped.status}' ` +
+      `attempt=${reaped.attempt} recoveries=${reapedRecoveries}`,
   );
-  s.ok('reaper released the zombie claim (run requeued, attempt 2)');
+  s.ok('reaper released the zombie claim (run requeued, attempt 1, recoveries 1)');
 
   /* -- B reclaims: token must increment by exactly 1 ------------------------ */
   const [claimB] = await kernel.claimRuns({
@@ -225,10 +236,10 @@ async function main(s: Scenario): Promise<void> {
     s.assert(seq99.rows.length === 0, `seq 99 must have no step row, got ${seq99.rows.length}`);
     const now = await kernel.getRun(runId);
     s.assert(
-      now.status === 'running' && now.attempt === 2,
-      `run must stay running at attempt 2 after the rejected write, got status='${now.status}' attempt=${now.attempt}`,
+      now.status === 'running' && now.attempt === 1,
+      `run must stay running at attempt 1 after the rejected write, got status='${now.status}' attempt=${now.attempt}`,
     );
-    s.ok('seq 99 has no row; run status/attempt unchanged (running, attempt 2)');
+    s.ok('seq 99 has no row; run status/attempt unchanged (running, attempt 1)');
   }
 
   /* -- EVERY fenced mutation rejects stale credentials with zero state change */
@@ -287,6 +298,47 @@ async function main(s: Scenario): Promise<void> {
     }),
   );
 
+  /* -- logs: no fencing, but still bounded by the run's lifetime (C8) -------
+   * appendLogs deliberately takes no token — a superseded executor's last
+   * flush is still worth keeping — so the only thing between A's late flush
+   * and a history that continues past the run's own finished_at is the
+   * INSERT's own `WHERE EXISTS (... finished_at IS NULL)`. That guard, the
+   * VALUES sub-select it hangs off and the per-column casts are SQL, and a
+   * stubbed pool would accept a statement Postgres rejects — so the statement
+   * gets exercised here, against a real database. -------------------------- */
+  const countLogs = async (id: string): Promise<number> =>
+    (await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM logs WHERE run_id = $1`, [id]))
+      .rows[0]!.n;
+
+  // One shape per cast in the statement: stepSeq absent / present / 0, data
+  // absent / object / scalar, every level.
+  const flush = (): LogEntry[] => [
+    { ts: nowIso(), level: 'debug', message: 'no step, no data' },
+    { ts: nowIso(), level: 'info', message: 'object data', stepSeq: 1, data: { a: [1, null] } },
+    { ts: nowIso(), level: 'warn', message: 'scalar data', stepSeq: 0, data: 'plain string' },
+    { ts: nowIso(), level: 'error', message: 'zero-seq boundary', stepSeq: 0 },
+  ];
+
+  await kernel.appendLogs(runId, flush());
+  const firstFlush = await countLogs(runId);
+  s.assert(firstFlush === 4, `a live run must absorb every line, got ${firstFlush} of 4`);
+  // Past LOG_INSERT_CHUNK (1000): proves the chunk loop's bind-param math
+  // against the real 65535 ceiling, not just against the stub's arithmetic.
+  const bulk: LogEntry[] = Array.from({ length: 1_200 }, (_, i) => ({
+    ts: nowIso(),
+    level: 'info',
+    message: `bulk ${i}`,
+    stepSeq: i % 3,
+    data: { i },
+  }));
+  await kernel.appendLogs(runId, bulk);
+  const liveLogs = await countLogs(runId);
+  s.assert(
+    liveLogs === 1_204,
+    `chunked append should land all 1200 lines for a total of 1204, got ${liveLogs}`,
+  );
+  s.ok('live run absorbed 1204 log lines (chunked at 1000 rows per statement)');
+
   /* -- B's writes land normally -------------------------------------------- */
   await kernel.reportStep({
     runId,
@@ -295,7 +347,9 @@ async function main(s: Scenario): Promise<void> {
     label: 'real-step',
     status: 'completed',
     output: 'from-B',
-    attempt: 2,
+    // B is executing the run's FIRST attempt — the reclaim was a recovery,
+    // and recoveries do not advance runs.attempt (C4).
+    attempt: 1,
     startedAt: nowIso(),
     finishedAt: nowIso(),
     workerId: workerB,
@@ -322,8 +376,26 @@ async function main(s: Scenario): Promise<void> {
       detail.steps[0].output === 'from-B',
     `expected exactly 1 step row (B's), got ${JSON.stringify(detail.steps)}`,
   );
-  s.assert(detail.run.attempt === 2, `attempt should be 2, got ${detail.run.attempt}`);
-  s.ok('run completed with a single step row (B) and attempt = 2');
+  s.assert(detail.run.attempt === 1, `attempt should still be 1, got ${detail.run.attempt}`);
+  s.ok('run completed with a single step row (B) and attempt = 1 (a recovery, not a retry)');
+
+  /* A is now both fenced out AND writing to a terminal run: its flush must
+   * land nowhere and must not raise — the executor's flush path counts a
+   * rejection as dropped-log diagnostics, so throwing would trade a silent
+   * no-op for a warn storm on every 1s tick of an abandoned run. */
+  await kernel.appendLogs(runId, flush());
+  const afterTerminal = await countLogs(runId);
+  s.assert(
+    afterTerminal === liveLogs,
+    `a terminal run must absorb nothing, went from ${liveLogs} to ${afterTerminal} lines`,
+  );
+  // Same statement, same silence, for a run that never existed.
+  await kernel.appendLogs('run_never_existed', flush());
+  s.assert(
+    (await countLogs('run_never_existed')) === 0,
+    'a missing run must not accumulate logs either',
+  );
+  s.ok("A's post-terminal flush wrote 0 rows and raised nothing (C8)");
 
   // Shared invariants. assertSeqContiguous is deliberately NOT asserted in this
   // scenario: it writes seqs by hand (1, 96..99) instead of letting a replay

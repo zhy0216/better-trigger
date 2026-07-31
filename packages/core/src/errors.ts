@@ -46,6 +46,43 @@ export function isSuspendSignal(err: unknown): err is SuspendSignal {
   );
 }
 
+/**
+ * The other control-flow signal thrown through user code: this attempt is over
+ * (its failure was already reported to the kernel) and run() is being unwound.
+ * The class itself belongs to the worker's executor — user code never builds
+ * one — but its brand lives here so a broad `catch` can recognize it without
+ * importing the daemon (todos/01-correctness.md C6).
+ */
+export interface ExecutionEndedSignal extends Error {
+  readonly isBetterTriggerExecutionDone: true;
+}
+
+export function isExecutionEndedSignal(err: unknown): err is ExecutionEndedSignal {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as Record<string, unknown>).isBetterTriggerExecutionDone === true
+  );
+}
+
+/**
+ * True for every value the runtime throws to steer control flow: the suspend
+ * signal (ctx.wait / triggerAndWait) and the end-of-execution signal. Neither
+ * is a failure user code can recover from — the run is already 'waiting' or
+ * finished — so a catch broad enough to see one must hand it back:
+ *
+ *     try { await ctx.wait.for('1h') }
+ *     catch (err) { if (isControlFlowSignal(err)) throw err; ...your handling }
+ *
+ * This is the single predicate to reach for: `isSuspendSignal` alone leaves the
+ * step-failure path still swallowing its signal.
+ */
+export function isControlFlowSignal(
+  err: unknown,
+): err is SuspendSignal | ExecutionEndedSignal {
+  return isSuspendSignal(err) || isExecutionEndedSignal(err);
+}
+
 /** Convert any thrown value to a JSON-safe error record. */
 export function serializeError(err: unknown): SerializedError {
   if (err instanceof Error) {

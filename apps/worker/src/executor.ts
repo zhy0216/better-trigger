@@ -23,11 +23,13 @@ import {
   AbortError,
   durationToDate,
   isAbortError,
+  isExecutionEndedSignal,
   isSuspendSignal,
   KernelError,
   serializeError,
   SuspendSignal,
   type ClaimedRun,
+  type ExecutionEndedSignal,
   type LogEntry,
   type RetryPolicy,
   type StepKind,
@@ -51,8 +53,14 @@ import {
 } from 'better-trigger/internal';
 import { errorKey, type ExecutorDiagnostics } from './observability';
 
-/** Thrown internally to unwind the run() stack after a fatal failure was reported. */
-class ExecutionDone extends Error {
+/**
+ * Thrown internally to unwind the run() stack after a fatal failure was
+ * reported. The class stays private (user code never constructs one), but its
+ * brand is core's `ExecutionEndedSignal` so `isControlFlowSignal` — the
+ * predicate we tell users to rethrow on — recognizes it: `implements` is what
+ * keeps the two in step.
+ */
+class ExecutionDone extends Error implements ExecutionEndedSignal {
   readonly isBetterTriggerExecutionDone = true;
   constructor() {
     super('execution complete');
@@ -96,6 +104,13 @@ export class Executor implements RunExecutor {
   private logTimer: ReturnType<typeof setInterval> | null = null;
   /** Set true once a kernel write is rejected (run_not_running / stale_lease). */
   private abandoned = false;
+  /**
+   * Which control-flow signal we have already thrown into user code, if any:
+   * 'suspend' = SuspendSignal (the run is 'waiting'), 'done' = ExecutionDone
+   * (this attempt is over). Non-null means nothing this execution does may
+   * still be recorded — see assertSignalNotSwallowed (C6).
+   */
+  private endSignal: 'suspend' | 'done' | null = null;
   /** Set by the worker when a heartbeat reports a cancel for this run. */
   private canceled = false;
   /**
@@ -153,10 +168,11 @@ export class Executor implements RunExecutor {
   }
 
   /**
-   * Lease-loss seam for todos/01-correctness.md C2: once the heartbeat response
-   * carries lostRunIds, runtime.ts's heartbeat loop calls this for each of them
-   * (next to the existing markCanceled() call). Nothing detects lease loss yet,
-   * so nothing calls this — deliberately: C2 owns the detection side.
+   * Worker calls this when a heartbeat reports our claim on this run is gone
+   * (todos/01-correctness.md C2) — reaped away, or the queue row vanished under
+   * us. Only ctx.signal is touched, on purpose: whoever holds the claim now is
+   * responsible for the run, and every write from here would be fenced off
+   * anyway. We just stop paying for it.
    */
   markLost(): void {
     this.abort('lease_lost');
@@ -178,7 +194,7 @@ export class Executor implements RunExecutor {
   private abandonIfAborted(): void {
     if (this.abortReason !== null) {
       this.abandoned = true;
-      throw new ExecutionDone();
+      throw this.endExecution();
     }
   }
 
@@ -205,7 +221,12 @@ export class Executor implements RunExecutor {
         return this.handleThrown(err);
       }
 
-      // Normal return → complete.
+      // Normal return → complete. Unless run() only returned because a catch-all
+      // swallowed the signal that was supposed to end it (C6) and no durable
+      // primitive followed to catch it out: the run is already 'waiting' /
+      // finished, so completing it here is exactly the write that must not
+      // happen. Report the outcome that actually holds instead.
+      if (this.endSignal !== null) return this.endedWithoutUs();
       if (this.abandoned) return { type: 'abandoned' };
       await this.flushLogs();
       try {
@@ -235,7 +256,7 @@ export class Executor implements RunExecutor {
     // ExecutionDone: a step failure path already reported fail() — just unwind.
     // The abandonment paths (kernel rejection, cancel, ctx.signal abort) unwind
     // the same way but reported nothing, so keep them distinguishable.
-    if (err instanceof ExecutionDone || (err as any)?.isBetterTriggerExecutionDone) {
+    if (isExecutionEndedSignal(err)) {
       return this.abandoned ? { type: 'abandoned' } : { type: 'failed' };
     }
     if (this.abandoned) return { type: 'abandoned' };
@@ -247,6 +268,26 @@ export class Executor implements RunExecutor {
     // still governs the backoff, same as the step-failure path.
     const abort = isAbortError(err);
     await this.failRun(serializeError(err), undefined, abort, abort ? undefined : this.task.retry);
+    return this.abandoned ? { type: 'abandoned' } : { type: 'failed' };
+  }
+
+  /**
+   * run() returned normally even though we had already thrown a signal into it,
+   * so the return value is worth nothing: the run is suspended (or this attempt
+   * already failed) and user code simply kept going after swallowing the throw.
+   * Leave a trace in the run's logs and report the outcome the signal stood for.
+   */
+  private async endedWithoutUs(): Promise<ExecutionResult> {
+    const signal = this.endSignal === 'suspend' ? 'suspend signal' : 'end-of-execution signal';
+    this.log(
+      'warn',
+      `run() returned normally after this execution ended — your code caught the ` +
+        `${signal} instead of rethrowing it. Its return value is discarded, and ` +
+        `everything after the catch ran outside the run: unrecorded, and again on ` +
+        `replay. Rethrow it: if (isControlFlowSignal(err)) throw err.`,
+    );
+    await this.flushLogs();
+    if (this.endSignal === 'suspend') return { type: 'suspended' };
     return this.abandoned ? { type: 'abandoned' } : { type: 'failed' };
   }
 
@@ -333,8 +374,67 @@ export class Executor implements RunExecutor {
   private checkCanceled(): void {
     if (this.canceled) {
       this.abandoned = true;
-      throw new ExecutionDone();
+      throw this.endExecution();
     }
+  }
+
+  /**
+   * The only way ExecutionDone is created: records that a control-flow signal
+   * is now in flight through user code, so a catch-all that swallows it is
+   * detectable at the next durable primitive.
+   */
+  private endExecution(): ExecutionDone {
+    this.endSignal = 'done';
+    return new ExecutionDone();
+  }
+
+  /**
+   * Suspending and ending an attempt are delivered by throwing (SuspendSignal,
+   * ExecutionDone). A catch-all in user code swallows them and keeps going:
+   *
+   *     try { await ctx.wait.for('1h') } catch {}
+   *     await sendEmail(user)              // ← really sends, right now
+   *
+   * suspendRun already flipped the run to 'waiting' and dropped its queue row,
+   * so every later kernel write is fenced off and the executor abandons in
+   * silence — but the side effects between the catch and the end of run() do
+   * happen, and happen again after the run resumes and replays, with nothing in
+   * the ledger to show for it (todos/01-correctness.md C6).
+   *
+   * Plain side effects are out of reach, but the moment a durable primitive is
+   * called we know the signal was swallowed: say so, in the run's own logs and
+   * in the error. AbortError on purpose — this is a deterministic bug in the
+   * task, so retrying would only replay it — and it stays consistent with T6:
+   * if this attempt was already abandoned or aborted, handleThrown classifies
+   * the throw as 'abandoned' and still reports nothing.
+   */
+  private async assertSignalNotSwallowed(what: string): Promise<void> {
+    if (this.endSignal === null) return;
+    const caught =
+      this.endSignal === 'suspend'
+        ? 'your code caught the suspend signal thrown by ctx.wait() / triggerAndWait()'
+        : 'your code caught the internal end-of-execution signal';
+    const summary = `${what} was called after this execution ended — ${caught}`;
+    this.log(
+      'warn',
+      `${summary}. Everything after that catch is running outside the run: it ` +
+        `records nothing, and it runs again when the run replays. ` +
+        `Rethrow it: if (isControlFlowSignal(err)) throw err.`,
+    );
+    // Reach the user before the throw is classified: the abandonment paths in
+    // handleThrown return without flushing, and this warning is the only trace.
+    await this.flushLogs();
+    throw new AbortError(
+      `${summary}. A catch-all around a durable primitive swallows the signal ` +
+        `that ends the execution, so run ${this.run.id} kept executing while it ` +
+        `was already suspended or finished — no write from here on is recorded, ` +
+        `and the code after the catch runs a second time on replay. ` +
+        `Rethrow it: catch (err) { if (isControlFlowSignal(err)) throw err; ... } ` +
+        `— isControlFlowSignal is exported from "better-trigger" and covers both ` +
+        `signals (suspend and end-of-execution), so one rethrow fixes both paths. ` +
+        `Or move the durable primitive out of the try block: a step that fails is ` +
+        `retried by its retry policy, there is no "carry on anyway" for it.`,
+    );
   }
 
   /**
@@ -362,7 +462,8 @@ export class Executor implements RunExecutor {
     fn: () => T | Promise<T>,
     opts?: StepOptions,
   ): Promise<T> {
-    if (this.abandoned) throw new ExecutionDone();
+    await this.assertSignalNotSwallowed(`ctx.step("${label}")`);
+    if (this.abandoned) throw this.endExecution();
     this.assertNotNested(`ctx.step("${label}")`);
     const seq = this.nextSeq();
 
@@ -383,7 +484,7 @@ export class Executor implements RunExecutor {
       // undefined, so onStepError's logs are not mis-attributed to this seq.
       await this.onStepError(seq, label, 'step', err, opts?.retry, startedAt);
       // onStepError always reports + throws; unreachable, but satisfies types.
-      throw new ExecutionDone();
+      throw this.endExecution();
     }
 
     await this.reportStep(seq, 'step', label, 'completed', result, startedAt);
@@ -426,7 +527,7 @@ export class Executor implements RunExecutor {
     } catch (e) {
       if (isAbandonment(e)) {
         this.abandoned = true;
-        throw new ExecutionDone();
+        throw this.endExecution();
       }
       // Non-fatal: still try to fail the run below. The run does land as
       // failed, so this is not silent from the outside — but the step row that
@@ -447,7 +548,7 @@ export class Executor implements RunExecutor {
 
     const effectiveRetry = abort ? undefined : (stepRetry ?? this.task.retry);
     await this.failRun(serialized, seq, abort, effectiveRetry);
-    throw new ExecutionDone();
+    throw this.endExecution();
   }
 
   private async reportStep(
@@ -475,7 +576,7 @@ export class Executor implements RunExecutor {
     } catch (err) {
       if (isAbandonment(err)) {
         this.abandoned = true;
-        throw new ExecutionDone();
+        throw this.endExecution();
       }
       throw err;
     }
@@ -484,8 +585,10 @@ export class Executor implements RunExecutor {
   /* ---- ctx.wait -------------------------------------------------------- */
 
   private async doWait(kind: 'duration' | 'until', resumeAt: Date): Promise<void> {
-    if (this.abandoned) throw new ExecutionDone();
-    this.assertNotNested(`ctx.wait.${kind === 'duration' ? 'for' : 'until'}()`);
+    const what = `ctx.wait.${kind === 'duration' ? 'for' : 'until'}()`;
+    await this.assertSignalNotSwallowed(what);
+    if (this.abandoned) throw this.endExecution();
+    this.assertNotNested(what);
     const seq = this.nextSeq();
 
     if (this.cached(seq, 'wait', null)) return; // already resumed on a prior replay
@@ -505,12 +608,13 @@ export class Executor implements RunExecutor {
     } catch (err) {
       if (isAbandonment(err)) {
         this.abandoned = true;
-        throw new ExecutionDone();
+        throw this.endExecution();
       }
       throw err;
     }
 
     if (resumed) return; // resumeAt already past — keep executing, seq consumed
+    this.endSignal = 'suspend'; // from here the run is 'waiting': nothing may write
     throw new SuspendSignal(seq);
   }
 
@@ -522,7 +626,8 @@ export class Executor implements RunExecutor {
     label: string,
     options?: TriggerOptions,
   ): Promise<TaskRunResult<TOutput>> {
-    if (this.abandoned) throw new ExecutionDone();
+    await this.assertSignalNotSwallowed(`triggerAndWait("${taskId}")`);
+    if (this.abandoned) throw this.endExecution();
     this.assertNotNested(`triggerAndWait("${taskId}")`);
     const seq = this.nextSeq();
 
@@ -544,10 +649,11 @@ export class Executor implements RunExecutor {
     } catch (err) {
       if (isAbandonment(err)) {
         this.abandoned = true;
-        throw new ExecutionDone();
+        throw this.endExecution();
       }
       throw err;
     }
+    this.endSignal = 'suspend'; // waiting on the child run — same as ctx.wait
     throw new SuspendSignal(seq);
   }
 
@@ -557,7 +663,8 @@ export class Executor implements RunExecutor {
     items: TriggerItem[],
     label: string,
   ): Promise<string[]> {
-    if (this.abandoned) throw new ExecutionDone();
+    await this.assertSignalNotSwallowed(`trigger/batchTrigger (${label})`);
+    if (this.abandoned) throw this.endExecution();
     this.assertNotNested(`trigger/batchTrigger (${label})`);
     const seq = this.nextSeq();
 
@@ -581,7 +688,7 @@ export class Executor implements RunExecutor {
     } catch (err) {
       if (isAbandonment(err)) {
         this.abandoned = true;
-        throw new ExecutionDone();
+        throw this.endExecution();
       }
       throw err;
     }
@@ -595,7 +702,8 @@ export class Executor implements RunExecutor {
   private async doDeterministic(
     kind: 'now' | 'random' | 'uuid',
   ): Promise<Date | number | string> {
-    if (this.abandoned) throw new ExecutionDone();
+    await this.assertSignalNotSwallowed(`ctx.${kind}()`);
+    if (this.abandoned) throw this.endExecution();
     this.assertNotNested(`ctx.${kind}()`);
     const seq = this.nextSeq();
 

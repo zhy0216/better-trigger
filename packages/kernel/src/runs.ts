@@ -25,6 +25,25 @@
    lease_until set), and neither scan ever *waits* on a queue row, so neither
    can close a cycle. heartbeat touches only queue rows (never runs) and thus
    cannot participate in a queue↔runs cycle.
+   releaseClaims (shutdown hand-back) is the one multi-row scan that deliberately
+   does NOT use SKIP LOCKED — it must hand back every claim it holds, not the
+   convenient subset — so unlike claim/reap it can *wait* on a queue row. It is
+   still ordered 1→2 and holds N queue locks before touching any runs row, so it
+   cannot close a cycle with a per-run tx (those take queue before runs too), and
+   it orders its own scan by run_id so two shutting-down workers cannot deadlock
+   against each other. Its candidate set is locked_by = $me, which is disjoint
+   from claimRuns' (locked_by IS NULL) and from every other worker's hand-back.
+   The wait-due scanner (orchestrator.scanWaits) is the opposite case — every
+   daemon reads the same due waits, so waiting on one is waiting for a peer that
+   is already resuming it. Its per-wait tx keeps the 1→2→3 order but takes
+   positions 2 and 3 with SKIP LOCKED (tryLockRunRow, then the wait row) and
+   abandons the wait the instant either is held: the row stays 'pending' and the
+   next tick, which orders by resume_at, finds it at the head again. Position 1
+   stays blocking on purpose — a waiting run has no queue row (suspendRun
+   deleted it), so it is a 0-row no-op on the path this is about, and actually
+   holding it when a stale row does exist is what keeps the closing
+   INSERT ... ON CONFLICT on queue from waiting on a queue row while the runs
+   row is already held, which is the one direction (2→1) this order forbids.
 
    FENCING: worker-side writes are guarded by assertOwnedRunning — owner
    (locked_by) from the queue row, status + fencing_token from the runs row,
@@ -83,6 +102,13 @@ const MAX_DELAY_MS = 315_576_000_000;
 const DEFAULT_MAX_BATCH_ITEMS = 500;
 const DEFAULT_MAX_PAYLOAD_BYTES = 256 * 1024;
 
+/* How many times the reaper may hand a run back after a worker vanished under
+   it. Deliberately generous: infrastructure churn (a deploy, an OOM kill, a
+   laptop that slept) is not the user's code failing, so it must not eat
+   max_attempts — but an unbounded budget would let a run that kills every
+   worker it touches cycle forever, so there is still a ceiling. */
+const DEFAULT_MAX_RECOVERIES = 10;
+
 /**
  * Read a positive-integer limit from the environment; absent or unparseable
  * falls back to the default rather than disabling the limit.
@@ -101,6 +127,19 @@ const maxBatchItems = () => envLimit('BETTER_TRIGGER_MAX_BATCH', DEFAULT_MAX_BAT
 /** Max serialized payload size for one run (BETTER_TRIGGER_MAX_PAYLOAD_BYTES). */
 const maxPayloadBytes = () =>
   envLimit('BETTER_TRIGGER_MAX_PAYLOAD_BYTES', DEFAULT_MAX_PAYLOAD_BYTES);
+
+/**
+ * Reaper recovery budget stamped on new runs (BETTER_TRIGGER_MAX_RECOVERIES).
+ * Read with its own parser rather than envLimit: 0 is a meaningful setting here
+ * ("never recover a lost run, fail it the moment its lease expires") whereas
+ * envLimit treats 0 as garbage and falls back to the default.
+ */
+function maxRecoveries(): number {
+  const raw = process.env.BETTER_TRIGGER_MAX_RECOVERIES;
+  if (raw === undefined || raw === '') return DEFAULT_MAX_RECOVERIES;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n >= 0 ? n : DEFAULT_MAX_RECOVERIES;
+}
 
 /** Shared by both batch entry points; checked before any tx is opened. */
 function assertBatchSize(items: TriggerItem[]): void {
@@ -141,17 +180,25 @@ export interface RunRow {
   status: string;
   attempt: number;
   max_attempts: number;
+  /** Infrastructure hand-backs (reaper recoveries), NOT user-code failures —
+   *  a separate budget from attempt/max_attempts (see the reaper). */
+  recoveries: number;
+  max_recoveries: number;
   parent_run_id: string | null;
   payload: unknown;
   env: string;
   concurrency_key: string | null;
+  /** Copy of the queue row's priority, kept on runs so it survives the queue
+   *  row's deletion at terminal (retryRun reads it; see createRunIn). */
+  priority: number;
   code_version: string | null;
   /** Monotonic claim counter (bigint → text through pg). */
   fencing_token: string;
 }
 
-const RUN_ROW_COLS = `id, task_id, status, attempt, max_attempts, parent_run_id,
-            payload, env, concurrency_key, code_version, fencing_token`;
+const RUN_ROW_COLS = `id, task_id, status, attempt, max_attempts,
+            recoveries, max_recoveries, parent_run_id,
+            payload, env, concurrency_key, priority, code_version, fencing_token`;
 
 export async function getRunRow(
   db: Pool | PoolClient,
@@ -174,6 +221,25 @@ export async function lockRunRow(
 ): Promise<RunRow | null> {
   const res = await client.query<RunRow>(
     `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1 FOR UPDATE`,
+    [id],
+  );
+  return res.rows[0] ?? null;
+}
+
+/**
+ * Non-blocking variant of lockRunRow (same canonical position 2). Returns null
+ * both when the run is gone and when another transaction holds its row — the
+ * caller cannot tell the two apart and must not care: both mean "not mine right
+ * now, come back later". Only for scans that re-derive their candidates every
+ * tick (orchestrator.scanWaits); a fenced worker write must use lockRunRow, for
+ * which "someone else holds it" is a wait, never a skip.
+ */
+export async function tryLockRunRow(
+  client: PoolClient,
+  id: string,
+): Promise<RunRow | null> {
+  const res = await client.query<RunRow>(
+    `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1 FOR UPDATE SKIP LOCKED`,
     [id],
   );
   return res.rows[0] ?? null;
@@ -330,6 +396,11 @@ export async function createRunIn(
     ? opts.concurrencyKey ?? args.taskId
     : opts.concurrencyKey ?? null;
   const env = opts.env ?? args.env ?? 'prod';
+  // Resolved once and written to BOTH the runs row and the queue row: the queue
+  // row is what the claim scan orders by, the runs copy is what outlives it
+  // (the queue row is deleted at terminal / suspend), so a manual retry can
+  // reproduce the run's scheduling config instead of silently dropping to 0.
+  const priority = opts.priority ?? 0;
 
   // parseDuration throws a plain Error on garbage ("soon", {}) — at an API
   // boundary that is the caller's mistake, so translate it to bad_request.
@@ -358,16 +429,18 @@ export async function createRunIn(
   const insertSql = opts.idempotencyKey
     ? `INSERT INTO runs
          (id, task_id, status, payload, trigger_type, parent_run_id,
-          idempotency_key, concurrency_key, attempt, max_attempts, env, code_version,
+          idempotency_key, concurrency_key, priority, attempt, max_attempts,
+          recoveries, max_recoveries, env, code_version,
           queued_at, created_at, updated_at)
-       VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,1,$8,$9,$10, now(), now(), now())
+       VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,1,$9,0,$10,$11,$12, now(), now(), now())
        ON CONFLICT (task_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING id`
     : `INSERT INTO runs
          (id, task_id, status, payload, trigger_type, parent_run_id,
-          idempotency_key, concurrency_key, attempt, max_attempts, env, code_version,
+          idempotency_key, concurrency_key, priority, attempt, max_attempts,
+          recoveries, max_recoveries, env, code_version,
           queued_at, created_at, updated_at)
-       VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,1,$8,$9,$10, now(), now(), now())
+       VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,1,$9,0,$10,$11,$12, now(), now(), now())
        RETURNING id`;
   const inserted = await client.query<{ id: string }>(insertSql, [
     id,
@@ -377,7 +450,11 @@ export async function createRunIn(
     args.parentRunId ?? null,
     opts.idempotencyKey ?? null,
     concurrencyKey,
+    priority,
     policy.maxAttempts,
+    // Infrastructure budget, not a retry policy: it is an operator setting
+    // (BETTER_TRIGGER_MAX_RECOVERIES), not something a trigger call chooses.
+    maxRecoveries(),
     env,
     // The version registered when the run was created — NOT a pin: claimRuns
     // does not filter on it, so a redeployed worker still picks this run up.
@@ -403,7 +480,7 @@ export async function createRunIn(
   await enqueue(client, {
     runId: id,
     availableAt,
-    priority: opts.priority ?? 0,
+    priority,
     concurrencyKey,
     env,
   });
@@ -784,9 +861,15 @@ async function wakeParentIfWaiting(
       `UPDATE runs SET status = 'queued', updated_at = now() WHERE id = $1`,
       [wait.run_id],
     );
+    // Same reason as the timer-wait resume in the orchestrator: waitForChildRun
+    // deleted the parent's queue row, and enqueue() defaults an omitted priority
+    // to 0 *and* writes it over any surviving row (priority = EXCLUDED.priority),
+    // so leaving it out demotes a high-priority parent every time a child
+    // finishes (todos/01-correctness.md C7).
     await enqueue(client, {
       runId: wait.run_id,
       availableAt: new Date(),
+      priority: parent.priority,
       concurrencyKey: parent.concurrency_key,
       env: parent.env,
     });
@@ -941,6 +1024,18 @@ export async function retryRun(pool: Pool, runId: string): Promise<{ runId: stri
     const created = await createRunIn(client, {
       taskId: run.task_id,
       payload: run.payload,
+      // Carry the source run's scheduling config over: a retry of an urgent,
+      // separately-throttled run must not silently land at priority 0 in the
+      // task's default concurrency bucket. priority comes off the runs row
+      // (the queue row is long gone — the source run is terminal), and a NULL
+      // concurrency_key means "the task has no limit", which createRunIn
+      // re-derives from the task anyway.
+      options: {
+        priority: run.priority,
+        ...(run.concurrency_key !== null ? { concurrencyKey: run.concurrency_key } : {}),
+      },
+      // NOT carried over: idempotencyKey — reusing it would make the retry
+      // collide with the very run it is retrying and hand back its id.
       triggerType: 'retry',
       env: run.env,
     });
@@ -949,32 +1044,57 @@ export async function retryRun(pool: Pool, runId: string): Promise<{ runId: stri
 }
 
 /* ---------------------------------------------------------------------------
- * Logs (best effort, any run status — no fencing)
+ * Logs (best effort, any non-terminal run — no fencing)
  * ------------------------------------------------------------------------- */
 
-/** Rows per INSERT. 6 bind params each → 6000 params, well under pg's 65535. */
+/** Rows per INSERT. 5 bind params each (+1 shared run_id) → 5001 params, well
+ *  under pg's 65535. */
 const LOG_INSERT_CHUNK = 1000;
 
+/**
+ * Append log lines to a run. Best effort in both directions: no fencing (a
+ * superseded executor's last flush is still worth keeping) and no error when
+ * the write lands nowhere.
+ *
+ * The existence + liveness test rides along with the INSERT instead of being a
+ * separate SELECT: `WHERE EXISTS (... finished_at IS NULL)` writes 0 rows for a
+ * run that is gone or already terminal, which drops the per-flush round trip
+ * (the executor flushes once a second per in-flight run) and keeps lines from
+ * appearing *after* a run's own terminal timestamp — a fenced-out executor used
+ * to be able to write those, and a history where logs continue past the end is
+ * actively misleading to read.
+ *
+ * The trade-off, taken deliberately: a line emitted in the same instant the run
+ * is being finalized can be evaluated against the already-terminal row and
+ * silently dropped. Serializing against that would mean locking the runs row on
+ * every flush, which is exactly the cost this path refuses to pay — and losing
+ * the last few milliseconds of logs is what "best effort" was already promising.
+ */
 export async function appendLogs(
   pool: Pool,
   runId: string,
   entries: LogEntry[],
 ): Promise<void> {
   if (entries.length === 0) return;
-  const run = await getRunRow(pool, runId);
-  if (!run) throw new KernelError('not_found', `run ${runId} not found`);
 
   // Chunk inserts so a single call can never exceed pg's 65535 bind-param
-  // limit (6 params/row → cap at LOG_INSERT_CHUNK rows per statement).
+  // limit (5 params/row → cap at LOG_INSERT_CHUNK rows per statement); each
+  // chunk re-checks the run, so a run that goes terminal mid-flush simply stops
+  // absorbing the remaining chunks.
   for (let start = 0; start < entries.length; start += LOG_INSERT_CHUNK) {
     const chunk = entries.slice(start, start + LOG_INSERT_CHUNK);
     const values: string[] = [];
-    const params: unknown[] = [];
-    let i = 1;
+    // $1 is the run id, shared by the SELECT list and the EXISTS test.
+    const params: unknown[] = [runId];
+    let i = 2;
     for (const e of chunk) {
-      values.push(`($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`);
+      // Casts are required, not decoration: inside a VALUES sub-select pg has no
+      // target column to infer an untyped parameter from, so it would settle on
+      // text and then refuse to assign text to step_seq / data / ts.
+      values.push(
+        `($${i++}::int, $${i++}::text, $${i++}::text, $${i++}::jsonb, $${i++}::timestamptz)`,
+      );
       params.push(
-        runId,
         e.stepSeq ?? null,
         e.level,
         e.message,
@@ -983,7 +1103,10 @@ export async function appendLogs(
       );
     }
     await pool.query(
-      `INSERT INTO logs (run_id, step_seq, level, message, data, ts) VALUES ${values.join(',')}`,
+      `INSERT INTO logs (run_id, step_seq, level, message, data, ts)
+       SELECT $1::text, v.step_seq, v.level, v.message, v.data, v.ts
+         FROM (VALUES ${values.join(',')}) AS v(step_seq, level, message, data, ts)
+        WHERE EXISTS (SELECT 1 FROM runs WHERE id = $1 AND finished_at IS NULL)`,
       params,
     );
   }

@@ -8,9 +8,13 @@
                  WITHOUT unwrapping, so a lost child completes the parent with
                  ok:false instead of failing it.
      wl-child  — retry { maxAttempts: 1 }; sleeps 60s so the harness can
-                 SIGKILL the daemon while the child is mid-run. With no retry
-                 budget left, the reaper must terminal-fail the child as
-                 'worker lost' and wake the waiting parent.
+                 SIGKILL the daemon while the child is mid-run — twice. The
+                 first lost worker must cost a `recovery`, NOT the child's only
+                 attempt (C4): losing a machine is not the task failing. The
+                 second exhausts the recovery budget the scenario stamps
+                 (BETTER_TRIGGER_MAX_RECOVERIES=1), so the reaper must
+                 terminal-fail the child as 'worker lost' and wake the waiting
+                 parent.
    ============================================================================= */
 import { task } from 'better-trigger';
 

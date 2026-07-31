@@ -23,6 +23,7 @@ export {
   SuspendSignal,
   isAbortError,
   isSuspendSignal,
+  isControlFlowSignal,
   serializeError,
 } from '@better-trigger/core';
 
@@ -47,6 +48,7 @@ export type { AnySchema, InferSchema } from './schema';
 
 /* ---- re-exported domain types from core --------------------------------- */
 export type {
+  ExecutionEndedSignal,
   TaskRunResult,
   TriggerOptions,
   TriggerItem,

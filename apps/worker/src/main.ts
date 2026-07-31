@@ -262,10 +262,12 @@ function parseArgs(argv: string[]): Options {
    boot still hands back whatever already exists — and the crash handlers can
    be installed at module load, before there is anything to hand back.
 
-   C3 (todos/01-correctness.md) adds releaseClaims() / deregisterWorker() to
-   the kernel. It belongs inside handoff(); once it lands, every exit path —
-   SIGINT, SIGTERM, unhandledRejection, uncaughtException — inherits the claim
-   release and the offline mark without another change here.
+   Handing the claims back (C3, todos/01-correctness.md) rides on the `worker`
+   step below: WorkerHandle.stop() releases every claim this process still
+   holds and marks the workers row offline once the drain is over. It lives
+   there rather than here so all four exit paths — SIGINT, SIGTERM,
+   unhandledRejection, uncaughtException — inherit it through the one handoff,
+   and so an embedded host that drives the runtime directly gets it too.
    ============================================================================= */
 
 /** Pieces to hand back on the way out, in the order they are created. */

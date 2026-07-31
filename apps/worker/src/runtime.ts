@@ -2,10 +2,13 @@
    @better-trigger/worker — execution runtime.
    register → orchestrator loops (waits / cron / reaper / offline markers)
             → N concurrent claim-and-execute slots (idle backoff + jitter)
-            + a heartbeat loop (max(500, leaseMs/3): lease renewal + cancels).
-   stop() stops claiming, drains in-flight runs (bounded) and stops the loops;
-   process signals are the daemon entry point's business (see main.ts), not
-   this module's.
+            + a heartbeat loop (max(500, leaseMs/3): lease renewal + cancels +
+              lease-loss detection).
+   stop() stops claiming, drains in-flight runs (bounded), stops the loops and
+   then hands back what did not drain: the claims this worker still holds go
+   straight back to the queue and the workers row is marked offline. Process
+   signals are the daemon entry point's business (see main.ts), not this
+   module's — every one of its exit paths goes through stop().
    ============================================================================= */
 import { createHash } from 'node:crypto';
 import type { ClaimedRun, RetryPolicy } from '@better-trigger/core';
@@ -130,8 +133,11 @@ export async function startWorkerRuntime(
 
   /* ---- heartbeat loop --------------------------------------------------- */
   const heartbeatMs = Math.max(MIN_HEARTBEAT_MS, Math.floor(leaseMs / 3));
+  // The tick currently in flight, so shutdown can wait it out: clearInterval
+  // stops future ticks but cannot cancel one already awaiting Postgres.
+  let heartbeatTick: Promise<void> = Promise.resolve();
   const heartbeatTimer = setInterval(() => {
-    void (async () => {
+    heartbeatTick = (async () => {
       try {
         const res = await kernel.heartbeat({
           workerId,
@@ -142,9 +148,16 @@ export async function startWorkerRuntime(
         for (const runId of res.cancelRunIds) {
           inFlight.get(runId)?.markCanceled();
         }
-        // C2 (todos/01-correctness.md) plugs in right here: when the heartbeat
-        // starts reporting runs whose lease we lost, loop them into
-        // `inFlight.get(runId)?.markLost()` so ctx.signal aborts too.
+        // C2 (todos/01-correctness.md): a run we asked to renew and no longer
+        // hold the claim on has been reaped away and is (or is about to be)
+        // running somewhere else. Nothing this executor produces from here on
+        // can be written — fencing rejects it — so abort ctx.signal instead of
+        // letting a 5-minute LLM step burn its tokens for a result that lands
+        // in the bin. The run itself is left alone: the new owner owns it now,
+        // and the executor unwinds as 'abandoned' at its next step boundary.
+        for (const runId of res.lostRunIds) {
+          inFlight.get(runId)?.markLost();
+        }
       } catch (err) {
         // Still best-effort — the lease reaper protects correctness, so this
         // must not take the loop down. But a heartbeat that keeps missing means
@@ -258,10 +271,66 @@ export async function startWorkerRuntime(
       // leases keep renewing while runs finish.
       await Promise.race([loopsDone, sleep(SHUTDOWN_DRAIN_MS)]);
       clearInterval(heartbeatTimer);
+      // clearInterval only stops *future* ticks. A tick already in flight still
+      // has its `UPDATE workers SET last_heartbeat_at = now(), status = 'online'`
+      // to commit, and if that lands after deregisterWorker the row comes back
+      // online until the offline marker corrects it two minutes later — the very
+      // symptom C3 is about. The IIFE swallows its own errors, so this cannot
+      // reject.
+      await heartbeatTick;
       orchestrator.stop();
+      // Only now, with the heartbeat stopped: it would otherwise renew the very
+      // leases being released and set the workers row back to 'online'.
+      await handBack();
       await deps.onStopped?.();
     })();
     return stopPromise;
+  }
+
+  /**
+   * Give the claims back instead of letting them expire (C3,
+   * todos/01-correctness.md). Whatever did not drain still carries this
+   * worker's `locked_by` and a live lease, so without this a clean SIGTERM
+   * costs the run up to lease + reaper interval (70s by default) of nobody
+   * touching it — and the reaper's recovery *spends one of the run's
+   * `recoveries`* (C4), so a deploy would eat the budget that exists for
+   * machines actually dying. releaseClaims makes the run claimable at once and
+   * leaves both counters alone; it does not weaken fencing either (see its doc
+   * comment in kernel/queue.ts).
+   *
+   * Both steps are best-effort: this runs on the crash path too, where a
+   * failing hand-back must not stop the process from exiting. Losing it costs
+   * only what the pre-C3 shutdown always cost — the reaper picks the runs up.
+   */
+  async function handBack(): Promise<void> {
+    try {
+      const { releasedRunIds } = await kernel.releaseClaims({ workerId });
+      if (releasedRunIds.length > 0) {
+        // Not an error, but it is the record of which runs changed hands
+        // mid-flight — the first thing anyone asks after a rough deploy.
+        (deps.logger ?? console).warn(
+          `[better-trigger] released ${releasedRunIds.length} claim(s) on shutdown ` +
+            `(worker=${workerId}): ${releasedRunIds.join(', ')}`,
+        );
+      }
+    } catch (err) {
+      log.warn(
+        `release-claims:${errorKey(err)}`,
+        `failed to release claims on shutdown (worker=${workerId}); ` +
+          `in-flight runs wait for the lease reaper instead`,
+        err,
+      );
+    }
+    try {
+      await kernel.deregisterWorker({ workerId });
+    } catch (err) {
+      log.warn(
+        `deregister:${errorKey(err)}`,
+        `failed to mark worker ${workerId} offline; the dashboard shows it ` +
+          `online until the offline marker corrects it`,
+        err,
+      );
+    }
   }
 
   return {

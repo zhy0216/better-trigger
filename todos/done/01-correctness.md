@@ -133,6 +133,13 @@ await sendEmail(user)            // ← 真实副作用
 3. **lint**:`packages/eslint-plugin`(P6)里加规则 —— `try` 块内出现 `ctx.wait` /
    `ctx.step` / `triggerAndWait` 且 `catch` 不重抛 → 报错。
 
+**状态** 第 1 层(`endSignal` 检测 + `AbortError` + `warn`,executor.ts
+`assertSignalNotSwallowed`)与第 2 层(`docs/architecture.md` 承诺表)已落地;
+补救文案指向新的公开谓词 `isControlFlowSignal`(core/errors.ts,SDK 再导出),
+它同时认得挂起信号与结束信号 —— 只判 `isSuspendSignal` 会漏掉 step 失败那条路径。
+第 3 层 **延后到 P6**:需要新建 `packages/eslint-plugin`(动根 package.json /
+turbo.json),不在本组范围内。
+
 ---
 
 ## C7 · `retryRun` 丢失 priority / concurrencyKey {#c7}
@@ -173,3 +180,22 @@ SELECT $1, ... FROM runs WHERE id = $1 AND finished_at IS NULL
 ```
 
 不存在或已终态则自然写 0 行。想保留"终态后的迟到日志"的话,至少给它们打个标记列。
+
+**状态 ✅ 已落地**(`packages/kernel/src/runs.ts` `appendLogs`)。`getRunRow` 那次
+往返没了,每个 chunk 一条语句:行从 `(VALUES ...)` 子查询出,外面挂
+`WHERE EXISTS (SELECT 1 FROM runs WHERE id = $1 AND finished_at IS NULL)`。
+判定用 `finished_at` 而不是 `status`:全仓只有 completeRun / failRun 的终态分支 /
+cancelRun 写 `finished_at`,和 `waitForResult` 的终态三元组
+(`completed|failed|canceled`)一一对应,且没有任何路径把已写 `finished_at` 的 run
+放回非终态(重试是新建 run,reaper 恢复的 run 从未终态过)。
+不抛:run 不存在从 `not_found` 改成静默 0 行 —— 这是 `flushLogs` 想要的语义
+(它把异常记成 `logFlushErrors` + 限流 warn),契约文档同步改了
+(`docs/backend-contract.md` 的 `POST /runs/:id/logs` 一行)。分块仍在
+(`LOG_INSERT_CHUNK = 1000`,现在 5 参/行 + 共享 `$1`)。
+`VALUES` 里的 `::int/::text/::jsonb/::timestamptz` 是必需的,不是装饰:去掉后 pg 报
+`column "step_seq" is of type integer but expression is of type text`(实测)。
+覆盖:`packages/kernel/test/runs-logs.test.ts`(stub pool,6 例)+
+`examples/basic/scripts/fencing.ts` 里的活 PG 断言 —— 单测的 stub 拦不住 SQL 本身的
+退化(把 cast 全删掉,单测 6/6 照样绿,fencing 直接 42804 炸),所以终态不吸日志、
+1200 行跨 chunk 全部落库这两条放在 fencing 场景里跑(`bun run test:acceptance`,
+需要活 Postgres,不在默认 `bun run test` 里)。

@@ -199,6 +199,25 @@ export const dailyReport = task({
 > — cancellation is still enforced at the next durable primitive — it just costs
 > you the wait.
 
+> **Never catch-all around a durable primitive.** Suspending (`ctx.wait`,
+> `triggerAndWait`) and ending an attempt are delivered by throwing, so
+> `try { await ctx.wait.for("1h") } catch {}` keeps your code running while the
+> run is already `waiting`: the side effects after the catch really happen, are
+> recorded nowhere, and happen again on replay. If a `catch` can see one, hand
+> it back:
+>
+> ```ts
+> try {
+>   await ctx.wait.for("1h");
+> } catch (err) {
+>   if (isControlFlowSignal(err)) throw err; // suspend *and* end-of-execution
+>   // ...your own handling
+> }
+> ```
+>
+> The runtime catches the mistake at the next durable primitive with an
+> `AbortError` plus a `warn` line in the run's logs.
+
 > **Determinism:** code *between* steps re-runs on every replay, so it must be
 > deterministic. Put side effects, time, and randomness inside `ctx.step` or use
 > `ctx.now()` / `ctx.random()` / `ctx.uuid()`.
@@ -328,6 +347,7 @@ import {
   SuspendSignal,
   isAbortError,
   isSuspendSignal,
+  isControlFlowSignal,
 } from "better-trigger";
 
 import type {

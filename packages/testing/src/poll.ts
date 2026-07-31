@@ -11,25 +11,44 @@ import { AssertionFailure, describeError } from './assert';
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * What one poll of a `waitFor` predicate concluded: satisfied, not yet, or
+ * `{ abort }` — the state being waited for has become unreachable, so waiting
+ * out the rest of the timeout can only turn a diagnosable failure into a slow
+ * anonymous one. A run that reached a terminal status is the usual case: it
+ * will never be 'running' again no matter how long anyone waits.
+ */
+export type WaitOutcome = boolean | { abort: string };
+
+/**
  * Poll `cond` until it returns true. Throws (→ scenario failure) on timeout,
  * naming what it was waiting for. Exceptions from `cond` are treated as
- * "not yet" — the daemon under test may not have migrated / booted yet.
+ * "not yet" — the daemon under test may not have migrated / booted yet — so a
+ * predicate that wants to stop early must say so with `{ abort }` rather than
+ * by throwing.
  */
 export async function waitFor(
   label: string,
   timeoutMs: number,
-  cond: () => Promise<boolean> | boolean,
+  cond: () => Promise<WaitOutcome> | WaitOutcome,
   opts: { intervalMs?: number } = {},
 ): Promise<void> {
   const intervalMs = opts.intervalMs ?? 100;
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown = null;
+  let abort: string | null = null;
   while (Date.now() < deadline) {
     try {
-      if (await cond()) return;
+      const outcome = await cond();
+      if (outcome === true) return;
+      if (outcome !== false) abort = outcome.abort;
       lastError = null;
     } catch (err) {
       lastError = err;
+    }
+    // Outside the try: an abort is a verdict, not a transient read failure, so
+    // it must not be swallowed as "not yet" the way cond()'s own throws are.
+    if (abort !== null) {
+      throw new AssertionFailure(`gave up waiting for: ${label} — ${abort}`);
     }
     await sleep(intervalMs);
   }

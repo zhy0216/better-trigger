@@ -23,6 +23,9 @@ interface Stale {
   runId: string;
   attempt: number;
   maxAttempts: number;
+  /** Since C4 the reaper decides on these two, not on attempt/maxAttempts. */
+  recoveries: number;
+  maxRecoveries: number;
 }
 
 interface StubOptions {
@@ -69,6 +72,8 @@ function stubPool(opts: StubOptions = {}) {
                   status: 'running',
                   attempt: row.attempt,
                   max_attempts: row.maxAttempts,
+                  recoveries: row.recoveries,
+                  max_recoveries: row.maxRecoveries,
                   parent_run_id: null,
                   payload: null,
                   env: 'dev',
@@ -132,10 +137,25 @@ describe('reaper recovery counters', () => {
   it('counts a requeued claim and a terminal one, from an actual reap', async () => {
     const { pool, texts } = stubPool({
       stale: [
-        // Attempts left → handed back to the queue.
-        { id: 1, runId: 'run_requeued', attempt: 1, maxAttempts: 3 },
-        // Out of attempts → terminal 'worker lost'.
-        { id: 2, runId: 'run_lost', attempt: 3, maxAttempts: 3 },
+        // Recovery budget left → handed back to the queue.
+        {
+          id: 1,
+          runId: 'run_requeued',
+          attempt: 1,
+          maxAttempts: 3,
+          recoveries: 0,
+          maxRecoveries: 10,
+        },
+        // Out of recoveries → terminal 'worker lost' (attempt is untouched and
+        // deliberately nowhere near its own limit — see C4).
+        {
+          id: 2,
+          runId: 'run_lost',
+          attempt: 1,
+          maxAttempts: 3,
+          recoveries: 10,
+          maxRecoveries: 10,
+        },
       ],
     });
     const { logger, lines } = recordingLogger();
@@ -177,8 +197,22 @@ describe('reaper recovery counters', () => {
     // only by where the two lines are written.
     const { pool, texts, released } = stubPool({
       stale: [
-        { id: 1, runId: 'run_requeued', attempt: 1, maxAttempts: 3 },
-        { id: 2, runId: 'run_lost', attempt: 3, maxAttempts: 3 },
+        {
+          id: 1,
+          runId: 'run_requeued',
+          attempt: 1,
+          maxAttempts: 3,
+          recoveries: 0,
+          maxRecoveries: 10,
+        },
+        {
+          id: 2,
+          runId: 'run_lost',
+          attempt: 1,
+          maxAttempts: 3,
+          recoveries: 10,
+          maxRecoveries: 10,
+        },
       ],
       failOn: /^COMMIT$/,
     });

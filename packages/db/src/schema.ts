@@ -61,6 +61,20 @@ export const runs = pgTable(
     concurrencyKey: text('concurrency_key'),
     attempt: integer('attempt').notNull().default(1),
     maxAttempts: integer('max_attempts').notNull().default(1),
+    /** Redundant copy of the queue row's priority (queue.priority is what the
+     *  claim scan orders by; this one is never read by the scheduler). The
+     *  queue row is deleted the moment a run goes terminal, so without it the
+     *  answer to "what priority was this run triggered at?" dies with the run —
+     *  which is exactly what a manual retry (C7) and the dashboard need. */
+    priority: integer('priority').notNull().default(0),
+    /** Infrastructure hand-backs, kept apart from `attempt` on purpose:
+     *  attempt/max_attempts is the budget the USER's code may fail through,
+     *  recoveries/max_recoveries is how often the reaper may pick this run up
+     *  after a worker vanished (deploy, OOM, SIGKILL). Counting both against
+     *  max_attempts would let three deploys kill a maxAttempts:3 run. Never
+     *  reset — the pair only bounds an endless claim/die loop. */
+    recoveries: integer('recoveries').notNull().default(0),
+    maxRecoveries: integer('max_recoveries').notNull().default(10),
     /** Monotonic write credential, bumped on every claim. Lives on runs (not
      *  queue) so suspend/resume cycles — which delete and re-insert the queue
      *  row — can never reset the watermark. */

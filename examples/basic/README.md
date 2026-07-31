@@ -19,7 +19,7 @@ daemon (and the harnesses' direct-SQL assertions) ever sees `DATABASE_URL`.
 | `scripts/crash.ts` + `scripts/crash-tasks.ts` | Crash recovery: 3 SIGKILLs of the executor node, exactly-once durable steps. |
 | `scripts/fencing.ts` | Kernel-level lease/fencing test (no daemon, no HTTP): 6 fenced ops rejected with zero state change, token monotonic across suspend/resume. |
 | `scripts/replay-drift.ts` + `scripts/replay-drift-tasks-v{1,2}.ts` | Mid-flight redeploy: `code_version` stamping, body fingerprinting, `replay: 'strict'` refusing a drifted ledger. |
-| `scripts/worker-lost.ts` + `scripts/worker-lost-tasks.ts` | Reaper terminal-fail: child dies of `worker lost` at max attempts, waiting parent is woken with `ok: false`. |
+| `scripts/worker-lost.ts` + `scripts/worker-lost-tasks.ts` | Reaper recovery then terminal-fail: the first lost worker costs a `recovery` and not the child's only attempt, the second exhausts the recovery budget → `worker lost`, waiting parent woken with `ok: false`. |
 
 The scaffolding every scenario shares — database provisioning, daemon spawn /
 health-wait / SIGKILL, polling, the marker-file probe, the scenario runner and

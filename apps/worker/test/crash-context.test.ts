@@ -45,7 +45,7 @@ function fakeKernel(runs: ClaimedRun[]) {
       const next = queue.shift();
       return next ? [next] : [];
     },
-    heartbeat: async () => ({ cancelRunIds: [] }),
+    heartbeat: async () => ({ cancelRunIds: [], lostRunIds: [] }),
     reportStep: async () => {},
     failRun: async () => {},
     completeRun: async () => {},

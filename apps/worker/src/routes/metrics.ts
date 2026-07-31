@@ -321,7 +321,7 @@ export async function collectMetrics(
     },
     {
       name: 'reaper_recovered_total',
-      help: "Expired-lease claims recovered by this process's reaper: requeued for another attempt, or failed terminally as worker lost.",
+      help: "Expired-lease claims recovered by this process's reaper: requeued to resume the same attempt (spending one recovery), or failed terminally as worker lost once the recovery budget ran out.",
       type: 'counter',
       samples: [
         { labels: { outcome: 'requeued' }, value: orchestrator.reaperRequeued },

@@ -14,8 +14,14 @@ export type {
   OrchestratorOptions,
 } from './orchestrator';
 
-export type { ClaimRunsArgs, HeartbeatArgs } from './queue';
-export type { RegisterWorkerArgs } from './workers';
+export type {
+  ClaimRunsArgs,
+  HeartbeatArgs,
+  HeartbeatResult,
+  ReleaseClaimsArgs,
+  ReleaseClaimsResult,
+} from './queue';
+export type { DeregisterWorkerArgs, RegisterWorkerArgs } from './workers';
 export type {
   BatchTriggerChildArgs,
   CompleteRunArgs,

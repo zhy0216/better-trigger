@@ -2,7 +2,8 @@
    @better-trigger/kernel — kernel worker registration.
    registerWorker inserts the worker row and, in the same transaction, upserts
    every task definition and syncs cron schedules (preserving the enabled flag
-   of existing schedules). See docs/backend-contract.md §3.6.
+   of existing schedules); deregisterWorker marks the row offline on the way
+   out. See docs/backend-contract.md §3.6.
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { KernelError, type TaskManifest } from '@better-trigger/core';
@@ -72,6 +73,29 @@ export async function registerWorker(
   }
 
   return { workerId: id };
+}
+
+export interface DeregisterWorkerArgs {
+  workerId: string;
+}
+
+/**
+ * Mark a worker offline on the way out (todos/01-correctness.md C3). Without
+ * it the row stays 'online' until the orchestrator's offline marker notices the
+ * missing heartbeat — two minutes during which the dashboard shows a process
+ * that is already gone, right after every deploy.
+ *
+ * One row, one statement: no transaction, no lock-order concern (the workers
+ * table takes part in no multi-row kernel tx), and idempotent — calling it
+ * twice, or for a worker whose row was already marked offline, is a no-op. The
+ * caller stops its heartbeat first; a heartbeat landing afterwards would set
+ * the row back to 'online'.
+ */
+export async function deregisterWorker(
+  pool: Pool,
+  args: DeregisterWorkerArgs,
+): Promise<void> {
+  await pool.query(`UPDATE workers SET status = 'offline' WHERE id = $1`, [args.workerId]);
 }
 
 /* ---------------------------------------------------------------------------

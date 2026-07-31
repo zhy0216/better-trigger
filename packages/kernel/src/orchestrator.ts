@@ -6,20 +6,37 @@
      2. cron scheduler     (cronIntervalMs, 1s)    — fire due schedules via
         createRunIn (task retry policy resolved like any other trigger)
      3. lease reaper       (reaperIntervalMs, 10s) — recover runs whose
-        lease_until has expired
+        lease_until has expired (spends runs.recoveries, never runs.attempt —
+        losing a worker is infrastructure, not the user's code failing)
      4. worker offline marker (30s)                — mark workers with no
         heartbeat > 2m
    A bookkeeping-only host (e.g. the dashboard server) runs { waits: false,
    cron: false } so it reaps leases and marks workers offline without becoming
    an execution scheduler. All loops follow the canonical kernel lock order
-   (queue → runs → dependent rows; see runs.ts header).
+   (queue → runs → dependent rows; see runs.ts header), and neither scan ever
+   queues up behind the peer that is already processing a row: every daemon
+   re-derives the same candidates every tick, so blocking would only buy the
+   right to discover the work is done. Each therefore takes SKIP LOCKED at the
+   position where peers actually collide, and leaves what it cannot get to the
+   next tick — the wait scanner at positions 2 and 3 (tryLockRunRow, then the
+   wait row), the reaper at position 1 (its expired-lease queue scan).
+   Their *other* positions are plain blocking FOR UPDATE, deliberately, and
+   still cannot end up waiting on a peer:
+     - wait scanner, position 1 — a suspended run has no queue row (suspendRun
+       deleted it), so it is a 0-row no-op on this path; it is taken at all to
+       stop the closing INSERT ... ON CONFLICT on queue from inverting 2→1.
+     - reaper, position 2 (lockRunRow) — by then it already holds that run's
+       queue row, and since every kernel path takes queue before runs, no peer
+       can be holding the runs row it is asking for.
+   runs.ts spells out the scanner case ("Position 1 stays blocking on purpose")
+   and the disjoint candidate sets the reaper's queue scan relies on.
    See docs/backend-contract.md §3.2, §3.5, §3.6. Loop errors are swallowed
    (logged via the kernel logger) so loops never die.
    ============================================================================= */
 import { Cron } from 'croner';
 import type { Pool } from 'pg';
 import type { KernelLogger } from './kernel';
-import { createRunIn, lockRunRow, terminalFail, withTx } from './runs';
+import { createRunIn, lockRunRow, terminalFail, tryLockRunRow, withTx } from './runs';
 
 const WORKER_OFFLINE_MS = 120_000;
 const WORKER_OFFLINE_SCAN_MS = 30_000;
@@ -55,9 +72,11 @@ export interface OrchestratorOptions {
  * scrapes rather than a query.
  */
 export interface OrchestratorCounters {
-  /** Expired-lease claims handed back to the queue (the run gets another attempt). */
+  /** Expired-lease claims handed back to the queue: the run resumes on its
+   *  SAME attempt and spends one of its `recoveries` instead. */
   reaperRequeued: number;
-  /** Expired-lease claims out of attempts → terminal 'worker lost'. */
+  /** Expired-lease claims out of *recoveries* (not attempts) → terminal
+   *  'worker lost'. */
   reaperFailed: number;
   /** Loop iterations that threw, per loop. Each one is logged too, but a rate
    *  is what says "the cron loop has been failing all afternoon". */
@@ -132,18 +151,29 @@ export function startOrchestrator(
     // under its lock: a concurrent cancel or another orchestrator instance may
     // have resolved it between the phases. Per-wait txs keep each tx's lock
     // footprint to a single run, so scanners can never cross-deadlock.
+    //
+    // Phase 1 holds nothing, so every daemon reads the same due rows. Positions
+    // 2 and 3 therefore take their locks with SKIP LOCKED: a wait another
+    // instance is already resuming is skipped outright instead of blocking
+    // until its tx commits only to find the wait no longer 'pending'. Skipping
+    // cannot lose a resume — the row is still 'pending' with resume_at in the
+    // past, and phase 1 orders by resume_at, so the very next tick puts it back
+    // at the head of the batch. Nor can it double-resume: the run row is the
+    // serialization point (every path that touches a wait holds it first), so
+    // exactly one instance gets past it, and it re-checks status under the
+    // lock. Position 1 stays blocking — see the runs.ts header for why.
     for (const w of due.rows) {
       await withTx(pool, async (client) => {
         await client.query(`SELECT run_id FROM queue WHERE run_id = $1 FOR UPDATE`, [
           w.run_id,
         ]);
-        const run = await lockRunRow(client, w.run_id);
-        if (!run) return; // run vanished — leave the orphan wait alone
+        const run = await tryLockRunRow(client, w.run_id);
+        if (!run) return; // run vanished, or another instance has it — next tick
         const lockedWait = await client.query<{ id: number }>(
-          `SELECT id FROM waits WHERE id = $1 AND status = 'pending' FOR UPDATE`,
+          `SELECT id FROM waits WHERE id = $1 AND status = 'pending' FOR UPDATE SKIP LOCKED`,
           [w.id],
         );
-        if (!lockedWait.rows[0]) return; // already resumed/canceled
+        if (!lockedWait.rows[0]) return; // already resumed/canceled, or held
 
         await client.query(`UPDATE waits SET status = 'completed' WHERE id = $1`, [w.id]);
         await client.query(
@@ -158,12 +188,19 @@ export function startOrchestrator(
           `UPDATE runs SET status = 'queued', updated_at = now() WHERE id = $1`,
           [w.run_id],
         );
+        // Priority comes off the runs row, not a literal: suspendRun deleted the
+        // queue row that held it, so this is always the INSERT branch, and a
+        // hard-coded 0 would silently demote every timer wait — a priority-10
+        // run that slept an hour would come back at the tail of the queue
+        // (todos/01-correctness.md C7). The conflict branch deliberately leaves
+        // priority alone: reaching it means a queue row survived the suspend,
+        // and that row's own value is then the more trustworthy of the two.
         await client.query(
           `INSERT INTO queue (run_id, available_at, priority, concurrency_key, env)
-           VALUES ($1, now(), 0, $2, $3)
+           VALUES ($1, now(), $2, $3, $4)
            ON CONFLICT (run_id) DO UPDATE
              SET available_at = now(), locked_by = NULL, locked_at = NULL, lease_until = NULL`,
-          [w.run_id, run.concurrency_key, run.env],
+          [w.run_id, run.priority, run.concurrency_key, run.env],
         );
       });
     }
@@ -246,15 +283,29 @@ export function startOrchestrator(
           await client.query(`DELETE FROM queue WHERE id = $1`, [q.id]);
           continue;
         }
-        if (run.attempt >= run.max_attempts) {
+        // A lost worker is infrastructure, not the user's code failing: it
+        // spends `recoveries`, never `attempt`. maxAttempts:3 means "my code
+        // may throw three times", and three deploys must not consume it (see
+        // todos/01-correctness.md C4). max_recoveries is the separate, much
+        // wider ceiling that still stops a run which kills every worker that
+        // claims it from cycling forever.
+        if (run.recoveries >= run.max_recoveries) {
           // Terminal 'worker lost' — same wrap-up as failRun so a waiting
-          // parent gets woken instead of hanging forever.
-          await terminalFail(client, run, { message: 'worker lost' });
+          // parent gets woken instead of hanging forever. The message spells
+          // out WHICH budget ran out: this run never spent an attempt, so
+          // "worker lost" alone would read like the user's code failed.
+          await terminalFail(client, run, {
+            name: 'WorkerLostError',
+            message:
+              `worker lost: recovery budget exhausted ` +
+              `(${run.recoveries}/${run.max_recoveries} infrastructure recoveries used; ` +
+              `attempt ${run.attempt}/${run.max_attempts} unaffected)`,
+          });
           failed += 1;
         } else {
           await client.query(
             `UPDATE runs
-                SET status = 'queued', attempt = attempt + 1, updated_at = now()
+                SET status = 'queued', recoveries = recoveries + 1, updated_at = now()
               WHERE id = $1`,
             [q.run_id],
           );

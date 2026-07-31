@@ -22,6 +22,20 @@
       "when": 1785259672211,
       "tag": "0002_naive_harpoon",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785437322889,
+      "tag": "0003_jazzy_gabe_jones",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785438583156,
+      "tag": "0004_natural_bloodscream",
+      "breakpoints": true
     }
   ]
 }
