@@ -1,0 +1,1 @@
+CREATE INDEX "queue_claimable_idx" ON "queue" USING btree ("priority" DESC NULLS FIRST,"id") WHERE "queue"."locked_by" IS NULL;

@@ -103,7 +103,14 @@ export const runs = pgTable(
 export const runSteps = pgTable(
   'run_steps',
   {
-    runId: text('run_id').notNull(),
+    // FK to runs, ON DELETE CASCADE: retention (todos/02-performance.md PF6)
+    // prunes by deleting `runs` rows, and the dependent rows have to follow.
+    // Doing it in the database rather than in the prune SQL is what makes
+    // "delete a run" mean the same thing everywhere — a manual DELETE in psql
+    // can no longer leave a step timeline behind pointing at nothing.
+    runId: text('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
     seq: integer('seq').notNull(),
     projectId: text('project_id').notNull().default('default'),
     env: text('env').notNull().default('prod'),
@@ -139,6 +146,27 @@ export const queue = pgTable(
   (t) => [
     index('queue_available_priority_idx').on(t.availableAt, t.priority.desc()),
     index('queue_concurrency_idx').on(t.concurrencyKey),
+    // Partial, backing the reaper's expired-lease scan every 10s
+    // (WHERE lease_until IS NOT NULL AND lease_until <= now() ORDER BY
+    // lease_until ASC — todos/02-performance.md PF1). Only claimed rows carry a
+    // lease, so the predicate keeps the index to the in-flight subset instead of
+    // the whole backlog, and its key order is the scan's ORDER BY.
+    index('queue_lease_until_idx')
+      .on(t.leaseUntil)
+      .where(sql`${t.leaseUntil} IS NOT NULL`),
+    // Partial, backing the claim scan's candidate window — the query every
+    // execution slot runs on every poll (WHERE available_at <= now() AND
+    // locked_by IS NULL ORDER BY priority DESC, id ASC — todos/02-performance.md
+    // PF2). Key order IS that ORDER BY (`nullsFirst` because DESC defaults to
+    // NULLS FIRST in Postgres, and an index whose null ordering differs cannot
+    // satisfy the sort), so the scan stops at the LIMIT instead of sorting every
+    // available row. The predicate is the point: a backlog is mostly *claimed*
+    // rows, and they are exactly the ones the scan used to read and throw away.
+    // `available_at <= now()` stays a filter — now() is not immutable, so it
+    // cannot appear in an index predicate.
+    index('queue_claimable_idx')
+      .on(t.priority.desc().nullsFirst(), t.id)
+      .where(sql`${t.lockedBy} IS NULL`),
   ],
 );
 
@@ -174,7 +202,11 @@ export const logs = pgTable(
     id: bigserial('id', { mode: 'number' }).primaryKey(),
     projectId: text('project_id').notNull().default('default'),
     env: text('env').notNull().default('prod'),
-    runId: text('run_id').notNull(),
+    // Same cascade as run_steps above — logs are the fastest-growing table and
+    // the whole reason PF6 exists, so they must not survive their run.
+    runId: text('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
     stepSeq: integer('step_seq'),
     level: text('level').notNull(),
     message: text('message').notNull(),

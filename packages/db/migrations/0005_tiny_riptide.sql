@@ -1,0 +1,1 @@
+CREATE INDEX "queue_lease_until_idx" ON "queue" USING btree ("lease_until") WHERE "queue"."lease_until" IS NOT NULL;

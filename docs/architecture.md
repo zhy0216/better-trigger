@@ -110,6 +110,7 @@ better-trigger-worker(daemon)
 | task 模块 | 必须可被 daemon 独立 import;不得闭包应用内部状态 |
 | PostgreSQL | v1 唯一生产存储;内部 repository 是模块边界,不是公开 adapter API |
 | 所有 daemon 停止 | 只保存状态,不消耗任务("状态 durable,计算需要至少一个 daemon 在线") |
+| 唤醒延迟 | v1 **全部靠轮询,没有推送**:trigger → 开始执行 ≤ 一个空闲退避周期(~2.4s)、`result()` 每个等待者 4 QPS、wait/cron 唤醒 50 次/秒。具体数字与出处见分阶段计划 P2 下的「轮询代价」;LISTEN/NOTIFY 排在 P2 |
 
 ## Schema
 
@@ -154,6 +155,21 @@ core 拆分(kernel 独立成包、core 归零依赖);`packages/server` → `apps
 
 ### P2 — 正确性硬化(1 周)
 fingerprint + `NonDeterminismError`;vitest + 真 PG 的 correctness suite;crash / fault-injection harness(在每个持久化边界注入 throw / abort / 连接中断 / 重复投递);不变量断言(seq 连续只追加、终态不再接受写、每个外部事件至多一个 outcome、旧 fencing 全路径无效);LISTEN/NOTIFY 唤醒。
+
+#### 轮询代价(LISTEN/NOTIFY 落地前的当前值)
+
+四条唤醒路径全是轮询,没有推送。数字写在这里,免得要读代码才知道上限:
+
+| 路径 | 当前值 | 代价 |
+|---|---|---|
+| trigger → 开始执行 | 空闲执行槽指数退避 300ms → 2s(`IDLE_POLL_BASE_MS` / `IDLE_POLL_MAX_MS`,`apps/worker/src/runtime.ts`),每次睡眠 ±20% jitter | 已空闲一阵的 daemon 上,冷启动延迟 0–2.4s(单槽中位 ~1s)。对「本地多 agent」这个定位是能被感知到的。并发槽各自独立退避、jitter 会打散相位,concurrency 越大实测中位越低,**上限不变**(仍是一个完整退避周期)。刚跑完一个 run 的槽退避重置为 300ms,所以繁忙时不吃这个延迟 |
+| `handle.result()` / `GET /runs/:id/result` | 服务端每 `pollMs`(默认 250ms,查询参数可给 50–5000ms)一次 `SELECT status, output, error FROM runs`(`packages/kernel/src/runs.ts` 的 `waitForResult`) | 每个等待中的客户端 = **4 QPS 纯轮询**;M 个并发等待 = 4M QPS,100 个 fan-out 子任务就是 400 QPS,全打在 daemon 的同一个 pg pool(未配置时 `pg` 默认 max 10 连接)上。单跳服务端等待上限 30s(`MAX_RESULT_WAIT_MS`),客户端按自己的 deadline 每 25s 续一跳 |
+| wait 到期唤醒 | `scanWaits` 每 tick `LIMIT 50`,tick 间隔 1s(`timerIntervalMs`) | **50 次唤醒/秒**,而且是**全局上限**:phase 1 是不加锁的普通读,每个 daemon 都读到同一批 50 行,再靠 `SKIP LOCKED` 互相跳过 —— 加 daemon 只增加争用,不提高吞吐。积压超过 50 时按 `resume_at` 升序逐 tick 消化 |
+| cron 起 run | `scanCron` 每 tick `LIMIT 50`,tick 间隔 1s(`cronIntervalMs`) | 50 次调度/秒;这条的 phase 1 自带 `FOR UPDATE SKIP LOCKED`,每个 daemon 锁到互不相同的 50 行,所以**随 daemon 数线性放大**,不像 waits 那样是全局上限 |
+
+两个扫描循环都有「上一 tick 没跑完就跳过本 tick」的护栏,所以 50/s 是 tick 能在 1s 内跑完时的上限;`scanWaits` 每条 wait 一个短事务,一个满 tick 就是 50 个 round-trip。
+
+`NOTIFY` 落地后,前两行趋近于零,后两行变成「NOTIFY 唤醒 + 轮询兜底」。
 
 ### P3 — 交互原语(1–2 周)
 `event()` / `emit` / `wait.forEvent`(signal 级不变量:写入与唤醒原子、离线不丢、恰好消费一次);cancel 级联(父→子传播);`batchTriggerAndWait`(fan-out/fan-in);testing 包虚拟时间(测试里跳过数天 wait)。

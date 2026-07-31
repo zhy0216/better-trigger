@@ -13,7 +13,10 @@
     "fencing": "bun scripts/fencing.ts",
     "replay-drift": "bun scripts/replay-drift.ts",
     "graceful-restart": "bun scripts/graceful-restart.ts",
+    "retention": "bun scripts/retention.ts",
+    "concurrency": "bun scripts/concurrency.ts",
     "test:acceptance": "bun scripts/acceptance.ts",
+    "bench:claim-scan": "bun scripts/claim-scan-bench.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

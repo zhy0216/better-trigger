@@ -22,6 +22,8 @@ export type {
   ReleaseClaimsResult,
 } from './queue';
 export type { DeregisterWorkerArgs, RegisterWorkerArgs } from './workers';
+export { MIN_RETENTION_MS, PRUNE_BATCH } from './prune';
+export type { PruneArgs, PruneResult } from './prune';
 export type {
   BatchTriggerChildArgs,
   CompleteRunArgs,

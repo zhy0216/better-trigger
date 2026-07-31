@@ -1,7 +1,8 @@
 /* =============================================================================
    @better-trigger/kernel — kernel background orchestrator.
    Four interval loops (each with re-entrancy guards, each individually
-   switchable via OrchestratorOptions — all default on):
+   switchable via OrchestratorOptions — all default on), plus a fifth that is
+   default OFF (5. retention GC, below):
      1. wait-due scanner   (timerIntervalMs, 1s)   — resume duration/until waits
      2. cron scheduler     (cronIntervalMs, 1s)    — fire due schedules via
         createRunIn (task retry policy resolved like any other trigger)
@@ -10,6 +11,10 @@
         losing a worker is infrastructure, not the user's code failing)
      4. worker offline marker (30s)                — mark workers with no
         heartbeat > 2m
+     5. retention GC       (gcIntervalMs, 1h)      — delete terminal runs (and
+        their cascaded steps/logs) and offline worker rows older than
+        `retentionMs`. Runs ONLY when `retentionMs` is set: the default daemon
+        deletes no history at all (todos/02-performance.md PF6).
    A bookkeeping-only host (e.g. the dashboard server) runs { waits: false,
    cron: false } so it reaps leases and marks workers offline without becoming
    an execution scheduler. All loops follow the canonical kernel lock order
@@ -36,10 +41,37 @@
 import { Cron } from 'croner';
 import type { Pool } from 'pg';
 import type { KernelLogger } from './kernel';
+import { prune } from './prune';
 import { createRunIn, lockRunRow, terminalFail, tryLockRunRow, withTx } from './runs';
 
 const WORKER_OFFLINE_MS = 120_000;
 const WORKER_OFFLINE_SCAN_MS = 30_000;
+
+/**
+ * How often the retention GC looks, when it is switched on at all
+ * (todos/02-performance.md PF6). Deliberately the slowest loop in the file by
+ * three orders of magnitude: it deletes history, so it is a housekeeping job,
+ * not a scheduler — and every daemon on the database runs it, so a short
+ * interval would only mean N processes racing to find the same nothing.
+ */
+const GC_INTERVAL_MS = 3_600_000;
+
+/**
+ * How many expired leases one reap tick takes (todos/02-performance.md PF1);
+ * scanWaits/scanCron cap their batches at 50 for the same reason.
+ *
+ * Without a cap, a fleet-wide crash (a batch of daemons dying together) makes
+ * one transaction lock every expired queue row at once and walk them one by
+ * one, and for that whole transaction the claim path's SKIP LOCKED bounces off
+ * all of them — a recovery storm that stalls execution instead of restoring it.
+ * The bound turns it into 100 rows per 10s tick, which cannot starve: the scan
+ * takes the OLDEST leases first (ORDER BY lease_until ASC) and every row it
+ * processes leaves the candidate set (lease_until := NULL on requeue, the queue
+ * row deleted on terminal fail), so the remainder is strictly closer to the
+ * head on the next tick. Rows another daemon holds are skipped, not lost —
+ * whoever holds them is reaping them.
+ */
+const REAP_BATCH = 100;
 
 /** Compute the next fire time for a cron pattern, in a timezone. */
 export function nextCronAt(pattern: string, timezone?: string, from?: Date): Date | null {
@@ -62,6 +94,20 @@ export interface OrchestratorOptions {
   reaper?: boolean;
   /** Run the worker offline marker loop (default true). */
   workerOffline?: boolean;
+  /**
+   * Retention window in ms for the data-retention GC loop
+   * (todos/02-performance.md PF6). **Off unless set**, and there is no default
+   * window on purpose: the loop deletes finished runs, their steps and their
+   * logs, and a runtime that starts quietly throwing history away because
+   * nobody passed a flag is a data-loss bug, not a feature. `--retention 30d`
+   * on the daemon is what turns it on.
+   *
+   * Must be at least MIN_RETENTION_MS; anything smaller is rejected by
+   * prune() (the loop logs it once per tick rather than dying).
+   */
+  retentionMs?: number;
+  /** Retention GC interval (default 1h). Only used when retentionMs is set. */
+  gcIntervalMs?: number;
 }
 
 /**
@@ -78,16 +124,29 @@ export interface OrchestratorCounters {
   /** Expired-lease claims out of *recoveries* (not attempts) → terminal
    *  'worker lost'. */
   reaperFailed: number;
+  /** Runs deleted by the retention GC loop, all time on this handle. Stays 0
+   *  on the default configuration, where the loop does not run at all. */
+  gcRunsDeleted: number;
+  /** Offline worker rows deleted by the retention GC loop. */
+  gcWorkersDeleted: number;
   /** Loop iterations that threw, per loop. Each one is logged too, but a rate
    *  is what says "the cron loop has been failing all afternoon". */
-  loopErrors: { waits: number; cron: number; reaper: number; workers: number };
+  loopErrors: {
+    waits: number;
+    cron: number;
+    reaper: number;
+    workers: number;
+    gc: number;
+  };
 }
 
 export function createOrchestratorCounters(): OrchestratorCounters {
   return {
     reaperRequeued: 0,
     reaperFailed: 0,
-    loopErrors: { waits: 0, cron: 0, reaper: 0, workers: 0 },
+    gcRunsDeleted: 0,
+    gcWorkersDeleted: 0,
+    loopErrors: { waits: 0, cron: 0, reaper: 0, workers: 0, gc: 0 },
   };
 }
 
@@ -107,8 +166,11 @@ export function startOrchestrator(
   const cronIntervalMs = opts.cronIntervalMs ?? 1_000;
   const reaperIntervalMs = opts.reaperIntervalMs ?? 10_000;
 
+  const gcIntervalMs = opts.gcIntervalMs ?? GC_INTERVAL_MS;
+  const retentionMs = opts.retentionMs;
+
   const timers: NodeJS.Timeout[] = [];
-  const running = { waits: false, cron: false, reaper: false, workers: false };
+  const running = { waits: false, cron: false, reaper: false, workers: false, gc: false };
   const counters = createOrchestratorCounters();
   let stopped = false;
 
@@ -268,10 +330,20 @@ export function startOrchestrator(
         id: number;
         run_id: string;
       }>(
+        // `lease_until IS NOT NULL` is redundant against `<= now()`, and not
+        // load-bearing for the plan: PG derives it from the comparison itself
+        // (NULL never compares true) and picks the *partial*
+        // queue_lease_until_idx either way — checked on 16.2. It is spelled out
+        // so the predicate matches that index's WHERE verbatim, stating "the
+        // in-flight subset" instead of relying on the planner's inference.
+        // ORDER BY matches that index's key order (no sort node) and, with the
+        // LIMIT, makes the batch the OLDEST expired leases — see REAP_BATCH.
         `SELECT q.id, q.run_id
            FROM queue q
           WHERE q.lease_until IS NOT NULL
             AND q.lease_until <= now()
+          ORDER BY q.lease_until ASC
+          LIMIT ${REAP_BATCH}
           FOR UPDATE SKIP LOCKED`,
       );
 
@@ -342,10 +414,36 @@ export function startOrchestrator(
     );
   }
 
+  /* ---------------------------------------------------------------- gc */
+  /**
+   * Retention sweep (todos/02-performance.md PF6). Same body as the CLI's
+   * `prune` subcommand — one implementation, so "what the daemon deletes" and
+   * "what prune deletes" cannot drift apart. Reported at info-level through the
+   * logger's warn sink only when it actually removed something: a silent GC and
+   * a broken GC must not look the same in a log, but an hourly "deleted 0 rows"
+   * line is noise.
+   */
+  async function gc(): Promise<void> {
+    if (retentionMs === undefined) return;
+    const res = await prune(pool, { olderThanMs: retentionMs });
+    counters.gcRunsDeleted += res.runs;
+    counters.gcWorkersDeleted += res.workers;
+    if (res.runs > 0 || res.workers > 0) {
+      logger.warn(
+        `[orchestrator:gc] retention ${retentionMs}ms: deleted ${res.runs} run(s), ` +
+          `${res.runSteps} step(s), ${res.logs} log(s), ${res.workers} worker row(s) ` +
+          `older than ${res.cutoff.toISOString()}`,
+      );
+    }
+  }
+
   if (opts.waits ?? true) loop('waits', timerIntervalMs, scanWaits);
   if (opts.cron ?? true) loop('cron', cronIntervalMs, scanCron);
   if (opts.reaper ?? true) loop('reaper', reaperIntervalMs, reap);
   if (opts.workerOffline ?? true) loop('workers', WORKER_OFFLINE_SCAN_MS, markOfflineWorkers);
+  // No `?? true` here, and no default window above: the retention loop exists
+  // only when a window was asked for.
+  if (retentionMs !== undefined) loop('gc', gcIntervalMs, gc);
 
   return {
     stop() {

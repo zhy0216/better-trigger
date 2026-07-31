@@ -67,16 +67,83 @@ export interface ClaimRunsArgs {
 }
 
 /**
+ * `classid` of the concurrency limiter's advisory locks, spelling 'btcc'
+ * (better-trigger concurrency control) — todos/02-performance.md PF7.
+ *
+ * Advisory locks live in one namespace shared by the whole database, and the
+ * one-argument form this used to take (`pg_advisory_xact_lock(hashtext(key))`)
+ * put better-trigger's keys in the same space as any `pg_advisory_lock` the
+ * application owning the database takes for its own reasons — a documented
+ * deployment (daemon sharing the app's database) where an unrelated lock could
+ * silently serialize our claims. The two-argument form's (classid, objid) space
+ * is disjoint from the one-argument bigint space and, with a classid nobody
+ * else picks, ours alone. Collision odds *within* better-trigger are unchanged
+ * (objid is still the 32-bit hashtext of the key, so two concurrency keys can
+ * still hash together and serialize each other), but `pg_locks` now names the
+ * owner: classid 1651794787 is this limiter and nothing else.
+ *
+ * Deliberately NOT the migration lock's class (`LOCK_CLASS` = 'btmg',
+ * packages/db/src/migrate.ts): different classid ⇒ different objid space, so
+ * the two can never meet however their objids hash. They are also different
+ * kinds of lock — this one is *transaction*-scoped (released by COMMIT/ROLLBACK
+ * of the claim transaction, never unlocked by hand), the migration's is
+ * *session*-scoped and pinned to one client. Do not mix the two forms on the
+ * same key.
+ */
+export const CONCURRENCY_LOCK_CLASS = 0x62_74_63_63; // 'btcc'
+
+/**
+ * Size of the candidate window the claim transaction locks, derived from the
+ * caller's `limit` (todos/02-performance.md PF3).
+ *
+ * The window has to be wider than `limit` because a candidate can be dropped
+ * after it is locked: the per-task concurrency limit below skips rows whose key
+ * is already at its cap, and a run whose row vanished is skipped too. With a
+ * window of exactly `limit`, a queue whose head happens to be full of capped
+ * runs would return nothing while perfectly claimable runs sat one row further
+ * down. Doubling gives that skipping room; the floor of 10 keeps the common
+ * `limit: 1` slot poll from degenerating into "look at the single head row".
+ *
+ * It must not be much wider either — every row in the window is held
+ * `FOR UPDATE SKIP LOCKED` for the whole transaction, so anything locked and
+ * not taken is a row hidden from other workers (and, since they skip it, a
+ * dent in the global priority order). `2x` is the smallest multiplier that
+ * tolerates skipping at all.
+ */
+export function claimWindow(limit: number): number {
+  return Math.max(limit * 2, 10);
+}
+
+/**
  * Claim up to `limit` runs for the given worker. Single transaction:
- *   SELECT candidates FOR UPDATE SKIP LOCKED (available + unclaimed, by
- *   priority, task set filtered in SQL), for each candidate skip if the
- *   concurrency limit is hit, otherwise claim it: take the lease on the queue
- *   row (locked_by/locked_at + lease_until = now() + leaseMs), then flip the
- *   run to running and bump runs.fencing_token — queue row locked before the
- *   runs row, the canonical kernel lock order (see runs.ts header). Returns
- *   claimed runs + step snapshots + the fencing token guarding each claim's
- *   writes. Expired-lease recovery is the reaper's job alone — candidates here
- *   stay `locked_by IS NULL`.
+ *   SELECT a claimWindow(limit)-wide candidate set FOR UPDATE SKIP LOCKED
+ *   (available + unclaimed, by priority, task set filtered in SQL), for each
+ *   candidate skip if the concurrency limit is hit, otherwise claim it: take
+ *   the lease on the queue row (locked_by/locked_at + lease_until = now() +
+ *   leaseMs), then flip the run to running and bump runs.fencing_token —
+ *   queue row locked before the runs row, the canonical kernel lock order
+ *   (see runs.ts header). Returns claimed runs + step snapshots + the fencing
+ *   token guarding each claim's writes. Expired-lease recovery is the reaper's
+ *   job alone — candidates here stay `locked_by IS NULL`.
+ *
+ * The candidate SELECT carries every column the loop needs (todos/02-performance.md
+ * PF4). It already had to `JOIN runs` for the task filter, so the run's execution
+ * columns and the task's concurrency_limit ride along for free instead of costing
+ * two round trips *per candidate* — a window of 10 used to mean 20+ statements for
+ * a call that normally claims one run. Only `run_steps` stays per-run: it is needed
+ * for the runs actually claimed, which is a small subset of the window.
+ *
+ * Locking is unchanged by the join. `FOR UPDATE OF q` locks queue rows and only
+ * queue rows — `runs` and `tasks` are read, never locked — so the scan still
+ * takes canonical position 1 and nothing else, and the runs row is still first
+ * locked by the claiming UPDATE below (position 2). Reading the runs columns in
+ * the same statement is safe for the same reason it was safe one statement later:
+ * every path that mutates a run takes that run's queue row FOR UPDATE first, so a
+ * mutation racing us either holds the queue row (we SKIP LOCKED past it and never
+ * see the row at all) or is not yet committed when our snapshot is taken — in
+ * which case its pre-image has locked_by set (a claimed run being failed/retried)
+ * and fails the candidate predicate. Fencing is untouched: fencing_token is still
+ * read from the RETURNING of the same-tx UPDATE that bumps it, never from here.
  */
 export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<ClaimedRun[]> {
   if (args.taskIds.length === 0 || args.limit <= 0) return [];
@@ -85,60 +152,58 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
   try {
     await client.query('BEGIN');
 
+    // `JOIN runs` is an inner join, so a queue row whose run vanished is simply
+    // not a candidate (it was skipped by the old per-row read too). `LEFT JOIN
+    // tasks` because a run may reference a task row that was never registered —
+    // that means "no concurrency limit", not "not claimable".
     const candidates = await client.query<{
-      id: number;
+      queue_id: number;
       run_id: string;
+      task_id: string;
+      payload: unknown;
+      attempt: number;
+      max_attempts: number;
+      code_version: string | null;
+      env: string;
       concurrency_key: string | null;
+      concurrency_limit: number | null;
     }>(
-      `SELECT q.id, q.run_id, q.concurrency_key
+      `SELECT q.id AS queue_id, q.run_id,
+              r.task_id, r.payload, r.attempt, r.max_attempts,
+              r.code_version, r.env, r.concurrency_key,
+              t.concurrency_limit
          FROM queue q
          JOIN runs r ON r.id = q.run_id
+         LEFT JOIN tasks t ON t.id = r.task_id
         WHERE q.available_at <= now() AND q.locked_by IS NULL
           AND r.task_id = ANY($1::text[])
         ORDER BY q.priority DESC, q.id ASC
-        LIMIT 10
+        LIMIT $2
         FOR UPDATE OF q SKIP LOCKED`,
-      [args.taskIds],
+      [args.taskIds, claimWindow(args.limit)],
     );
 
     const claimed: ClaimedRun[] = [];
     for (const cand of candidates.rows) {
       if (claimed.length >= args.limit) break;
 
-      const runRes = await client.query<{
-        id: string;
-        task_id: string;
-        payload: unknown;
-        attempt: number;
-        max_attempts: number;
-        code_version: string | null;
-        env: string;
-        concurrency_key: string | null;
-      }>(
-        `SELECT id, task_id, payload, attempt, max_attempts, code_version, env, concurrency_key
-           FROM runs WHERE id = $1`,
-        [cand.run_id],
-      );
-      const run = runRes.rows[0];
-      if (!run) continue;
-
-      // Concurrency limit: read the task's limit; if set, count running runs
-      // sharing the same concurrency_key (redundantly stored on runs).
-      const taskRes = await client.query<{ concurrency_limit: number | null }>(
-        `SELECT concurrency_limit FROM tasks WHERE id = $1`,
-        [run.task_id],
-      );
-      const limit = taskRes.rows[0]?.concurrency_limit ?? null;
+      // Concurrency limit: the task's limit came back with the candidate; if set,
+      // count running runs sharing the same concurrency_key (redundantly stored
+      // on runs).
+      const limit = cand.concurrency_limit;
       if (limit != null && limit > 0) {
-        const key = run.concurrency_key ?? run.task_id;
+        const key = cand.concurrency_key ?? cand.task_id;
         // Serialize concurrent claims sharing this key: SKIP LOCKED does not
         // serialize two workers picking different queue rows of the same key, so
         // the count-then-flip below could race and overshoot the limit. Take a
         // tx-level advisory lock on the key first; it releases at COMMIT/ROLLBACK
-        // and must be held while we count (same transaction).
-        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
-          `bt:cc:${key}`,
-        ]);
+        // and must be held while we count (same transaction). Two-argument form
+        // so the key sits in better-trigger's own lock space — see
+        // CONCURRENCY_LOCK_CLASS above.
+        await client.query(
+          `SELECT pg_advisory_xact_lock($1::int4, hashtext($2))`,
+          [CONCURRENCY_LOCK_CLASS, `bt:cc:${key}`],
+        );
         const countRes = await client.query<{ n: string }>(
           `SELECT count(*)::text AS n
              FROM runs
@@ -160,7 +225,7 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
                 locked_at = now(),
                 lease_until = now() + ($2::text || ' milliseconds')::interval
           WHERE id = $3`,
-        [args.workerId, String(args.leaseMs), cand.id],
+        [args.workerId, String(args.leaseMs), cand.queue_id],
       );
 
       const tokenRes = await client.query<{ fencing_token: string }>(
@@ -171,7 +236,7 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
                 fencing_token = fencing_token + 1
           WHERE id = $1
           RETURNING fencing_token`,
-        [run.id],
+        [cand.run_id],
       );
       const fencingToken = Number(tokenRes.rows[0]?.fencing_token ?? 0);
 
@@ -185,7 +250,7 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
       }>(
         `SELECT seq, kind, label, status, output, error
            FROM run_steps WHERE run_id = $1 ORDER BY seq ASC`,
-        [run.id],
+        [cand.run_id],
       );
       const steps: StepSnapshot[] = stepsRes.rows.map((s) => ({
         seq: s.seq,
@@ -197,13 +262,13 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
       }));
 
       claimed.push({
-        id: run.id,
-        taskId: run.task_id,
-        payload: run.payload,
-        attempt: run.attempt,
-        maxAttempts: run.max_attempts,
-        codeVersion: run.code_version,
-        env: run.env,
+        id: cand.run_id,
+        taskId: cand.task_id,
+        payload: cand.payload,
+        attempt: cand.attempt,
+        maxAttempts: cand.max_attempts,
+        codeVersion: cand.code_version,
+        env: cand.env,
         steps,
         fencingToken,
       });

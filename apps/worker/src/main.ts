@@ -21,8 +21,9 @@
    stop the loops, close the server, end the pool. An escaping rejection or an
    uncaught exception takes that same path and then exits non-zero.
    ============================================================================= */
+import { parseDuration } from '@better-trigger/core';
 import { createPool, migrate } from '@better-trigger/db';
-import { createKernel, type OrchestratorCounters } from '@better-trigger/kernel';
+import { createKernel, MIN_RETENTION_MS, type OrchestratorCounters } from '@better-trigger/kernel';
 import { setResultResolver } from 'better-trigger/internal';
 import { createApp } from './app';
 import { startHttpServer } from './listen';
@@ -35,6 +36,7 @@ const USAGE = `better-trigger-worker — durable task daemon
 
 Usage:
   better-trigger-worker [options]
+  better-trigger-worker prune --older-than <duration> [--dry-run]
 
 Options:
   --tasks <path>           Module exporting task() handles. Repeatable, or
@@ -57,6 +59,11 @@ Options:
   --timer-interval-ms <n>  Wait-due scan interval       (default 1000)
   --cron-interval-ms <n>   Cron scan interval           (default 1000)
   --reaper-interval-ms <n> Expired-lease reap interval  (default 10000)
+  --retention <duration>   Turn ON the retention GC loop: hourly, delete
+                           terminal runs (steps + logs cascade) and offline
+                           worker rows older than this ("30d", "72h"). OFF by
+                           default — the daemon deletes no history unless asked.
+  --gc-interval-ms <n>     Retention GC interval        (default 3600000)
   --database-url <s>       Postgres connection string   (env DATABASE_URL)
   --no-migrate             Skip applying migrations at boot
   --no-serve               Execute tasks without serving HTTP (executor-only
@@ -82,6 +89,28 @@ Env:
                            objects elsewhere and pass a reference
 `;
 
+const PRUNE_USAGE = `better-trigger-worker prune — delete history past a retention window
+
+Usage:
+  better-trigger-worker prune --older-than <duration> [--dry-run]
+
+Deletes terminal runs (completed / failed / canceled) that finished before the
+window, together with their steps and logs (foreign-key cascade), and worker
+rows already marked offline whose last heartbeat is older than it. Runs that
+are still queued / running / waiting are never touched, at any age, and neither
+are tasks or schedules.
+
+Options:
+  --older-than <duration>  Retention window: "30d", "72h", "1w". Required.
+  --dry-run                Report what would be deleted and delete nothing.
+  --database-url <s>       Postgres connection string   (env DATABASE_URL)
+  --no-migrate             Skip applying migrations first. The cascade that
+                           removes steps and logs is a constraint added by
+                           migration 0007, so on a database that has not been
+                           migrated this would leave them behind.
+  -h, --help               Show this help
+`;
+
 interface Options {
   tasks: string[];
   port: number;
@@ -94,9 +123,20 @@ interface Options {
   timerIntervalMs?: number;
   cronIntervalMs?: number;
   reaperIntervalMs?: number;
+  /** Undefined = no retention GC loop at all (the default). */
+  retentionMs?: number;
+  gcIntervalMs?: number;
   databaseUrl?: string;
   migrate: boolean;
   serve: boolean;
+}
+
+/** `better-trigger-worker prune ...` — the one-shot maintenance subcommand. */
+interface PruneOptions {
+  olderThanMs: number;
+  dryRun: boolean;
+  databaseUrl?: string;
+  migrate: boolean;
 }
 
 /**
@@ -155,6 +195,35 @@ function requireInt(flag: string, raw: string): number {
     throw new Error(`${flag} must be a positive number, got "${raw}"`);
   }
   return n;
+}
+
+/**
+ * A retention window as a duration ("30d", "72h", "1w"). The unit suffix is
+ * required — parseDuration rejects a bare "30" for a string input, which is
+ * what the CLI always hands it, so `--retention 30` cannot silently mean 30
+ * milliseconds. parseDuration's own message names the flag through the rethrow
+ * so the CLI error says which one was wrong.
+ *
+ * The floor is checked here rather than only in the kernel: prune() rejects
+ * anything under MIN_RETENTION_MS, but the GC loop only calls it once a tick,
+ * so `--retention 30s` would otherwise start a daemon that prints its
+ * "retention GC on" banner and then throws in the background every hour.
+ * Failing in parseArgs turns that into an unmissable startup error.
+ */
+function requireDuration(flag: string, raw: string): number {
+  let ms: number;
+  try {
+    ms = parseDuration(raw);
+  } catch (err) {
+    throw new Error(`${flag}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (ms < MIN_RETENTION_MS) {
+    throw new Error(
+      `${flag} must be at least ${MIN_RETENTION_MS}ms (got "${raw}" = ${ms}ms) — ` +
+        `a shorter window would delete history the engine is still using`,
+    );
+  }
+  return ms;
 }
 
 function parseArgs(argv: string[]): Options {
@@ -237,6 +306,12 @@ function parseArgs(argv: string[]): Options {
       case '--reaper-interval-ms':
         opts.reaperIntervalMs = requireInt(flag, value());
         break;
+      case '--retention':
+        opts.retentionMs = requireDuration(flag, value());
+        break;
+      case '--gc-interval-ms':
+        opts.gcIntervalMs = requireInt(flag, value());
+        break;
       case '--database-url':
         opts.databaseUrl = value();
         break;
@@ -252,6 +327,65 @@ function parseArgs(argv: string[]): Options {
   }
 
   return opts;
+}
+
+/**
+ * `prune`'s own flag set, parsed the same strict way as the daemon's: unknown
+ * flags are typos to report, and `--dry-run=false` has to mean false —
+ * a bool flag that ignored its value would resolve a typo towards deleting.
+ */
+function parsePruneArgs(argv: string[]): PruneOptions {
+  let olderThanMs: number | undefined;
+  const opts: Omit<PruneOptions, 'olderThanMs'> = {
+    dryRun: false,
+    databaseUrl: process.env.DATABASE_URL,
+    migrate: true,
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    const eq = arg.indexOf('=');
+    const flag = eq === -1 ? arg : arg.slice(0, eq);
+    const inline = eq === -1 ? undefined : arg.slice(eq + 1);
+    const value = (): string => {
+      if (inline !== undefined) return inline;
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('-')) {
+        throw new Error(`${flag} requires a value`);
+      }
+      i += 1;
+      return next;
+    };
+
+    switch (flag) {
+      case '-h':
+      case '--help':
+        process.stdout.write(PRUNE_USAGE);
+        process.exit(0);
+        break;
+      case '--older-than':
+        olderThanMs = requireDuration(flag, value());
+        break;
+      case '--dry-run':
+        opts.dryRun = inline === undefined ? true : boolValue(flag, inline);
+        break;
+      case '--database-url':
+        opts.databaseUrl = value();
+        break;
+      case '--no-migrate':
+        opts.migrate = false;
+        break;
+      default:
+        throw new Error(`unknown option "${flag}" (try \`prune --help\`)`);
+    }
+  }
+
+  // No default window on purpose: a `prune` that picks one for you is a command
+  // that deletes an amount of history nobody chose.
+  if (olderThanMs === undefined) {
+    throw new Error('prune requires --older-than <duration>, e.g. --older-than 30d');
+  }
+  return { ...opts, olderThanMs };
 }
 
 /* =============================================================================
@@ -428,8 +562,51 @@ function crash(kind: string, err: unknown): void {
 process.on('unhandledRejection', (reason) => crash('unhandledRejection', reason));
 process.on('uncaughtException', (err) => crash('uncaughtException', err));
 
+/**
+ * `better-trigger-worker prune --older-than 30d [--dry-run]`
+ * (todos/02-performance.md PF6).
+ *
+ * A one-shot: connect, delete, report, exit — no server, no orchestrator, no
+ * task loading, nothing claimed. It goes through `daemon.pool` so the exit
+ * paths already installed above close the pool for it, including when the
+ * delete throws half way.
+ */
+async function runPrune(argv: string[]): Promise<void> {
+  const opts = parsePruneArgs(argv);
+  const pool = createPool(opts.databaseUrl);
+  daemon.pool = pool;
+  // --dry-run promises to delete nothing, and migrating is a write: 0007 cleans
+  // orphaned logs/run_steps before it can add the foreign keys, so a dry run
+  // against a not-yet-migrated database would delete rows and then print
+  // "nothing was deleted". A dry run therefore never migrates; if the schema is
+  // behind, prune's own statements fail and say so, which is the honest outcome.
+  if (opts.migrate && !opts.dryRun) await migrate(pool);
+
+  const kernel = createKernel({ pool });
+  const res = await kernel.prune({ olderThanMs: opts.olderThanMs, dryRun: opts.dryRun });
+
+  const tag = res.dryRun ? '[dry-run] would delete' : 'deleted';
+  console.log(
+    `[better-trigger] prune: everything terminal before ${res.cutoff.toISOString()}\n` +
+      `  ${tag}: ${res.runs} run(s), ${res.runSteps} step(s), ${res.logs} log(s), ` +
+      `${res.waits} wait(s), ${res.queue} queue row(s), ${res.workers} worker row(s)`,
+  );
+  if (res.dryRun) {
+    console.log('  nothing was deleted — drop --dry-run to apply');
+  }
+  await handoff();
+}
+
 async function main(): Promise<void> {
-  const opts = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  // Subcommand before flag parsing: parseArgs() rejects unknown options, and a
+  // bare `prune` is exactly that as far as the daemon's parser is concerned.
+  if (argv[0] === 'prune') {
+    await runPrune(argv.slice(1));
+    return;
+  }
+
+  const opts = parseArgs(argv);
   if (!opts.serve && opts.tasks.length === 0) {
     throw new Error('--no-serve without --tasks leaves nothing to do');
   }
@@ -480,6 +657,9 @@ async function main(): Promise<void> {
           timerIntervalMs: opts.timerIntervalMs,
           cronIntervalMs: opts.cronIntervalMs,
           reaperIntervalMs: opts.reaperIntervalMs,
+          // Undefined unless --retention was given → no GC loop at all.
+          retentionMs: opts.retentionMs,
+          gcIntervalMs: opts.gcIntervalMs,
         },
       },
       {
@@ -500,6 +680,10 @@ async function main(): Promise<void> {
       reaper: true,
       workerOffline: true,
       reaperIntervalMs: opts.reaperIntervalMs,
+      // Retention is bookkeeping, so an API-only daemon is a perfectly good
+      // place to run it — still only when --retention asked for it.
+      retentionMs: opts.retentionMs,
+      gcIntervalMs: opts.gcIntervalMs,
     });
     daemon.stopOrchestrator = () => orchestrator.stop();
     orchestratorCounters = orchestrator.counters;
@@ -540,6 +724,15 @@ async function main(): Promise<void> {
           (isLoopbackHost(opts.host) ? '' : ` (bound to ${opts.host})`)
       : '[better-trigger] --no-serve: executor-only node, no HTTP surface',
   );
+  // Deleting history is the kind of thing a process should say out loud once,
+  // at the point it was switched on — not something a user discovers later by
+  // noticing runs are missing.
+  if (opts.retentionMs !== undefined) {
+    console.log(
+      `[better-trigger] retention GC on: terminal runs (with their steps and logs) ` +
+        `and offline worker rows older than ${opts.retentionMs}ms are deleted periodically`,
+    );
+  }
   // Unauthenticated-by-default is the product choice, but it should be a known
   // state rather than a forgotten one — so name it, with the address it
   // actually applies to. The exposed case gets the louder warning below.

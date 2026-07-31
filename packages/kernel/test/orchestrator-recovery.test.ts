@@ -13,6 +13,8 @@
    stub client (no Postgres): which counter the recovery UPDATE moves, which
    pair the terminal decision reads, and that the resulting error says WHICH
    budget ran out — 'worker lost' on its own reads like the user's code failed.
+   The last block pins the shape of the scan that finds those claims
+   (todos/02-performance.md PF1) — same statement, same stub.
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
@@ -196,5 +198,43 @@ describe('lease recovery', () => {
 
     expect(requeued).toBe(1);
     expect(failed).toBe(2);
+  }, 10_000);
+});
+
+describe('expired-lease scan', () => {
+  /** The one SELECT the reaper issues against queue. */
+  async function scanSql(): Promise<string> {
+    const { stmts } = await reapOnce([]);
+    const scan = stmts.find((s) => /FROM queue q/.test(s.sql));
+    expect(scan).toBeDefined();
+    return scan!.sql;
+  }
+
+  it('takes a bounded batch, so one recovery storm is not one giant tx', async () => {
+    // Unbounded, a fleet-wide crash locks every expired row in a single tx and
+    // walks it row by row, and the claim path's SKIP LOCKED bounces off all of
+    // them for the duration. 100 per 10s tick; the rest wait one tick.
+    expect(await scanSql()).toMatch(/LIMIT 100/);
+  }, 10_000);
+
+  it('orders by lease_until, so the remainder cannot starve', async () => {
+    // Oldest expiry first. Every row a tick processes leaves the candidate set
+    // (lease_until := NULL, or the queue row deleted), so whatever the LIMIT cut
+    // off is strictly nearer the head next tick rather than perpetually behind
+    // newer expiries.
+    expect(await scanSql()).toMatch(/ORDER BY q\.lease_until ASC/);
+  }, 10_000);
+
+  it('keeps the IS NOT NULL clause that matches the partial index', async () => {
+    // Implied by `<= now()`, and stated anyway so the predicate mirrors
+    // queue_lease_until_idx (partial, WHERE lease_until IS NOT NULL) verbatim.
+    // Dropping it would NOT go sequential — PG 16.2 still plans an Index Scan
+    // using queue_lease_until_idx, deriving NOT NULL from the comparison. This
+    // pins the statement shape, not the index's availability.
+    const sql = await scanSql();
+    expect(sql).toMatch(/q\.lease_until IS NOT NULL/);
+    expect(sql).toMatch(/q\.lease_until <= now\(\)/);
+    // The LIMIT must not turn into a plain "first 100 rows we can lock".
+    expect(sql).toMatch(/FOR UPDATE SKIP LOCKED/);
   }, 10_000);
 });

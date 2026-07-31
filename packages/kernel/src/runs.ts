@@ -20,6 +20,10 @@
    queue rows first, and only rows with locked_by IS NULL, so it never contends
    with a fenced op's held claim (those keep locked_by set until
    terminal/suspend); it then locks each candidate's runs row — same 1→2 order.
+   That scan joins runs (and tasks) to read the claim's columns in one statement,
+   but `FOR UPDATE OF q` restricts the lock to the queue row: the joined tables
+   are read, never locked, so position 2 is still first taken by the claiming
+   UPDATE that follows.
    The reaper likewise locks expired-lease queue rows via SKIP LOCKED, then the
    runs row; claim and reap candidate sets are disjoint (locked_by IS NULL vs
    lease_until set), and neither scan ever *waits* on a queue row, so neither
@@ -1066,9 +1070,16 @@ const LOG_INSERT_CHUNK = 1000;
  *
  * The trade-off, taken deliberately: a line emitted in the same instant the run
  * is being finalized can be evaluated against the already-terminal row and
- * silently dropped. Serializing against that would mean locking the runs row on
- * every flush, which is exactly the cost this path refuses to pay — and losing
- * the last few milliseconds of logs is what "best effort" was already promising.
+ * silently dropped. Serializing against that would mean taking the runs row
+ * under FOR UPDATE on every flush, which is the cost this path refuses to pay —
+ * and losing the last few milliseconds of logs is what "best effort" was
+ * already promising.
+ *
+ * Since PF6 added logs.run_id REFERENCES runs(id) ON DELETE CASCADE, the INSERT
+ * does take a FOR KEY SHARE lock on the parent run row — enough to block behind
+ * a concurrent FOR UPDATE holder, not enough to serialize against one the way
+ * the paragraph above rules out. No deadlock edge comes with it: this is a
+ * single autocommit statement that holds no other lock while it waits.
  */
 export async function appendLogs(
   pool: Pool,

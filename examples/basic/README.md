@@ -20,6 +20,7 @@ daemon (and the harnesses' direct-SQL assertions) ever sees `DATABASE_URL`.
 | `scripts/fencing.ts` | Kernel-level lease/fencing test (no daemon, no HTTP): 6 fenced ops rejected with zero state change, token monotonic across suspend/resume. |
 | `scripts/replay-drift.ts` + `scripts/replay-drift-tasks-v{1,2}.ts` | Mid-flight redeploy: `code_version` stamping, body fingerprinting, `replay: 'strict'` refusing a drifted ledger. |
 | `scripts/worker-lost.ts` + `scripts/worker-lost-tasks.ts` | Reaper recovery then terminal-fail: the first lost worker costs a `recovery` and not the child's only attempt, the second exhausts the recovery budget → `worker lost`, waiting parent woken with `ok: false`. |
+| `scripts/claim-scan-bench.ts` | Plan bench, not a correctness scenario: `EXPLAIN (ANALYZE, BUFFERS)` of the claim candidate scan over a 50k-row backlog, with and without `queue_claimable_idx`. |
 
 The scaffolding every scenario shares — database provisioning, daemon spawn /
 health-wait / SIGKILL, polling, the marker-file probe, the scenario runner and
@@ -87,6 +88,15 @@ across every kill, plus an executor node (`--tasks ... --no-serve`) that is the
 one being killed.
 
 Each check prints `✓`/`✗` with its elapsed time and a final summary.
+
+The claim-scan bench uses the same harness but is **not** in
+`test:acceptance` — it asserts a query *plan*, not durable-execution behaviour,
+and it seeds 50k queue rows to do it. Run it by hand after touching the claim
+query or the `queue` indexes:
+
+```bash
+bun run --filter @better-trigger/example-basic bench:claim-scan  # 3 checks · db _claim_scan · no daemon
+```
 
 ## Watch it in the dashboard
 

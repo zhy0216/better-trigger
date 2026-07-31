@@ -10,7 +10,8 @@
 # The two packaging guards bracket the build because that is what they need:
 # `check:deps` only reads package.json (so it runs first, failing in ms), while
 # `check:exports` resolves the actual dist/ artifacts and therefore has to run
-# after it.
+# after it. `check:drift` joins the cheap end: it reads packages/db only and
+# needs no database.
 # =============================================================================
 name: CI
 
@@ -64,6 +65,14 @@ jobs:
       # nothing but core — see docs/architecture.md on the client/daemon split.
       - name: Dependency guard
         run: bun run check:deps
+
+      # schema.ts is the source of truth but nothing runs it — daemons apply the
+      # generated .sql. A schema edit without a `db:generate` reaches no
+      # database, and the next unrelated generate folds it in silently. Offline:
+      # `drizzle-kit generate` only diffs schema.ts against migrations/meta, so
+      # this step does not touch the postgres service above.
+      - name: Migration drift
+        run: bun run check:drift
 
       - name: Build
         run: bun run build

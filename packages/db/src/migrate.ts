@@ -14,11 +14,12 @@ import type pg from 'pg';
 const MIGRATIONS_FOLDER = fileURLToPath(new URL('../migrations', import.meta.url));
 
 /* Advisory-lock key for the migration itself, in the two-argument
-   (classid, objid) key space — Postgres keeps that space disjoint from the
-   one-argument bigint space, which is the one the kernel's concurrency limiter
-   uses (`pg_advisory_xact_lock(hashtext('bt:cc:…'))`, packages/kernel/src/
-   queue.ts), so the two can never collide. classid spells 'btmg'
-   (better-trigger migrate); objid leaves room for further migration locks. */
+   (classid, objid) key space. classid spells 'btmg' (better-trigger migrate);
+   objid leaves room for further migration locks. The kernel's concurrency
+   limiter is in the same two-argument space but under its own classid ('btcc',
+   CONCURRENCY_LOCK_CLASS in packages/kernel/src/queue.ts), so the two objid
+   spaces are disjoint and can never collide. That one is also transaction
+   scoped; this one is session scoped, hence the manual unlock below. */
 const LOCK_CLASS = 0x62_74_6d_67; // 'btmg'
 const LOCK_OBJECT = 1;
 

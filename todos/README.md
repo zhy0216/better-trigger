@@ -27,16 +27,20 @@
 | P0 | ✅ pg Pool 没有 `error` 监听 → 空闲连接被断开时进程崩溃 | [done/03-operability.md](done/03-operability.md#o1) |
 | P0 | ✅ 关停不释放 claim、不标记 worker offline | [done/01-correctness.md](done/01-correctness.md#c3) |
 | P1 | ✅ `migrate()` 无 advisory lock,多 daemon 同时启动会打架 | [done/01-correctness.md](done/01-correctness.md#c5) |
-| P1 | reaper 全表扫 queue(缺 `lease_until` 索引)且扫描无 `LIMIT` | [02-performance.md](02-performance.md#pf1) |
-| P1 | 无数据保留策略:runs / run_steps / logs / workers 只增不删 | [02-performance.md](02-performance.md#pf6) |
+| P1 | ✅ reaper 全表扫 queue(缺 `lease_until` 索引)且扫描无 `LIMIT` | [done/02-performance.md](done/02-performance.md#pf1) |
+| P1 | ✅ 无数据保留策略:runs / run_steps / logs / workers 只增不删 | [done/02-performance.md](done/02-performance.md#pf6) |
 | P1 | ✅ heartbeat 不上报 lease 丢失 → 旧 executor 白跑到下一次写 | [done/01-correctness.md](done/01-correctness.md#c2) |
 | P1 | ✅ `LICENSE` 文件缺失(sdk 已声明 MIT) | [done/05-tests-and-dx.md](done/05-tests-and-dx.md#t3) |
-| P2 | 其余(claim 索引/N+1、CORS 收紧、错误信息脱敏、`ctx.signal` …) | 各文件 |
+| P2 | ✅ 其余(claim 索引/N+1、CORS 收紧、错误信息脱敏、`ctx.signal` …) | 各文件 |
+
+> **全部 34 条已完成**(2026-07-31)。唯一未实现的是 PF5 的 LISTEN/NOTIFY 本体 ——
+> 它属于 `docs/architecture.md` 的 P2 阶段,本轮按条目要求只把轮询的量化代价写进文档;
+> C6 的第 3 层(eslint 规则)同理留给 P6。各文件末尾有逐条的落地说明。
 
 ## 文件
 
 - ✅ [done/01-correctness.md](done/01-correctness.md) — 正确性与竞态(8 条,全部完成)
-- [02-performance.md](02-performance.md) — 索引、claim 路径、保留策略(7 条)
+- ✅ [done/02-performance.md](done/02-performance.md) — 索引、claim 路径、保留策略(7 条,PF5 按 roadmap 只补文档,LISTEN/NOTIFY 留给 P2)
 - ✅ [done/03-operability.md](done/03-operability.md) — 进程生命周期、可观测性(6 条,全部完成)
 - ✅ [done/04-security.md](done/04-security.md) — 默认姿态、输入边界(5 条,全部完成)
 - ✅ [done/05-tests-and-dx.md](done/05-tests-and-dx.md) — 测试 / CI / 开发体验(8 条,全部完成)

@@ -1,10 +1,10 @@
 /* =============================================================================
    @better-trigger/example-basic — acceptance suite entry point.
 
-   The six scenarios in this directory are the project's real correctness
+   The eight scenarios in this directory are the project's real correctness
    evidence (exactly-once steps under SIGKILL, fencing, replay drift, worker
-   loss, graceful restart). Each one is a `runScenario()` call from
-   @better-trigger/testing, so it
+   loss, graceful restart, per-key concurrency limits, retention cascades).
+   Each one is a `runScenario()` call from @better-trigger/testing, so it
    already provisions its own database, spawns its own daemons, runs its own
    teardown and exits non-zero on any failed assertion — this script only runs
    them in sequence and folds their exit codes into one, so
@@ -45,12 +45,22 @@ const HARNESSES: Harness[] = [
   { name: 'e2e', file: 'e2e.ts', what: 'end-to-end smoke test over the HTTP client' },
   { name: 'fencing', file: 'fencing.ts', what: 'fencing tokens reject late writes' },
   { name: 'replay-drift', file: 'replay-drift.ts', what: 'replay drift across code versions' },
+  {
+    name: 'concurrency',
+    file: 'concurrency.ts',
+    what: 'per-key concurrency limits are enforced by the advisory lock',
+  },
   { name: 'crash', file: 'crash.ts', what: 'steps stay exactly-once across SIGKILL' },
   { name: 'worker-lost', file: 'worker-lost.ts', what: 'expired leases are reclaimed' },
   {
     name: 'graceful-restart',
     file: 'graceful-restart.ts',
     what: 'a clean SIGTERM hands the claim back without spending an attempt',
+  },
+  {
+    name: 'retention',
+    file: 'retention.ts',
+    what: 'prune deletes history through the foreign-key cascade',
   },
 ];
 

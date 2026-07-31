@@ -62,6 +62,7 @@ import {
   type DeregisterWorkerArgs,
   type RegisterWorkerArgs,
 } from './workers';
+import { prune, type PruneArgs, type PruneResult } from './prune';
 
 export interface KernelLogger {
   warn(...args: unknown[]): void;
@@ -123,8 +124,15 @@ export interface Kernel {
 
   /* ------------------------------------------------------ orchestration */
   /** Start the wait/cron/reaper/offline-marker loops (each individually
-   *  switchable, all default on). Caller must stop(). */
+   *  switchable, all default on), plus the retention GC when
+   *  `retentionMs` is set. Caller must stop(). */
   startOrchestrator(opts?: OrchestratorOptions): OrchestratorHandle;
+
+  /* --------------------------------------------------------- retention */
+  /** Delete terminal runs (steps + logs cascade) and offline worker rows older
+   *  than `olderThanMs`. `dryRun: true` reports and deletes nothing. This is
+   *  what `better-trigger-worker prune` and the GC loop both call. */
+  prune(args: PruneArgs): Promise<PruneResult>;
 }
 
 export function createKernel(opts: KernelOptions): Kernel {
@@ -154,5 +162,6 @@ export function createKernel(opts: KernelOptions): Kernel {
     appendLogs: (runId, entries) => appendLogs(pool, runId, entries),
 
     startOrchestrator: (o) => startOrchestrator(pool, logger, o),
+    prune: (args) => prune(pool, args),
   };
 }

@@ -4,7 +4,9 @@
 > worker 不再是独立进程——执行器与 kernel 同在 `better-trigger-worker` daemon 内,直连 Postgres
 > (claim + lease/fencing;fencing 语义见 architecture.md),中间没有协议。
 > §5 的 REST 形状仍在用,并且现在**也是 SDK 的传输面**(`betterTrigger({url})`),另加两个端点:
-> `GET /runs/:id/record`(单个 run 行)与 `GET /runs/:id/result?timeoutMs=&pollMs=`(服务端 long-poll 到终态)。
+> `GET /runs/:id/record`(单个 run 行)与 `GET /runs/:id/result?timeoutMs=&pollMs=`(服务端 long-poll 到终态;
+> long-poll 内部仍是 `pollMs`(默认 250ms)一次 `SELECT`,每个等待者 4 QPS —— 轮询代价的完整数字见
+> architecture.md「P2 · 轮询代价」)。
 > `configure()`/`BETTER_TRIGGER_API_URL` 不复存在,改为 `betterTrigger({ url })` / `BETTER_TRIGGER_URL`。
 > **§3 引擎语义(重放不变量、退避公式、suspend/resume、cron、并发)继续有效且规范。**
 
@@ -90,19 +92,29 @@ runs         id text PK ('run_'+随机) · task_id text · status text
              · queued_at/started_at/finished_at/created_at/updated_at timestamptz
              UNIQUE (task_id, idempotency_key)(部分索引 WHERE idempotency_key IS NOT NULL)
 
-run_steps    run_id text + seq int 复合 PK · kind text('step'|'wait'|'trigger-and-wait'|
+run_steps    run_id text + seq int 复合 PK(run_id **FK → runs(id) ON DELETE CASCADE**)
+             · kind text('step'|'wait'|'trigger-and-wait'|
              'batch-trigger'|'now'|'random'|'uuid') · label text · status text('completed'|'failed')
              · output jsonb · error jsonb · attempt int · started_at/finished_at timestamptz
 
 queue        id bigserial PK · run_id text UNIQUE · available_at timestamptz · priority int DEFAULT 0
-             · locked_by text · locked_at timestamptz · concurrency_key text
-             索引 (available_at, priority desc) 与 (concurrency_key)
+             · locked_by text · locked_at timestamptz · lease_until timestamptz · concurrency_key text
+             (**`locked_by IS NULL` = 未被占用**;三列同进同出,claim 一起写、归还/reaper 一起清)
+             索引 (available_at, priority desc) 与 (concurrency_key),外加两个部分索引,
+             各自对应 §3.5 里一条一直在跑的扫描:
+               queue_claimable_idx   (priority desc nulls first, id) WHERE locked_by IS NULL
+                                     —— claim 的候选扫描(每个执行槽每轮都跑)
+               queue_lease_until_idx (lease_until)       WHERE lease_until IS NOT NULL
+                                     —— reaper 的过期租约扫描(每 10s)
+             两个谓词都只覆盖各自那一小撮行(可领取的 / 在飞的),把积压里占绝大多数的
+             「已 claim 且租约未到期」整个排除在索引之外
 
 waits        id bigserial PK · run_id text · step_seq int · kind text('duration'|'until'|'run')
              · resume_at timestamptz · child_run_id text · status text('pending'|'completed'|'canceled')
              · created_at timestamptz;索引 (status, resume_at) 与 (child_run_id)
 
-logs         id bigserial PK · run_id text · step_seq int · level text · message text
+logs         id bigserial PK · run_id text(**FK → runs(id) ON DELETE CASCADE**)
+             · step_seq int · level text · message text
              · data jsonb · ts timestamptz;索引 (run_id, id)
 
 schedules    id text PK ('sch_'+随机) · task_id text UNIQUE · cron_pattern text · cron_tz text
@@ -112,13 +124,31 @@ schedules    id text PK ('sch_'+随机) · task_id text UNIQUE · cron_pattern t
 workers      id text PK ('wkr_'+随机) · name text · code_version text · runtime text
              · tasks jsonb(string[]) · concurrency int · started_at · last_heartbeat_at
              · status text('online'|'offline')
+             (**每次进程启动插一行新的**,下线只改 status —— 靠 §2.1 的保留策略清理)
 ```
+
+### 2.1 数据保留(默认不删任何东西)
+
+引擎自己不清理历史:`runs` / `run_steps` / `logs` 只增不减,`workers` 每次启动多一行。
+两个显式的出口,**都要人主动开**:
+
+- `better-trigger-worker prune --older-than 30d [--dry-run]` —— 一次性维护命令。删除
+  在窗口之前进入终态(`completed`/`failed`/`canceled`)的 run,以及已 `offline` 且最后心跳
+  早于窗口的 worker 行。非终态 run 无论多老都不删(卡住的 run 是要看的 bug,不是垃圾)。
+  `--dry-run` 只报告、不执行任何 DELETE。
+- `--retention 30d` —— 打开 daemon 里的低频 GC 循环(默认 1h 一次,`--gc-interval-ms` 可调),
+  逻辑与 `prune` 完全同一份实现。**不给这个参数就没有这个循环**:默认行为不能是悄悄删用户数据。
+
+`logs.run_id` / `run_steps.run_id` 上的 `ON DELETE CASCADE`(迁移 0007)是这件事的支点 ——
+删 run 就是删它的日志和步骤账本,不需要第二份「删干净」的 SQL。`waits` / `queue` 没有这个
+外键(终态 run 上它们本就是空的),由 prune 显式按 run_id 删。窗口有下限(60s):
+`--older-than 0` 会删掉调用方正在 poll 结果的那个 run,直接拒绝而不是照做。
 
 ## 3. 引擎语义(不变量,重点读)
 
 ### 3.1 重放与位置键
 - 每次执行 task 函数,SDK 维护一个**单调递增 seq 计数器**(从 0 开始),`ctx.step/wait/triggerAndWait/batchTrigger/now/random/uuid` **每调用一次消耗一个 seq**。
-- dequeue 响应携带该 run 已完成 steps 快照;执行到 seq 时若快照中存在 `status='completed'` 的行 → **直接返回缓存 output,不执行 fn**。
+- claim 返回该 run 已完成 steps 快照(`claimRuns` 在同一事务里读 `run_steps`,见 §3.5);执行到 seq 时若快照中存在 `status='completed'` 的行 → **直接返回缓存 output,不执行 fn**。
 - 快照中 `status='failed'` 的行视为未完成(重试时重新执行,结果 upsert 覆盖)。
 - **漂移检查**:命中缓存前比对该行与调用点。`kind` 不一致(如 wait 行落到 `ctx.step()` 上)是硬信号——它由原语推导,不来自用户文本;`label` 不一致是软信号(改名无害,插入有害)。
   - `replay:'lenient'`(默认):`logger.warn` 一条 `replay drift at seq N: ...`,仍使用该缓存行。
@@ -127,7 +157,8 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 ### 3.2 挂起(Suspend)
 - `wait.for(d)` / `wait.until(date)`:SDK 先 `POST /runs/:id/suspend {seq, kind, resumeAt}`,成功后抛内部 `SuspendSignal`;执行器捕获后**静默结束本次执行**(不算失败),继续 poll 下一个 run。
 - server 处理 suspend(单事务):插入 `waits` 行(pending)、`runs.status='waiting'`、删除该 run 的 queue 行。
-- **到期恢复**(编排器 timer,每 1s 扫):`waits WHERE status='pending' AND kind IN ('duration','until') AND resume_at <= now() FOR UPDATE SKIP LOCKED` → 标记 completed、写 `run_steps` 行(seq=step_seq, kind='wait', status='completed', output=null)、`runs.status='queued'`、插 queue 行。重放时该 seq 命中缓存 → 跳过。
+- **到期恢复**(编排器 timer,每 1s 扫)分两阶段(C1):**阶段一**不持任何锁地读一批到期的 wait —— `waits WHERE status='pending' AND kind IN ('duration','until') AND resume_at <= now() ORDER BY resume_at ASC LIMIT 50`;**阶段二**每条 wait 各开一个短事务,按规范锁序 queue → runs → wait 依次上锁,并在锁下重新确认这条 wait 还是 `pending`(期间可能被取消,或被另一个 daemon 抢先恢复),然后标记 completed、写 `run_steps` 行(seq=step_seq, kind='wait', status='completed', output=null)、`runs.status='queued'`、插 queue 行(priority 从 `runs.priority` 读回,见 §2 的说明)。重放时该 seq 命中缓存 → 跳过。
+  - 锁序里 runs 行与 wait 行都用 `SKIP LOCKED`:阶段一无锁,所以每个 daemon 读到的是同一批 wait,阻塞等待等于排队等同伴做完同一件事;跳过不会丢唤醒(行仍是 `pending` 且已过期,下一 tick 按 `resume_at` 排序又排在最前),也不会重复唤醒(runs 行是串行化点,只有一个实例能过)。queue 行那一位仍是阻塞式的 —— 理由见 `runs.ts` 头注释。**一个 wait 一个事务**,单事务的锁足迹因此只有一个 run,扫描之间不会交叉死锁。
 - 若 resumeAt 已过期(如 `wait.for("0s")`),server 直接同步走恢复路径并返回 `{resumed: true}`,SDK **不挂起继续执行**(写 step 行,seq 照常消耗)。
 
 ### 3.3 triggerAndWait(父子)
@@ -144,21 +175,49 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 - worker 上报任何接口若收到 `409 {code:'run_not_running'}`(run 已被 cancel 等)→ SDK 放弃该 run 的执行,不再上报。
 
 ### 3.5 队列与并发(SKIP LOCKED)
-- dequeue 单事务:
-  ```sql
-  SELECT q.* FROM queue q
-  WHERE q.available_at <= now() AND q.locked_at IS NULL
-  ORDER BY q.priority DESC, q.id ASC
-  LIMIT 10 FOR UPDATE SKIP LOCKED
-  ```
-  对每个候选:若其 run 的 task 不在该 worker 注册列表 → 跳过;若 task 有 `concurrency_limit`:统计 `runs.status='running' AND concurrency_key 相同` 的数量(join queue 已锁行或 runs 表计数,用 runs 表:`SELECT count(*) FROM runs r JOIN queue... ` 简化为对 runs 计数 WHERE status='running' AND task 同 concurrency_key —— 把 concurrency_key 冗余存到 runs 行避免 join)≥ limit → 跳过(留队列)。
-  - 因此 **runs 表也加 `concurrency_key text` 列**。默认 key = task_id;trigger options 可覆盖。
-- 取中第一个可执行的:`locked_by=workerId, locked_at=now()`,`runs.status='running', started_at=coalesce(started_at, now())`,提交,返回 run + steps 快照。
-- **可见性超时** 60s:reaper(每 10s)扫 `lease_until <= now()` 的 queue 行 → 释放锁、**`recoveries+1`**、`runs.status='queued'`;若 `recoveries` 已达 `max_recoveries` → failed。
+
+**claim 是一个事务**(`packages/kernel/src/queue.ts` 的 `claimRuns`,在 daemon 进程内直跑)。候选扫描一条 SQL 就把这一批要用的列全取回来:
+
+```sql
+SELECT q.id AS queue_id, q.run_id,
+       r.task_id, r.payload, r.attempt, r.max_attempts,
+       r.code_version, r.env, r.concurrency_key,
+       t.concurrency_limit
+  FROM queue q
+  JOIN runs r ON r.id = q.run_id
+  LEFT JOIN tasks t ON t.id = r.task_id
+ WHERE q.available_at <= now() AND q.locked_by IS NULL
+   AND r.task_id = ANY($1::text[])   -- 该 worker 注册的 task 集合
+ ORDER BY q.priority DESC, q.id ASC
+ LIMIT $2                            -- claimWindow(limit) = max(limit * 2, 10)
+ FOR UPDATE OF q SKIP LOCKED
+```
+
+逐条读法:
+
+- **`locked_by IS NULL` 是「未被占用」的唯一判据**(不是 `locked_at`)。`locked_by/locked_at/lease_until` 三列同进同出,所以**租约过期的行不是 claim 的候选** —— 它 `locked_by` 还在,回收只归 reaper 一家。两条路径的候选集因此不相交(`locked_by IS NULL` vs `lease_until` 有值),claim 永远不做接管。
+- **task 过滤在 SQL 里**(`r.task_id = ANY($1::text[])`),不是取回来再在应用层丢掉:只注册了 2 个 task 的 worker,不会因为队头堆着别人的 run 就把整个候选窗口浪费掉。
+- **窗口大小是参数化的 `claimWindow(limit) = max(limit * 2, 10)`**,不是写死的 10(PF3)。比 `limit` 宽,是因为候选被锁住之后仍可能被下面的并发限流跳过 —— 窗口正好等于 `limit` 时,队头挤着一批已达上限的 run 就会让这次 claim 空手而归,而下一行明明可领。也不能宽太多:窗口里每一行都被 `FOR UPDATE SKIP LOCKED` 按住整个事务,锁住却不领走 = 对其他 worker 隐身(它们 SKIP LOCKED 跳过)+ 削弱全局优先级序。`2x` 是能容忍跳过的最小倍数;下限 10 兜住最常见的 `limit: 1`。
+- **`JOIN runs` + `LEFT JOIN tasks` 是为了消掉 N+1**(PF4):payload / attempt / max_attempts / code_version / env / concurrency_key / concurrency_limit 一次取回,而不是每个候选再发两条查询(窗口 10 行 = 一次 claim 20+ 条往返,而它通常只领走 1 个)。`JOIN runs` 是内连接:run 行已经不在的 queue 行直接不算候选。`LEFT JOIN tasks` 是外连接:没注册过的 task 表示「没有并发上限」,不是「不可领取」。
+- **`FOR UPDATE OF q` 只锁 queue 行**,`runs` / `tasks` 只读不锁 —— 所以 claim 仍然只占规范锁序的第 1 位(queue),runs 行第一次被锁是下面那条 claim UPDATE(第 2 位)。在同一条语句里读 runs 的列是安全的:每一条改 run 的路径都先拿它的 queue 行 `FOR UPDATE`,所以与我们相争的事务要么正持有那个 queue 行(我们 SKIP LOCKED 跳过,根本看不见这一行),要么还没提交 —— 那它的 pre-image 里 `locked_by` 非空,过不了候选谓词。
+- **索引**:`queue_claimable_idx (priority desc nulls first, id) WHERE locked_by IS NULL`(PF2)的键序就是这里的 ORDER BY、谓词就是这里的 `locked_by IS NULL`,扫到 LIMIT 就停,不必先排序再截断(`nulls first` 不是装饰:Postgres 里 DESC 默认就是 NULLS FIRST,空值序不一致的索引满足不了这个排序)。积压里绝大多数是已 claim 的行,而它们正是这条扫描以前要读出来再丢掉的;`available_at <= now()` 只能留作 filter(`now()` 不是 immutable,进不了部分索引的谓词)。
+
+拿到候选后**在同一个事务里逐个处理**,领满 `limit` 就停(剩下的候选连看都不看,随 COMMIT 一起放开):
+
+1. **并发限流**(仅当该 task 有 `concurrency_limit`;key = `runs.concurrency_key`,缺省 task_id):先取事务级 advisory lock `pg_advisory_xact_lock($classid, hashtext('bt:cc:' || key))`,`$classid = 0x62746363`(`'btcc'`,kernel 里的 `CONCURRENCY_LOCK_CLASS`)。用两参数版是为了把 better-trigger 的锁放进自己的命名空间,不与「共库的业务代码自己调 `pg_advisory_lock`」重叠,`pg_locks` 里也能一眼看出锁的主人(PF7)。这个锁是必需的:SKIP LOCKED 并不能让「两个 worker 各拿同一 key 的不同 queue 行」互相串行,先数后改会一起越过上限;锁随 COMMIT/ROLLBACK 释放,从不手动 unlock。
+   然后 `SELECT count(*) FROM runs WHERE status='running' AND concurrency_key = $key`,`≥ limit` → **跳过这一行**(不改任何列,行留在队列里)。
+   - 计数走 runs 而不是 join queue,**因此 runs 表也冗余存 `concurrency_key`**。默认 key = task_id;trigger options 可覆盖。
+2. **领走**:`UPDATE queue SET locked_by=workerId, locked_at=now(), lease_until=now()+leaseMs`(queue 行,锁序第 1 位,已经在候选窗口里锁着),再 `UPDATE runs SET status='running', started_at=COALESCE(started_at, now()), fencing_token=fencing_token+1 RETURNING fencing_token`(runs 行,第 2 位)。**只有 claim 会推进 `fencing_token`**,返回的这个值就是本次 claim 的写入凭证,任何一次后来的 claim 都让它作废(fencing 语义见 architecture.md 与 `runs.ts` 头注释)。`attempt` / `recoveries` 都不动。
+3. **读账本**:`SELECT seq, kind, label, status, output, error FROM run_steps WHERE run_id=$1 ORDER BY seq` —— 唯一保留的 per-run 查询(只有真正领到的 run 才需要它,而那是候选窗口里的一小撮)。
+4. 循环结束 → COMMIT,每个领到的 run 交给执行器的是 `{ id, taskId, payload, attempt, maxAttempts, codeVersion, env, steps, fencingToken }`。
+
+其余(租约、心跳、关停):
+
+- **可见性超时** 60s(`lease_until = claim 时刻 + leaseMs`,靠心跳续期):reaper 每 10s 扫**最老的**一批过期租约 —— `WHERE lease_until IS NOT NULL AND lease_until <= now() ORDER BY lease_until ASC LIMIT 100 FOR UPDATE SKIP LOCKED`(键序与谓词都对着 `queue_lease_until_idx`;`LIMIT` 是刻意的:一批 daemon 同时挂掉时,单个事务不能锁住成百上千行把 claim 全挡在 SKIP LOCKED 外面,剩下的下一 tick 接着收 —— PF1)→ 释放锁(三列清空、`available_at=now()`)、**`recoveries+1`**、`runs.status='queued'`;若 `recoveries` 已达 `max_recoveries` → failed;run 行已经不在的 queue 行直接删掉。
 - **两本预算分开记**(C4):`attempt/max_attempts` 是**用户代码**的失败预算(只有 failRun 会花),`recoveries/max_recoveries` 是**基础设施**接管预算(只有 reaper 会花,默认 10,`BETTER_TRIGGER_MAX_RECOVERIES` 在创建 run 时盖章)。worker 消失(部署、OOM、机器休眠)属于后者:`maxAttempts: 3` 的语义是"我的代码可以失败 3 次",三次部署不该把它耗光。因此 lease 过期的恢复**不动 `attempt`**,run 在**同一个 attempt** 上按账本继续重放;而 `max_recoveries` 仍然兜住"每个 claim 它的 worker 都会死"的无限循环。两种耗尽的终态错误文案必须可区分:reaper 写 `{ name: 'WorkerLostError', message: "worker lost: recovery budget exhausted (R/M infrastructure recoveries used; attempt A/N unaffected)" }`,用户代码耗尽 attempt 写的是用户自己的错误。`recoveries` 跨 attempt 累计,不重置。
-- 心跳每 15s:`POST /workers/:id/heartbeat {runIds}` → 刷新这些 run 的 `queue.locked_at = now()` 与 worker `last_heartbeat_at`;响应含 `cancelRunIds`(server 发现已 cancel 的 run)与 `lostRunIds`(请求续期但已不再持有 claim 的 run —— 被 reaper 收走或已终态)。两个集合互斥;收到 `lostRunIds` 的 executor 立刻 abort `ctx.signal`(reason `lease_lost`),不再为一份注定被 fencing 拒绝的结果空跑。worker 2 分钟无心跳 → 编排器标记 `offline`。
+- 心跳每 `leaseMs/3`(默认 60s 租约 → 20s,下限 500ms):带上在飞的 `runIds` → 把这些 run 的 **`queue.lease_until` 推到 `now() + leaseMs`**(`locked_at` 保持「什么时候被 claim 的」这个语义,**不刷新**),同时刷 worker `last_heartbeat_at`。续期语句本身 `RETURNING run_id`:续到的就是「我还持有的 claim」,请求集减去它、再减去 cancel 集就是 `lostRunIds`,不额外多一条查询。响应含 `cancelRunIds`(server 发现已 cancel 的 run)与 `lostRunIds`(请求续期但已不再持有 claim 的 run —— 被 reaper 收走或已终态)。两个集合互斥;收到 `lostRunIds` 的 executor 立刻 abort `ctx.signal`(reason `lease_lost`),不再为一份注定被 fencing 拒绝的结果空跑。worker 2 分钟无心跳 → 编排器标记 `offline`。
 - **优雅关停**是主动交接,不是失败:daemon 排干后停掉心跳,把自己名下没排完的 claim 一次性归还(`locked_by/locked_at/lease_until = NULL`、`available_at = now()`、`runs.status='queued'`),并立刻把 workers 行标成 `offline`。**`attempt` 不递增**(一次部署不该花掉用户的重试预算),`fencing_token` 也不动 —— 释放 `locked_by` 已经让旧 executor 的迟到写立即被 `assertOwnedRunning` 拒掉,下一次 claim 的 token++ 再永久作废它们。因此正常重启的接管是秒级的,不用等可见性超时 + reaper。
-- **长轮询**:`GET /dequeue` 挂住最多 `timeoutMs`(默认 20s,上限 30s),内部每 500ms 查一次,无任务到时返回 `{run: null}`。
+- **领取节奏**:daemon 的每个并发槽各跑一条自己的 `claimRuns({ limit: 1 })` 循环 —— 领到就执行,执行完立刻再 claim;空手而归则按 300ms → 2s 指数退避(带 jitter),领到之后退避重置。所以最常见的形状就是 `limit=1`、候选窗口 10。没有 LISTEN/NOTIFY,因此「trigger → 开始执行」的冷启动延迟是 0–2s(量化见 `todos/02-performance.md` PF5;NOTIFY 在 architecture.md 的 P2)。
 
 ### 3.6 cron 调度
 - worker register 时,manifest 带 cron 的 task → upsert `schedules`(保留已有 `enabled` 状态),用 **croner** 按 timezone 算 `next_run_at`。manifest 不再含 cron 的已有 schedule → 删除。
@@ -211,8 +270,8 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
 - `POST /runs/:id/cancel` / `POST /runs/:id/retry`(见 3.7)
 - `GET /schedules` → `{ schedules: [{ id, taskId, cronPattern, cronTz, enabled, nextRunAt, lastRunAt, lastRunStatus(查 last_run_id 的 status) }] }`
 - `PATCH /schedules/:id` `{ enabled }` → 更新(enable 时重算 next_run_at)
-- `GET /workers` → `{ workers: [{ id, name, codeVersion, runtime, tasks, concurrency, status, startedAt, lastHeartbeatAt }] }`
-- `GET /metrics` → Prometheus 文本格式(`text/plain; version=0.0.4`),**不是 JSON**。指标名一律 `better_trigger_` 前缀:`db_up`、`queue_depth{state=available|scheduled|claimed}`、`inflight_runs`(全库 `runs.status='running'`)、`worker_inflight_runs`(本进程)、`runs_total{outcome=completed|failed|suspended|abandoned}`(**注意标签是 `outcome` 而不是 `status`**,见下)、`claim_errors_total` / `claim_errors_consecutive`、`heartbeat_errors_total` / `heartbeat_errors_consecutive`、`executor_errors_total`、`step_report_errors_total`、`fail_report_errors_total`、`log_flush_errors_total`、`reaper_recovered_total{outcome=requeued|failed}`、`orchestrator_errors_total{loop}`。两个 SQL gauge 一次往返、2s 超时;DB 不通时**照样 200**,但 `db_up 0` 且省略 queue/inflight 两族(0 与「不知道」不能长得一样)。与 `/health` 不同,这个端点**跟着 `authMiddleware` 走**(设了 `BETTER_TRIGGER_API_KEY` 就需要 bearer):它暴露队列规模与吞吐,而 scraper 有地方放 token。
+- `GET /workers?status=online|offline|all&limit=50` → `{ workers: [{ id, name, codeVersion, runtime, tasks, concurrency, status, startedAt, lastHeartbeatAt }] }`(`workers` 是只增的历史表,见 §2.1:**默认只返回 online,且永远带 LIMIT**(默认 50,上限 200)。要看历史进程用 `status=offline` / `status=all`;未知的 `status` 是 `bad_request` 而不是「匹配不到」)
+- `GET /metrics` → Prometheus 文本格式(`text/plain; version=0.0.4`),**不是 JSON**。指标名一律 `better_trigger_` 前缀:`db_up`、`queue_depth{state=available|scheduled|claimed}`、`inflight_runs`(全库 `runs.status='running'`)、`worker_inflight_runs`(本进程)、`runs_total{outcome=completed|failed|suspended|abandoned}`(**注意标签是 `outcome` 而不是 `status`**,见下)、`claim_errors_total` / `claim_errors_consecutive`、`heartbeat_errors_total` / `heartbeat_errors_consecutive`、`executor_errors_total`、`step_report_errors_total`、`fail_report_errors_total`、`log_flush_errors_total`、`reaper_recovered_total{outcome=requeued|failed}`、`orchestrator_errors_total{loop}`(`loop` 含 `gc`,即 §2.1 的保留循环 —— 没开 `--retention` 时恒为 0 而不是消失)。两个 SQL gauge 一次往返、2s 超时;DB 不通时**照样 200**,但 `db_up 0` 且省略 queue/inflight 两族(0 与「不知道」不能长得一样)。与 `/health` 不同,这个端点**跟着 `authMiddleware` 走**(设了 `BETTER_TRIGGER_API_KEY` 就需要 bearer):它暴露队列规模与吞吐,而 scraper 有地方放 token。
 
 > `runs_total` 的 `outcome` 标签是 **Executor 对单次执行 pass 的判定,不是 `runs.status`**:`failed` 指这一次尝试被上报为失败(kernel 之后很可能还会重试),`suspended` 是 pass 停在了 wait 上(run 还活着),`abandoned` 是 lease 丢失后交还的 claim —— 后两个根本不是 `runs.status` 的取值。它同时是**按进程、按生命周期**计的:重启归零,换台 daemon 重试的 run 记在那一台上。要问「现在有多少 run 处于状态 X」请查 `runs` 表(或看 dashboard 的 `/tasks` 聚合);这里刻意不提供对应指标 —— 那是对无界历史做聚合而不是计数器,每次 scrape 都要扫表。
 
@@ -280,7 +339,8 @@ const out = await processVideo.triggerAndWait({ url }).unwrap?.()  // ❌ 不做
 
 // worker 进程
 await startWorker({ tasks: [hello, onboarding, daily], concurrency: 5 });
-// 内部:register → N 个并发槽 long-poll dequeue → 重放执行 → 心跳循环;SIGINT/SIGTERM 优雅退出
+// 内部:register → N 个并发槽各自 claimRuns({limit:1})(300ms→2s 退避)→ 重放执行 → 心跳循环;
+// SIGINT/SIGTERM 优雅退出(交还 claim + 标记 offline,见 §3.5)
 ```
 
 类型要求:`task()` 返回 `TaskHandle<TPayload, TOutput>`,payload/output 全程类型推断;schema 存在时以 schema 推断 payload 类型。

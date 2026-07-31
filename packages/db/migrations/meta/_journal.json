@@ -36,6 +36,27 @@
       "when": 1785438583156,
       "tag": "0004_natural_bloodscream",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1785456482747,
+      "tag": "0005_tiny_riptide",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1785456965539,
+      "tag": "0006_classy_sabretooth",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1785457442462,
+      "tag": "0007_aberrant_the_liberteens",
+      "breakpoints": true
     }
   ]
 }

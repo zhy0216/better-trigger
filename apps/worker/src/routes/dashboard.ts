@@ -1,7 +1,7 @@
 /* =============================================================================
    @better-trigger/worker — dashboard read API.
    GET /health · /tasks · /runs · /runs/:id · /schedules · PATCH /schedules/:id
-   · GET /workers. See docs/backend-contract.md §5.
+   · GET /workers (online-only + LIMIT by default). See docs/backend-contract.md §5.
    ============================================================================= */
 import { Hono } from 'hono';
 import type { Pool } from 'pg';
@@ -409,7 +409,34 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
   });
 
   /* ------------------------------------------------------- workers */
+  /**
+   * The workers table is an append-only history: registerWorker inserts a new
+   * row per process start (every `bun --watch` reload is one), and going
+   * offline only flips `status`. This route used to serialize all of it, every
+   * poll, unbounded (todos/02-performance.md PF6).
+   *
+   * So: online only by default, and a LIMIT that always applies. "Which
+   * daemons are running right now" is the question the workers page asks, and
+   * yesterday's dead processes are not part of the answer — `?status=offline`
+   * / `?status=all` are there for when they are. Retention (`prune`, or the GC
+   * loop) is what removes them for good; this only stops the reader from
+   * paying for them.
+   */
   app.get('/workers', async (c) => {
+    const status = c.req.query('status') ?? 'online';
+    if (status !== 'online' && status !== 'offline' && status !== 'all') {
+      throw new KernelError('bad_request', 'status must be online, offline or all');
+    }
+    const limit = intQuery(c, 'limit', { min: 1, max: 200, fallback: 50 });
+
+    const params: unknown[] = [];
+    let where = '';
+    if (status !== 'all') {
+      params.push(status);
+      where = `WHERE status = $${params.length}`;
+    }
+    params.push(limit);
+
     const rows = await pool.query<{
       id: string;
       name: string | null;
@@ -423,7 +450,11 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
     }>(
       `SELECT id, name, code_version, runtime, tasks, concurrency, status,
               started_at, last_heartbeat_at
-         FROM workers ORDER BY started_at DESC`,
+         FROM workers
+         ${where}
+        ORDER BY started_at DESC
+        LIMIT $${params.length}`,
+      params,
     );
     const workers: WorkerSummary[] = rows.rows.map((w) => ({
       id: w.id,
