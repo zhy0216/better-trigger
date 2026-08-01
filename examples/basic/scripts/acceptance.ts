@@ -1,9 +1,10 @@
 /* =============================================================================
    @better-trigger/example-basic — acceptance suite entry point.
 
-   The eight scenarios in this directory are the project's real correctness
-   evidence (exactly-once steps under SIGKILL, fencing, replay drift, worker
-   loss, graceful restart, per-key concurrency limits, retention cascades).
+   The nine scenarios in this directory are the project's real correctness
+   evidence (exactly-once steps under SIGKILL, fencing, replay drift, version
+   pinning, worker loss, graceful restart, per-key concurrency limits, retention
+   cascades).
    Each one is a `runScenario()` call from @better-trigger/testing, so it
    already provisions its own database, spawns its own daemons, runs its own
    teardown and exits non-zero on any failed assertion — this script only runs
@@ -45,6 +46,11 @@ const HARNESSES: Harness[] = [
   { name: 'e2e', file: 'e2e.ts', what: 'end-to-end smoke test over the HTTP client' },
   { name: 'fencing', file: 'fencing.ts', what: 'fencing tokens reject late writes' },
   { name: 'replay-drift', file: 'replay-drift.ts', what: 'replay drift across code versions' },
+  {
+    name: 'code-version-pinning',
+    file: 'code-version-pinning.ts',
+    what: 'a pinned claim refuses runs it cannot replay, and says so',
+  },
   {
     name: 'concurrency',
     file: 'concurrency.ts',

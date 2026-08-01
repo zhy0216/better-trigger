@@ -20,6 +20,8 @@ export type {
   HeartbeatResult,
   ReleaseClaimsArgs,
   ReleaseClaimsResult,
+  StrandedGroup,
+  StrandedScan,
 } from './queue';
 export type { DeregisterWorkerArgs, RegisterWorkerArgs } from './workers';
 export { MIN_RETENTION_MS, PRUNE_BATCH } from './prune';

@@ -80,6 +80,12 @@ across modules are an error unless they are literally the same handle.
 --timer-interval-ms <n>  Wait-due scan interval       (default 1000)
 --cron-interval-ms <n>   Cron scan interval           (default 1000)
 --reaper-interval-ms <n> Expired-lease reap interval  (default 10000)
+--retention <duration>   Turn ON the retention GC loop ("30d", "72h")
+--gc-interval-ms <n>     Retention GC interval        (default 3600000)
+--pin-code-version       Claim only runs whose code version this process serves
+                         (env BETTER_TRIGGER_PIN_CODE_VERSION)
+--stranded-interval-ms <n>
+                         Stranded-run scan interval   (default 30000)
 --database-url <s>       Postgres connection string   (env DATABASE_URL)
 --no-migrate             Skip applying migrations at boot
 --no-serve               Execute without serving HTTP
@@ -100,7 +106,45 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_MAX_BATCH` | `500` | Max items in one `batchTrigger`; over it `400 bad_request` — split the fan-out |
 | `BETTER_TRIGGER_MAX_PAYLOAD_BYTES` | `262144` (256 KiB) | Max serialized payload per run; over it `400 bad_request` |
 | `BETTER_TRIGGER_API_KEY` | _(unset)_ | When set, every `/api/v1/*` call (except `/health`) requires `Authorization: Bearer <key>`. Unset = local mode, no auth. |
-| `BETTER_TRIGGER_VERSION` | _(hashed)_ | Code version reported on registration; defaults to a hash of the task ids + cron config |
+| `BETTER_TRIGGER_PIN_CODE_VERSION` | _(unset)_ | `1`/`true` = same as `--pin-code-version` |
+| `BETTER_TRIGGER_VERSION` | _(hashed)_ | Code version reported on registration. Defaults to a per-task hash of id + cron + `run()` source; setting it makes every task report this one value instead |
+
+### Code versions and redeploys
+
+Replay keys steps **by position**, so editing a `run()` while runs are in flight
+is the one change that can corrupt a ledger: a `ctx.step()` inserted at seq 1
+meets the `wait` row the old code wrote there. A long `ctx.wait` makes this
+routine — a suspended run's ledger can outlive several deploys.
+
+Every task therefore carries a **code version**: a hash of its id, cron config
+and `run()` body source (`BETTER_TRIGGER_VERSION` overrides it for all tasks at
+once). It is per task, not per deploy, so editing one task does not move the
+version of the runs of another. Registration stamps it on
+`tasks.latest_code_version`, and every run created from then on carries it on
+`runs.code_version` — which is what makes "which code shape wrote this ledger"
+answerable after the fact.
+
+`--pin-code-version` turns that record into a rule: **a claim only picks up runs
+stamped with the version this process serves for that task.** A run whose task
+was edited mid-flight stays queued for a worker that can still replay it,
+instead of being handed to code that will drift.
+
+That is a real trade, not a free win:
+
+| | Default (off) | `--pin-code-version` |
+|---|---|---|
+| Redeploy with runs in flight | New build takes them over. Matching ledgers replay fine; drifted ones warn (`replay:'lenient'`) or fail (`'strict'`) | New build ignores them. They wait |
+| Old build never returns | Runs finish, possibly on a drifted ledger | Runs wait **forever** |
+| Rolling deploy | Nothing to do | Keep one worker on the old build until its runs drain |
+
+The waiting is not silent: with pinning on, the daemon scans for runs due,
+unclaimed, and pinned to a version no online worker serves, and reports them on
+`better_trigger_stranded_runs` (plus a log line whenever the picture changes).
+Alert on that gauge — under pinning it is the failure mode.
+
+Either way, prefer `replay: 'strict'` on tasks whose ledgers matter: it turns a
+drifted replay into a terminal `AbortError` instead of a run that completes
+while reporting success for a step whose body never executed.
 
 ### Network exposure
 
@@ -276,6 +320,8 @@ their errors have been swallowing them all afternoon. Everything is prefixed
 | `executor_errors_total`, `fail_report_errors_total`, `log_flush_errors_total` | counter | The other best-effort catches |
 | `reaper_recovered_total{outcome=requeued\|failed}` | counter | How much work the lease reaper had to rescue |
 | `orchestrator_errors_total{loop}` | counter | Background loop iterations that threw |
+| `stranded_runs` | gauge | Due runs pinned to a code version no online worker serves. `0` unless `--pin-code-version` is on — **alert on this one** |
+| `stranded_runs_by_version{task_id,code_version}` | gauge | Which build has to come back. Present only while something is stranded |
 
 Two gauges come from one SQL round trip (2s deadline); everything else is a
 live in-process counter, so a scrape stays cheap. The endpoint answers `200`

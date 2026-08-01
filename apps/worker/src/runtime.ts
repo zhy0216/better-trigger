@@ -42,6 +42,19 @@ export interface StartOptions {
   name?: string;
   /** Lease duration granted per claim (renewed by heartbeat). Default 60s. */
   leaseMs?: number;
+  /**
+   * Claim only runs stamped with the code version this process serves for that
+   * task (`--pin-code-version`). Default false — the historical behaviour, where
+   * a redeployed worker takes over every in-flight run regardless of which code
+   * shape wrote its ledger.
+   *
+   * On, a run whose task has been edited waits for a worker that can still
+   * replay it instead of being handed to code its step ledger no longer matches.
+   * The cost is the other side of that promise: if no such worker ever comes
+   * back, the run waits forever (see the orchestrator's stranded-run scan, which
+   * is what makes that visible rather than silent).
+   */
+  pinCodeVersion?: boolean;
 }
 
 /** Handle returned by startWorkerRuntime(); lets callers stop it. */
@@ -111,9 +124,15 @@ export async function startWorkerRuntime(
   const taskById = new Map<string, ResolvedTaskDefinition<any, any>>();
   for (const def of definitions) taskById.set(def.id, def);
   const taskIds = definitions.map((d) => d.id);
+  // Parallel to taskIds by construction — claimRuns reads them as (id, version)
+  // pairs, so the two arrays are built from one map and never re-derived.
+  const taskVersions = definitions.map(resolveTaskVersion);
 
   const codeVersion = resolveCodeVersion(definitions);
-  const manifests = definitions.map(toManifest);
+  const manifests = definitions.map((d, i) => ({
+    ...toManifest(d),
+    codeVersion: taskVersions[i]!,
+  }));
 
   const { workerId } = await kernel.registerWorker({
     name: options.name,
@@ -183,7 +202,15 @@ export async function startWorkerRuntime(
     while (!stopping) {
       let run: ClaimedRun | undefined;
       try {
-        const claimed = await kernel.claimRuns({ workerId, taskIds, limit: 1, leaseMs });
+        const claimed = await kernel.claimRuns({
+          workerId,
+          taskIds,
+          limit: 1,
+          leaseMs,
+          // Undefined (not an empty array) when pinning is off: the kernel keys
+          // "filter or not" off the field's presence.
+          codeVersions: options.pinCodeVersion ? taskVersions : undefined,
+        });
         counters.consecutiveClaimErrors = 0;
         run = claimed[0];
       } catch (err) {
@@ -343,6 +370,20 @@ export async function startWorkerRuntime(
   };
 }
 
+/** BETTER_TRIGGER_VERSION, when the deployment sets it. It overrides both
+ *  versions below — an explicit git sha / image tag is more trustworthy than
+ *  any source hash, and churns only when the deployment says so. */
+function envVersion(): string | undefined {
+  return (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
+    ?.BETTER_TRIGGER_VERSION;
+}
+
+/** One task's identity for versioning: id + cron config + run body source. */
+function taskSignature(d: ResolvedTaskDefinition<any, any>): string {
+  const cron = d.cron ? `${d.cron.pattern}@${d.cron.timezone ?? ''}` : '';
+  return `${d.id}|${cron}|${fingerprintFn(d.run)}`;
+}
+
 /**
  * Derive a stable code version from env, or from a hash of the task set: ids +
  * cron config + **a fingerprint of each run function's source**.
@@ -351,8 +392,12 @@ export async function startWorkerRuntime(
  * — inserting a step, moving a wait — is exactly what invalidates in-flight
  * ledgers, and a version that ignores the body reports "same code" across
  * precisely the deploy that could corrupt them. Same source on two processes →
- * same version; a changed body → a new version, visible on runs.code_version
- * and workers.code_version.
+ * same version; a changed body → a new version.
+ *
+ * This is the *deploy* identity, and it lands on workers.code_version alone:
+ * "which build is this process running", one value per worker, changed by any
+ * task's edit. What a run is stamped with — and what version pinning matches
+ * on — is resolveTaskVersion() below, per task.
  *
  * Caveat: source text also changes under a different bundler/minifier without
  * any semantic change, so a rebuild can churn the version. Set
@@ -361,18 +406,31 @@ export async function startWorkerRuntime(
 export function resolveCodeVersion(
   definitions: Array<ResolvedTaskDefinition<any, any>>,
 ): string {
-  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process
-    ?.env?.BETTER_TRIGGER_VERSION;
+  const env = envVersion();
   if (env) return env;
 
-  const signature = definitions
-    .map((d) => {
-      const cron = d.cron ? `${d.cron.pattern}@${d.cron.timezone ?? ''}` : '';
-      return `${d.id}|${cron}|${fingerprintFn(d.run)}`;
-    })
-    .sort()
-    .join('\n');
+  const signature = definitions.map(taskSignature).sort().join('\n');
   const hash = createHash('sha256').update(signature).digest('hex').slice(0, 12);
+  return `v_${hash}`;
+}
+
+/**
+ * One task's own version — the value stamped on every run of that task, and
+ * what `--pin-code-version` matches a claim against.
+ *
+ * Same ingredients as resolveCodeVersion, hashed over ONE definition instead of
+ * the set, so editing task A leaves task B's version (and therefore task B's
+ * in-flight runs) untouched. Under pinning that is the difference between "the
+ * runs I changed wait for a worker that can replay them" and "every run in the
+ * process is frozen to a build I just replaced".
+ *
+ * BETTER_TRIGGER_VERSION still wins: a deployment that names its own version is
+ * asking for exactly the coarse behaviour, all tasks moving together.
+ */
+export function resolveTaskVersion(d: ResolvedTaskDefinition<any, any>): string {
+  const env = envVersion();
+  if (env) return env;
+  const hash = createHash('sha256').update(taskSignature(d)).digest('hex').slice(0, 12);
   return `v_${hash}`;
 }
 

@@ -8,7 +8,7 @@
    by createKernel() — no module-global connection.
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
-import type { ClaimedRun, StepSnapshot } from '@better-trigger/core';
+import { KernelError, type ClaimedRun, type StepSnapshot } from '@better-trigger/core';
 
 export interface EnqueueArgs {
   runId: string;
@@ -64,6 +64,24 @@ export interface ClaimRunsArgs {
   limit: number;
   /** Lease duration granted per claimed run (renewed by heartbeat). */
   leaseMs: number;
+  /**
+   * Version pinning (`--pin-code-version`): the code version this worker serves
+   * for each entry of `taskIds`, **positionally parallel to it**. Present ⇒ a
+   * run is only a candidate if its `code_version` matches the version this
+   * worker has for that task (or is NULL — see below). Absent ⇒ no version
+   * predicate at all, the historical behaviour where any worker registered for
+   * the task claims any of its runs.
+   *
+   * Why it exists: replay keys steps by position, so a run whose task was
+   * edited mid-flight has a ledger the new code may no longer line up with
+   * (executor.ts `cached()`). Pinning keeps such a run queued for a worker that
+   * can still replay it instead of handing it to code that will drift.
+   *
+   * `code_version IS NULL` is claimable by anyone on purpose: it means the run
+   * was created before its task was ever registered, so there is no version to
+   * honour and no ledger written against one.
+   */
+  codeVersions?: string[];
 }
 
 /**
@@ -148,6 +166,18 @@ export function claimWindow(limit: number): number {
 export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<ClaimedRun[]> {
   if (args.taskIds.length === 0 || args.limit <= 0) return [];
 
+  const pinned = args.codeVersions !== undefined;
+  if (pinned && args.codeVersions!.length !== args.taskIds.length) {
+    // Positional arrays: a length mismatch would silently pin some task to
+    // another's version and quietly stop claiming its runs. Refuse instead —
+    // the caller built both arrays from one list and cannot be off by one on
+    // purpose.
+    throw new KernelError(
+      'bad_request',
+      `codeVersions must be parallel to taskIds (${args.codeVersions!.length} vs ${args.taskIds.length})`,
+    );
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -156,6 +186,15 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
     // not a candidate (it was skipped by the old per-row read too). `LEFT JOIN
     // tasks` because a run may reference a task row that was never registered —
     // that means "no concurrency limit", not "not claimable".
+    //
+    // Pinned, the task filter becomes a join against the (id, version) pairs
+    // this worker serves rather than an id-only `= ANY`, so the predicate is
+    // per task: task A can be at v2 here while task B is still at v1. Filtering
+    // in SQL and not in the loop is what keeps the window honest — a window
+    // full of other-version rows would otherwise report "nothing to claim"
+    // while claimable runs sat one row further down. Locking is unchanged:
+    // `FOR UPDATE OF q` still names the queue row and nothing else, and the CTE
+    // is a values list, not a lockable relation.
     const candidates = await client.query<{
       queue_id: number;
       run_id: string;
@@ -168,19 +207,38 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
       concurrency_key: string | null;
       concurrency_limit: number | null;
     }>(
-      `SELECT q.id AS queue_id, q.run_id,
-              r.task_id, r.payload, r.attempt, r.max_attempts,
-              r.code_version, r.env, r.concurrency_key,
-              t.concurrency_limit
-         FROM queue q
-         JOIN runs r ON r.id = q.run_id
-         LEFT JOIN tasks t ON t.id = r.task_id
-        WHERE q.available_at <= now() AND q.locked_by IS NULL
-          AND r.task_id = ANY($1::text[])
-        ORDER BY q.priority DESC, q.id ASC
-        LIMIT $2
-        FOR UPDATE OF q SKIP LOCKED`,
-      [args.taskIds, claimWindow(args.limit)],
+      pinned
+        ? `WITH serving(task_id, code_version) AS (
+             SELECT DISTINCT * FROM unnest($1::text[], $3::text[])
+           )
+           SELECT q.id AS queue_id, q.run_id,
+                  r.task_id, r.payload, r.attempt, r.max_attempts,
+                  r.code_version, r.env, r.concurrency_key,
+                  t.concurrency_limit
+             FROM queue q
+             JOIN runs r ON r.id = q.run_id
+             JOIN serving s ON s.task_id = r.task_id
+             LEFT JOIN tasks t ON t.id = r.task_id
+            WHERE q.available_at <= now() AND q.locked_by IS NULL
+              AND (r.code_version IS NULL OR r.code_version = s.code_version)
+            ORDER BY q.priority DESC, q.id ASC
+            LIMIT $2
+            FOR UPDATE OF q SKIP LOCKED`
+        : `SELECT q.id AS queue_id, q.run_id,
+                  r.task_id, r.payload, r.attempt, r.max_attempts,
+                  r.code_version, r.env, r.concurrency_key,
+                  t.concurrency_limit
+             FROM queue q
+             JOIN runs r ON r.id = q.run_id
+             LEFT JOIN tasks t ON t.id = r.task_id
+            WHERE q.available_at <= now() AND q.locked_by IS NULL
+              AND r.task_id = ANY($1::text[])
+            ORDER BY q.priority DESC, q.id ASC
+            LIMIT $2
+            FOR UPDATE OF q SKIP LOCKED`,
+      pinned
+        ? [args.taskIds, claimWindow(args.limit), args.codeVersions]
+        : [args.taskIds, claimWindow(args.limit)],
     );
 
     const claimed: ClaimedRun[] = [];
@@ -282,6 +340,86 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
   } finally {
     client.release();
   }
+}
+
+/** One (task, version) pair nobody online can currently claim. */
+export interface StrandedGroup {
+  taskId: string;
+  codeVersion: string;
+  /** Due, unclaimed runs in this group at scan time. */
+  count: number;
+}
+
+/** Result of one stranded-run scan. */
+export interface StrandedScan {
+  /** Biggest groups first, capped — see STRANDED_GROUP_LIMIT. */
+  groups: StrandedGroup[];
+  /** More groups existed than the cap reports. The counts shown are still
+   *  exact; the total across all groups is not. */
+  truncated: boolean;
+}
+
+/**
+ * How many groups one scan reports. Every group becomes a labelled metric
+ * sample, so this is the cardinality bound on `better_trigger_stranded_runs`
+ * as much as it is a query bound; the biggest groups come first, and the
+ * caller is told when it truncated (see the orchestrator's stranded loop).
+ */
+const STRANDED_GROUP_LIMIT = 20;
+
+/**
+ * Runs that are due and unclaimed, and whose `code_version` no online worker
+ * serves for that task — the failure mode version pinning creates.
+ *
+ * With `--pin-code-version` a claim skips runs whose ledger this build cannot
+ * replay, which is the point; but a run whose version left the fleet for good
+ * (the worker was replaced rather than restarted) then waits forever, and the
+ * only outward symptom is a queue that never moves. This is what turns that
+ * into a number and a log line.
+ *
+ * "Served" is read off the online workers' own `tasks` manifests, which carry
+ * `{ id, codeVersion }` per task. Rows written by an older build hold bare id
+ * strings; those normalize to the worker-level `code_version`, which is exactly
+ * what that build stamped its tasks with.
+ *
+ * Meaningless when nothing pins (an unpinned worker claims these runs on its
+ * next poll), so the loop that calls it is off unless pinning is on.
+ */
+export async function scanStrandedRuns(pool: Pool): Promise<StrandedScan> {
+  const res = await pool.query<{ task_id: string; code_version: string; n: string }>(
+    `WITH served AS (
+       SELECT DISTINCT COALESCE(e->>'id', e #>> '{}') AS task_id,
+              COALESCE(e->>'codeVersion', w.code_version) AS code_version
+         FROM workers w
+         CROSS JOIN LATERAL jsonb_array_elements(w.tasks) e
+        WHERE w.status = 'online'
+     )
+     SELECT r.task_id, r.code_version, count(*)::text AS n
+       FROM queue q
+       JOIN runs r ON r.id = q.run_id
+      WHERE q.locked_by IS NULL
+        AND q.available_at <= now()
+        AND r.code_version IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM served s
+           WHERE s.task_id = r.task_id AND s.code_version = r.code_version
+        )
+      GROUP BY 1, 2
+      ORDER BY count(*) DESC, r.task_id ASC
+      LIMIT $1`,
+    // One row past the cap, so "exactly full" is distinguishable from "there
+    // was more" without a second count query.
+    [STRANDED_GROUP_LIMIT + 1],
+  );
+  const rows = res.rows.map((r) => ({
+    taskId: r.task_id,
+    codeVersion: r.code_version,
+    count: Number(r.n),
+  }));
+  return {
+    groups: rows.slice(0, STRANDED_GROUP_LIMIT),
+    truncated: rows.length > STRANDED_GROUP_LIMIT,
+  };
 }
 
 export interface HeartbeatArgs {

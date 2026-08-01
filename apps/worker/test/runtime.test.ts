@@ -9,7 +9,7 @@
    ============================================================================= */
 import type { ResolvedTaskDefinition } from 'better-trigger/internal';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { resolveCodeVersion } from '../src/runtime';
+import { resolveCodeVersion, resolveTaskVersion } from '../src/runtime';
 
 type AnyDef = ResolvedTaskDefinition<any, any>;
 
@@ -80,5 +80,61 @@ describe('resolveCodeVersion', () => {
     const first = resolveCodeVersion([def('a', async () => 'same')]);
     const second = resolveCodeVersion([def('a', async () => 'same')]);
     expect(second).toBe(first);
+  });
+});
+
+/* -----------------------------------------------------------------------------
+   resolveTaskVersion is the OTHER half: what a run is stamped with, and what a
+   pinned claim matches on. Its whole reason to exist is the property the deploy
+   version cannot have — one task's edit must leave the other tasks' versions
+   alone, or pinning would freeze in-flight runs nobody touched.
+   -------------------------------------------------------------------------- */
+describe('resolveTaskVersion', () => {
+  let saved: string | undefined;
+
+  beforeEach(() => {
+    saved = process.env.BETTER_TRIGGER_VERSION;
+    delete process.env.BETTER_TRIGGER_VERSION;
+  });
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env.BETTER_TRIGGER_VERSION;
+    else process.env.BETTER_TRIGGER_VERSION = saved;
+  });
+
+  it('is independent of the other tasks in the process', () => {
+    const alone = resolveTaskVersion(def('a', bodyA));
+    // b changed, was added, was removed — none of it may move a's version.
+    expect(resolveTaskVersion(def('a', bodyA))).toBe(alone);
+    const withPeers = [def('a', bodyA), def('b', bodyB)].map(resolveTaskVersion);
+    expect(withPeers[0]).toBe(alone);
+    expect(withPeers[1]).not.toBe(alone);
+  });
+
+  it('changes when that task\'s own body, id or cron changes', () => {
+    const base = resolveTaskVersion(def('a', bodyA));
+    expect(resolveTaskVersion(def('a', bodyB))).not.toBe(base);
+    expect(resolveTaskVersion(def('renamed', bodyA))).not.toBe(base);
+    expect(resolveTaskVersion(def('a', bodyA, { pattern: '0 9 * * *' }))).not.toBe(base);
+  });
+
+  it('derives a v_<12 hex> version', () => {
+    expect(resolveTaskVersion(def('a', bodyA))).toMatch(/^v_[0-9a-f]{12}$/);
+  });
+
+  it('is NOT the deploy version — the two answer different questions', () => {
+    // workers.code_version says "which build is this process"; the task version
+    // says "which shape wrote this run's ledger". Same ingredients, different
+    // scope, and nothing should start treating them as interchangeable.
+    const defs = [def('a', bodyA), def('b', bodyB)];
+    expect(resolveTaskVersion(defs[0]!)).not.toBe(resolveCodeVersion(defs));
+  });
+
+  it('collapses to BETTER_TRIGGER_VERSION when the deployment names one', () => {
+    process.env.BETTER_TRIGGER_VERSION = 'git-1a2b3c4';
+    // Deliberate: a deployment that pins its own version is asking for all its
+    // tasks to move together, which is the coarse behaviour by definition.
+    expect(resolveTaskVersion(def('a', bodyA))).toBe('git-1a2b3c4');
+    expect(resolveTaskVersion(def('b', bodyB))).toBe('git-1a2b3c4');
   });
 });

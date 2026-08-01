@@ -42,10 +42,27 @@ import { Cron } from 'croner';
 import type { Pool } from 'pg';
 import type { KernelLogger } from './kernel';
 import { prune } from './prune';
+import { scanStrandedRuns, type StrandedScan } from './queue';
 import { createRunIn, lockRunRow, terminalFail, tryLockRunRow, withTx } from './runs';
 
 const WORKER_OFFLINE_MS = 120_000;
 const WORKER_OFFLINE_SCAN_MS = 30_000;
+
+/**
+ * How often the stranded-run scan looks, when pinning switches it on. Slow on
+ * purpose: it reports a condition that only a deploy (or a worker coming back)
+ * can change, and it is the one loop whose query walks the unclaimed queue
+ * without a lease to bound it.
+ */
+const STRANDED_SCAN_MS = 30_000;
+
+/** Stable text of a scan, so the loop can log transitions instead of ticks. */
+function signatureOf(scan: StrandedScan): string {
+  return scan.groups
+    .map((g) => `${g.taskId}@${g.codeVersion}=${g.count}`)
+    .join(',')
+    .concat(scan.truncated ? '+' : '');
+}
 
 /**
  * How often the retention GC looks, when it is switched on at all
@@ -108,6 +125,15 @@ export interface OrchestratorOptions {
   retentionMs?: number;
   /** Retention GC interval (default 1h). Only used when retentionMs is set. */
   gcIntervalMs?: number;
+  /**
+   * Run the stranded-run scan (default false). Turn it on where version pinning
+   * is on — `--pin-code-version` does — and leave it off everywhere else: with
+   * no pinning, every run it would report is one the next unpinned poll claims,
+   * so the loop would only manufacture false alarms.
+   */
+  stranded?: boolean;
+  /** Stranded-run scan interval (default 30s). Only used when `stranded`. */
+  strandedIntervalMs?: number;
 }
 
 /**
@@ -129,6 +155,14 @@ export interface OrchestratorCounters {
   gcRunsDeleted: number;
   /** Offline worker rows deleted by the retention GC loop. */
   gcWorkersDeleted: number;
+  /**
+   * Version-pinned runs no online worker can claim, as of the last stranded
+   * scan. The one *gauge* in here on purpose: "how many runs are stuck right
+   * now" is a level, not a total, and a monotonic counter could never fall back
+   * to zero when the missing worker returns. Empty unless the stranded loop
+   * runs at all (`stranded`), which is to say unless something pins.
+   */
+  stranded: StrandedScan;
   /** Loop iterations that threw, per loop. Each one is logged too, but a rate
    *  is what says "the cron loop has been failing all afternoon". */
   loopErrors: {
@@ -137,6 +171,7 @@ export interface OrchestratorCounters {
     reaper: number;
     workers: number;
     gc: number;
+    stranded: number;
   };
 }
 
@@ -146,7 +181,8 @@ export function createOrchestratorCounters(): OrchestratorCounters {
     reaperFailed: 0,
     gcRunsDeleted: 0,
     gcWorkersDeleted: 0,
-    loopErrors: { waits: 0, cron: 0, reaper: 0, workers: 0, gc: 0 },
+    stranded: { groups: [], truncated: false },
+    loopErrors: { waits: 0, cron: 0, reaper: 0, workers: 0, gc: 0, stranded: 0 },
   };
 }
 
@@ -168,9 +204,17 @@ export function startOrchestrator(
 
   const gcIntervalMs = opts.gcIntervalMs ?? GC_INTERVAL_MS;
   const retentionMs = opts.retentionMs;
+  const strandedIntervalMs = opts.strandedIntervalMs ?? STRANDED_SCAN_MS;
 
   const timers: NodeJS.Timeout[] = [];
-  const running = { waits: false, cron: false, reaper: false, workers: false, gc: false };
+  const running = {
+    waits: false,
+    cron: false,
+    reaper: false,
+    workers: false,
+    gc: false,
+    stranded: false,
+  };
   const counters = createOrchestratorCounters();
   let stopped = false;
 
@@ -437,6 +481,37 @@ export function startOrchestrator(
     }
   }
 
+  /* ---------------------------------------------------------------- stranded */
+  /**
+   * Version-pinned runs that no online worker can claim (see scanStrandedRuns).
+   * Publishes the level on `counters.stranded` for /metrics, and says it out
+   * loud when the picture *changes*: the condition persists by nature, so a
+   * line per tick would be noise, while a line only on the way in would leave
+   * "is it still stuck?" unanswered. Recovery (the version comes back, the runs
+   * drain) gets its own line for the same reason.
+   */
+  async function scanStranded(): Promise<void> {
+    const scan = await scanStrandedRuns(pool);
+    const before = counters.stranded;
+    counters.stranded = scan;
+    if (signatureOf(before) === signatureOf(scan)) return;
+
+    if (scan.groups.length === 0) {
+      logger.warn(`[orchestrator:stranded] no runs are stranded on a missing code version`);
+      return;
+    }
+    const total = scan.groups.reduce((n, g) => n + g.count, 0);
+    const detail = scan.groups
+      .map((g) => `${g.taskId}@${g.codeVersion}: ${g.count}`)
+      .join(', ');
+    logger.warn(
+      `[orchestrator:stranded] ${total}${scan.truncated ? '+' : ''} due run(s) pinned to a ` +
+        `code version no online worker serves — they stay queued until one does. ` +
+        `Start a worker on that build, or re-trigger the work under the current one. ` +
+        `(${detail}${scan.truncated ? ', …' : ''})`,
+    );
+  }
+
   if (opts.waits ?? true) loop('waits', timerIntervalMs, scanWaits);
   if (opts.cron ?? true) loop('cron', cronIntervalMs, scanCron);
   if (opts.reaper ?? true) loop('reaper', reaperIntervalMs, reap);
@@ -444,6 +519,8 @@ export function startOrchestrator(
   // No `?? true` here, and no default window above: the retention loop exists
   // only when a window was asked for.
   if (retentionMs !== undefined) loop('gc', gcIntervalMs, gc);
+  // Likewise off by default — it only has something true to say under pinning.
+  if (opts.stranded === true) loop('stranded', strandedIntervalMs, scanStranded);
 
   return {
     stop() {

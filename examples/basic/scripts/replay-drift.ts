@@ -90,9 +90,13 @@ async function main(s: Scenario): Promise<void> {
   s.cleanup(() => executor.stop());
 
   await waitForTasks(s.pool, ['drift-strict', 'drift-lenient']);
+  // Versions are per TASK, not per deploy (see code-version-pinning.ts for why:
+  // a deploy-level version would let an edit to one task strand the in-flight
+  // runs of every other). So the two tasks in this one process have two of them.
   const V1 = await readLatestCodeVersion(s.pool, 'drift-strict');
-  s.assert(V1 !== null, 'deploy #1 should have registered a code version');
-  s.ok(`deploy #1 up — code version ${V1}`);
+  const V1_LENIENT = await readLatestCodeVersion(s.pool, 'drift-lenient');
+  s.assert(V1 !== null && V1_LENIENT !== null, 'deploy #1 should have registered code versions');
+  s.ok(`deploy #1 up — drift-strict ${V1}, drift-lenient ${V1_LENIENT}`);
 
   const strictRun = await client.trigger('drift-strict', { user: 'u_42' });
   const lenientRun = await client.trigger('drift-lenient', { user: 'u_42' });
@@ -113,11 +117,12 @@ async function main(s: Scenario): Promise<void> {
     const strict = await client.getRun(strictRun.id);
     const lenient = await client.getRun(lenientRun.id);
     s.assert(
-      strict.codeVersion === V1 && lenient.codeVersion === V1,
-      `runs.code_version should be stamped '${V1}' at trigger time, got ` +
+      strict.codeVersion === V1 && lenient.codeVersion === V1_LENIENT,
+      `runs.code_version should be stamped with each run's own task version ` +
+        `('${V1}' / '${V1_LENIENT}') at trigger time, got ` +
         `'${strict.codeVersion}' / '${lenient.codeVersion}'`,
     );
-    s.ok(`① runs.code_version stamped at trigger time (${V1})`);
+    s.ok(`① runs.code_version stamped at trigger time (${V1} / ${V1_LENIENT})`);
   }
 
   await killDaemon(executor);

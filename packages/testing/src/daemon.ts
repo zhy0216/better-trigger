@@ -29,9 +29,14 @@ export interface DaemonOptions {
   concurrency?: number;
   leaseMs?: number;
   reaperIntervalMs?: number;
+  /** Stranded-run scan interval; only used together with `pinCodeVersion`. */
+  strandedIntervalMs?: number;
   name?: string;
   /** Default true. */
   serve?: boolean;
+  /** `--pin-code-version`: claim only runs whose code version this daemon
+   *  serves for that task. Default false, like the flag. */
+  pinCodeVersion?: boolean;
   /** Default false — scenarios migrate once, up front, to avoid a race. */
   migrate?: boolean;
   /** Extra environment for the child. */
@@ -65,7 +70,11 @@ export function spawnDaemon(opts: DaemonOptions): Daemon {
   if (opts.reaperIntervalMs !== undefined) {
     args.push('--reaper-interval-ms', String(opts.reaperIntervalMs));
   }
+  if (opts.strandedIntervalMs !== undefined) {
+    args.push('--stranded-interval-ms', String(opts.strandedIntervalMs));
+  }
   if (opts.name !== undefined) args.push('--name', opts.name);
+  if (opts.pinCodeVersion) args.push('--pin-code-version');
   if (!(opts.migrate ?? false)) args.push('--no-migrate');
 
   const proc = spawn('bun', args, {

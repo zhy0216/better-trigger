@@ -197,6 +197,18 @@ SELECT q.id AS queue_id, q.run_id,
 
 - **`locked_by IS NULL` 是「未被占用」的唯一判据**(不是 `locked_at`)。`locked_by/locked_at/lease_until` 三列同进同出,所以**租约过期的行不是 claim 的候选** —— 它 `locked_by` 还在,回收只归 reaper 一家。两条路径的候选集因此不相交(`locked_by IS NULL` vs `lease_until` 有值),claim 永远不做接管。
 - **task 过滤在 SQL 里**(`r.task_id = ANY($1::text[])`),不是取回来再在应用层丢掉:只注册了 2 个 task 的 worker,不会因为队头堆着别人的 run 就把整个候选窗口浪费掉。
+- **版本钉死(`--pin-code-version`,默认关)**:开启后 `claimRuns` 多收一个与 `taskIds` **按位平行**的 `codeVersions`,task 过滤从「只按 id」换成「按 (id, version) 对」——
+
+  ```sql
+  WITH serving(task_id, code_version) AS (
+    SELECT DISTINCT * FROM unnest($1::text[], $3::text[])
+  )
+  ... JOIN serving s ON s.task_id = r.task_id
+   WHERE ... AND (r.code_version IS NULL OR r.code_version = s.code_version)
+  ```
+
+  为什么要有它:重放按位置寻址(§3.4),所以「run 在途时改了 run() 函数体」正是能让新代码撞上旧账本的那种改动;钉死把这个判断从执行器(它只能在已经重放到那一行时才发现)前移到 claim(根本不领)。同理**必须在 SQL 里过滤**,否则候选窗口会被别的版本的行占满,报「无活可干」而下一行明明可领。`code_version IS NULL` 仍然人人可领:那是 task 注册之前创建的 run,没有版本可尊重,也没有对着版本写过的账本。锁不变——CTE 是值列表不是可锁关系,`FOR UPDATE OF q` 依旧只锁 queue 行。
+  **代价是对称的**:钉死意味着「宁可等,也不要用错代码跑」,所以旧版本再也不回来的 run 会**一直排队**。因此 orchestrator 多一条默认关闭的扫描(随 `--pin-code-version` 打开,30s 一次):找出 due 且未被占用、而 `code_version` 不被任何 online worker 提供的 run,按 (task, version) 分组落到 `better_trigger_stranded_runs` / `..._by_version`,并在画面变化时 warn 一次。「谁提供哪个版本」读的是 online worker 行的 `tasks` manifest。
 - **窗口大小是参数化的 `claimWindow(limit) = max(limit * 2, 10)`**,不是写死的 10(PF3)。比 `limit` 宽,是因为候选被锁住之后仍可能被下面的并发限流跳过 —— 窗口正好等于 `limit` 时,队头挤着一批已达上限的 run 就会让这次 claim 空手而归,而下一行明明可领。也不能宽太多:窗口里每一行都被 `FOR UPDATE SKIP LOCKED` 按住整个事务,锁住却不领走 = 对其他 worker 隐身(它们 SKIP LOCKED 跳过)+ 削弱全局优先级序。`2x` 是能容忍跳过的最小倍数;下限 10 兜住最常见的 `limit: 1`。
 - **`JOIN runs` + `LEFT JOIN tasks` 是为了消掉 N+1**(PF4):payload / attempt / max_attempts / code_version / env / concurrency_key / concurrency_limit 一次取回,而不是每个候选再发两条查询(窗口 10 行 = 一次 claim 20+ 条往返,而它通常只领走 1 个)。`JOIN runs` 是内连接:run 行已经不在的 queue 行直接不算候选。`LEFT JOIN tasks` 是外连接:没注册过的 task 表示「没有并发上限」,不是「不可领取」。
 - **`FOR UPDATE OF q` 只锁 queue 行**,`runs` / `tasks` 只读不锁 —— 所以 claim 仍然只占规范锁序的第 1 位(queue),runs 行第一次被锁是下面那条 claim UPDATE(第 2 位)。在同一条语句里读 runs 的列是安全的:每一条改 run 的路径都先拿它的 queue 行 `FOR UPDATE`,所以与我们相争的事务要么正持有那个 queue 行(我们 SKIP LOCKED 跳过,根本看不见这一行),要么还没提交 —— 那它的 pre-image 里 `locked_by` 非空,过不了候选谓词。
@@ -239,7 +251,7 @@ SELECT q.id AS queue_id, q.run_id,
 
 | 方法路径 | 请求体 → 响应 |
 |---|---|
-| `POST /workers/register` | `{ name?, codeVersion, runtime:'self-host', concurrency, tasks: TaskManifest[] }` → `{ workerId, heartbeatIntervalMs:15000, visibilityTimeoutMs:60000 }`。同时 upsert tasks 表 + schedules。`codeVersion` 取 `BETTER_TRIGGER_VERSION`,否则由「task id + cron + **run 函数体源码指纹**」哈希得出——改实现即变版本(打包器/压缩器不同也会变;要稳定就显式设环境变量)。 |
+| `POST /workers/register` | `{ name?, codeVersion, runtime:'self-host', concurrency, tasks: TaskManifest[] }` → `{ workerId, heartbeatIntervalMs:15000, visibilityTimeoutMs:60000 }`。同时 upsert tasks 表 + schedules。**两级版本**:`codeVersion`(顶层)是 deploy 身份,只落 `workers.code_version`;`TaskManifest.codeVersion` 是 **per-task** 版本,落 `tasks.latest_code_version` → 进而 stamp 到该 task 之后每个 `runs.code_version`。两者都取 `BETTER_TRIGGER_VERSION`,否则由「task id + cron + **run 函数体源码指纹**」哈希得出(deploy 版本 hash 整个 task 集,task 版本只 hash 自己)——改实现即变版本(打包器/压缩器不同也会变;要稳定就显式设环境变量)。粒度是 per-task 而非 per-deploy 的原因见 3.5 的版本钉死:否则改一个 task 会把同进程里所有在途 run 一起钉死在旧版本上。`workers.tasks` 存 `[{id, codeVersion}]`(旧版本写的是 `["id"]`,读侧两种形状都认)。 |
 | `POST /workers/:id/heartbeat` | `{ runIds: string[] }` → `{ ok:true, cancelRunIds: string[], lostRunIds: string[] }` |
 | `GET /dequeue?workerId=&timeoutMs=` | → `{ run: null }` 或 `{ run: { id, taskId, payload, attempt, maxAttempts, codeVersion, env, steps: StepSnapshot[] } }` |
 | `POST /runs/:id/steps` | `{ seq, kind, label, status:'completed'\|'failed', output?, error?, attempt, startedAt, finishedAt, workerId }` → `{ ok:true }`;run 非 running → 409 `{code:'run_not_running'}` |

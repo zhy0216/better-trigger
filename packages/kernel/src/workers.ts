@@ -35,7 +35,16 @@ export async function registerWorker(
     }
   }
   const id = genWorkerId();
-  const taskIds = args.tasks.map((t) => t.id);
+  // What this process serves, as (task id, code version) pairs. It used to be a
+  // bare array of ids; the pairs are what the stranded-run scan needs to answer
+  // "is any online worker still able to replay this run's ledger", and there is
+  // nowhere else to read them from. Same jsonb column, so no migration — and
+  // every reader normalizes both shapes, because an offline row written by an
+  // older build (or a peer mid-rollout) still holds the string form.
+  const taskEntries = args.tasks.map((t) => ({
+    id: t.id,
+    codeVersion: t.codeVersion ?? args.codeVersion,
+  }));
 
   const client = await pool.connect();
   try {
@@ -51,14 +60,14 @@ export async function registerWorker(
         args.name ?? null,
         args.codeVersion,
         args.runtime,
-        JSON.stringify(taskIds),
+        JSON.stringify(taskEntries),
         args.concurrency,
       ],
     );
 
     // Upsert each task definition.
     for (const t of args.tasks) {
-      await upsertTask(client, t, args.codeVersion);
+      await upsertTask(client, t, t.codeVersion ?? args.codeVersion);
     }
 
     // Sync schedules: upsert cron tasks (preserve enabled), delete others.
@@ -102,6 +111,13 @@ export async function deregisterWorker(
  * Task + schedule upsert helpers
  * ------------------------------------------------------------------------- */
 
+/**
+ * `codeVersion` here is the TASK's version (manifest first, worker-level only
+ * as the fallback for a manifest that carries none). It lands on
+ * tasks.latest_code_version, which is what every new run of the task is stamped
+ * with — so an edit to one task must not move the version of the runs of
+ * another, or version-pinned claims would strand runs nobody touched.
+ */
 async function upsertTask(
   client: PoolClient,
   t: TaskManifest,

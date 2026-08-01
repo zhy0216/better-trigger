@@ -86,6 +86,19 @@ export interface TaskManifest {
   retry?: RetryPolicy;
   concurrencyLimit?: number;
   description?: string;
+  /**
+   * This task's own code version — the value stamped on every run created for
+   * it (tasks.latest_code_version → runs.code_version), and what a version-
+   * pinned claim matches against.
+   *
+   * Per *task*, not per deploy: the worker's own `code_version` identifies the
+   * process ("which deploy is this"), but pinning a run to that would mean
+   * editing one task freezes the in-flight runs of every other task in the
+   * same file — and if that worker goes away, none of them can be claimed.
+   * Absent (a worker built before this field existed) ⇒ the kernel falls back
+   * to the worker-level version, i.e. the old whole-deploy behaviour.
+   */
+  codeVersion?: string;
 }
 
 /** Options accepted by trigger / batchTrigger / triggerAndWait. */

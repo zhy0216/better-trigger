@@ -38,6 +38,20 @@ const durationMs = (started: Date | null, finished: Date | null): number | null 
   started && finished ? finished.getTime() - started.getTime() : null;
 
 /**
+ * Task ids out of a `workers.tasks` jsonb value. Registration writes
+ * `[{ id, codeVersion }]` (the stranded-run scan needs the versions), but rows
+ * written by an older build hold `["id"]` — and worker rows outlive the process
+ * that wrote them, so both shapes are live data, not a migration window. The
+ * dashboard contract is ids either way.
+ */
+function workerTaskIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((e) => (typeof e === 'string' ? e : (e as { id?: unknown } | null)?.id))
+    .filter((id): id is string => typeof id === 'string');
+}
+
+/**
  * `SELECT 1` under a deadline. Postgres being unreachable is not always a
  * refused connection: a dead peer, a saturated pool or a paused container all
  * leave the query pending forever, and a probe that waits with it is no better
@@ -461,7 +475,7 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
       name: w.name,
       codeVersion: w.code_version,
       runtime: w.runtime,
-      tasks: (w.tasks as string[] | null) ?? [],
+      tasks: workerTaskIds(w.tasks),
       concurrency: w.concurrency,
       status: w.status === 'offline' ? 'offline' : 'online',
       startedAt: w.started_at.toISOString(),

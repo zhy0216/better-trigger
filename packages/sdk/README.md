@@ -329,8 +329,15 @@ exactly-once.
 Run any number of daemons against the same database — they coordinate through
 Postgres row locks; no leader election.
 
-The code version reported on registration comes from `BETTER_TRIGGER_VERSION`,
-or a stable hash of the sorted task ids + cron config.
+Each task reports a **code version** — `BETTER_TRIGGER_VERSION`, or a stable
+hash of its id, cron config and `run()` body source — and every run it creates
+is stamped with it (`runs.codeVersion`). Because replay keys steps by position,
+that stamp is what tells you which code shape wrote a run's ledger after a
+redeploy. `better-trigger-worker --pin-code-version` makes the claim honour it:
+a run whose task was edited mid-flight waits for a worker that can still replay
+it rather than being taken over by the new build. See the
+[worker README](../../apps/worker/README.md#code-versions-and-redeploys) for
+the trade-off (runs can wait indefinitely) and the metric that surfaces it.
 
 ---
 

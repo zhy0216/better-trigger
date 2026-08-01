@@ -337,7 +337,32 @@ export async function collectMetrics(
         value,
       })),
     },
+    {
+      name: 'stranded_runs',
+      help: 'Due runs pinned to a code version no online worker serves, as of the last scan. Stays 0 unless --pin-code-version is on, where it is the cost of the guarantee: these runs wait for a worker that can replay their ledger. Alert on this one — it is always present, so a rule on it never silently stops evaluating.',
+      type: 'gauge',
+      samples: [
+        { value: orchestrator.stranded.groups.reduce((n, g) => n + g.count, 0) },
+      ],
+    },
   );
+
+  // The breakdown answers the *next* question — which build has to come back —
+  // so it carries labels, and it is pushed only when something is stranded: a
+  // (task, version) series is meaningful while the condition lasts and is
+  // nothing but stale cardinality afterwards. The unlabelled total above is
+  // what stays put for alerting.
+  if (orchestrator.stranded.groups.length > 0) {
+    families.push({
+      name: 'stranded_runs_by_version',
+      help: 'Stranded runs broken down by task and the code version they are pinned to (capped at the largest groups). Present only while runs are actually stranded.',
+      type: 'gauge',
+      samples: orchestrator.stranded.groups.map((g) => ({
+        labels: { task_id: g.taskId, code_version: g.codeVersion },
+        value: g.count,
+      })),
+    });
+  }
 
   return families;
 }

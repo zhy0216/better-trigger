@@ -287,14 +287,16 @@ describe('loop error counters', () => {
       handle.stop();
     }
 
-    // `gc` is in here even though no GC loop was started: the counter set is
-    // fixed so a series never appears or vanishes between metrics scrapes.
+    // `gc` and `stranded` are in here even though neither loop was started: the
+    // counter set is fixed so a series never appears or vanishes between
+    // metrics scrapes.
     expect(handle.counters.loopErrors).toEqual({
       waits: 0,
       cron: 0,
       reaper: 0,
       workers: 0,
       gc: 0,
+      stranded: 0,
     });
   }, 10_000);
 });

@@ -64,10 +64,24 @@ Options:
                            worker rows older than this ("30d", "72h"). OFF by
                            default — the daemon deletes no history unless asked.
   --gc-interval-ms <n>     Retention GC interval        (default 3600000)
+  --stranded-interval-ms <n>
+                           Stranded-run scan interval   (default 30000). Only
+                           used with --pin-code-version, which is what starts
+                           that loop.
   --database-url <s>       Postgres connection string   (env DATABASE_URL)
   --no-migrate             Skip applying migrations at boot
   --no-serve               Execute tasks without serving HTTP (executor-only
                            node; another daemon serves the API)
+  --pin-code-version       Claim only runs stamped with the code version this
+                           process serves for that task
+                           (env BETTER_TRIGGER_PIN_CODE_VERSION). Off by
+                           default, where a redeployed worker takes over every
+                           in-flight run whatever code wrote its step ledger.
+                           On, a run whose task was edited mid-flight waits for
+                           a worker that can still replay it — including
+                           forever, if that build never comes back. Watch
+                           better_trigger_stranded_runs; it is switched on with
+                           this flag.
   -h, --help               Show this help
 
 Env:
@@ -78,6 +92,13 @@ Env:
                            Same as --allow-unauthenticated (set to 1/true)
   BETTER_TRIGGER_CORS_ORIGIN
                            Same as --cors-origin (comma-separated)
+  BETTER_TRIGGER_PIN_CODE_VERSION
+                           Same as --pin-code-version (set to 1/true)
+  BETTER_TRIGGER_VERSION   Code version this build reports, overriding the
+                           source-derived one. Set it to a git sha or image tag
+                           to stop rebuilds from churning versions — and note
+                           that it applies to every task at once, so under
+                           --pin-code-version one task's edit moves them all.
   BETTER_TRIGGER_BODY_LIMIT
                            Max request body in bytes (default 1048576 = 1 MiB).
                            Over it: 413 \`payload_too_large\`
@@ -126,9 +147,12 @@ interface Options {
   /** Undefined = no retention GC loop at all (the default). */
   retentionMs?: number;
   gcIntervalMs?: number;
+  strandedIntervalMs?: number;
   databaseUrl?: string;
   migrate: boolean;
   serve: boolean;
+  /** Claim only runs whose code version this process still serves. */
+  pinCodeVersion: boolean;
 }
 
 /** `better-trigger-worker prune ...` — the one-shot maintenance subcommand. */
@@ -241,6 +265,7 @@ function parseArgs(argv: string[]): Options {
     databaseUrl: process.env.DATABASE_URL,
     migrate: true,
     serve: true,
+    pinCodeVersion: envFlag(process.env.BETTER_TRIGGER_PIN_CODE_VERSION),
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -312,6 +337,9 @@ function parseArgs(argv: string[]): Options {
       case '--gc-interval-ms':
         opts.gcIntervalMs = requireInt(flag, value());
         break;
+      case '--stranded-interval-ms':
+        opts.strandedIntervalMs = requireInt(flag, value());
+        break;
       case '--database-url':
         opts.databaseUrl = value();
         break;
@@ -320,6 +348,12 @@ function parseArgs(argv: string[]): Options {
         break;
       case '--no-serve':
         opts.serve = false;
+        break;
+      case '--pin-code-version':
+        // `--pin-code-version=false` has to mean false, like the other bool
+        // flags: this one decides whether in-flight runs are handed to code
+        // that may not match their ledger.
+        opts.pinCodeVersion = inline === undefined ? true : boolValue(flag, inline);
         break;
       default:
         throw new Error(`unknown option "${flag}" (try --help)`);
@@ -660,6 +694,11 @@ async function main(): Promise<void> {
           // Undefined unless --retention was given → no GC loop at all.
           retentionMs: opts.retentionMs,
           gcIntervalMs: opts.gcIntervalMs,
+          // Pinning is what makes a run stranded, so it is what makes the scan
+          // worth running: unpinned, everything it would report gets claimed on
+          // the next poll anyway.
+          stranded: opts.pinCodeVersion,
+          strandedIntervalMs: opts.strandedIntervalMs,
         },
       },
       {
@@ -667,6 +706,7 @@ async function main(): Promise<void> {
         concurrency: opts.concurrency,
         name: opts.name,
         leaseMs: opts.leaseMs,
+        pinCodeVersion: opts.pinCodeVersion,
       },
     );
     daemon.worker = worker;
@@ -684,6 +724,12 @@ async function main(): Promise<void> {
       // place to run it — still only when --retention asked for it.
       retentionMs: opts.retentionMs,
       gcIntervalMs: opts.gcIntervalMs,
+      // Same reasoning for the stranded scan: it reports on the whole fleet's
+      // queue, not on this process's claims, so the node that serves the
+      // dashboard is a natural place to watch from. --pin-code-version on an
+      // executes-nothing daemon means exactly that and nothing else.
+      stranded: opts.pinCodeVersion,
+      strandedIntervalMs: opts.strandedIntervalMs,
     });
     daemon.stopOrchestrator = () => orchestrator.stop();
     orchestratorCounters = orchestrator.counters;
@@ -731,6 +777,16 @@ async function main(): Promise<void> {
     console.log(
       `[better-trigger] retention GC on: terminal runs (with their steps and logs) ` +
         `and offline worker rows older than ${opts.retentionMs}ms are deleted periodically`,
+    );
+  }
+  // Same reasoning as retention's banner: this one changes which runs get
+  // picked up at all, so it should be a state the operator was told about
+  // rather than one they infer from a queue that stopped moving.
+  if (opts.pinCodeVersion) {
+    console.log(
+      `[better-trigger] code-version pinning on: this process claims only runs ` +
+        `stamped with the version it serves for that task. Runs left on a version ` +
+        `no online worker has stay queued — see better_trigger_stranded_runs.`,
     );
   }
   // Unauthenticated-by-default is the product choice, but it should be a known

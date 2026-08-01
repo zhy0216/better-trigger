@@ -151,7 +151,7 @@ claim CTE + `FOR UPDATE SKIP LOCKED`、持久 lease、单调 fencing token、orc
 
 ### P1.5 — 客户端/daemon 分离(已完成,本文档)
 core 拆分(kernel 独立成包、core 归零依赖);`packages/server` → `apps/worker`;执行器与 worker 循环移入 daemon;SDK 改写为 HTTP 客户端;`--tasks` 加载器 + CLI(`--port/--concurrency/--lease-ms/--no-serve/--no-migrate/...`);`GET /runs/:id/record`、`GET /runs/:id/result` long-poll。
-**验收(已跑通,79 项;`bun run test:acceptance` 一键重跑,CI 每个 PR 都跑)**:e2e 18 项(hello / 多 step / wait 挂起恢复 / triggerAndWait / batchTrigger / 幂等键 / 重试与 AbortError / cron)· fencing 22 项 · replay-drift 17 项 · crash 14 项(3× SIGKILL,step 恰好一次)· worker-lost 8 项。场景全部跑在 `packages/testing` 的 harness 上,不变量断言(seq 连续只追加、终态冻结)由 harness 统一提供。
+**验收(已跑通,9 个 harness;`bun run test:acceptance` 一键重跑,CI 每个 PR 都跑)**:e2e 18 项(hello / 多 step / wait 挂起恢复 / triggerAndWait / batchTrigger / 幂等键 / 重试与 AbortError / cron)· fencing 24 项 · replay-drift 17 项 · code-version-pinning 11 项(同一次改动,钉死开与关的两面)· concurrency 9 项 · crash 14 项(3× SIGKILL,step 恰好一次)· worker-lost 10 项 · graceful-restart 10 项 · retention 5 项。场景全部跑在 `packages/testing` 的 harness 上,不变量断言(seq 连续只追加、终态冻结)由 harness 统一提供。
 
 ### P2 — 正确性硬化(1 周)
 fingerprint + `NonDeterminismError`;vitest + 真 PG 的 correctness suite;crash / fault-injection harness(在每个持久化边界注入 throw / abort / 连接中断 / 重复投递);不变量断言(seq 连续只追加、终态不再接受写、每个外部事件至多一个 outcome、旧 fencing 全路径无效);LISTEN/NOTIFY 唤醒。
@@ -204,7 +204,7 @@ planner fan-out 3 个 researcher → `gather` 汇总 → `requestApproval` 人�
 | step 非幂等 + at-least-once → 副作用重复 | `ctx.idempotencyKey` 自动提供;文档强调;LLM 步骤给出幂等实践 |
 | 确定性被违反 | fingerprint 硬检测 + eslint-plugin + `ctx.now/random/uuid`;VM sandbox 明确为远期(本地跑可信代码) |
 | run_steps 无限增长(agent 长循环) | `continueAsNew` + 长度警告;不做 snapshot(与代码版本兼容复杂) |
-| 代码升级致重放漂移 | 保留 code_version 锁定;远期 `ctx.patched()` |
+| 代码升级致重放漂移 | per-task code_version + `--pin-code-version`(claim 只领本进程能重放的版本,孤儿 run 有 metric 兜底);远期 `ctx.patched()` |
 | daemon 在 node 下无法 import `.ts` | 文档写明:bun/tsx 跑源码,或 `--tasks` 指向编译产物 |
 
 ## ADR 摘要
