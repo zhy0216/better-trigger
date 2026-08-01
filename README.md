@@ -5,25 +5,20 @@ small **worker daemon** that owns the database and executes your tasks; your
 application only ever speaks HTTP to it. **No Redis, no ClickHouse** — Postgres
 is the only infrastructure.
 
-- **One daemon owns Postgres** — the queue, the orchestrator loops (timers /
-  cron / lease reaper) and the replay executor all live in
-  `better-trigger-worker`. Run N daemons against the same database and they
-  coordinate via `FOR UPDATE SKIP LOCKED` — no leader election.
-- **The SDK is an HTTP client** — `better-trigger` ships `task()` for defining
-  work and `betterTrigger({ url })` for triggering it. It has zero runtime
-  dependencies and never opens a database connection, so it is safe to import
-  into a web server, a CLI, or an edge-ish runtime.
-- **Replay model** — no container snapshots: completed steps are memoized in
-  Postgres; after a crash or a long `wait`, the task function re-runs and
-  cached steps return instantly. `kill -9` a daemon mid-run and another one
-  picks up where it left off.
-- **Crash-safe by construction** — persistent leases (`lease_until`) plus a
-  monotonic **fencing token** per claim; late writes from a dead worker are
-  rejected, so step history stays exactly-once.
-- **Postgres-only queue** — exponential-backoff retries, idempotency keys,
-  cron schedules, concurrency limits.
-- **Dashboard** — live runs, trace-style run detail with logs, schedules,
-  workers; served by the same daemon.
+- **One daemon owns Postgres** — queue, orchestrator loops (timers / cron /
+  lease reaper) and the replay executor all live in `better-trigger-worker`.
+  Run N daemons against the same database and they coordinate via
+  `FOR UPDATE SKIP LOCKED` — no leader election.
+- **The SDK is an HTTP client** — `better-trigger` ships `task()` and
+  `betterTrigger({ url })`, has zero runtime dependencies and never opens a
+  database connection, so it is safe to import into a web server or a CLI.
+- **Replay, not snapshots** — completed steps are memoized in Postgres; after a
+  crash or a long `wait`, the task function re-runs and cached steps return
+  instantly. Persistent leases plus a monotonic **fencing token** per claim
+  reject late writes from a dead worker, so step history stays exactly-once.
+- **Batteries in the same process** — retries with backoff, idempotency keys,
+  cron, concurrency limits, a live dashboard, `/health` and Prometheus
+  `/metrics`.
 
 ## Quick start
 
@@ -52,9 +47,7 @@ Or keep the daemon on your machine:
 
 ```bash
 bun install && bun run build
-
-# Postgres (any of: local install, or `docker compose up -d postgres`)
-createdb better_trigger
+createdb better_trigger      # or: docker compose up -d postgres
 ```
 
 ```ts
@@ -97,43 +90,6 @@ The daemon runs your TypeScript task modules directly under `bun`. Under plain
 cd apps/web && VITE_BT_API_URL=http://localhost:4848 bun run dev   # :5173
 ```
 
-### Scaling out
-
-`--tasks` and `--no-serve` are independent, so the same binary covers every
-shape:
-
-```bash
-better-trigger-worker --tasks ./tasks.ts                  # all-in-one (default)
-better-trigger-worker                                     # API + dashboard only
-better-trigger-worker --tasks ./tasks.ts --no-serve       # executor-only node
-```
-
-## Layout (Turborepo + bun workspaces)
-
-```
-.
-├── apps/
-│   ├── worker/          # @better-trigger/worker — THE daemon: task loader, replay
-│   │                    #   executor, orchestrator loops, Hono API (bin: better-trigger-worker)
-│   └── web/             # dashboard (Vite + React)
-├── packages/
-│   ├── core/            # @better-trigger/core — shared types/errors/utils, ZERO deps
-│   ├── kernel/          # @better-trigger/kernel — durable engine over Postgres:
-│   │                    #   claim + lease/fencing, retry/backoff, suspend/resume, cron
-│   ├── db/              # @better-trigger/db — Drizzle schema + generated migrations + pool
-│   └── sdk/             # better-trigger — task() + betterTrigger() HTTP client (no pg)
-├── examples/
-│   └── basic/           # example tasks + e2e/crash/fencing/worker-lost harnesses
-├── docs/
-│   ├── architecture.md        # architecture & roadmap (the source of truth)
-│   └── backend-contract.md    # engine semantics (§3 normative)
-└── docker-compose.yml   # postgres + the worker daemon, running examples/basic
-```
-
-Only `apps/worker` and `packages/kernel` import `pg`. That boundary is the
-whole point of the layout: `better-trigger`, the package your application
-installs, cannot reach the database even by accident.
-
 ## Writing tasks
 
 ```ts
@@ -157,41 +113,119 @@ Task modules are imported by the daemon, so they must be importable on their
 own — a task's `run` may not close over your application's request state.
 
 See [`packages/sdk/README.md`](./packages/sdk/README.md) for the full SDK API
-(cron, `triggerAndWait`, `batchTrigger`, `ctx.now/random/uuid`, AbortError),
-[`docs/architecture.md`](./docs/architecture.md) for the architecture and
-semantic guarantees, and [`docs/backend-contract.md`](./docs/backend-contract.md)
-§3 for engine semantics (replay invariants, queue, suspend/resume, retries).
+(cron, `triggerAndWait`, `batchTrigger`, `ctx.now/random/uuid`, AbortError).
 
-## Repo scripts
+## Running the daemon
+
+`--tasks` and `--no-serve` are independent, so the same binary covers every
+shape:
 
 ```bash
-bun run dev          # turbo run dev
-bun run build        # build all packages (tsup) + web (tsc + vite)
-bun run typecheck    # tsc --noEmit everywhere
-bun run lint
-bun run test         # vitest unit tests (pure functions — no Postgres needed)
-bun run test:acceptance   # the 5 acceptance harnesses — REQUIRES a live Postgres
+better-trigger-worker --tasks ./tasks.ts                  # all-in-one (default)
+better-trigger-worker                                     # API + dashboard only
+better-trigger-worker --tasks ./tasks.ts --no-serve       # executor-only node
+better-trigger-worker --help                              # every flag and env var
 ```
 
-`test:acceptance` runs `examples/basic/scripts/acceptance.ts`, which drives the
-e2e / fencing / replay-drift / crash / worker-lost harnesses in sequence (each
-provisions its own database from `DATABASE_URL`) and exits non-zero if any of
-them fails. Pass names to run a subset: `bun scripts/acceptance.ts fencing`.
-Both entries run on every PR — see [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
+SIGINT/SIGTERM shut down gracefully: stop claiming, drain in-flight runs, stop
+the loops, close the server, end the pool. A clean restart hands claims back
+without spending a retry attempt.
+
+**Network posture.** The API binds `127.0.0.1` and is unauthenticated — so
+"local" has to mean local. Set `BETTER_TRIGGER_API_KEY` and the API requires
+`Authorization: Bearer <key>`; the SDK takes the same value. A non-loopback
+`--host` **without** a key refuses to start unless `--allow-unauthenticated`
+says the exposure is deliberate. Browser origins are loopback-only by default;
+add others with `--cors-origin`.
+
+**Limits** (all overridable by env): request body 1 MiB
+(`BETTER_TRIGGER_BODY_LIMIT`, over it `413`), 500 items per `batchTrigger`
+(`BETTER_TRIGGER_MAX_BATCH`), 256 KiB serialized payload per run
+(`BETTER_TRIGGER_MAX_PAYLOAD_BYTES`).
+
+**Observability.** `GET /api/v1/health` is always open (no key needed) and
+answers `{ ok, version }`; `?deep=1` adds a database probe and pool stats and
+returns `503` when the database is down. `GET /api/v1/metrics` renders
+Prometheus text — queue depth, in-flight runs, run outcomes, claim/heartbeat
+error counters, reaper recoveries, orchestrator loop errors — and stays `200`
+with `db_up 0` when Postgres is unreachable.
+
+**Retention** is off by default: the daemon deletes no history unless asked.
+`--retention 30d` turns on an hourly GC that removes terminal runs (steps and
+logs cascade) and offline worker rows past the window. One-shot instead:
+
+```bash
+better-trigger-worker prune --older-than 30d --dry-run   # report, delete nothing
+better-trigger-worker prune --older-than 30d
+```
+
+Queued / running / waiting runs are never deleted at any age, and neither are
+tasks or schedules.
+
+## Layout (Turborepo + bun workspaces)
+
+```
+.
+├── apps/
+│   ├── worker/          # @better-trigger/worker — THE daemon: task loader, replay
+│   │                    #   executor, orchestrator loops, Hono API (bin: better-trigger-worker)
+│   └── web/             # dashboard (Vite + React)
+├── packages/
+│   ├── core/            # @better-trigger/core — shared types/errors/utils, ZERO deps
+│   ├── kernel/          # @better-trigger/kernel — durable engine over Postgres:
+│   │                    #   claim + lease/fencing, retry/backoff, suspend/resume, cron
+│   ├── db/              # @better-trigger/db — Drizzle schema + generated migrations + pool
+│   ├── sdk/             # better-trigger — task() + betterTrigger() HTTP client (no pg)
+│   └── testing/         # @better-trigger/testing — private harness: scenario runner,
+│                        #   per-scenario databases, daemon control, invariant assertions
+├── examples/
+│   └── basic/           # example tasks + the acceptance scenarios
+├── docs/
+│   ├── architecture.md        # architecture & roadmap (the source of truth)
+│   └── backend-contract.md    # engine semantics (§3 normative)
+└── docker-compose.yml   # postgres + the worker daemon, running examples/basic
+```
+
+Only `apps/worker`, `packages/kernel` and the private test harness import `pg`.
+That boundary is the whole point of the layout: `better-trigger`, the package
+your application installs, cannot reach the database even by accident —
+`check:deps` fails CI if `core` or the SDK ever grows a runtime dependency.
+
+## Development
+
+```bash
+bun run dev            # turbo run dev
+bun run build          # build all packages (tsup) + web (tsc + vite)
+bun run typecheck      # tsc --noEmit everywhere
+bun run lint
+bun run test           # vitest unit tests (stubbed clients — no Postgres needed)
+bun run test:acceptance   # the 8 acceptance scenarios — REQUIRES a live Postgres
+
+bun run check:deps     # core stays zero-dep; the SDK depends on core and nothing else
+bun run check:drift    # packages/db schema.ts vs. the generated migrations (offline)
+bun run check:exports  # publint + attw on the published core/sdk artifacts
+```
+
+`test:acceptance` runs `examples/basic/scripts/acceptance.ts`: e2e, fencing,
+replay-drift, concurrency, crash (exactly-once under `SIGKILL`), worker-lost,
+graceful-restart and retention. Each provisions its own database from
+`DATABASE_URL`, spawns its own daemons and exits non-zero on a failed
+assertion. Pass names to run a subset: `bun scripts/acceptance.ts fencing crash`.
+Everything above runs on every PR — see
+[`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
 ## Status / roadmap
 
-The runtime is a **client/daemon split**: `better-trigger` defines and triggers
-tasks over HTTP, `better-trigger-worker` owns Postgres and executes them.
-
 Implemented: task/step replay · queue/retry/idempotency · wait.for/until ·
 triggerAndWait/batchTrigger · cron · concurrency limits · lease/fencing
-crash-safety · dashboard.
+crash-safety · retention/prune · health + metrics · dashboard.
 
 Roadmap: see [`docs/architecture.md`](./docs/architecture.md) **P2–P6** —
 correctness hardening (step fingerprints, LISTEN/NOTIFY), events
 (`wait.forEvent`), CLI, agent-layer primitives
 (`handoff`/`gather`/`requestApproval`/`ctx.llm`), plugins.
+[`docs/backend-contract.md`](./docs/backend-contract.md) §3 is the normative
+engine contract (replay invariants, queue, suspend/resume, retries).
 
 ## License
 
