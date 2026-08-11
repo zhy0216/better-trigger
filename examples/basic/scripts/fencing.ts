@@ -448,7 +448,15 @@ async function main(s: Scenario): Promise<void> {
   s.ok('run #2 suspended on wait.for (queue row deleted)');
 
   // The already-running orchestrator's wait scanner resumes it (~1.2s + 1s tick).
-  await waitForStatus(kernel, runId2, 'queued', { timeoutMs: 10_000 });
+  // NOTE: a function reader, not the kernel object — readStatus's object form
+  // calls getRun(runId) namespace-less, and the kernel's namespace-scoped
+  // getRun (C2) refuses that with an assertion.
+  await waitForStatus(
+    (id) => kernel.getRun(id, DEFAULT_NAMESPACE).then((r) => r.status),
+    runId2,
+    'queued',
+    { timeoutMs: 10_000 },
+  );
   const [postClaim] = await kernel.claimRuns({
     workerId: workerA,
     taskIds: ['fenced-task'],

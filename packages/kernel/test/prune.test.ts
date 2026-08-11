@@ -11,9 +11,10 @@
      - the age used is COALESCE(finished_at, updated_at), not created_at — a run
        that has been *running* for 40 days is not old, it is stuck;
      - deletion is batched, and the loop ends;
-     - `runs` is the only table the run-side delete names besides the two the FK
-       cascade cannot cover (waits / queue) — steps and logs go through the
-       0007 cascade, not through hand-written SQL that could drift from it;
+     - `runs` is the only table the run-side delete names, besides the queue
+       DELETE that runs ahead of it purely for lock ordering — steps, logs and
+       waits go through the 0007/0011 cascades, not through hand-written SQL
+       that could drift from them;
      - workers: offline only, and never a merely-stale online row;
      - a retention window under MIN_RETENTION_MS is refused rather than obeyed.
 
@@ -56,7 +57,10 @@ function stubPool(runIds: string[] = []) {
       return { rows: remaining.slice(0, limit).map((id) => ({ id })), rowCount: 0 };
     }
     if (/AS run_steps/.test(sql) && /AS logs/.test(sql)) {
-      return { rows: [{ run_steps: '3', logs: '7' }], rowCount: 0 };
+      return {
+        rows: [{ run_steps: '3', logs: '7', waits: '1', queue: '2' }],
+        rowCount: 0,
+      };
     }
     if (/count\(\*\) AS count FROM workers/.test(sql)) {
       return { rows: [{ count: '5' }], rowCount: 0 };
@@ -92,7 +96,7 @@ describe('prune --dry-run', () => {
   });
 
   it('still reports what a real run would remove, per table', async () => {
-    const { pool } = stubPool();
+    const { pool, stmts } = stubPool();
 
     const res = await prune(pool, { olderThanMs: RETENTION, namespaces: [DEFAULT_NAMESPACE], dryRun: true });
 
@@ -102,6 +106,11 @@ describe('prune --dry-run', () => {
     expect(res.waits).toBe(1);
     expect(res.queue).toBe(0);
     expect(res.workers).toBe(5);
+    // The dry-run roll-up counts waits in both directions too — the rows a
+    // real prune would delete (run_id) and the ones it would orphan-clear
+    // (child_run_id SET NULL) — so the report and the delete stay in sync.
+    const rollup = find(stmts, /^\s*WITH doomed AS/)!;
+    expect(rollup.sql).toMatch(/OR child_run_id IN \(SELECT id FROM doomed\)/);
   });
 });
 
@@ -159,19 +168,31 @@ describe('prune deletion', () => {
     expect(res.logs).toBe(21);
   });
 
-  it('leaves steps and logs to the foreign-key cascade', async () => {
+  it('leaves steps, logs and waits to the foreign-key cascades', async () => {
     const { pool, stmts } = stubPool(['a']);
 
     await prune(pool, { olderThanMs: RETENTION , namespaces: [DEFAULT_NAMESPACE]});
 
     // If prune ever grew its own `DELETE FROM logs`, the cascade and the CLI
-    // would be two definitions of "delete a run" free to drift apart.
+    // would be two definitions of "delete a run" free to drift apart. waits is
+    // the same story since 0011 extended the cascade to it.
     const deleted = deletes(stmts).map((s) => s.sql);
     expect(deleted.some((sql) => /DELETE FROM logs/.test(sql))).toBe(false);
     expect(deleted.some((sql) => /DELETE FROM run_steps/.test(sql))).toBe(false);
-    // waits / queue have no FK to runs, so those two ARE deleted by hand.
-    expect(deleted.some((sql) => /DELETE FROM waits WHERE run_id/.test(sql))).toBe(true);
+    expect(deleted.some((sql) => /DELETE FROM waits/.test(sql))).toBe(false);
+    // queue IS still deleted by hand — ahead of the runs DELETE, to take the
+    // row in canonical lock order (position 1) instead of letting the cascade
+    // reach it from behind the runs lock, where the reaper could deadlock.
     expect(deleted.some((sql) => /DELETE FROM queue WHERE run_id/.test(sql))).toBe(true);
+    // The counts the report needs must come from a pre-delete SELECT: the
+    // cascade reports nothing back about the rows it removed. waits is
+    // counted in both directions — run_id rows die by cascade, child_run_id
+    // rows get SET NULL (0011).
+    const counts = find(stmts, /AS run_steps/);
+    expect(counts!.sql).toMatch(/AS waits/);
+    expect(counts!.sql).toMatch(/AS queue/);
+    expect(counts!.sql).toMatch(/SELECT \(SELECT count\(\*\) FROM run_steps/);
+    expect(counts!.sql).toMatch(/OR child_run_id = ANY\(\$1::text\[\]\)/);
   });
 
   it('runs each batch in its own transaction', async () => {

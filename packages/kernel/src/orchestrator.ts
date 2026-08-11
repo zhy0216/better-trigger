@@ -282,12 +282,22 @@ export function startOrchestrator(
 
   /* ------------------------------------------------------------------ waits */
   async function scanWaits(): Promise<void> {
-    // Phase 1 — discover due timer waits with a plain read, holding no locks.
+    // Phase 1 — discover due work with a plain read, holding no locks. Two
+    // candidate classes:
+    //   - due timer waits (kind 'duration'/'until', resume_at passed) — the
+    //     regular resume path;
+    //   - orphan run-waits (kind 'run' with child_run_id NULL, C5): the child
+    //     run was deleted out from under the wait — waits.child_run_id is
+    //     ON DELETE SET NULL, so a pending run-wait whose child id vanished is
+    //     exactly this. The child can never deliver a result, so the parent
+    //     must be failed, never resumed (phase 2 branches on kind).
     // fingerprint rides along: the executor computed it from the DECLARED wait
     // (duration string / until instant) when it suspended, and the resume must
     // stamp the completed step row with that same value (C1). project_id/env
     // ride along so every statement below re-scopes on the wait's namespace
-    // (C2) — a staging daemon never resumes prod waits.
+    // (C2) — a staging daemon never resumes prod waits. Orphan run-waits sort
+    // first (resume_at IS NULL, NULLS FIRST in ASC), so they are recovered
+    // before due timer waits rather than crowding them out of the LIMIT.
     const due = await pool.query<{
       id: number;
       run_id: string;
@@ -295,12 +305,16 @@ export function startOrchestrator(
       env: string;
       step_seq: number;
       fingerprint: string | null;
+      kind: string;
+      child_run_id: string | null;
     }>(
-      `SELECT id, run_id, project_id, env, step_seq, fingerprint
+      `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
          FROM waits
         WHERE status = 'pending'
-          AND kind IN ('duration','until')
-          AND resume_at <= now()
+          AND (
+                (kind IN ('duration','until') AND resume_at <= now())
+             OR (kind = 'run' AND child_run_id IS NULL)
+          )
           AND ${nsPredicate}
         ORDER BY resume_at ASC
         LIMIT 50`,
@@ -332,12 +346,48 @@ export function startOrchestrator(
         );
         const run = await tryLockRunRow(client, w.run_id, wNs);
         if (!run) return; // run vanished, or another instance has it — next tick
+        // NOTE the predicate order: the row-lock clause must stay LAST in the
+        // statement. (A C2 regression once appended `AND project_id = ...`
+        // after `FOR UPDATE SKIP LOCKED`, which is a 42601 syntax error on
+        // every Postgres and silently broke ALL wait resumes — the orphan
+        // recovery branch below would sit behind the same broken statement.)
         const lockedWait = await client.query<{ id: number }>(
-          `SELECT id FROM waits WHERE id = $1 AND status = 'pending' FOR UPDATE SKIP LOCKED
-             AND project_id = $2 AND env = $3`,
+          `SELECT id FROM waits WHERE id = $1 AND status = 'pending'
+             AND project_id = $2 AND env = $3
+           FOR UPDATE SKIP LOCKED`,
           [w.id, wNs.projectId, wNs.env],
         );
         if (!lockedWait.rows[0]) return; // already resumed/canceled, or held
+
+        // Orphan run-wait recovery (C5, todos/01-correctness.md): the wait's
+        // child run was deleted out from under it — waits.child_run_id is
+        // ON DELETE SET NULL, so a pending `kind = 'run'` wait with a NULL
+        // child_run_id can only mean the child vanished (a live child's wait
+        // always carries its id, and wakeParentIfWaiting resolves the wait the
+        // moment the child goes terminal). The parent can never be woken by a
+        // result that no longer exists; without this it would sit 'waiting'
+        // forever (no wait, no queue row, no path back). Fail it like a lost
+        // worker: terminalFail records the reason, cancels the run's pending
+        // waits (this one included) and wakes the parent's own parent if any.
+        if (w.kind === 'run') {
+          if (run.status === 'waiting') {
+            await terminalFail(client, run, {
+              name: 'ChildLostError',
+              message:
+                `child run was deleted before it finished (waits.child_run_id is NULL) — ` +
+                `no result can ever arrive; parent failed`,
+            });
+          } else {
+            // Defensive: a run that is not 'waiting' cannot be stranded by its
+            // wait — never clobber its state, just retire the stale wait row.
+            await client.query(
+              `UPDATE waits SET status = 'canceled' WHERE id = $1
+                 AND project_id = $2 AND env = $3`,
+              [w.id, wNs.projectId, wNs.env],
+            );
+          }
+          return;
+        }
 
         await client.query(
           `UPDATE waits SET status = 'completed' WHERE id = $1

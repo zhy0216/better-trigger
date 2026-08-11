@@ -5,12 +5,26 @@
    Authoritative spec: docs/backend-contract.md §2 (+ §3.5 concurrency_key on runs).
    All business tables carry project_id ('default') and env ('prod').
    DB columns are snake_case; the JS object keys are camelCase.
+   Referential integrity (C5, todos/01-correctness.md): every relation is a
+   real FK — queue/waits.run_id → runs CASCADE, runs.parent_run_id →
+   waits.child_run_id → runs SET NULL (a deleted child run must not strand
+   its 'waiting' parent; the orchestrator's wait-due scanner fails those
+   parents with a ChildLostError), schedules → tasks CASCADE — and
+   status/kind/level are CHECK-constrained closed enums; a manual DELETE or a
+   hand-written bad status cannot leave orphan rows or unreadable states
+   behind. Migration 0011 cleans FK orphans automatically, but CHECK
+   constraints assume pre-existing status/kind/level values are already
+   in-set (everything this engine writes is): a hand-edited row outside the
+   set makes the migration fail, which the operator must resolve by fixing
+   the row (the migration's header comment spells out the UPDATEs).
    ============================================================================= */
 import { sql } from 'drizzle-orm';
 import {
   bigint,
   bigserial,
   boolean,
+  check,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -19,6 +33,7 @@ import {
   text,
   timestamp,
   uniqueIndex,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
 /* ---------------------------------------------------------------------------
@@ -60,7 +75,18 @@ export const runs = pgTable(
     output: jsonb('output'),
     error: jsonb('error'),
     triggerType: text('trigger_type').notNull(),
-    parentRunId: text('parent_run_id'),
+    // FK to runs, ON DELETE SET NULL (C5, todos/01-correctness.md): a deleted
+    // run must not take its still-live children down with it — prune deletes
+    // runs one batch at a time and a parent may be pruned while a child is
+    // still queued/running. CASCADE would silently delete the child (and, in
+    // the same batch, double-delete rows the prune already targeted); RESTRICT
+    // would make prune fail the moment a batch contained a parent/child pair.
+    // SET NULL orphans the child's lineage field but nothing else — the child
+    // is an independent run and keeps executing; its trigger-and-wait step row
+    // (already recorded, or absent) does not depend on this column.
+    parentRunId: text('parent_run_id').references((): AnyPgColumn => runs.id, {
+      onDelete: 'set null',
+    }),
     codeVersion: text('code_version'),
     idempotencyKey: text('idempotency_key'),
     concurrencyKey: text('concurrency_key'),
@@ -101,6 +127,25 @@ export const runs = pgTable(
     index('runs_task_created_idx').on(t.projectId, t.env, t.taskId, t.createdAt),
     index('runs_status_concurrency_idx').on(t.projectId, t.env, t.status, t.concurrencyKey),
     index('runs_created_idx').on(t.projectId, t.env, t.createdAt),
+    // C5 (todos/01-correctness.md): status is an enum the whole engine switches
+    // on — a row outside the set would be unreadable garbage instead of a state.
+    check(
+      'runs_status_check',
+      sql`${t.status} IN ('queued','running','waiting','completed','failed','canceled')`,
+    ),
+    // attempt is 1-based and only ever grows (failRun guards attempt <
+    // max_attempts before incrementing). max_attempts is deliberately NOT
+    // bounded here: a user-supplied retry policy can legitimately be
+    // maxAttempts: 0 ("never retry"), which makes attempt (1) > max_attempts —
+    // so the cross-column relation is enforced by failRun, not by SQL.
+    check('runs_attempt_check', sql`${t.attempt} >= 1`),
+    // recoveries is the reaper's separate budget: the reaper terminal-fails
+    // the moment recoveries >= max_recoveries, so the count never exceeds the
+    // ceiling (orchestrator.ts reap).
+    check(
+      'runs_recoveries_check',
+      sql`${t.recoveries} >= 0 AND ${t.recoveries} <= ${t.maxRecoveries}`,
+    ),
   ],
 );
 
@@ -135,7 +180,17 @@ export const runSteps = pgTable(
     startedAt: timestamp('started_at', { withTimezone: true }),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
   },
-  (t) => [primaryKey({ columns: [t.runId, t.seq] })],
+  (t) => [
+    primaryKey({ columns: [t.runId, t.seq] }),
+    // C5: kind/status are closed enums (StepKind / StepStatus in
+    // @better-trigger/core); the replay executor switches on them.
+    check(
+      'run_steps_kind_check',
+      sql`${t.kind} IN ('step','wait','trigger-and-wait','batch-trigger','now','random','uuid')`,
+    ),
+    check('run_steps_status_check', sql`${t.status} IN ('completed','failed')`),
+    check('run_steps_attempt_check', sql`${t.attempt} >= 1`),
+  ],
 );
 
 /* ---------------------------------------------------------------------------
@@ -147,7 +202,13 @@ export const queue = pgTable(
     id: bigserial('id', { mode: 'number' }).primaryKey(),
     projectId: text('project_id').notNull().default('default'),
     env: text('env').notNull().default('prod'),
-    runId: text('run_id').notNull().unique(),
+    // FK to runs, ON DELETE CASCADE (C5): a deleted run takes its queue row
+    // with it — the queue row is pure scheduling state for that run and can
+    // never outlive it. The unique constraint stays: one queue row per run.
+    runId: text('run_id')
+      .notNull()
+      .unique()
+      .references(() => runs.id, { onDelete: 'cascade' }),
     availableAt: timestamp('available_at', { withTimezone: true }).notNull().defaultNow(),
     priority: integer('priority').notNull().default(0),
     lockedBy: text('locked_by'),
@@ -193,11 +254,30 @@ export const waits = pgTable(
     id: bigserial('id', { mode: 'number' }).primaryKey(),
     projectId: text('project_id').notNull().default('default'),
     env: text('env').notNull().default('prod'),
-    runId: text('run_id').notNull(),
+    // FK to runs, ON DELETE CASCADE (C5): deleting a run deletes its waits.
+    // Safe with prune because prune only deletes TERMINAL runs, and a terminal
+    // run's waits are already resolved ('completed'/'canceled') — the row that
+    // dies is history, never an outstanding suspension.
+    runId: text('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
     stepSeq: integer('step_seq').notNull(),
     kind: text('kind').notNull(),
     resumeAt: timestamp('resume_at', { withTimezone: true }),
-    childRunId: text('child_run_id'),
+    // FK to runs, ON DELETE SET NULL (C5, todos/01-correctness.md): a deleted
+    // child run must not strand its parent. CASCADE would delete the parent's
+    // wait row outright — the parent stays 'waiting' with no queue row and no
+    // wait, i.e. permanently stuck (a manual DELETE of a live child, which
+    // prune would never do to a terminal one, is exactly that case). With
+    // SET NULL the wait row survives with a NULL child_run_id, and the
+    // orchestrator's wait-due scanner recognizes `kind = 'run' AND
+    // child_run_id IS NULL AND status = 'pending'` as "the child vanished"
+    // and fails the parent (ChildLostError) instead of stranding it. Prune is
+    // unaffected: it only deletes TERMINAL children, whose parent waits are
+    // already resolved — their stale child_run_id pointers just become NULL.
+    childRunId: text('child_run_id').references(() => runs.id, {
+      onDelete: 'set null',
+    }),
     /** C1 replay fingerprint computed by the executor when the wait was
      *  created; the resume copies it onto the completed run_steps row so the
      *  parent's replay compares against the DECLARED wait, not a recomputed
@@ -209,6 +289,9 @@ export const waits = pgTable(
   (t) => [
     index('waits_status_resume_idx').on(t.projectId, t.env, t.status, t.resumeAt),
     index('waits_child_run_idx').on(t.projectId, t.env, t.childRunId),
+    // C5: closed enums (WaitKind / 'pending'|'completed'|'canceled' in core).
+    check('waits_kind_check', sql`${t.kind} IN ('duration','until','run')`),
+    check('waits_status_check', sql`${t.status} IN ('pending','completed','canceled')`),
   ],
 );
 
@@ -232,7 +315,11 @@ export const logs = pgTable(
     data: jsonb('data'),
     ts: timestamp('ts', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('logs_run_id_idx').on(t.projectId, t.env, t.runId, t.id)],
+  (t) => [
+    index('logs_run_id_idx').on(t.projectId, t.env, t.runId, t.id),
+    // C5: LogLevel in core — the executor's logger emits exactly these.
+    check('logs_level_check', sql`${t.level} IN ('debug','info','warn','error')`),
+  ],
 );
 
 /* ---------------------------------------------------------------------------
@@ -259,6 +346,15 @@ export const schedules = pgTable(
   (t) => [
     uniqueIndex('schedules_task_id_unique').on(t.projectId, t.env, t.taskId),
     index('schedules_next_run_idx').on(t.projectId, t.env, t.nextRunAt),
+    // C5: composite FK to the tasks PK (project_id, env, id) — a schedule is
+    // one task's cron registration and cannot outlive its task. CASCADE is
+    // safe because nothing currently deletes task rows (registration only
+    // upserts), and syncSchedules inserts the task and its schedule in the
+    // same transaction, so a schedule can never be created without its task.
+    foreignKey({
+      columns: [t.projectId, t.env, t.taskId],
+      foreignColumns: [tasks.projectId, tasks.env, tasks.id],
+    }).onDelete('cascade'),
   ],
 );
 
@@ -283,7 +379,10 @@ export const workers = pgTable('workers', {
   startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
   lastHeartbeatAt: timestamp('last_heartbeat_at', { withTimezone: true }).notNull().defaultNow(),
   status: text('status').notNull().default('online'),
-});
+},
+// C5: the offline marker and heartbeat loop flip between exactly these two.
+(t) => [check('workers_status_check', sql`${t.status} IN ('online','offline')`)],
+);
 
 export type DbRun = typeof runs.$inferSelect;
 export type DbRunInsert = typeof runs.$inferInsert;

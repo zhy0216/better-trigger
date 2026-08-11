@@ -1141,8 +1141,12 @@ export async function wakeParentIfWaiting(
   await lockQueueRow(client, wait.run_id, parentNs);
   const parent = await lockRunRow(client, wait.run_id, parentNs);
   const lockedWait = await client.query<{ id: number }>(
-    `SELECT id FROM waits WHERE id = $1 AND status = 'pending' FOR UPDATE
-       AND project_id = $2 AND env = $3`,
+    // Row-lock clause LAST (same C2 regression as the orchestrator's wait
+    // lock once had: `AND project_id` after `FOR UPDATE` is a 42601 syntax
+    // error on every Postgres and silently breaks child completion).
+    `SELECT id FROM waits WHERE id = $1 AND status = 'pending'
+       AND project_id = $2 AND env = $3
+     FOR UPDATE`,
     [wait.id, parentNs.projectId, parentNs.env],
   );
   if (!lockedWait.rows[0]) return; // canceled/completed while ordering locks

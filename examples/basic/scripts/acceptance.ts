@@ -1,7 +1,7 @@
 /* =============================================================================
    @better-trigger/example-basic — acceptance suite entry point.
 
-   The nine scenarios in this directory are the project's real correctness
+   The ten scenarios in this directory are the project's real correctness
    evidence (exactly-once steps under SIGKILL, fencing, replay drift, version
    pinning, worker loss, graceful restart, per-key concurrency limits, retention
    cascades).
@@ -67,6 +67,11 @@ const HARNESSES: Harness[] = [
     name: 'retention',
     file: 'retention.ts',
     what: 'prune deletes history through the foreign-key cascade',
+  },
+  {
+    name: 'constraints',
+    file: 'constraints.ts',
+    what: 'database-level FKs and CHECK constraints are enforced',
   },
 ];
 

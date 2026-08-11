@@ -101,7 +101,11 @@ function stubPool(opts: StubOptions = {}) {
       }
 
       // Canonical position 3 — the wait row, re-checked under its own lock.
-      if (/FROM waits WHERE id = \$1 AND status = 'pending' FOR UPDATE/.test(text)) {
+      // The namespace predicate sits BEFORE the row-lock clause (the lock
+      // clause must be last — a C2 regression once put `AND project_id` after
+      // `FOR UPDATE SKIP LOCKED`, which is a 42601 syntax error on every
+      // Postgres), so match `pending'` → `FOR UPDATE` across the gap.
+      if (/FROM waits WHERE id = \$1 AND status = 'pending'[\s\S]*FOR UPDATE/.test(text)) {
         const id = Number(params?.[0]);
         if (heldWaits.has(id)) {
           if (!/SKIP LOCKED/.test(text)) {
@@ -189,9 +193,7 @@ describe('scanWaits lock acquisition', () => {
       texts.some((t) => /FROM runs WHERE id = \$1.*FOR UPDATE SKIP LOCKED/.test(t)),
     ).toBe(true);
     expect(
-      texts.some((t) =>
-        /FROM waits WHERE id = \$1 AND status = 'pending' FOR UPDATE SKIP LOCKED/.test(t),
-      ),
+      texts.some((t) => /FROM waits WHERE id = \$1 AND status = 'pending'[\s\S]*FOR UPDATE SKIP LOCKED/.test(t)),
     ).toBe(true);
     // Position 1 is deliberately blocking: for a waiting run there is no queue
     // row at all, and holding it when a stale one exists is what stops the

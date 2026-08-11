@@ -11,13 +11,15 @@
      1. a plain `DELETE FROM runs` takes that run's run_steps and logs with it,
         and leaves every other run's rows alone (the cascade exists, and is
         scoped to the run);
-     2. the migration is applied to a database that already contains ORPHANS —
-        logs and run_steps pointing at a run that no longer exists. That is the
-        case that would otherwise fail `ADD CONSTRAINT ... FOREIGN KEY` and,
-        because daemons auto-migrate at boot, stop every daemon on that database
-        from starting. The orphans are inserted before the constraint exists (a
-        pre-0007 schema, rebuilt here by dropping the two constraints) and the
-        migration is then re-run;
+     2. the migration history is applied to a database that already contains
+        ORPHANS — queue / waits / schedules rows pointing at runs or tasks
+        that no longer exist, and a parent_run_id pointing at nothing. That is
+        the case that would otherwise fail `ADD CONSTRAINT ... FOREIGN KEY`
+        and, because daemons auto-migrate at boot, stop every daemon on that
+        database from starting. The orphans are inserted before the
+        constraints exist (the 0011 constraints are dropped, i.e. a
+        pre-retention schema, rebuilt here) and the 0011 migration is then
+        re-run;
      3. the real CLI: `better-trigger-worker prune --older-than <w> --dry-run`
         reports rows and deletes nothing; without --dry-run it deletes exactly
         the terminal runs past the window, their cascaded rows, and the offline
@@ -30,6 +32,8 @@
      BT_RETENTION_DB   override the provisioned database name (default
                        better_trigger_retention)
    ============================================================================= */
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { migrate } from '@better-trigger/db';
@@ -115,47 +119,92 @@ async function main(s: Scenario): Promise<void> {
     );
   });
 
-  /* -- 2. the migration survives a database full of orphans ---------------- */
-  await s.check('0007 cleans orphans before adding the constraints', async () => {
-    // Rebuild the pre-0007 shape, then create exactly the rows that would make
-    // ADD CONSTRAINT fail — and with it every daemon's boot.
-    await s.pool.query(`ALTER TABLE logs DROP CONSTRAINT logs_run_id_runs_id_fk`);
-    await s.pool.query(`ALTER TABLE run_steps DROP CONSTRAINT run_steps_run_id_runs_id_fk`);
+  /* -- 2. the migration history survives a database full of orphans -------- */
+  await s.check('0011 cleans orphans before adding the constraints', async () => {
+    // Rebuild the pre-0011 shape: drop every FK/CHECK 0011 adds and remove
+    // 0011 from the journal, so `migrate()` re-applies it — orphan cleanups
+    // included. (The journal record is identified by its hash, which is
+    // sha256(sql file content), computed exactly as drizzle's migrator does.
+    // Only 0011 re-runs: the migrator skips everything older than the newest
+    // remaining record, so 0007..0010 stay applied as-is.)
+    const C5_CONSTRAINTS: Array<{ table: string; name: string }> = [
+      { table: 'queue', name: 'queue_run_id_runs_id_fk' },
+      { table: 'runs', name: 'runs_parent_run_id_runs_id_fk' },
+      { table: 'schedules', name: 'schedules_project_id_env_task_id_tasks_project_id_env_id_fk' },
+      { table: 'waits', name: 'waits_run_id_runs_id_fk' },
+      { table: 'waits', name: 'waits_child_run_id_runs_id_fk' },
+      { table: 'logs', name: 'logs_level_check' },
+      { table: 'run_steps', name: 'run_steps_kind_check' },
+      { table: 'run_steps', name: 'run_steps_status_check' },
+      { table: 'run_steps', name: 'run_steps_attempt_check' },
+      { table: 'runs', name: 'runs_status_check' },
+      { table: 'runs', name: 'runs_attempt_check' },
+      { table: 'runs', name: 'runs_recoveries_check' },
+      { table: 'waits', name: 'waits_kind_check' },
+      { table: 'waits', name: 'waits_status_check' },
+      { table: 'workers', name: 'workers_status_check' },
+    ];
+    for (const c of C5_CONSTRAINTS) {
+      await s.pool.query(`ALTER TABLE ${c.table} DROP CONSTRAINT ${c.name}`);
+    }
+
+    const migrationsDir = fileURLToPath(new URL('../../../packages/db/migrations', import.meta.url));
+    const sql = readFileSync(`${migrationsDir}/0011_thick_rage.sql`, 'utf8');
+    const hash = createHash('sha256').update(sql).digest('hex');
+    await s.pool.query(`DELETE FROM drizzle.__drizzle_migrations WHERE hash = $1`, [hash]);
+
+    // Orphans that would make ADD CONSTRAINT fail — and with it every
+    // daemon's boot. (logs / run_steps orphans are the 0007 cleanup's job and
+    // were proven when that migration was the newest; 0011's own orphans are
+    // the ones under test here.)
+    await s.pool.query(`INSERT INTO queue (run_id, available_at) VALUES ('run_gone', now())`);
     await s.pool.query(
-      `DELETE FROM drizzle.__drizzle_migrations WHERE hash IN (
-         SELECT hash FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 1)`,
+      `INSERT INTO waits (run_id, step_seq, kind, status)
+       VALUES ('run_gone', 1, 'duration', 'pending')`,
     );
     await s.pool.query(
-      `INSERT INTO logs (run_id, level, message) VALUES ('run_gone', 'info', 'orphan')`,
+      `INSERT INTO waits (run_id, step_seq, kind, child_run_id, status)
+       VALUES ('run_waiter', 1, 'run', 'run_gone', 'pending')`,
     );
     await s.pool.query(
-      `INSERT INTO run_steps (run_id, seq, kind, status)
-       VALUES ('run_gone', 1, 'step', 'completed')`,
+      `INSERT INTO runs (id, task_id, status, trigger_type, parent_run_id, created_at, updated_at)
+       VALUES ('run_orphan_parent', 't', 'queued', 'api', 'run_gone', now(), now())`,
+    );
+    await s.pool.query(
+      `INSERT INTO schedules (id, task_id, cron_pattern, created_at, updated_at)
+       VALUES ('sch_orphan', 'task_gone', '* * * * *', now(), now())`,
     );
 
     // This is the assertion: it must not throw.
     await migrate(s.pool);
 
+    s.assertEqual(await count(s, `SELECT count(*) FROM queue WHERE run_id = 'run_gone'`), 0, 'orphaned queue rows');
+    s.assertEqual(await count(s, `SELECT count(*) FROM waits WHERE run_id = 'run_gone'`), 0, 'orphaned waits (run_id)');
     s.assertEqual(
-      await count(s, `SELECT count(*) FROM logs WHERE run_id = 'run_gone'`),
+      await count(s, `SELECT count(*) FROM waits WHERE child_run_id = 'run_gone'`),
       0,
-      'orphaned logs after the migration',
+      'orphaned waits (child_run_id)',
     );
-    s.assertEqual(
-      await count(s, `SELECT count(*) FROM run_steps WHERE run_id = 'run_gone'`),
-      0,
-      'orphaned run_steps after the migration',
+    const parent = await s.pool.query<{ parent_run_id: string | null }>(
+      `SELECT parent_run_id FROM runs WHERE id = 'run_orphan_parent'`,
     );
-    // And the constraints are back, so the cascade still applies.
+    s.assertEqual(parent.rows[0]?.parent_run_id, null, 'orphaned parent_run_id set to NULL');
+    s.assertEqual(await count(s, `SELECT count(*) FROM schedules WHERE id = 'sch_orphan'`), 0, 'orphaned schedules');
+    // And the constraints are back, so the cascades still apply.
     s.assertEqual(
       await count(
         s,
-        `SELECT count(*) FROM pg_constraint
-          WHERE conname IN ('logs_run_id_runs_id_fk','run_steps_run_id_runs_id_fk')`,
+        `SELECT count(*) FROM pg_constraint WHERE conname = ANY($1::text[])`,
+        [C5_CONSTRAINTS.map((c) => c.name)],
       ),
-      2,
-      'foreign keys after the re-run migration',
+      C5_CONSTRAINTS.length,
+      'constraints after the re-run migration',
     );
+
+    // The orphan scaffolding is the check's, not the database's: it was only
+    // there to make ADD CONSTRAINT fail, so take it away before the CLI test
+    // below counts what a prune would remove.
+    await s.pool.query(`DELETE FROM runs WHERE id IN ('run_orphan_parent','run_waiter')`);
   });
 
   /* -- 3. the CLI ---------------------------------------------------------- */

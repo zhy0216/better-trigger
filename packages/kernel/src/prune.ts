@@ -10,8 +10,13 @@
      - a run that reached a terminal state before the cutoff, plus everything
        that hangs off it. Since migration 0007 `logs.run_id` and
        `run_steps.run_id` are real foreign keys ON DELETE CASCADE, so deleting
-       the run row IS deleting its logs and its step timeline. `waits` and
-       `queue` carry no such constraint and are deleted explicitly here;
+       the run row IS deleting its logs and its step timeline; migration 0011
+       (C5) extended the same cascade to `queue` and `waits`, so deleting the
+       run row is the whole delete — the only per-table SQL left is the queue
+       DELETE ahead of the runs DELETE, which exists purely to take the queue
+       rows in canonical lock order (position 1 before position 2, see runs.ts
+       header) instead of letting the 0011 cascade reach them from behind the
+       runs lock, where the reaper could deadlock against it;
      - a worker row already marked offline whose last heartbeat is older than
        the cutoff.
 
@@ -76,9 +81,11 @@ export interface PruneResult {
   runSteps: number;
   /** logs rows that went with them (via the FK cascade). */
   logs: number;
-  /** waits rows that went with them (deleted explicitly — no FK). */
+  /** waits rows resolved by the prune — deleted via the run_id cascade, or
+   *  their child_run_id SET NULL via the child FK (0011); counted in both
+   *  directions (a row referencing two doomed runs counts once). */
   waits: number;
-  /** queue rows that went with them (deleted explicitly — no FK). */
+  /** queue rows that went with them (deleted explicitly, or via the FK cascade). */
   queue: number;
   /** Offline worker rows removed. */
   workers: number;
@@ -159,7 +166,9 @@ async function countPrunable(
      SELECT (SELECT count(*) FROM doomed)                                          AS runs,
             (SELECT count(*) FROM run_steps WHERE run_id IN (SELECT id FROM doomed)) AS run_steps,
             (SELECT count(*) FROM logs      WHERE run_id IN (SELECT id FROM doomed)) AS logs,
-            (SELECT count(*) FROM waits     WHERE run_id IN (SELECT id FROM doomed)) AS waits,
+            (SELECT count(*) FROM waits
+              WHERE run_id IN (SELECT id FROM doomed)
+                 OR child_run_id IN (SELECT id FROM doomed))                        AS waits,
             (SELECT count(*) FROM queue     WHERE run_id IN (SELECT id FROM doomed)) AS queue`,
     params,
   );
@@ -232,40 +241,48 @@ async function deleteBatch(
     // Counted before the delete, inside the same transaction, because the FK
     // cascade reports nothing back: `DELETE FROM runs` returns the number of
     // *runs* it removed and stays silent about the rows that followed. This is
-    // the only way the report can say how much log volume actually went.
-    const counts = await client.query<{ run_steps: string; logs: string }>(
+    // the only way the report can say how much log volume actually went —
+    // and, since 0011, how many waits/queue rows went too.
+    //
+    // waits is counted in BOTH directions: run_id = ANY(...) rows are deleted
+    // by the run_id FK cascade, child_run_id = ANY(...) rows are SET NULL by
+    // the child FK (0011) — one wait referencing two doomed runs counts once
+    // (OR, not +). The report's `waits` figure means "waits this prune
+    // resolved, deleted or orphaned-child cleared".
+    const counts = await client.query<{
+      run_steps: string;
+      logs: string;
+      waits: string;
+      queue: string;
+    }>(
       `SELECT (SELECT count(*) FROM run_steps WHERE run_id = ANY($1::text[])) AS run_steps,
-              (SELECT count(*) FROM logs      WHERE run_id = ANY($1::text[])) AS logs`,
+              (SELECT count(*) FROM logs      WHERE run_id = ANY($1::text[])) AS logs,
+              (SELECT count(*) FROM waits
+                WHERE run_id = ANY($1::text[])
+                   OR child_run_id = ANY($1::text[]))                          AS waits,
+              (SELECT count(*) FROM queue     WHERE run_id = ANY($1::text[])) AS queue`,
       [runIds],
     );
     batch.runSteps = num(counts.rows[0]?.run_steps);
     batch.logs = num(counts.rows[0]?.logs);
+    batch.waits = num(counts.rows[0]?.waits);
+    batch.queue = num(counts.rows[0]?.queue);
 
-    // waits / queue have no FK to runs, so they are deleted by hand. Both are
-    // normally already empty for a terminal run (the queue row goes on the
-    // terminal transition, waits are resolved) — this is what keeps a run that
-    // ended some other way from leaving a dangling row behind.
-    //
-    // Order matters, and it is the canonical one from runs.ts: queue (position
-    // 1) → runs (position 2) → waits (position 3). The rows this touches are
-    // meant to be absent, but "meant to be" is exactly the case this code exists
-    // for, so it takes its locks in the same order every other multi-row tx does
-    // rather than relying on the candidate set being disjoint from scanWaits'.
-    // Deleting runs before waits is safe in either direction here — waits has no
-    // FK to runs, so no constraint sees the intermediate state inside this tx.
-    const queued = await client.query(`DELETE FROM queue WHERE run_id = ANY($1::text[])`, [
-      runIds,
-    ]);
-    batch.queue = num(queued.rowCount);
+    // The 0011 FKs cascade waits (and, redundantly, queue) off the runs
+    // DELETE below, so no hand-written dependent delete is needed — "delete a
+    // run" means the same thing everywhere, manual psql DELETE included. The
+    // one statement that stays is this queue DELETE, taken FIRST on purpose:
+    // it is the canonical lock-order position 1 (runs.ts header). If the
+    // cascade were left to delete the queue rows from behind the runs lock, a
+    // concurrent reaper that already holds a queue row of this batch (SKIP
+    // LOCKED) could block our cascade while we hold the runs row it wants —
+    // a deadlock that the queue-first order cannot reach.
+    await client.query(`DELETE FROM queue WHERE run_id = ANY($1::text[])`, [runIds]);
 
-    // run_steps + logs go with it, in the database, by the 0007 cascade.
+    // run_steps + logs + waits go with it, in the database, by the 0007/0011
+    // cascades.
     const runs = await client.query(`DELETE FROM runs WHERE id = ANY($1::text[])`, [runIds]);
     batch.runs = num(runs.rowCount);
-
-    const waits = await client.query(`DELETE FROM waits WHERE run_id = ANY($1::text[])`, [
-      runIds,
-    ]);
-    batch.waits = num(waits.rowCount);
     return batch;
   });
 }
