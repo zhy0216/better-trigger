@@ -17,6 +17,7 @@
     "stats": "bun scripts/stats.ts",
     "notify": "bun scripts/notify.ts",
     "run-detail": "bun scripts/run-detail.ts",
+    "batch-perf": "bun scripts/batch-perf.ts",
     "constraints": "bun scripts/constraints.ts",
     "health-pool": "bun scripts/health-pool.ts",
     "concurrency": "bun scripts/concurrency.ts",

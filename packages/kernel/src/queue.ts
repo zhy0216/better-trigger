@@ -65,9 +65,29 @@ export function assertNamespaces(namespaces: readonly Namespace[]): void {
  * (and does not) travel with them.
  */
 export async function enqueue(client: PoolClient, args: EnqueueArgs): Promise<void> {
+  await enqueueMany(client, [args]);
+}
+
+/**
+ * The same INSERT as enqueue, but for many runs in ONE statement (PF5) — the
+ * batch-trigger fan-out used to cost one round trip per item, which is exactly
+ * the long-write-tx problem the batch byte cap exists for. Per-row semantics
+ * are identical to enqueue (ON CONFLICT (run_id) DO UPDATE clears a stale
+ * claim; the fencing token is untouched either way).
+ */
+export async function enqueueMany(client: PoolClient, args: EnqueueArgs[]): Promise<void> {
+  if (args.length === 0) return;
+  const start = 1;
+  const values = args
+    .map(
+      (_, i) =>
+        `($${start + i * 6}, $${start + i * 6 + 1}, $${start + i * 6 + 2}, ` +
+        `$${start + i * 6 + 3}, $${start + i * 6 + 4}, $${start + i * 6 + 5}, NULL, NULL)`,
+    )
+    .join(', ');
   await client.query(
     `INSERT INTO queue (run_id, available_at, priority, concurrency_key, project_id, env, locked_by, locked_at)
-     VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL)
+     VALUES ${values}
      ON CONFLICT (run_id) DO UPDATE
        SET available_at = EXCLUDED.available_at,
            priority     = EXCLUDED.priority,
@@ -75,14 +95,14 @@ export async function enqueue(client: PoolClient, args: EnqueueArgs): Promise<vo
            locked_by    = NULL,
            locked_at    = NULL,
            lease_until  = NULL`,
-    [
-      args.runId,
-      args.availableAt,
-      args.priority ?? 0,
-      args.concurrencyKey,
-      args.namespace.projectId,
-      args.namespace.env,
-    ],
+    args.flatMap((a) => [
+      a.runId,
+      a.availableAt,
+      a.priority ?? 0,
+      a.concurrencyKey,
+      a.namespace.projectId,
+      a.namespace.env,
+    ]),
   );
 }
 

@@ -104,6 +104,7 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_CONCURRENCY` | `5` | Concurrent execution slots |
 | `BETTER_TRIGGER_BODY_LIMIT` | `1048576` (1 MiB) | Max request body in bytes; over it the API answers `413 payload_too_large` |
 | `BETTER_TRIGGER_MAX_BATCH` | `500` | Max items in one `batchTrigger`; over it `400 bad_request` — split the fan-out |
+| `BETTER_TRIGGER_MAX_BATCH_PAYLOAD_BYTES` | `1048576` (1 MiB) | Max TOTAL serialized payload across one `batchTrigger`; over it `400 bad_request` — split the fan-out (500 items at the per-item cap would be 128 MiB in one write tx) |
 | `BETTER_TRIGGER_MAX_PAYLOAD_BYTES` | `262144` (256 KiB) | Max serialized payload per run; over it `413 payload_too_large` |
 | `BETTER_TRIGGER_STEP_OUTPUT_MAX_BYTES` | `262144` (256 KiB) | Max serialized output/error per step row; over it the step records as **failed** with a `SerializationError` diagnostic and the run fails |
 | `BETTER_TRIGGER_RUN_OUTPUT_MAX_BYTES` | `262144` (256 KiB) | Max serialized run output; over it the run fails `413 payload_too_large` |
@@ -259,6 +260,7 @@ through the environment variables in the table above:
 |---|---|---|
 | Request body | 1 MiB | `413 payload_too_large` |
 | `batchTrigger` items | 500 | `400 bad_request` |
+| Total serialized payload per `batchTrigger` | 1 MiB | `400 bad_request` |
 | Serialized payload per run | 256 KiB | `413 payload_too_large` |
 | Serialized step output / error | 256 KiB | step records **failed** with a `SerializationError` diagnostic; the run fails |
 | Serialized run output | 256 KiB | `413 payload_too_large`; the run fails |
@@ -275,11 +277,14 @@ must still land its failure even when the error text itself is enormous, so
 that is degraded rather than refused.
 
 The body cap is enforced by middleware before anything buffers the request, so
-a 500MB POST never reaches the heap. The batch cap is about the transaction:
-every item is two INSERTs inside **one** transaction, so an unbounded array
-parks a long write transaction on top of the queue rows and stalls every claim
-behind it — **fan-outs larger than the cap have to be split into batches by the
-caller**:
+a 500MB POST never reaches the heap. The batch caps are about the transaction:
+a fan-out inserts every run in ONE transaction, so an unbounded array (in item
+count OR in total payload bytes) parks a long write transaction on top of the
+queue rows and stalls every claim behind it. The kernel preloads the task
+configs once and bulk-inserts the runs and queue rows, so a 500-item batch is
+a constant handful of statements — but the caps still stand, because a long
+write tx is a long write tx however few statements it took. **Fan-outs larger
+than the caps have to be split into batches by the caller**:
 
 ```ts
 for (let i = 0; i < items.length; i += 500) {
@@ -308,6 +313,7 @@ heap behind them do not change:
 ```bash
 BETTER_TRIGGER_BODY_LIMIT=4194304 \
 BETTER_TRIGGER_MAX_BATCH=2000 \
+BETTER_TRIGGER_MAX_BATCH_PAYLOAD_BYTES=8388608 \
 BETTER_TRIGGER_MAX_PAYLOAD_BYTES=1048576 \
 BETTER_TRIGGER_RUN_OUTPUT_MAX_BYTES=1048576 better-trigger-worker
 ```

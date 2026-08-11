@@ -84,6 +84,11 @@ const HARNESSES: Harness[] = [
     what: 'notification fast-path: claim wake, waiter registry, LISTEN loss, duplicate-safety',
   },
   {
+    name: 'batch-perf',
+    file: 'batch-perf.ts',
+    what: '500-item batchTrigger is O(1) statements on a real Postgres; idempotency/cap/all-or-nothing intact (PF5)',
+  },
+  {
     name: 'constraints',
     file: 'constraints.ts',
     what: 'database-level FKs and CHECK constraints are enforced',

@@ -147,7 +147,14 @@ describe('batchTrigger item cap', () => {
       batchTrigger(refusingPool, Array.from({ length: 500 }, () => item), DEFAULT_NAMESPACE),
     ).rejects.toBe(sentinel);
     await expect(batchTrigger(refusingPool, [item], DEFAULT_NAMESPACE)).rejects.toBe(sentinel);
-    await expect(batchTrigger(refusingPool, [], DEFAULT_NAMESPACE)).rejects.toBe(sentinel);
+  });
+
+  it('treats an empty batch as a no-op that never reaches the database (PF5)', async () => {
+    // An empty VALUES list would be a syntax error inside the tx; the entry
+    // guard returns the empty result instead — no connect, no statements.
+    await expect(batchTrigger(refusingPool, [], DEFAULT_NAMESPACE)).resolves.toEqual({
+      runIds: [],
+    });
   });
 
   it('honours BETTER_TRIGGER_MAX_BATCH', async () => {

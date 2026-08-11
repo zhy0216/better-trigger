@@ -84,7 +84,10 @@ function makeClient() {
         return { rows: [], rowCount: 1 };
       }
       if (/INSERT INTO runs/.test(sql)) {
-        return { rows: [{ id: 'child_run_1' }], rowCount: 1 };
+        // Echo the pre-generated run ids back: the single path only checks
+        // rows.length, and the batch path (PF5) needs RETURNING to carry the
+        // id of each VALUES row — every 13th param, starting at the first.
+        return { rows: p.filter((_, i) => i % 13 === 0).map((id) => ({ id: String(id) })) };
       }
       if (/INSERT INTO run_steps/.test(sql)) return { rows: [], rowCount: 1 };
       if (/FROM runs/.test(sql)) return { rows: [RUNNING_ROW], rowCount: 1 };
@@ -493,6 +496,27 @@ describe('batchTriggerChild step-row failure (C3)', () => {
     // the error after commit is what stops a replay from re-creating the
     // fan-out (the executor converts it to a non-retryable AbortError).
     expect(tx).toEqual(['BEGIN', 'COMMIT']);
+  });
+
+  it('rejects an over-cap child payload BEFORE the transaction opens — zero SQL (PF5)', async () => {
+    // The whole batch is validated + serialized before the tx (same as the
+    // client-side path): a payload that cannot be stored costs no round trips
+    // and not even a connection-level BEGIN.
+    process.env.BETTER_TRIGGER_MAX_PAYLOAD_BYTES = '16';
+    const { pool, sqls, tx } = makeClient();
+    await expect(
+      batchTriggerChild(pool, {
+        runId: 'r1',
+        namespace: TEST_NS,
+        seq: 0,
+        label: 'fan',
+        items: [{ taskId: 't', payload: 'x'.repeat(100) }],
+        workerId: 'w1',
+        fencingToken: 7,
+      }),
+    ).rejects.toMatchObject({ code: 'payload_too_large' });
+    expect(tx).toEqual([]);
+    expect(sqls).toEqual([]);
   });
 
   it('returns the recorded runIds on a healthy write', async () => {

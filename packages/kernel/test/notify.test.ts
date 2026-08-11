@@ -197,12 +197,13 @@ describe('notify sources — work notifications', () => {
       handlers: [
         ...FENCED_HEAD,
         () => ({ rows: [] }), // existing step check
-        () => ({ rows: [TASK_ROW] }), // child 1 task
-        (_, params) => ({ rows: [{ id: String(params?.[0]) }] }),
-        () => ({ rows: [] }),
-        () => ({ rows: [TASK_ROW] }), // child 2 task
-        (_, params) => ({ rows: [{ id: String(params?.[0]) }] }),
-        () => ({ rows: [] }),
+        () => ({ rows: [TASK_ROW] }), // task preload (deduped: both items are t1)
+        // The multi-row runs INSERT returns the pre-generated id of each
+        // VALUES row (every 13th param, starting at the first).
+        (_, params) => ({
+          rows: (params ?? []).filter((_, i) => i % 13 === 0).map((id) => ({ id })),
+        }),
+        () => ({ rows: [] }), // enqueueMany
         () => ({ rows: [], rowCount: 1 }), // upsertStep
       ],
     });
@@ -217,6 +218,29 @@ describe('notify sources — work notifications', () => {
     expect(res.runIds).toHaveLength(2);
     expectWork(notified);
     expectNotifyIsLastStatement(texts);
+  });
+
+  it('batchTriggerChild with no items records the step row and notifies without any batch SQL', async () => {
+    const { pool, notified, texts } = stubPool({
+      handlers: [
+        ...FENCED_HEAD,
+        () => ({ rows: [] }), // existing step check
+        () => ({ rows: [], rowCount: 1 }), // upsertStep (empty runIds)
+      ],
+    });
+    const res = await batchTriggerChild(pool, {
+      runId: 'run_1',
+      namespace: DEFAULT_NAMESPACE,
+      seq: 1,
+      items: [],
+      workerId: 'w1',
+      fencingToken: 1,
+    });
+    expect(res.runIds).toEqual([]);
+    expectWork(notified);
+    expectNotifyIsLastStatement(texts);
+    // No preload / runs / queue INSERT for the empty fan-out.
+    expect(texts.some((t) => /INSERT INTO (runs|queue)/.test(t))).toBe(false);
   });
 
   it('failRun retry branch sends work only (not terminal — waiters keep waiting)', async () => {

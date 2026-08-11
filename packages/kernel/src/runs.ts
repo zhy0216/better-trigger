@@ -96,7 +96,7 @@ import {
 import { stepFingerprint } from './fingerprint';
 import { runId as genRunId } from './ids';
 import { notifyTerminal, notifyWork } from './notify';
-import { enqueue, removeFromQueue } from './queue';
+import { enqueue, enqueueMany, removeFromQueue } from './queue';
 
 /** Upper bound for a delay before a run becomes available: 10 years in ms. */
 const MAX_DELAY_MS = 315_576_000_000;
@@ -122,6 +122,13 @@ const MAX_DETAIL_PAGE = 5000;
    the queue rows and stalls every claim behind it. */
 const DEFAULT_MAX_BATCH_ITEMS = 500;
 const DEFAULT_MAX_PAYLOAD_BYTES = 256 * 1024;
+/** Total serialized payload cap for ONE batchTrigger transaction (PF5): the
+ *  per-item cap bounds one run, but 500 items at 256 KiB each would still park
+ *  128 MiB of jsonb in a single write tx — so the batch as a whole has its own
+ *  ceiling, a fraction of the theoretical max. The body cap (1 MiB) already
+ *  bounds what an HTTP caller can send, but child fan-outs (batchTriggerChild)
+ *  never cross HTTP, so the kernel must enforce it itself. */
+const DEFAULT_MAX_BATCH_PAYLOAD_BYTES = 1024 * 1024;
 
 /* Serialized-size caps for the other values that land verbatim in jsonb/text
    columns (C3): step output/error (run_steps), run output/error (runs) and
@@ -178,6 +185,10 @@ const maxBatchItems = () => envLimit('BETTER_TRIGGER_MAX_BATCH', DEFAULT_MAX_BAT
 /** Max serialized payload size for one run (BETTER_TRIGGER_MAX_PAYLOAD_BYTES). */
 const maxPayloadBytes = () =>
   envLimit('BETTER_TRIGGER_MAX_PAYLOAD_BYTES', DEFAULT_MAX_PAYLOAD_BYTES);
+/** Max TOTAL serialized payload bytes across one batchTrigger's items
+ *  (BETTER_TRIGGER_MAX_BATCH_PAYLOAD_BYTES). */
+const maxBatchPayloadBytes = () =>
+  envLimit('BETTER_TRIGGER_MAX_BATCH_PAYLOAD_BYTES', DEFAULT_MAX_BATCH_PAYLOAD_BYTES);
 /** Max serialized step output/error (BETTER_TRIGGER_STEP_OUTPUT_MAX_BYTES). */
 const stepOutputMaxBytes = () =>
   envLimit('BETTER_TRIGGER_STEP_OUTPUT_MAX_BYTES', DEFAULT_STEP_OUTPUT_MAX_BYTES);
@@ -224,6 +235,106 @@ function assertBatchSize(items: TriggerItem[]): void {
  *  4xx (serialization_error → 400, payload_too_large → 413). */
 function throwSerializeFailure(res: { ok: false; code: KernelErrorCode; message: string }): never {
   throw new KernelError(res.code, res.message);
+}
+
+/** The options every create path shares, normalized to the values the INSERTs
+ *  need. Shared by createRunIn and the batch paths (PF5) so a single trigger
+ *  and a fan-out cannot drift apart in what they accept. */
+interface ParsedRunOptions {
+  priority: number;
+  idempotencyKey: string | null;
+  concurrencyKey: string | null;
+  availableAt: Date;
+}
+
+/**
+ * Validate + normalize trigger options, throwing KernelError('bad_request') on
+ * garbage. Pure (no SQL): the batch paths run it for every item before any
+ * statement, so a refused batch costs zero round trips (PF5).
+ */
+function parseCreateRunOptions(
+  options: TriggerOptions | null | undefined,
+): ParsedRunOptions {
+  // A non-object `options` (a JSON string, an array) would otherwise have every
+  // key read as undefined — the run silently loses the caller's intent.
+  if (options != null && (typeof options !== 'object' || Array.isArray(options))) {
+    throw new KernelError('bad_request', 'options must be an object');
+  }
+  const opts = options ?? {};
+
+  // Validate priority up front (covers trigger / batch-trigger / wait-for-run /
+  // retry — all funnel through here). Must be an int32 to fit queue.priority int4.
+  if (opts.priority != null) {
+    if (
+      typeof opts.priority !== 'number' ||
+      !Number.isSafeInteger(opts.priority) ||
+      opts.priority < -2147483648 ||
+      opts.priority > 2147483647
+    ) {
+      throw new KernelError('bad_request', 'priority must be an int32');
+    }
+  }
+
+  // Same for the options that land in text columns: pg does not type-check them
+  // (it JSON.stringifies an object into the column), so a wrong-typed key would
+  // silently corrupt idempotency / concurrency grouping instead of failing.
+  // Empty strings are refused too, and not just for tidiness: `''` is falsy but
+  // non-null, so it slips between the two ways this function reads these keys —
+  // the INSERT picks its branch on truthiness (no ON CONFLICT target) while the
+  // bound value is chosen with `??` (the empty string survives as non-NULL), so
+  // a second trigger with idempotencyKey '' hits the partial unique index
+  // runs_task_idempotency_uniq without a DO NOTHING to absorb it → pg 23505,
+  // which is not a KernelError and would surface as a 500. Same class of
+  // mismatch for concurrencyKey (all '' runs silently share one group). No key
+  // has a meaningful empty spelling, so reject early rather than let it reach
+  // the database. (env/projectId are validated by assertNamespace — the run's
+  // namespace comes from args.namespace, never from these options.)
+  for (const key of ['idempotencyKey', 'concurrencyKey', 'env', 'projectId'] as const) {
+    if (opts[key] == null) continue;
+    if (typeof opts[key] !== 'string') {
+      throw new KernelError('bad_request', `${key} must be a string`);
+    }
+    if (opts[key] === '') {
+      throw new KernelError('bad_request', `${key} must not be empty`);
+    }
+  }
+
+  const priority = opts.priority ?? 0;
+
+  // parseDuration throws a plain Error on garbage ("soon", {}) — at an API
+  // boundary that is the caller's mistake, so translate it to bad_request.
+  let delayMs = 0;
+  if (opts.delay != null) {
+    try {
+      delayMs = parseDuration(opts.delay);
+    } catch {
+      throw new KernelError('bad_request', 'delay must be ms or a duration like "10m"');
+    }
+  }
+  if (delayMs > MAX_DELAY_MS) {
+    throw new KernelError('bad_request', 'delay exceeds maximum of 10 years');
+  }
+  const availableAt = new Date(Date.now() + delayMs);
+  if (Number.isNaN(availableAt.getTime())) {
+    throw new KernelError('bad_request', 'delay produces an invalid date');
+  }
+
+  return {
+    priority,
+    idempotencyKey: opts.idempotencyKey ?? null,
+    concurrencyKey: opts.concurrencyKey ?? null,
+    availableAt,
+  };
+}
+
+/**
+ * Serialize a payload for storage, throwing the stable KernelError family on
+ * failure — never a raw TypeError that would read as a 500 (C3).
+ */
+function serializePayload(payload: unknown): { json: string; bytes: number } {
+  const res = safeSerializeJson(payload ?? null, maxPayloadBytes(), 'payload');
+  if (!res.ok) throwSerializeFailure(res);
+  return { json: res.json, bytes: res.bytes };
 }
 
 /**
@@ -430,49 +541,7 @@ export async function createRunIn(
   args: CreateRunArgs,
 ): Promise<CreatedRun> {
   assertNamespace(args.namespace);
-  // A non-object `options` (a JSON string, an array) would otherwise have every
-  // key read as undefined — the run silently loses the caller's intent.
-  if (args.options != null && (typeof args.options !== 'object' || Array.isArray(args.options))) {
-    throw new KernelError('bad_request', 'options must be an object');
-  }
-  const opts = args.options ?? {};
-
-  // Validate priority up front (covers trigger / batch-trigger / wait-for-run /
-  // retry — all funnel through here). Must be an int32 to fit queue.priority int4.
-  if (opts.priority != null) {
-    if (
-      typeof opts.priority !== 'number' ||
-      !Number.isSafeInteger(opts.priority) ||
-      opts.priority < -2147483648 ||
-      opts.priority > 2147483647
-    ) {
-      throw new KernelError('bad_request', 'priority must be an int32');
-    }
-  }
-
-  // Same for the options that land in text columns: pg does not type-check them
-  // (it JSON.stringifies an object into the column), so a wrong-typed key would
-  // silently corrupt idempotency / concurrency grouping instead of failing.
-  // Empty strings are refused too, and not just for tidiness: `''` is falsy but
-  // non-null, so it slips between the two ways this function reads these keys —
-  // the INSERT picks its branch on truthiness (no ON CONFLICT target) while the
-  // bound value is chosen with `??` (the empty string survives as non-NULL), so
-  // a second trigger with idempotencyKey '' hits the partial unique index
-  // runs_task_idempotency_uniq without a DO NOTHING to absorb it → pg 23505,
-  // which is not a KernelError and would surface as a 500. Same class of
-  // mismatch for concurrencyKey (all '' runs silently share one group). No key
-  // has a meaningful empty spelling, so reject early rather than let it reach
-  // the database. (env/projectId are validated by assertNamespace — the run's
-  // namespace comes from args.namespace, never from these options.)
-  for (const key of ['idempotencyKey', 'concurrencyKey', 'env', 'projectId'] as const) {
-    if (opts[key] == null) continue;
-    if (typeof opts[key] !== 'string') {
-      throw new KernelError('bad_request', `${key} must be a string`);
-    }
-    if (opts[key] === '') {
-      throw new KernelError('bad_request', `${key} must not be empty`);
-    }
-  }
+  const parsed = parseCreateRunOptions(args.options);
 
   // Serialize the payload once, up front: it is what actually reaches pg, so it
   // is what has to be measured, and doing it before the first query means an
@@ -482,9 +551,7 @@ export async function createRunIn(
   // a 500, and an over-limit one must surface as payload_too_large, the same
   // family the HTTP body cap uses. `?? null` keeps the pre-existing meaning
   // of an undefined payload — it stores NULL.)
-  const payloadSerialized = safeSerializeJson(args.payload ?? null, maxPayloadBytes(), 'payload');
-  if (!payloadSerialized.ok) throwSerializeFailure(payloadSerialized);
-  const payloadJson = payloadSerialized.json;
+  const payloadJson = serializePayload(args.payload).json;
 
   // Resolve task config (retry policy, concurrency limit/key default, and the
   // code version currently registered for the task — stamped on the run below).
@@ -510,33 +577,16 @@ export async function createRunIn(
   const policy = resolveRetryPolicy(args.retry ?? task?.retry ?? undefined);
   const hasLimit = (task?.concurrency_limit ?? 0) > 0;
   const concurrencyKey = hasLimit
-    ? opts.concurrencyKey ?? args.taskId
-    : opts.concurrencyKey ?? null;
+    ? parsed.concurrencyKey ?? args.taskId
+    : parsed.concurrencyKey ?? null;
   // The namespace is explicit on the args — never defaulted here (C2).
   const { projectId, env } = args.namespace;
   // Resolved once and written to BOTH the runs row and the queue row: the queue
   // row is what the claim scan orders by, the runs copy is what outlives it
   // (the queue row is deleted at terminal / suspend), so a manual retry can
   // reproduce the run's scheduling config instead of silently dropping to 0.
-  const priority = opts.priority ?? 0;
-
-  // parseDuration throws a plain Error on garbage ("soon", {}) — at an API
-  // boundary that is the caller's mistake, so translate it to bad_request.
-  let delayMs = 0;
-  if (opts.delay != null) {
-    try {
-      delayMs = parseDuration(opts.delay);
-    } catch {
-      throw new KernelError('bad_request', 'delay must be ms or a duration like "10m"');
-    }
-  }
-  if (delayMs > MAX_DELAY_MS) {
-    throw new KernelError('bad_request', 'delay exceeds maximum of 10 years');
-  }
-  const availableAt = new Date(Date.now() + delayMs);
-  if (Number.isNaN(availableAt.getTime())) {
-    throw new KernelError('bad_request', 'delay produces an invalid date');
-  }
+  const priority = parsed.priority;
+  const availableAt = parsed.availableAt;
 
   const id = genRunId();
 
@@ -546,7 +596,7 @@ export async function createRunIn(
   // two independent runs (C2). INSERT ... ON CONFLICT DO NOTHING wins the race;
   // a loser gets no row back and reads the existing run. (Without a key there
   // is no conflict target, so insert plainly.)
-  const insertSql = opts.idempotencyKey
+  const insertSql = parsed.idempotencyKey !== null
     ? `INSERT INTO runs
          (id, project_id, env, task_id, status, payload, trigger_type, parent_run_id,
           idempotency_key, concurrency_key, priority, attempt, max_attempts,
@@ -571,7 +621,7 @@ export async function createRunIn(
     payloadJson,
     args.triggerType,
     args.parentRunId ?? null,
-    opts.idempotencyKey ?? null,
+    parsed.idempotencyKey,
     concurrencyKey,
     priority,
     policy.maxAttempts,
@@ -593,7 +643,7 @@ export async function createRunIn(
       `SELECT id FROM runs
         WHERE project_id = $1 AND env = $2 AND task_id = $3 AND idempotency_key = $4
         LIMIT 1`,
-      [projectId, env, args.taskId, opts.idempotencyKey],
+      [projectId, env, args.taskId, parsed.idempotencyKey],
     );
     if (existing.rows[0]) {
       return { runId: existing.rows[0].id, idempotent: true };
@@ -645,6 +695,13 @@ export async function trigger(pool: Pool, args: TriggerArgs): Promise<CreatedRun
  * Create N 'api' runs in one all-or-nothing transaction. The whole batch shares
  * one namespace — request env/project are data, and mixing namespaces inside
  * one atomic batch would make the idempotency semantics ambiguous.
+ *
+ * The whole batch is validated and serialized BEFORE the transaction opens
+ * (PF5), so a refused batch — a bad option, an over-cap payload, or a total
+ * payload over the batch byte cap — costs zero SQL and not even a connection.
+ * What survives is inserted in a constant number of statements regardless of
+ * item count: one task-config preload, one multi-row runs INSERT, one conflict
+ * readback (only when idempotency keys collide), one multi-row queue INSERT.
  */
 export async function batchTrigger(
   pool: Pool,
@@ -663,28 +720,276 @@ export async function batchTrigger(
       throw new KernelError('bad_request', 'item.taskId must be a non-empty string');
     }
   }
+  // An empty batch is a no-op, not a query: return without opening a
+  // transaction (an empty VALUES list would be a syntax error anyway, and a
+  // 500-item tx that does nothing is pure waste).
+  if (items.length === 0) return { runIds: [] };
+  const prepared = prepareBatchItems(items);
   const runIds = await withTx(pool, async (client) => {
-    const ids: string[] = [];
-    let createdAny = false;
-    for (const item of items) {
-      const created = await createRunIn(client, {
-        taskId: item.taskId,
-        payload: item.payload,
-        options: item.options,
-        triggerType: 'api',
-        namespace,
-        requireTask: true,
-      });
-      ids.push(created.runId);
-      if (!created.idempotent) createdAny = true;
-    }
+    const out = await createRunsInBatch(client, {
+      items: prepared,
+      namespace,
+      triggerType: 'api',
+      parentRunId: null,
+      requireTask: true,
+    });
     // One aggregate `work` notification for the whole batch (the payload is
     // run-id-less by design, so 500 items cost one NOTIFY, far under the
     // 8000-byte cap) — only when at least one NEW run was enqueued.
-    if (createdAny) await notifyWork(client);
-    return ids;
+    if (out.createdAny) await notifyWork(client);
+    return out.runIds;
   });
   return { runIds };
+}
+
+/* ---------------------------------------------------------------------------
+ * Batch creation core (PF5)
+ * ------------------------------------------------------------------------- */
+
+/** One batch item, validated + serialized, ready for the INSERTs. */
+interface PreparedBatchItem {
+  taskId: string;
+  /** Serialized payload — the bytes that actually reach the jsonb column. */
+  payloadJson: string;
+  priority: number;
+  idempotencyKey: string | null;
+  /** The caller's concurrencyKey option; the task's default is applied later
+   *  (it needs the preloaded task config). */
+  concurrencyKey: string | null;
+  availableAt: Date;
+}
+
+/**
+ * Validate + serialize every item of a batch, and enforce the batch's TOTAL
+ * serialized-payload cap on top of the per-item one. Pure (no SQL): a refusal
+ * anywhere — a bad option, an unserializable / over-cap payload, a total over
+ * the byte cap — costs zero round trips and, in the client path, not even a
+ * connection (PF5).
+ */
+function prepareBatchItems(items: TriggerItem[]): PreparedBatchItem[] {
+  const cap = maxBatchPayloadBytes();
+  let totalBytes = 0;
+  const prepared: PreparedBatchItem[] = [];
+  for (const item of items) {
+    const parsed = parseCreateRunOptions(item.options);
+    const payload = serializePayload(item.payload);
+    totalBytes += payload.bytes;
+    if (totalBytes > cap) {
+      throw new KernelError(
+        'bad_request',
+        `items must serialize to at most ${cap} bytes in total ` +
+          `(split larger fan-outs into batches)`,
+      );
+    }
+    prepared.push({
+      taskId: item.taskId,
+      payloadJson: payload.json,
+      priority: parsed.priority,
+      idempotencyKey: parsed.idempotencyKey,
+      concurrencyKey: parsed.concurrencyKey,
+      availableAt: parsed.availableAt,
+    });
+  }
+  return prepared;
+}
+
+/**
+ * Create all runs of a prepared batch in the caller's transaction, in a
+ * constant number of statements no matter how many items:
+ *
+ *   1. one task-config preload: `SELECT ... WHERE (project_id, env, id) IN
+ *      (VALUES ...)` over the DEDUPLICATED task ids — repeated task ids (the
+ *      same task fanning out N times) cost one row of the map, not N lookups;
+ *   2. one multi-row `INSERT INTO runs ... ON CONFLICT (...) DO NOTHING
+ *      RETURNING id` — run ids are generated client-side, so a RETURNING row
+ *      missing an item's id means idempotency conflict;
+ *   3. one batched readback `SELECT id ... IN (VALUES ...)` for exactly the
+ *      conflicted (task_id, idempotency_key) pairs — conflicts are the rare
+ *      case, and this statement only exists when there is at least one;
+ *   4. one multi-row `INSERT INTO queue ... ON CONFLICT (run_id) DO UPDATE`
+ *      for the newly created runs only (conflicts enqueue nothing, exactly
+ *      like createRunIn).
+ *
+ * Per-item semantics are identical to createRunIn: priority / availableAt /
+ * idempotencyKey / concurrencyKey (task default applied from the preload) /
+ * triggerType / parentRunId are all per item, and a missing task throws
+ * TaskNotFoundError (requireTask) — the whole tx rolls back, so the batch
+ * stays all-or-nothing. No per-item advisory lock here: the concurrency limit
+ * is enforced at claim time, this path only records concurrency_key.
+ */
+async function createRunsInBatch(
+  client: PoolClient,
+  args: {
+    items: PreparedBatchItem[];
+    namespace: Namespace;
+    triggerType: TriggerType;
+    parentRunId: string | null;
+    requireTask: boolean;
+  },
+): Promise<{ runIds: string[]; createdAny: boolean }> {
+  const { projectId, env } = args.namespace;
+
+  // Empty batch: nothing to insert. The client entry point refuses to open a
+  // transaction at all; the child entry point (batchTriggerChild) still needs
+  // the tx for its fencing + step row, so this guard only skips the batch SQL
+  // itself — an empty VALUES list would be a syntax error.
+  if (args.items.length === 0) return { runIds: [], createdAny: false };
+
+  // 1. Task config, one preload over the deduplicated task ids.
+  const taskIds = [...new Set(args.items.map((p) => p.taskId))];
+  const preloadStart = 1;
+  const preloadValues = taskIds
+    .map(
+      (_, i) =>
+        `($${preloadStart + i * 3}::text, $${preloadStart + i * 3 + 1}::text, ` +
+        `$${preloadStart + i * 3 + 2}::text)`,
+    )
+    .join(', ');
+  const taskRes = await client.query<{
+    id: string;
+    retry: RetryPolicy | null;
+    concurrency_limit: number | null;
+    latest_code_version: string | null;
+  }>(
+    `SELECT id, retry, concurrency_limit, latest_code_version
+       FROM tasks WHERE (project_id, env, id) IN (VALUES ${preloadValues})`,
+    taskIds.flatMap((id) => [projectId, env, id]),
+  );
+  const tasks = new Map(taskRes.rows.map((t) => [t.id, t]));
+
+  // 2. Resolve each item against its task and build the runs INSERT. The run id
+  // is generated here, before the statement: RETURNING alone cannot say WHICH
+  // VALUES row a returned id came from, and the idempotency readback below
+  // needs per-item identity.
+  const recoveries = maxRecoveries();
+  interface ResolvedItem {
+    runId: string;
+    concurrencyKey: string | null;
+    policy: RetryPolicy;
+    codeVersion: string | null;
+    availableAt: Date;
+    priority: number;
+    idempotencyKey: string | null;
+  }
+  const resolved: ResolvedItem[] = args.items.map((p) => {
+    const task = tasks.get(p.taskId);
+    if (!task && args.requireTask) {
+      throw new TaskNotFoundError(
+        `task ${p.taskId} not registered in ${projectId}/${env}`,
+      );
+    }
+    const hasLimit = (task?.concurrency_limit ?? 0) > 0;
+    return {
+      runId: genRunId(),
+      concurrencyKey: hasLimit ? p.concurrencyKey ?? p.taskId : p.concurrencyKey ?? null,
+      policy: resolveRetryPolicy(task?.retry ?? undefined),
+      codeVersion: task?.latest_code_version ?? null,
+      availableAt: p.availableAt,
+      priority: p.priority,
+      idempotencyKey: p.idempotencyKey,
+    };
+  });
+
+  const rowStart = 1;
+  const rowValues = resolved
+    .map((r, i) => {
+      const b = rowStart + i * 13;
+      return `($${b},$${b + 1},$${b + 2},$${b + 3},'queued',$${b + 4},$${b + 5},$${b + 6},` +
+        `$${b + 7},$${b + 8},$${b + 9},1,$${b + 10},0,$${b + 11},$${b + 12}, now(), now(), now())`;
+    })
+    .join(', ');
+  const inserted = await client.query<{ id: string }>(
+    `INSERT INTO runs
+       (id, project_id, env, task_id, status, payload, trigger_type, parent_run_id,
+        idempotency_key, concurrency_key, priority, attempt, max_attempts,
+        recoveries, max_recoveries, code_version,
+        queued_at, created_at, updated_at)
+     VALUES ${rowValues}
+     ON CONFLICT (project_id, env, task_id, idempotency_key)
+       WHERE idempotency_key IS NOT NULL DO NOTHING
+     RETURNING id`,
+    resolved.flatMap((r, i) => {
+      const p = args.items[i]!;
+      return [
+        r.runId,
+        projectId,
+        env,
+        p.taskId,
+        p.payloadJson,
+        args.triggerType,
+        args.parentRunId,
+        p.idempotencyKey,
+        r.concurrencyKey,
+        r.priority,
+        r.policy.maxAttempts,
+        recoveries,
+        r.codeVersion,
+      ];
+    }),
+  );
+
+  // 3. Idempotency conflicts: a VALUES row whose id is missing from RETURNING
+  // lost the INSERT race (or repeated a key present earlier IN THIS batch).
+  // Re-read exactly those (task_id, idempotency_key) pairs in one statement.
+  const insertedIds = new Set(inserted.rows.map((r) => r.id));
+  const existingByIdKey = new Map<string, string>();
+  const conflictPairs = resolved.flatMap((r, i) =>
+    insertedIds.has(r.runId) ? [] : [{ taskId: args.items[i]!.taskId, key: r.idempotencyKey! }],
+  );
+  if (conflictPairs.length > 0) {
+    const cb = 1;
+    const conflictValues = conflictPairs
+      .map(
+        (_, i) =>
+          `($${cb + i * 4}::text, $${cb + i * 4 + 1}::text, $${cb + i * 4 + 2}::text, ` +
+          `$${cb + i * 4 + 3}::text)`,
+      )
+      .join(', ');
+    const readback = await client.query<{
+      id: string;
+      task_id: string;
+      idempotency_key: string;
+    }>(
+      `SELECT id, task_id, idempotency_key FROM runs
+        WHERE (project_id, env, task_id, idempotency_key) IN (VALUES ${conflictValues})`,
+      conflictPairs.flatMap((p) => [projectId, env, p.taskId, p.key]),
+    );
+    for (const row of readback.rows) {
+      existingByIdKey.set(`${row.task_id}\u0000${row.idempotency_key}`, row.id);
+    }
+  }
+
+  // 4. Enqueue only the newly created runs (conflicts enqueue nothing — the
+  // original trigger already did).
+  const runIds: string[] = [];
+  const toEnqueue = [];
+  let createdAny = false;
+  for (let i = 0; i < resolved.length; i++) {
+    const r = resolved[i]!;
+    if (insertedIds.has(r.runId)) {
+      runIds.push(r.runId);
+      createdAny = true;
+      toEnqueue.push({
+        runId: r.runId,
+        availableAt: r.availableAt,
+        priority: r.priority,
+        concurrencyKey: r.concurrencyKey,
+        namespace: args.namespace,
+      });
+    } else {
+      const existingId = existingByIdKey.get(
+        `${args.items[i]!.taskId}\u0000${r.idempotencyKey}`,
+      );
+      if (!existingId) {
+        // Defensive: a DO NOTHING with no surviving row should not happen.
+        throw new Error('failed to create run');
+      }
+      runIds.push(existingId);
+    }
+  }
+  if (toEnqueue.length > 0) await enqueueMany(client, toEnqueue);
+
+  return { runIds, createdAny };
 }
 
 /* ---------------------------------------------------------------------------
@@ -1059,6 +1364,11 @@ export async function batchTriggerChild(
   // inside a task can park exactly the same long write tx on the queue.
   assertBatchSize(args.items);
   assertNamespace(args.namespace);
+  // PF5: validate + serialize the whole batch BEFORE the transaction opens, so
+  // a refused payload costs zero SQL here too (a serialization failure is a
+  // pure in-memory verdict; nothing needs to be fenced to refuse it). The
+  // fencing and step-idempotency checks stay inside the tx.
+  const prepared = prepareBatchItems(args.items);
   const outcome = await withTx(pool, async (client) => {
     const parent = await assertOwnedRunning(
       client,
@@ -1079,18 +1389,17 @@ export async function batchTriggerChild(
       if (out?.runIds) return { ok: true as const, runIds: out.runIds };
     }
 
-    const runIds: string[] = [];
-    for (const item of args.items) {
-      const child = await createRunIn(client, {
-        taskId: item.taskId,
-        payload: item.payload,
-        options: item.options,
-        triggerType: 'subtask',
-        parentRunId: args.runId,
-        namespace: { projectId: parent.project_id, env: parent.env },
-      });
-      runIds.push(child.runId);
-    }
+    // Batched creation (PF5): a constant number of statements for the whole
+    // fan-out. Like createRunIn here, a missing task row is NOT an error —
+    // "no task config" means default retry/concurrency.
+    const out = await createRunsInBatch(client, {
+      items: prepared,
+      namespace: { projectId: parent.project_id, env: parent.env },
+      triggerType: 'subtask',
+      parentRunId: args.runId,
+      requireTask: false,
+    });
+    const runIds = out.runIds;
 
     const stepOutcome = await upsertStep(client, {
       runId: args.runId,
