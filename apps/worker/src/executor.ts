@@ -24,6 +24,7 @@ import {
   durationToDate,
   isAbortError,
   isExecutionEndedSignal,
+  isNonDeterminismError,
   isSuspendSignal,
   KernelError,
   serializeError,
@@ -38,7 +39,7 @@ import {
   type TriggerItem,
   type TriggerOptions,
 } from '@better-trigger/core';
-import type { Kernel } from '@better-trigger/kernel';
+import { fnSourceHash, stepFingerprint, type Kernel } from '@better-trigger/kernel';
 import {
   RunAbortedError,
   type RunAbortReason,
@@ -298,8 +299,12 @@ export class Executor implements RunExecutor {
       run: runInfo,
       step: (label, fn, opts) => this.doStep(label, fn, opts),
       wait: {
-        for: (duration) => this.doWait('duration', durationToDate(duration)),
-        until: (date) => this.doWait('until', date),
+        // The fingerprint hashes the DECLARED wait, not the computed instant:
+        // ctx.wait.for('24h') must fingerprint as '24h' on every replay, while
+        // the absolute resumeAt is recomputed from wall-clock time each time
+        // and would drift the ledger (C1).
+        for: (duration) => this.doWait('duration', durationToDate(duration), { duration }),
+        until: (date) => this.doWait('until', date, { until: date.toISOString() }),
       },
       logger: {
         debug: (m, d) => this.log('debug', m, d),
@@ -333,13 +338,25 @@ export class Executor implements RunExecutor {
    * so a wait row arriving at a ctx.step() call is unambiguous corruption.
    * `label` is the softer one (renames are innocent, inserts are not).
    *
-   * Under replay:'strict' either mismatch aborts the run; the default stays
-   * lenient (warn + use the row) for backward compatibility.
+   * The C1 replay fingerprint is the semantic check on top: when kind + label
+   * agree, the row still only belongs to this call site if the code/inputs
+   * that recorded it produce the same signature today.
+   *
+   *   - NULL fingerprint (a ledger written before fingerprints existed, or a
+   *     wait created before this deploy) → cannot be drift-checked: replay
+   *     leniently with one compatibility notice, whatever the replay mode.
+   *   - non-NULL mismatch → the recorded output belongs to different code or
+   *     inputs: fail the run with a non-retryable AbortError REGARDLESS of
+   *     replay:'strict'. Retrying would only replay the same mismatch, and
+   *     feeding the old output to the new code is the exact failure C1 exists
+   *     to prevent — so there is no lenient reading of it. Kind/label drifts
+   *     below keep their existing strict/lenient split.
    */
   private cached(
     seq: number,
     expectedKind: StepKind,
     expectedLabel: string | null,
+    expectedFingerprint: string,
   ): StepSnapshot | undefined {
     const snap = this.snapshot.get(seq);
     if (!snap || snap.status !== 'completed') return undefined;
@@ -348,8 +365,66 @@ export class Executor implements RunExecutor {
       this.onReplayDrift(seq, `kind '${snap.kind}' → '${expectedKind}'`);
     } else if (expectedLabel != null && snap.label != null && snap.label !== expectedLabel) {
       this.onReplayDrift(seq, `label "${snap.label}" → "${expectedLabel}"`);
+    } else {
+      const stored = snap.fingerprint ?? null;
+      if (stored === null) {
+        this.onLegacyFingerprint(seq, expectedKind, expectedLabel);
+      } else if (stored !== expectedFingerprint) {
+        const what =
+          expectedKind === 'step' && expectedLabel
+            ? `step "${expectedLabel}"`
+            : `${expectedKind}${expectedLabel ? ` "${expectedLabel}"` : ''}`;
+        throw new AbortError(
+          `replay fingerprint mismatch at seq ${seq} (${what}): recorded "${stored}", ` +
+            `this call site computes "${expectedFingerprint}" — the step's code or its ` +
+            `inputs changed after it was recorded, so the recorded output is no longer ` +
+            `this code's result. task "${this.task.id}"'s run ${this.run.id} is failed ` +
+            `instead of replaying a stale step row. Retry it under a fresh run, or ` +
+            `cancel it if the work is obsolete.`,
+        );
+      }
     }
     return snap;
+  }
+
+  /**
+   * This run's ledger predates replay fingerprints (C1): the completed row at
+   * this seq has no fingerprint to compare, so replay uses it as-is. Said once
+   * per execution, not per row — one notice is the migration story, fifty is
+   * noise. Nothing needs migrating: new writes carry fingerprints, and the
+   * legacy rows simply cannot be drift-checked.
+   */
+  private legacyFingerprintNoted = false;
+
+  private onLegacyFingerprint(seq: number, kind: StepKind, label: string | null): void {
+    if (this.legacyFingerprintNoted) return;
+    this.legacyFingerprintNoted = true;
+    this.log(
+      'warn',
+      `run ${this.run.id} replays step rows recorded before replay fingerprints ` +
+        `(NULL fingerprint at seq ${seq}, ${kind}${label ? ` "${label}"` : ''}) — ` +
+        `those rows cannot be drift-checked, so their recorded output is used ` +
+        `as-is. New writes carry fingerprints; nothing needs migrating.`,
+    );
+  }
+
+  /**
+   * C1 replay fingerprint for THIS call site: primitive kind, label, the
+   * persistable inputs and the run's code version. Must be byte-identical to
+   * what the kernel recorded for the same primitive — the canonical algorithm
+   * lives in packages/kernel/src/fingerprint.ts, and the kernel write paths
+   * (suspendRun, waitForChildRun, batchTriggerChild) persist this exact value
+   * so the completed step row and the replay's comparison agree while a
+   * semantic input change (a step fn's source, a payload, the declared wait)
+   * drifts.
+   */
+  private fingerprint(kind: StepKind, label: string | null, input: unknown): string {
+    return stepFingerprint({
+      kind,
+      label,
+      input,
+      codeVersion: this.run.codeVersion,
+    });
   }
 
   /**
@@ -466,8 +541,14 @@ export class Executor implements RunExecutor {
     if (this.abandoned) throw this.endExecution();
     this.assertNotNested(`ctx.step("${label}")`);
     const seq = this.nextSeq();
+    // fn source hash is the persistable stand-in for the fn itself (its output
+    // semantics): an edited step body must not replay its old result.
+    const fp = this.fingerprint('step', label, {
+      fn: fnSourceHash(fn),
+      ...(opts !== undefined ? { opts } : {}),
+    });
 
-    const hit = this.cached(seq, 'step', label);
+    const hit = this.cached(seq, 'step', label, fp);
     if (hit) return hit.output as T;
 
     this.checkCanceled();
@@ -482,12 +563,12 @@ export class Executor implements RunExecutor {
     } catch (err) {
       // fn already threw → we are outside stepAls.run here; getStore() is
       // undefined, so onStepError's logs are not mis-attributed to this seq.
-      await this.onStepError(seq, label, 'step', err, opts?.retry, startedAt);
+      await this.onStepError(seq, label, 'step', err, opts?.retry, startedAt, fp);
       // onStepError always reports + throws; unreachable, but satisfies types.
       throw this.endExecution();
     }
 
-    await this.reportStep(seq, 'step', label, 'completed', result, startedAt);
+    await this.reportStep(seq, 'step', label, 'completed', result, startedAt, fp);
     return result;
   }
 
@@ -502,6 +583,7 @@ export class Executor implements RunExecutor {
     err: unknown,
     stepRetry: RetryPolicy | undefined,
     startedAt: string,
+    fingerprint: string,
   ): Promise<void> {
     // ctx.signal fired mid-step: the throw is the abort, not a step failure.
     this.abandonIfAborted();
@@ -521,6 +603,7 @@ export class Executor implements RunExecutor {
         attempt: this.run.attempt,
         startedAt,
         finishedAt: new Date().toISOString(),
+        fingerprint,
         workerId: this.workerId,
         fencingToken: this.run.fencingToken,
       });
@@ -558,6 +641,7 @@ export class Executor implements RunExecutor {
     status: 'completed' | 'failed',
     output: unknown,
     startedAt: string,
+    fingerprint: string,
   ): Promise<void> {
     try {
       await this.kernel.reportStep({
@@ -570,6 +654,7 @@ export class Executor implements RunExecutor {
         attempt: this.run.attempt,
         startedAt,
         finishedAt: new Date().toISOString(),
+        fingerprint,
         workerId: this.workerId,
         fencingToken: this.run.fencingToken,
       });
@@ -578,20 +663,35 @@ export class Executor implements RunExecutor {
         this.abandoned = true;
         throw this.endExecution();
       }
+      if (isNonDeterminismError(err)) {
+        // The kernel refused to overwrite a completed step row whose recorded
+        // fingerprint differs from ours: the code or its inputs changed under
+        // the ledger. Like strict replay drift, retrying would only replay the
+        // same mismatch forever — fail the run non-retryably. The kernel has
+        // already left the recorded row intact.
+        throw new AbortError(err.message);
+      }
       throw err;
     }
   }
 
   /* ---- ctx.wait -------------------------------------------------------- */
 
-  private async doWait(kind: 'duration' | 'until', resumeAt: Date): Promise<void> {
+  private async doWait(
+    kind: 'duration' | 'until',
+    resumeAt: Date,
+    declared: { duration: string | number } | { until: string },
+  ): Promise<void> {
     const what = `ctx.wait.${kind === 'duration' ? 'for' : 'until'}()`;
     await this.assertSignalNotSwallowed(what);
     if (this.abandoned) throw this.endExecution();
     this.assertNotNested(what);
     const seq = this.nextSeq();
 
-    if (this.cached(seq, 'wait', null)) return; // already resumed on a prior replay
+    // Fingerprint of the DECLARED wait — passed to suspendRun so the waits row
+    // and the completed step row carry it, and recomputed identically on replay.
+    const fp = this.fingerprint('wait', null, declared);
+    if (this.cached(seq, 'wait', null, fp)) return; // already resumed on a prior replay
     this.checkCanceled();
 
     let resumed: boolean;
@@ -601,6 +701,7 @@ export class Executor implements RunExecutor {
         seq,
         kind,
         resumeAt: resumeAt.toISOString(),
+        fingerprint: fp,
         workerId: this.workerId,
         fencingToken: this.run.fencingToken,
       });
@@ -631,7 +732,12 @@ export class Executor implements RunExecutor {
     this.assertNotNested(`triggerAndWait("${taskId}")`);
     const seq = this.nextSeq();
 
-    const hit = this.cached(seq, 'trigger-and-wait', label);
+    // Label stays NULL in the ledger row and out of the fingerprint (the row
+    // never stores it); kind + taskId + payload + options + code version is
+    // the full signature, persisted on the waits row by waitForChildRun so
+    // wakeParentIfWaiting stamps the completed step with this exact value.
+    const fp = this.fingerprint('trigger-and-wait', null, { taskId, payload, options });
+    const hit = this.cached(seq, 'trigger-and-wait', label, fp);
     if (hit) return hit.output as TaskRunResult<TOutput>;
     this.checkCanceled();
 
@@ -643,6 +749,7 @@ export class Executor implements RunExecutor {
         taskId,
         payload,
         options,
+        fingerprint: fp,
         workerId: this.workerId,
         fencingToken: this.run.fencingToken,
       });
@@ -668,7 +775,10 @@ export class Executor implements RunExecutor {
     this.assertNotNested(`trigger/batchTrigger (${label})`);
     const seq = this.nextSeq();
 
-    const hit = this.cached(seq, 'batch-trigger', label);
+    // Same items + label the kernel's batchTriggerChild fingerprints the row
+    // with — a changed fan-out must not replay the old run ids.
+    const fp = this.fingerprint('batch-trigger', label, { items });
+    const hit = this.cached(seq, 'batch-trigger', label, fp);
     if (hit) {
       const out = hit.output as { runIds?: string[] } | string[];
       return Array.isArray(out) ? out : (out.runIds ?? []);
@@ -707,7 +817,8 @@ export class Executor implements RunExecutor {
     this.assertNotNested(`ctx.${kind}()`);
     const seq = this.nextSeq();
 
-    const hit = this.cached(seq, kind, null);
+    const fp = this.fingerprint(kind, null, {});
+    const hit = this.cached(seq, kind, null, fp);
     if (hit) {
       if (kind === 'now') return new Date(hit.output as string);
       return hit.output as number | string;
@@ -728,7 +839,7 @@ export class Executor implements RunExecutor {
       stored = value;
     }
 
-    await this.reportStep(seq, kind, null, 'completed', stored, startedAt);
+    await this.reportStep(seq, kind, null, 'completed', stored, startedAt, fp);
     return value;
   }
 

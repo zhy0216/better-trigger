@@ -43,7 +43,14 @@ import type { Pool } from 'pg';
 import type { KernelLogger } from './kernel';
 import { prune } from './prune';
 import { scanStrandedRuns, type StrandedScan } from './queue';
-import { createRunIn, lockRunRow, terminalFail, tryLockRunRow, withTx } from './runs';
+import {
+  createRunIn,
+  lockRunRow,
+  terminalFail,
+  tryLockRunRow,
+  upsertStep,
+  withTx,
+} from './runs';
 
 const WORKER_OFFLINE_MS = 120_000;
 const WORKER_OFFLINE_SCAN_MS = 30_000;
@@ -242,8 +249,16 @@ export function startOrchestrator(
   /* ------------------------------------------------------------------ waits */
   async function scanWaits(): Promise<void> {
     // Phase 1 — discover due timer waits with a plain read, holding no locks.
-    const due = await pool.query<{ id: number; run_id: string; step_seq: number }>(
-      `SELECT id, run_id, step_seq
+    // fingerprint rides along: the executor computed it from the DECLARED wait
+    // (duration string / until instant) when it suspended, and the resume must
+    // stamp the completed step row with that same value (C1).
+    const due = await pool.query<{
+      id: number;
+      run_id: string;
+      step_seq: number;
+      fingerprint: string | null;
+    }>(
+      `SELECT id, run_id, step_seq, fingerprint
          FROM waits
         WHERE status = 'pending'
           AND kind IN ('duration','until')
@@ -282,14 +297,23 @@ export function startOrchestrator(
         if (!lockedWait.rows[0]) return; // already resumed/canceled, or held
 
         await client.query(`UPDATE waits SET status = 'completed' WHERE id = $1`, [w.id]);
-        await client.query(
-          `INSERT INTO run_steps
-             (run_id, seq, kind, label, status, output, attempt, started_at, finished_at)
-           VALUES ($1,$2,'wait',NULL,'completed',NULL,1, now(), now())
-           ON CONFLICT (run_id, seq) DO UPDATE
-             SET status = 'completed', finished_at = now()`,
-          [w.run_id, w.step_seq],
-        );
+        // upsertStep applies the C1 immutability rule (a completed row is never
+        // overwritten), and the fingerprint is the one the executor computed at
+        // suspend time — not something recomputed from resume_at, which would
+        // drift whenever the wait's declared duration differs from the elapsed
+        // wall-clock time.
+        await upsertStep(client, {
+          runId: w.run_id,
+          seq: w.step_seq,
+          kind: 'wait',
+          label: undefined, // the ledger row stores NULL (upsertStep binds ?? null)
+          status: 'completed',
+          output: null,
+          attempt: 1,
+          startedAt: new Date().toISOString(),
+          finishedAt: new Date().toISOString(),
+          fingerprint: w.fingerprint ?? undefined,
+        });
         await client.query(
           `UPDATE runs SET status = 'queued', updated_at = now() WHERE id = $1`,
           [w.run_id],

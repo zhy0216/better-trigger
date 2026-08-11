@@ -7,6 +7,9 @@
 export { createKernel } from './kernel';
 export type { Kernel, KernelLogger, KernelOptions } from './kernel';
 
+export { fnSourceHash, stepFingerprint } from './fingerprint';
+export type { StepFingerprintArgs } from './fingerprint';
+
 export { createOrchestratorCounters, nextCronAt } from './orchestrator';
 export type {
   OrchestratorCounters,
@@ -44,9 +47,11 @@ export type {
    codes) and the read models ARE the JSON the worker returns. */
 export {
   KernelError,
+  NonDeterminismError,
   RunNotRunningError,
   StaleLeaseError,
   TaskNotFoundError,
+  isNonDeterminismError,
 } from '@better-trigger/core';
 export type {
   CreatedRun,

@@ -116,6 +116,11 @@ export const runSteps = pgTable(
     env: text('env').notNull().default('prod'),
     kind: text('kind').notNull(),
     label: text('label'),
+    /** C1 replay fingerprint: stable hash of kind + label + persistable inputs
+     *  + the run's code version, recorded when the row is written and compared
+     *  on replay. NULL for rows written before fingerprints existed — the
+     *  executor replays those leniently (they cannot be drift-checked). */
+    fingerprint: text('fingerprint'),
     status: text('status').notNull(),
     output: jsonb('output'),
     error: jsonb('error'),
@@ -184,6 +189,11 @@ export const waits = pgTable(
     kind: text('kind').notNull(),
     resumeAt: timestamp('resume_at', { withTimezone: true }),
     childRunId: text('child_run_id'),
+    /** C1 replay fingerprint computed by the executor when the wait was
+     *  created; the resume copies it onto the completed run_steps row so the
+     *  parent's replay compares against the DECLARED wait, not a recomputed
+     *  absolute instant. */
+    fingerprint: text('fingerprint'),
     status: text('status').notNull().default('pending'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },

@@ -20,8 +20,10 @@ export { RunAbortedError, isRunAborted } from './context';
 export {
   AbortError,
   KernelError,
+  NonDeterminismError,
   SuspendSignal,
   isAbortError,
+  isNonDeterminismError,
   isSuspendSignal,
   isControlFlowSignal,
   serializeError,

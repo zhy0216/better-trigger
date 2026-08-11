@@ -132,6 +132,13 @@ export interface StepSnapshot {
   status: StepStatus;
   output?: unknown;
   error?: SerializedError;
+  /**
+   * Replay fingerprint (C1) recorded when the row was written: a stable hash of
+   * the primitive kind, label, persistable inputs and the run's code version.
+   * NULL for rows written before fingerprints existed — the executor treats
+   * those leniently (warn + use the row) since they cannot be drift-checked.
+   */
+  fingerprint?: string | null;
 }
 
 /** Returned by trigger / batchTrigger. */

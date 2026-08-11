@@ -133,7 +133,9 @@ describe('scanWaits re-enqueues a resumed run at its own priority', () => {
           // Served once — on a 20ms loop the same batch would repeat forever.
           if (scanned) return { rows: [] };
           scanned = true;
-          return { rows: [{ id: 1, run_id: 'run_1', step_seq: 1 }] };
+          // The executor's declared-wait fingerprint (C1) rides the due rows
+          // like the real phase-1 query; the resume stamps it on the step row.
+          return { rows: [{ id: 1, run_id: 'run_1', step_seq: 1, fingerprint: 'fp_wait' }] };
         }
         return { rows: [] };
       },

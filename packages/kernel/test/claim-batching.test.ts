@@ -185,6 +185,7 @@ describe('claimRuns candidate fan-out', () => {
         status: 'completed',
         output: { ok: true },
         error: undefined,
+        fingerprint: null,
       },
     ]);
 

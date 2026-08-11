@@ -305,8 +305,9 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
         status: string;
         output: unknown;
         error: unknown;
+        fingerprint: string | null;
       }>(
-        `SELECT seq, kind, label, status, output, error
+        `SELECT seq, kind, label, status, output, error, fingerprint
            FROM run_steps WHERE run_id = $1 ORDER BY seq ASC`,
         [cand.run_id],
       );
@@ -317,6 +318,7 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
         status: s.status as StepSnapshot['status'],
         output: s.output ?? undefined,
         error: (s.error as StepSnapshot['error']) ?? undefined,
+        fingerprint: s.fingerprint ?? null,
       }));
 
       claimed.push({

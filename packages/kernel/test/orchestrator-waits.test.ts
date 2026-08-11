@@ -24,6 +24,8 @@ interface DueWait {
   id: number;
   runId: string;
   stepSeq: number;
+  /** The executor's declared-wait fingerprint (C1), persisted on the waits row. */
+  fingerprint?: string | null;
 }
 
 interface StubOptions {
@@ -58,6 +60,7 @@ function stubPool(opts: StubOptions = {}) {
   const resolvedWaits = new Set(opts.resolvedWaits ?? []);
   const texts: string[] = [];
   const blockedOn: string[] = [];
+  const stepFingerprints: (string | null)[] = [];
   let scanned = false;
 
   const client = {
@@ -109,6 +112,14 @@ function stubPool(opts: StubOptions = {}) {
         return { rows: resolvedWaits.has(id) ? [] : [{ id }] };
       }
 
+      // The resume's step-row write (upsertStep): record the fingerprint slot
+      // (param 11 of the INSERT) so tests can pin the waits→run_steps carry.
+      if (/INSERT INTO run_steps/.test(text)) {
+        const fp = params?.[10];
+        stepFingerprints.push(typeof fp === 'string' ? fp : null);
+        return { rows: [], rowCount: 0 };
+      }
+
       return { rows: [] };
     },
     release: () => {},
@@ -124,14 +135,21 @@ function stubPool(opts: StubOptions = {}) {
         if (scanned) return { rows: [] };
         scanned = true;
         return {
-          rows: due.map((d) => ({ id: d.id, run_id: d.runId, step_seq: d.stepSeq })),
+          rows: due.map((d) => ({
+            id: d.id,
+            run_id: d.runId,
+            step_seq: d.stepSeq,
+            // The executor's declared-wait fingerprint (C1), carried like the
+            // real phase-1 query does.
+            fingerprint: d.fingerprint ?? null,
+          })),
         };
       }
       return { rows: [] };
     },
   } as unknown as Pool;
 
-  return { pool, texts, blockedOn };
+  return { pool, texts, blockedOn, stepFingerprints };
 }
 
 const logger = { warn: () => {}, error: () => {} };
@@ -247,5 +265,25 @@ describe('scanWaits lock acquisition', () => {
     expect(blockedOn).toEqual([]);
     expect(resumedWaitIds(texts)).toBe(0);
     expect(enqueued(texts)).toBe(0);
+  }, 10_000);
+
+  it('stamps the completed step row with the waits row fingerprint (C1), not a recomputed one', async () => {
+    const { pool, texts, stepFingerprints } = stubPool({
+      due: [{ id: 1, runId: 'run_a', stepSeq: 3, fingerprint: 'fp_declared_wait' }],
+    });
+
+    const handle = startOrchestrator(pool, logger, WAITS_ONLY);
+    try {
+      await waitFor(() => stepFingerprints.length > 0);
+    } finally {
+      handle.stop();
+    }
+
+    expect(stepFingerprints).toEqual(['fp_declared_wait']);
+    // And the write goes through the immutable upsertStep path — the SQL shape
+    // that refuses to overwrite a completed row (C1).
+    expect(
+      texts.some((t) => /INSERT INTO run_steps/.test(t) && /status <> 'completed'/.test(t)),
+    ).toBe(true);
   }, 10_000);
 });

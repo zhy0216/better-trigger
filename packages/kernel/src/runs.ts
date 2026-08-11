@@ -63,6 +63,7 @@ import type { Pool, PoolClient } from 'pg';
 import {
   computeBackoffMs,
   KernelError,
+  NonDeterminismError,
   parseDuration,
   resolveRetryPolicy,
   RunNotRunningError,
@@ -88,6 +89,7 @@ import {
   type WaitRecord,
   type WaitResult,
 } from '@better-trigger/core';
+import { stepFingerprint } from './fingerprint';
 import { runId as genRunId } from './ids';
 import { enqueue, removeFromQueue } from './queue';
 
@@ -564,12 +566,14 @@ export interface ReportStepArgs {
   attempt: number;
   startedAt: string;
   finishedAt: string;
+  /** Replay fingerprint (C1) computed by the reporter at its call site. */
+  fingerprint?: string;
   workerId: string;
   fencingToken: number;
 }
 
 /** Step-row payload without the fencing credentials. */
-type StepWriteArgs = Omit<ReportStepArgs, 'workerId' | 'fencingToken'>;
+export type StepWriteArgs = Omit<ReportStepArgs, 'workerId' | 'fencingToken'>;
 
 export async function reportStep(pool: Pool, args: ReportStepArgs): Promise<void> {
   await withTx(pool, async (client) => {
@@ -578,11 +582,34 @@ export async function reportStep(pool: Pool, args: ReportStepArgs): Promise<void
   });
 }
 
-async function upsertStep(client: PoolClient, args: StepWriteArgs): Promise<void> {
-  await client.query(
+/**
+ * Write one step row, with the C1 immutability rule:
+ *
+ *   - no existing row (or one that is NOT 'completed', e.g. a failed attempt
+ *     being retried) → insert / overwrite freely;
+ *   - existing row 'completed' → only an IDEMPOTENT re-report passes:
+ *       · fingerprints equal, or either side NULL (legacy data / legacy
+ *         reporter) → no-op, the recorded row stays byte-identical;
+ *       · both non-NULL and different → NonDeterminismError — the task's code
+ *         or inputs changed under a completed step, and replaying the recorded
+ *         output would feed stale data to the new code.
+ *
+ * Postgres cannot express "overwrite only if not completed" inside DO UPDATE
+ * alone, so the INSERT ... ON CONFLICT carries a `WHERE status <> 'completed'`
+ * guard: a conflicting completed row makes the update a no-op (rowCount 0),
+ * and the follow-up SELECT decides whether the no-op was idempotent or a
+ * non-deterministic replay. Both statements run in the caller's transaction,
+ * so the check is atomic with the write.
+ *
+ * Every step-row write funnels through here — reportStep, the wait-due resume
+ * (orchestrator) and wakeParentIfWaiting — so the immutability rule holds for
+ * all of them.
+ */
+export async function upsertStep(client: PoolClient, args: StepWriteArgs): Promise<void> {
+  const res = await client.query(
     `INSERT INTO run_steps
-       (run_id, seq, kind, label, status, output, error, attempt, started_at, finished_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       (run_id, seq, kind, label, status, output, error, attempt, started_at, finished_at, fingerprint)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      ON CONFLICT (run_id, seq) DO UPDATE
        SET kind = EXCLUDED.kind,
            label = EXCLUDED.label,
@@ -591,7 +618,9 @@ async function upsertStep(client: PoolClient, args: StepWriteArgs): Promise<void
            error = EXCLUDED.error,
            attempt = EXCLUDED.attempt,
            started_at = EXCLUDED.started_at,
-           finished_at = EXCLUDED.finished_at`,
+           finished_at = EXCLUDED.finished_at,
+           fingerprint = EXCLUDED.fingerprint
+       WHERE run_steps.status <> 'completed'`,
     [
       args.runId,
       args.seq,
@@ -603,7 +632,35 @@ async function upsertStep(client: PoolClient, args: StepWriteArgs): Promise<void
       args.attempt,
       args.startedAt,
       args.finishedAt,
+      args.fingerprint ?? null,
     ],
+  );
+  if (res.rowCount === 1) return; // inserted, or overwrote a non-completed row
+
+  // Conflict on a 'completed' row: the WHERE clause refused the update. Same
+  // transaction, so the row below is the row the INSERT conflicted with.
+  const existing = await client.query<{ status: string; fingerprint: string | null }>(
+    `SELECT status, fingerprint FROM run_steps WHERE run_id = $1 AND seq = $2`,
+    [args.runId, args.seq],
+  );
+  const row = existing.rows[0];
+  // Defensive: no row or a non-completed row means the write actually applied
+  // via a path rowCount cannot see; nothing to protect here.
+  if (!row || row.status !== 'completed') return;
+
+  const stored = row.fingerprint ?? null;
+  const incoming = args.fingerprint ?? null;
+  // NULL on either side = a ledger (or a reporter) that predates fingerprints:
+  // replay proceeds leniently, the recorded row stays untouched.
+  if (stored === null || incoming === null || stored === incoming) return;
+
+  throw new NonDeterminismError(
+    `step fingerprint mismatch at run ${args.runId} seq ${args.seq}` +
+      ` (kind '${args.kind}'${args.label ? `, label "${args.label}"` : ''}): ` +
+      `the code or its inputs changed since this step was recorded — recorded ` +
+      `fingerprint "${stored}", this report "${incoming}". The recorded step row ` +
+      `is left intact; the run must fail and be re-executed under a fresh run ` +
+      `for the new code to run.`,
   );
 }
 
@@ -617,6 +674,10 @@ export interface SuspendRunArgs {
   label?: string;
   kind: 'duration' | 'until';
   resumeAt: string;
+  /** Replay fingerprint (C1) computed by the executor from the DECLARED wait
+   *  (duration string / until instant), persisted on the waits row so the
+   *  wait-due resume writes the same value to run_steps. */
+  fingerprint?: string;
   workerId: string;
   fencingToken: number;
 }
@@ -636,7 +697,8 @@ export async function suspendRun(
     const resumeAt = new Date(args.resumeAt);
 
     if (resumeAt.getTime() <= Date.now()) {
-      // Already due — record the wait step as completed, keep running.
+      // Already due — record the wait step as completed, keep running, with
+      // the executor's fingerprint (the waits path below would carry it too).
       await upsertStep(client, {
         runId: args.runId,
         seq: args.seq,
@@ -647,14 +709,15 @@ export async function suspendRun(
         attempt: 1,
         startedAt: new Date().toISOString(),
         finishedAt: new Date().toISOString(),
+        fingerprint: args.fingerprint,
       });
       return { resumed: true };
     }
 
     await client.query(
-      `INSERT INTO waits (run_id, step_seq, kind, resume_at, status, created_at)
-       VALUES ($1,$2,$3,$4,'pending', now())`,
-      [args.runId, args.seq, args.kind, resumeAt],
+      `INSERT INTO waits (run_id, step_seq, kind, resume_at, fingerprint, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,'pending', now())`,
+      [args.runId, args.seq, args.kind, resumeAt, args.fingerprint ?? null],
     );
     await client.query(
       `UPDATE runs SET status = 'waiting', updated_at = now() WHERE id = $1`,
@@ -676,6 +739,10 @@ export interface WaitForChildRunArgs {
   taskId: string;
   payload: unknown;
   options?: TriggerOptions;
+  /** Replay fingerprint (C1) computed by the executor from taskId + payload +
+   *  options; persisted on the waits row so wakeParentIfWaiting writes the
+   *  same value to the parent's step row. */
+  fingerprint?: string;
   workerId: string;
   fencingToken: number;
 }
@@ -722,9 +789,9 @@ export async function waitForChildRun(
     });
 
     await client.query(
-      `INSERT INTO waits (run_id, step_seq, kind, child_run_id, status, created_at)
-       VALUES ($1,$2,'run',$3,'pending', now())`,
-      [args.runId, args.seq, child.runId],
+      `INSERT INTO waits (run_id, step_seq, kind, child_run_id, fingerprint, status, created_at)
+       VALUES ($1,$2,'run',$3,$4,'pending', now())`,
+      [args.runId, args.seq, child.runId, args.fingerprint ?? null],
     );
     await client.query(
       `UPDATE runs SET status = 'waiting', updated_at = now() WHERE id = $1`,
@@ -797,6 +864,12 @@ export async function batchTriggerChild(
       attempt: 1,
       startedAt: new Date().toISOString(),
       finishedAt: new Date().toISOString(),
+      fingerprint: stepFingerprint({
+        kind: 'batch-trigger',
+        label: args.label ?? null,
+        input: { items: args.items },
+        codeVersion: parent.code_version,
+      }),
     });
 
     return { runIds };
@@ -820,12 +893,16 @@ async function wakeParentIfWaiting(
 ): Promise<void> {
   // Locate the parent's pending wait WITHOUT locking it — the wait row may
   // only be locked after the parent's queue + runs rows (lock order 1→2→3).
+  // fingerprint rides along: the executor computed it (taskId + payload +
+  // options, C1) when the wait was created, and the step row must carry that
+  // exact value so the parent's replay matches it.
   const waitRes = await client.query<{
     id: number;
     run_id: string;
     step_seq: number;
+    fingerprint: string | null;
   }>(
-    `SELECT id, run_id, step_seq FROM waits
+    `SELECT id, run_id, step_seq, fingerprint FROM waits
       WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'`,
     [childRunId],
   );
@@ -850,14 +927,21 @@ async function wakeParentIfWaiting(
   if (result.output !== undefined) stepOutput.output = result.output;
   if (result.error !== undefined) stepOutput.error = result.error;
 
-  await client.query(
-    `INSERT INTO run_steps
-       (run_id, seq, kind, label, status, output, error, attempt, started_at, finished_at)
-     VALUES ($1,$2,'trigger-and-wait',NULL,'completed',$3,NULL,1, now(), now())
-     ON CONFLICT (run_id, seq) DO UPDATE
-       SET status = 'completed', output = EXCLUDED.output, finished_at = now()`,
-    [wait.run_id, wait.step_seq, JSON.stringify(stepOutput)],
-  );
+  // upsertStep applies the C1 immutability rule like any other step write: a
+  // completed row is never overwritten — an equal (or NULL-compatible)
+  // fingerprint is an idempotent no-op, a differing one rejects the write.
+  await upsertStep(client, {
+    runId: wait.run_id,
+    seq: wait.step_seq,
+    kind: 'trigger-and-wait',
+    label: undefined, // the ledger row stores NULL (upsertStep binds ?? null)
+    status: 'completed',
+    output: stepOutput,
+    attempt: 1,
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    fingerprint: wait.fingerprint ?? undefined,
+  });
 
   // Re-enqueue the parent.
   if (parent && parent.status === 'waiting') {
