@@ -287,13 +287,17 @@ export interface TaskSummary {
   filePath: string | null;
   triggerSource: TriggerSource;
   cronPattern: string | null;
+  /** Runs created within the last 24h. */
   runs24h: number;
+  /** p50 duration in ms over runs created within the last 24h (finished only). */
   p50Ms: number | null;
+  /** p95 duration in ms over runs created within the last 24h (finished only). */
   p95Ms: number | null;
-  /** 0–100; null when the task has no finished runs. */
+  /** 0–100; null when the task has no finished runs in the last 24h. */
   successRate: number | null;
   /** 12 buckets × 2h of run counts over the last 24h, oldest first. */
   trend: number[];
+  /** The task's most recent run over all history (not just the last 24h). */
   lastRunAt: string | null;
 }
 export interface TasksResponse {

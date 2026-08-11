@@ -14,10 +14,12 @@
     "replay-drift": "bun scripts/replay-drift.ts",
     "graceful-restart": "bun scripts/graceful-restart.ts",
     "retention": "bun scripts/retention.ts",
+    "stats": "bun scripts/stats.ts",
     "constraints": "bun scripts/constraints.ts",
     "concurrency": "bun scripts/concurrency.ts",
     "test:acceptance": "bun scripts/acceptance.ts",
     "bench:claim-scan": "bun scripts/claim-scan-bench.ts",
+    "bench:stats": "bun scripts/stats-bench.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

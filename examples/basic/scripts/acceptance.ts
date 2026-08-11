@@ -69,6 +69,11 @@ const HARNESSES: Harness[] = [
     what: 'prune deletes history through the foreign-key cascade',
   },
   {
+    name: 'stats',
+    file: 'stats.ts',
+    what: 'task stats aggregate only the 24h window; lastRunAt stays all-history',
+  },
+  {
     name: 'constraints',
     file: 'constraints.ts',
     what: 'database-level FKs and CHECK constraints are enforced',

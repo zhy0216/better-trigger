@@ -21,7 +21,9 @@ daemon (and the harnesses' direct-SQL assertions) ever sees `DATABASE_URL`.
 | `scripts/replay-drift.ts` + `scripts/replay-drift-tasks-v{1,2}.ts` | Mid-flight redeploy: `code_version` stamping, body fingerprinting, `replay: 'strict'` refusing a drifted ledger. |
 | `scripts/worker-lost.ts` + `scripts/worker-lost-tasks.ts` | Reaper recovery then terminal-fail: the first lost worker costs a `recovery` and not the child's only attempt, the second exhausts the recovery budget → `worker lost`, waiting parent woken with `ok: false`. |
 | `scripts/retention.ts` | Data retention through the FK cascades: a manual `DELETE FROM runs` takes steps/logs with it, the 0007 migration survives a database full of orphans, and the real `prune` CLI. |
+| `scripts/stats.ts` | The `/tasks` stats window is real: runs created 26h ago never leak into the 24h p50/p95/successRate, `lastRunAt` stays all-history, and a no-run task renders zero/null. |
 | `scripts/claim-scan-bench.ts` | Plan bench, not a correctness scenario: `EXPLAIN (ANALYZE, BUFFERS)` of the claim candidate scan over a 50k-row backlog, with and without `queue_claimable_idx`. |
+| `scripts/stats-bench.ts` | Plan bench: `EXPLAIN (ANALYZE, BUFFERS)` of the `/tasks` aggregation over ~1M runs (95% predating the 24h window), with and without `runs_created_idx`. |
 | `scripts/retention.ts` | Data retention through the FK cascades: a manual `DELETE FROM runs` takes steps/logs with it, the 0007 migration survives a database full of orphans, and the real `prune` CLI. |
 | `scripts/constraints.ts` | C5 database-level constraints: the five FKs (queue/waits.run_id cascade, `parent_run_id` + `child_run_id` SET NULL, schedules→tasks cascade) and the ten CHECK enums actually fire — a manual run delete leaves no orphan, a deleted child run's parent is failed by the orchestrator instead of stranded, an illegal status is refused with 23514, the 0011 migration cleans orphans instead of bricking daemon boots, and prune/cancel/retry keep every relation intact. |
 
@@ -81,9 +83,10 @@ bun run --filter @better-trigger/example-basic fencing       # 22 checks · db _
 bun run --filter @better-trigger/example-basic replay-drift  # 17 checks · db _drift · :4903
 bun run --filter @better-trigger/example-basic crash         # 14 checks · db _crash · :4902
 bun run --filter @better-trigger/example-basic worker-lost   #  8 checks · db _worker_lost · :4904
+bun run --filter @better-trigger/example-basic stats         #  4 checks · db _stats · :4906
 bun run --filter @better-trigger/example-basic constraints    #  8 checks · db _constraints · no daemon
 
-bun run test:acceptance                                      # all ten, one exit code
+bun run test:acceptance                                      # all eleven, one exit code
 ```
 
 `crash`, `worker-lost` and `replay-drift` run **two** daemons: an API node (no
@@ -93,13 +96,15 @@ one being killed.
 
 Each check prints `✓`/`✗` with its elapsed time and a final summary.
 
-The claim-scan bench uses the same harness but is **not** in
-`test:acceptance` — it asserts a query *plan*, not durable-execution behaviour,
-and it seeds 50k queue rows to do it. Run it by hand after touching the claim
-query or the `queue` indexes:
+The benches use the same harness but are **not** in `test:acceptance` — they
+assert a query *plan*, not durable-execution behaviour, and they seed tens of
+thousands of rows to do it. Run them by hand after touching the claim query /
+`queue` indexes, or the stats aggregation / `runs` indexes:
 
 ```bash
 bun run --filter @better-trigger/example-basic bench:claim-scan  # 3 checks · db _claim_scan · no daemon
+bun run --filter @better-trigger/example-basic bench:stats       # 3 checks · db _stats_bench · no daemon
+BT_STATS_ROWS=200000 bun run --filter @better-trigger/example-basic bench:stats  # smaller, faster
 ```
 
 ## Watch it in the dashboard

@@ -5,6 +5,7 @@
    ============================================================================= */
 import { Hono } from 'hono';
 import type { Pool } from 'pg';
+import type { Namespace } from '@better-trigger/core';
 import { KernelError, nextCronAt } from '@better-trigger/kernel';
 import type {
   HealthPoolStats,
@@ -33,6 +34,24 @@ const VERSION = '0.1.0';
 
 /** Deadline for the deep probe's SELECT 1 — a hung DB must not hang the probe. */
 const DEEP_PROBE_TIMEOUT_MS = 2000;
+
+/** Default TTL for the /tasks stats cache. The web dashboard polls /tasks
+ *  every 2s and the 24h-window aggregates cannot meaningfully change within
+ *  10s (PF1, todos/02-performance.md), so the cache absorbs the poll storm
+ *  without the dashboard ever seeing stats older than the TTL. */
+const DEFAULT_STATS_TTL_MS = 10_000;
+
+/**
+ * Read per request, like the body limit, so a test (or a reload) can flip it
+ * without re-assembly. `0` disables the cache entirely (every request
+ * re-queries).
+ */
+function statsTtlMs(): number {
+  const raw = process.env.BETTER_TRIGGER_STATS_TTL_MS;
+  if (raw === undefined || raw === '') return DEFAULT_STATS_TTL_MS;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n >= 0 ? n : DEFAULT_STATS_TTL_MS;
+}
 
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 const durationMs = (started: Date | null, finished: Date | null): number | null =>
@@ -93,6 +112,52 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
   const { pool } = deps;
   const app = new Hono();
 
+  // /tasks response cache, keyed by namespace, TTL'd via statsTtlMs(). Lives
+  // in the route closure so every createApp() gets a fresh cache (tests never
+  // see another app's entries).
+  const statsCache = new Map<string, { at: number; tasks: TaskSummary[] }>();
+  // Single-flight map for concurrent misses: requests for the same namespace
+  // that miss together share ONE load instead of each running its own (the
+  // web dashboard can fire parallel polls). The entry is removed when the
+  // promise settles — success or failure — so a failed load never poisons
+  // later requests.
+  const inFlight = new Map<string, Promise<TaskSummary[]>>();
+
+  /** Load the /tasks payload for one namespace: task list + 24h stats. */
+  async function loadTasks(namespace: Namespace): Promise<TaskSummary[]> {
+    const [taskRows, stats] = await Promise.all([
+      pool.query<{
+        id: string;
+        name: string;
+        file_path: string | null;
+        trigger_source: string;
+        cron_pattern: string | null;
+      }>(
+        `SELECT id, name, file_path, trigger_source, cron_pattern
+           FROM tasks WHERE project_id = $1 AND env = $2 ORDER BY name ASC`,
+        [namespace.projectId, namespace.env],
+      ),
+      computeTaskStats(pool, namespace),
+    ]);
+
+    return taskRows.rows.map((t) => {
+      const s = stats.get(t.id);
+      return {
+        id: t.id,
+        name: t.name,
+        filePath: t.file_path,
+        triggerSource: t.trigger_source === 'schedule' ? 'schedule' : 'api',
+        cronPattern: t.cron_pattern,
+        runs24h: s?.runs24h ?? 0,
+        p50Ms: s?.p50Ms ?? null,
+        p95Ms: s?.p95Ms ?? null,
+        successRate: s?.successRate ?? null,
+        trend: s?.trend ?? new Array<number>(12).fill(0),
+        lastRunAt: s?.lastRunAt ?? null,
+      };
+    });
+  }
+
   /* -------------------------------------------------------- health */
   /**
    * Two probes on one path:
@@ -125,37 +190,43 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
     // "single namespace by default" visibility boundary). The dashboard never
     // sees every namespace at once; ?projectId=/?env= moves the window.
     const ns = namespaceFromQuery(c);
-    const taskRows = await pool.query<{
-      id: string;
-      name: string;
-      file_path: string | null;
-      trigger_source: string;
-      cron_pattern: string | null;
-    }>(
-      `SELECT id, name, file_path, trigger_source, cron_pattern
-         FROM tasks WHERE project_id = $1 AND env = $2 ORDER BY name ASC`,
-      [ns.projectId, ns.env],
-    );
-    const stats = await computeTaskStats(pool, ns);
+    // Namespace parts may contain '/' (assertNamespace only bans ':'), so a
+    // joined key could collide: {projectId:'a/b', env:'c'} and
+    // {projectId:'a', env:'b/c'} would both produce 'a/b/c' and leak one
+    // namespace's stats into the other. JSON-encoding the pair is
+    // unambiguous, so the key can never alias.
+    const cacheKey = JSON.stringify([ns.projectId, ns.env]);
 
-    const tasks: TaskSummary[] = taskRows.rows.map((t) => {
-      const s = stats.get(t.id);
-      return {
-        id: t.id,
-        name: t.name,
-        filePath: t.file_path,
-        triggerSource: t.trigger_source === 'schedule' ? 'schedule' : 'api',
-        cronPattern: t.cron_pattern,
-        runs24h: s?.runs24h ?? 0,
-        p50Ms: s?.p50Ms ?? null,
-        p95Ms: s?.p95Ms ?? null,
-        successRate: s?.successRate ?? null,
-        trend: s?.trend ?? new Array<number>(12).fill(0),
-        lastRunAt: s?.lastRunAt ?? null,
-      };
-    });
-    const res: TasksResponse = { tasks };
-    return c.json(res);
+    // Short per-namespace cache (10s default, BETTER_TRIGGER_STATS_TTL_MS):
+    // the 24h aggregates and the task list cannot change within the TTL, and
+    // the dashboard polls every 2s — without this every poll re-runs the task
+    // list plus the runs aggregations, which grow with history when retention
+    // is off (PF1, todos/02-performance.md). A hit issues zero queries.
+    const hit = statsCache.get(cacheKey);
+    const ttlMs = statsTtlMs();
+    if (hit !== undefined && Date.now() - hit.at < ttlMs) {
+      return c.json({ tasks: hit.tasks } satisfies TasksResponse);
+    }
+
+    let pending = inFlight.get(cacheKey);
+    if (pending === undefined) {
+      pending = loadTasks(ns).finally(() => {
+        inFlight.delete(cacheKey);
+      });
+      inFlight.set(cacheKey, pending);
+    }
+    const tasks = await pending;
+
+    // Store only after the load succeeded, so a failure never poisons the
+    // cache. Namespace keys are few, but cap the map so a poller cycling many
+    // namespaces cannot grow it forever.
+    statsCache.set(cacheKey, { at: Date.now(), tasks });
+    if (statsCache.size > 64) {
+      const oldest = statsCache.keys().next().value;
+      if (oldest !== undefined) statsCache.delete(oldest);
+    }
+
+    return c.json({ tasks } satisfies TasksResponse);
   });
 
   /* ---------------------------------------------------------- runs */

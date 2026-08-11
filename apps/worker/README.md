@@ -110,6 +110,7 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_ERROR_MAX_BYTES` | `65536` (64 KiB) | Max serialized error record (message/name/stack); a larger one is stored as a `SerializationError` stub so the failure itself still lands |
 | `BETTER_TRIGGER_LOG_DATA_MAX_BYTES` | `16384` (16 KiB) | Max serialized `data` on one log line; an over-limit line keeps its message and stores `{ omitted: true, reason }` in `data` |
 | `BETTER_TRIGGER_LOG_BATCH_MAX_BYTES` | `262144` (256 KiB) | Max serialized payload of one log INSERT; a flush over it is split into more statements |
+| `BETTER_TRIGGER_STATS_TTL_MS` | `10000` | Cache TTL for `/tasks` stats (per namespace); `0` disables the cache |
 | `BETTER_TRIGGER_API_KEY` | _(unset)_ | When set, every `/api/v1/*` call (except `/health`) requires `Authorization: Bearer <key>`. Unset = local mode, no auth. |
 | `BETTER_TRIGGER_PIN_CODE_VERSION` | _(unset)_ | `1`/`true` = same as `--pin-code-version` |
 | `BETTER_TRIGGER_VERSION` | _(hashed)_ | Code version reported on registration. Defaults to a per-task hash of id + cron + `run()` source; setting it makes every task report this one value instead |
@@ -318,7 +319,7 @@ SDK also parses are aliases of the read models in `@better-trigger/core`.
 |---|---|
 | `GET /health` | `{ ok, version }` — liveness, never touches the DB (always open, no auth) |
 | `GET /health?deep=1` | readiness: `SELECT 1` (2s deadline) + `{ db, pool: { total, idle, waiting } }`; 503 when the DB does not answer. Also open — a container healthcheck has no key. This is what the image's `HEALTHCHECK` runs. |
-| `GET /tasks` | `{ tasks: TaskSummary[] }` (runs24h, p50/p95, successRate, 12×2h trend) |
+| `GET /tasks` | `{ tasks: TaskSummary[] }` (24h-window runs24h/p50/p95/successRate/trend, all-history `lastRunAt`; cached 10s per namespace) |
 | `GET /runs?env=&taskId=&status=&limit=&cursor=` | `{ runs: RunSummary[], nextCursor }` (keyset on `created_at + id`) |
 | `GET /runs/:id` | `{ run, steps, waits, logs }` (logs capped at 1000) |
 | `GET /schedules` | `{ schedules: ScheduleSummary[] }` |
@@ -332,6 +333,12 @@ pool is saturated it queues behind the work and can hit its own 2s deadline —
 a busy daemon would be killed and restarted for being busy. Liveness is the
 plain `/health`, which answers without touching Postgres for exactly this
 reason.
+
+`/tasks` stats are computed over runs **created in the last 24h** (runs24h,
+p50/p95, successRate, trend); `lastRunAt` is the task's most recent run over
+**all history**. The response is cached per namespace for 10s
+(`BETTER_TRIGGER_STATS_TTL_MS`), so the dashboard's 2s poll does not re-run
+the aggregations on every tick.
 
 ### Metrics
 
