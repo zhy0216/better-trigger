@@ -12,8 +12,9 @@
    (reaper + offline markers) alive, but claims nothing — a dashboard-only
    process. Execution requires at least one daemon started WITH tasks.
 
-   The API binds 127.0.0.1 by default — it is unauthenticated unless
-   BETTER_TRIGGER_API_KEY is set, so "local" has to mean local. --host opens
+   The API binds 127.0.0.1 by default — it is unauthenticated unless at least
+   one API key is configured (BETTER_TRIGGER_API_KEY and/or
+   BETTER_TRIGGER_API_KEYS), so "local" has to mean local. --host opens
    that up, and a non-loopback host without a key refuses to start unless
    --allow-unauthenticated says the exposure is deliberate.
 
@@ -33,7 +34,7 @@ import { createKernel, MIN_RETENTION_MS, type OrchestratorCounters } from '@bett
 import { setResultResolver } from 'better-trigger/internal';
 import { createApp } from './app';
 import { startHttpServer } from './listen';
-import { parseOriginList, setCorsOrigins } from './middleware';
+import { configuredApiKeys, parseOriginList, setCorsOrigins } from './middleware';
 import { loadTasks } from './loader';
 import { createNotifyListener, createWakeSignal, type NotifyPayload } from './notify';
 import {
@@ -107,7 +108,26 @@ Options:
 
 Env:
   DATABASE_URL             postgres://localhost:5432/better_trigger
-  BETTER_TRIGGER_API_KEY   When set, the API requires \`Authorization: Bearer <key>\`
+  BETTER_TRIGGER_API_KEY   When set, the API requires \`Authorization: Bearer <key>\`.
+                           May carry a \`@YYYY-MM-DD\` expiry suffix
+                           (e.g. sk-...@2027-01-01): past it, the key answers
+                           401 with code \`key_expired\`.
+  BETTER_TRIGGER_API_KEYS  Additional bearer keys, comma-separated (each may
+                           carry the same \`@YYYY-MM-DD\` expiry suffix). Any
+                           configured key authenticates — that is how key
+                           rotation works: add the new key here, wait for old
+                           requests to drain, then remove the old one.
+  BETTER_TRIGGER_RATE_LIMIT_RPS
+                           Per-key per-endpoint rate cap on trigger /
+                           batch-trigger / retry / cancel (default 50/s; 0
+                           disables the per-key bucket)
+  BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS
+                           Per-endpoint overall cap (default 200/s; 0 disables
+                           the global bucket). In-memory per process — put an
+                           exact fleet-wide cap at the reverse proxy
+  BETTER_TRIGGER_RATE_LIMIT_BURST
+                           Token-bucket burst capacity (default: the larger of
+                           the two rates above)
   BETTER_TRIGGER_HOST      Same as --host
   BETTER_TRIGGER_ALLOW_UNAUTHENTICATED
                            Same as --allow-unauthenticated (set to 1/true)
@@ -792,13 +812,17 @@ async function main(): Promise<void> {
   // task and read every run payload. Refuse rather than warn when nothing
   // guards it — a warning scrolls past, and the mistake is silent until it is
   // someone else's request. --allow-unauthenticated is the deliberate override.
+  // "Authenticated" means ANY configured key: the primary OR the
+  // BETTER_TRIGGER_API_KEYS list (an extras-only deployment is the normal
+  // post-rotation state, so it must count as guarded).
   const exposed = opts.serve && !isLoopbackHost(opts.host);
-  const unauthenticated = !process.env.BETTER_TRIGGER_API_KEY;
+  const unauthenticated = configuredApiKeys().length === 0;
   if (exposed && unauthenticated && !opts.allowUnauthenticated) {
     throw new Error(
-      `--host ${opts.host} exposes the API to the network but BETTER_TRIGGER_API_KEY is unset: ` +
+      `--host ${opts.host} exposes the API to the network but no API key is configured: ` +
         'anyone who can reach this port could trigger tasks and read run payloads. ' +
-        'Set BETTER_TRIGGER_API_KEY, or accept the exposure with --allow-unauthenticated ' +
+        'Set BETTER_TRIGGER_API_KEY (or add keys to BETTER_TRIGGER_API_KEYS), or accept ' +
+        'the exposure with --allow-unauthenticated ' +
         '(env BETTER_TRIGGER_ALLOW_UNAUTHENTICATED=1 where no CLI flags can be added — ' +
         'a container, for instance, where the image already sets BETTER_TRIGGER_HOST=0.0.0.0).',
     );
@@ -1021,7 +1045,8 @@ async function main(): Promise<void> {
   if (server && unauthenticated && !exposed) {
     console.log(
       `[better-trigger] API is unauthenticated: anything on this machine can call it ` +
-        `(bound to ${opts.host}). Set BETTER_TRIGGER_API_KEY to require a bearer token.`,
+        `(bound to ${opts.host}). Set BETTER_TRIGGER_API_KEY (or BETTER_TRIGGER_API_KEYS) ` +
+        `to require a bearer token.`,
     );
   }
   if (exposed && unauthenticated) {

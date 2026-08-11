@@ -30,7 +30,15 @@ export type KernelErrorCode =
    * KernelError with a stable code, not a bare transport failure.
    */
   | 'payload_too_large'
-  | 'conflict';
+  | 'conflict'
+  /**
+   * The host refused the request for hitting a rate limit — per API key or per
+   * endpoint — on one of the run-affecting routes (trigger / batch-trigger /
+   * retry / cancel), HTTP 429. Raised by the worker's rate-limit middleware;
+   * it lives in this union so clients see the same KernelError family with a
+   * stable code instead of a bare transport failure.
+   */
+  | 'rate_limited';
 
 export class KernelError extends Error {
   constructor(

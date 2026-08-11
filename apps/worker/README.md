@@ -146,7 +146,11 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_LOG_DATA_MAX_BYTES` | `16384` (16 KiB) | Max serialized `data` on one log line; an over-limit line keeps its message and stores `{ omitted: true, reason }` in `data` |
 | `BETTER_TRIGGER_LOG_BATCH_MAX_BYTES` | `262144` (256 KiB) | Max serialized payload of one log INSERT; a flush over it is split into more statements |
 | `BETTER_TRIGGER_STATS_TTL_MS` | `10000` | Cache TTL for `/tasks` stats (per namespace); `0` disables the cache |
-| `BETTER_TRIGGER_API_KEY` | _(unset)_ | When set, every `/api/v1/*` call (except `/health`) requires `Authorization: Bearer <key>`. Unset = local mode, no auth. |
+| `BETTER_TRIGGER_API_KEY` | _(unset)_ | When set, every `/api/v1/*` call (except `/health`) requires `Authorization: Bearer <key>`. Unset = local mode, no auth. The value may carry a `@<date>` expiry suffix (e.g. `sk-prod-abc@2027-01-01`): past the date the key answers `401 key_expired` |
+| `BETTER_TRIGGER_API_KEYS` | _(unset)_ | Additional bearer keys, comma-separated, each optionally carrying the same `@<date>` expiry suffix. ANY configured key authenticates — this is the rotation mechanism (see "Network exposure") |
+| `BETTER_TRIGGER_RATE_LIMIT_RPS` | `50` | Per-key per-endpoint token-bucket rate on `trigger` / `batch-trigger` / `retry` / `cancel` (tokens per second). `0` disables the per-key bucket |
+| `BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS` | `200` | Per-endpoint token-bucket rate over all keys (tokens per second). `0` disables the global bucket. In-memory per process — see "Network exposure" for the multi-daemon boundary |
+| `BETTER_TRIGGER_RATE_LIMIT_BURST` | _larger rate above_ | Token-bucket capacity (max burst) for both buckets; negative or unparseable values fall back to the default, `0` is honoured |
 | `BETTER_TRIGGER_PIN_CODE_VERSION` | _(unset)_ | `1`/`true` = same as `--pin-code-version` |
 | `BETTER_TRIGGER_VERSION` | _(build identity)_ | Code version reported on registration. Defaults to the build identity (`0.1.0+<git sha>`, the same value `/health` reports; version-only outside git); setting it overrides the worker-level version AND every per-task version at once |
 
@@ -253,6 +257,108 @@ daemon says so on boot, naming the address it is bound to, so "no auth" is a
 state you know about rather than one you forgot. When a key *is* set, the bearer
 token is compared with `crypto.timingSafeEqual` after a length check, so a
 wrong key costs the same time no matter how much of it was right.
+
+#### Multiple keys and rotation (O6)
+
+`BETTER_TRIGGER_API_KEY` keeps its single-key meaning, and
+`BETTER_TRIGGER_API_KEYS` adds more: a comma-separated list of keys, ANY of
+which authenticates (each compared in constant time). Each entry — in either
+variable — may carry an expiry suffix: `sk-prod-abc@2027-01-01` (or any date
+`new Date` accepts). Past the date the key answers `401` with code
+`key_expired` — distinct from the wrong-key `unauthorized`, so the audit log
+says *why* a credential stopped working. A key that merely contains `@` is
+kept whole; only a trailing `@<parseable-date>` is treated as expiry.
+
+Rotation is coexistence, and the coexistence is the mechanism:
+
+```bash
+# 1. add the new key alongside the old one (both authenticate now)
+BETTER_TRIGGER_API_KEY=sk-old-aaaaaaaa \
+BETTER_TRIGGER_API_KEYS=sk-new-bbbbbbbb better-trigger-worker --host 0.0.0.0
+
+# 2. wait for the old key's in-flight / long-polling requests to drain
+# 3. remove the old key — the new one keeps working, the old one stops
+BETTER_TRIGGER_API_KEY=sk-new-bbbbbbbb better-trigger-worker --host 0.0.0.0
+```
+
+Old requests are never interrupted mid-flight (the key is only checked at
+request start) and the old credential stops being accepted the moment it
+leaves the config — nothing keeps it around after removal. For scheduled
+rotation, set the suffix when the key is introduced: it expires on its own,
+and the audit trail shows `key_expired` for requests that tried it afterwards.
+
+#### Rate limiting (O6)
+
+The four endpoints that create or control runs — `POST /trigger`,
+`/batch-trigger`, `/runs/:id/cancel`, `/runs/:id/retry` — are token-bucket
+limited so a hostile or misconfigured client cannot create runs without bound.
+Two buckets are consumed per request: **per key** (one noisy client cannot
+starve its neighbours) and **per endpoint** (even several keys together cannot
+drive the endpoint past the overall cap). Over the limit is `429` with the
+standard envelope, `{ error: { code: 'rate_limited', message } }`.
+
+Knobs (see the env table): `BETTER_TRIGGER_RATE_LIMIT_RPS` (per key per
+endpoint, default 50/s), `BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS` (per endpoint
+over all keys, default 200/s), `BETTER_TRIGGER_RATE_LIMIT_BURST` (bucket
+capacity, default the larger of the two rates). `0` disables that bucket —
+e.g. set both to `0` for the pre-O6 behaviour. Reads, the dashboard, `/health`
+and `/metrics` are never limited, and neither are non-POST calls.
+
+Deliberately NOT bucketed: **IP** (behind a reverse proxy — the deployment
+this feature exists for — the socket address is the proxy's, and
+`X-Forwarded-For` is a header any client can set, so it is never trusted for
+enforcement or auditing) and **task** (the caller is already keyed; the
+per-key cap bounds what one caller can create regardless of task).
+
+The buckets are **in-memory and per process**. Several daemons behind a load
+balancer each keep their own, so this is a backstop per process rather than an
+exact fleet-wide meter — for an exact fleet-wide cap, put the limit at the
+reverse proxy (where per-IP limiting is also honest). A concurrency cap
+(max in-flight creations) was deliberately not added: the bucket already
+bounds the creation *rate*, which is the acceptance criterion, and a second
+independent cap would only add configuration surface.
+
+#### Audit log (O6)
+
+Every `/api/v1` request (except `/health` — polled by every healthcheck — and
+OPTIONS preflights) writes one structured line to stdout:
+
+```
+[audit] {"audit":true,"ts":"…","requestId":"req_ab12…","method":"POST",
+         "path":"/api/v1/trigger","endpoint":"trigger","key":"key_cd34ef56…",
+         "caller":"10.0.0.7","taskIds":["send-email"],"runIds":["run_…"],
+         "status":200,"result":"accepted","reason":null}
+```
+
+- `requestId` correlates the line with the response's `x-request-id` header
+  and with a production 500 body, which carries the same id.
+- `key` is a sha256 fingerprint of the matched API key, never the key.
+- `caller` is the TCP peer address; behind a reverse proxy it is the proxy's
+  address, and `X-Forwarded-For` is deliberately not recorded (see above).
+- `taskIds` / `runIds` come from the request and response bodies of the four
+  write endpoints (capped at 10 ids each). The **payload is never read into
+  the line** — it is the one thing an audit line must not carry — and the
+  `Authorization` header never appears either.
+- Rejections are recorded too: `status`, `result: "rejected"` and `reason`
+  (the error code — `unauthorized`, `key_expired`, `rate_limited`,
+  `bad_request`, …). The body of a rejected request is not parsed, so an
+  oversized one is not buffered just to audit it.
+
+The log is stdout, not a database table: an audit table would grow without
+bound on the same Postgres that stores runs. Pipe stdout to any log collector;
+retention of the lines is the collector's job.
+
+#### TLS, reverse proxy and database isolation
+
+The daemon speaks plain HTTP — terminate TLS at the reverse proxy
+(nginx/Caddy/Traefik/ALB) in front of it, which is also where to put
+client-IP-aware rate limits and access logging. Do not expose the daemon's
+port directly to the internet. The database is a separate boundary: **only the
+daemon** may reach Postgres — give `DATABASE_URL` no public route, keep the
+port closed to everything but the daemon's network (and your migration
+runner), and never ship the connection string to clients. The SDK never opens
+a database connection, so "app may not touch the DB" is a network rule, not a
+code rule.
 
 ### CORS
 

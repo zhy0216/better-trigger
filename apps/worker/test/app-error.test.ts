@@ -166,6 +166,7 @@ describe('STATUS_BY_CODE — the full kernel-code → HTTP-status table', () => 
     ['stale_lease', 409],
     ['conflict', 409],
     ['payload_too_large', 413],
+    ['rate_limited', 429],
   ];
 
   it.each(CODES)('maps %s → %i with the stable envelope', async (code, status) => {

@@ -11,7 +11,9 @@ import type { Pool } from 'pg';
 import type { Namespace } from '@better-trigger/core';
 import { KernelError, type Kernel, type KernelErrorCode } from '@better-trigger/kernel';
 import type { ApiErrorBody } from './types';
-import { authMiddleware, corsMiddleware } from './middleware';
+import { auditMiddleware } from './audit';
+import { authMiddleware, corsMiddleware, type AppVariables } from './middleware';
+import { rateLimitMiddleware } from './rate-limit';
 import { dashboardStatic } from './static';
 import { triggerRoutes } from './routes/trigger';
 import { runRoutes } from './routes/runs';
@@ -62,7 +64,7 @@ export interface AppDeps {
 }
 
 /** HTTP status per kernel error code; anything unknown falls through to 500. */
-const STATUS_BY_CODE: Partial<Record<KernelErrorCode, 400 | 404 | 409 | 413>> = {
+const STATUS_BY_CODE: Partial<Record<KernelErrorCode, 400 | 404 | 409 | 413 | 429>> = {
   bad_request: 400,
   serialization_error: 400,
   not_found: 404,
@@ -73,6 +75,8 @@ const STATUS_BY_CODE: Partial<Record<KernelErrorCode, 400 | 404 | 409 | 413>> = 
   // The body-limit middleware below answers 413 itself; this keeps the code
   // mapped to the same status should it ever arrive as a thrown KernelError.
   payload_too_large: 413,
+  // O6: thrown by the rate-limit middleware when a token bucket is empty.
+  rate_limited: 429,
 };
 
 /** Request body cap in bytes; 1 MiB unless BETTER_TRIGGER_BODY_LIMIT says else. */
@@ -95,11 +99,20 @@ function requestId(): string {
   return `req_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 }
 
-export function createApp(deps: AppDeps): Hono {
-  const app = new Hono();
+export function createApp(deps: AppDeps): Hono<{ Variables: AppVariables }> {
+  const app = new Hono<{ Variables: AppVariables }>();
 
   app.use('*', corsMiddleware);
+  // O6 order matters: audit is OUTERMOST so it sees every outcome — auth's
+  // 401, the rate limiter's 429, the body limit's 413, a route's throw
+  // (Hono turns it into the onError response before the chain unwinds) and
+  // the successful responses — and records them all with one requestId. The
+  // rate limiter sits AFTER auth so only authenticated callers draw from the
+  // run-creating budget, and BEFORE the body limit so a throttled request is
+  // answered without ever buffering its body.
+  app.use('/api/v1/*', auditMiddleware());
   app.use('/api/v1/*', authMiddleware());
+  app.use('/api/v1/*', rateLimitMiddleware());
 
   // Refuse an oversized body before anything buffers it: `c.req.json()` would
   // otherwise read a 500MB POST straight into the daemon's heap. Content-Length
@@ -161,7 +174,11 @@ export function createApp(deps: AppDeps): Hono {
     // goes to the log under the same id. (KernelError above is untouched —
     // those messages are ours, written for the caller.)
     if (isProduction()) {
-      const id = requestId();
+      // Reuse the audit middleware's correlation id when this request had one
+      // (every /api/v1 request does), so the 500 body, the audit line and the
+      // log line all carry the same id; fall back to a fresh one for errors
+      // that never passed the audit middleware.
+      const id = c.get('auditRequestId') ?? requestId();
       console.error(`[server] unhandled error (${id}):`, err);
       const body: ApiErrorBody = {
         error: { code: 'internal_error', message: 'internal error', requestId: id },

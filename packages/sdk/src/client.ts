@@ -52,6 +52,8 @@ const KERNEL_CODES = new Set<string>([
   'serialization_error',
   'payload_too_large',
   'conflict',
+  // O6: the daemon's rate-limit middleware (HTTP 429).
+  'rate_limited',
 ]);
 
 export interface HttpClientOptions {

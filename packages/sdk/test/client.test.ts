@@ -90,6 +90,7 @@ describe('HttpClient — error mapping', () => {
     ['serialization_error', 400],
     ['payload_too_large', 413],
     ['conflict', 409],
+    ['rate_limited', 429],
   ] as const;
 
   // The list above restates client.ts's KERNEL_CODES, which restates core's

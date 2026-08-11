@@ -43,6 +43,7 @@ function runCli(
   return new Promise((resolve, reject) => {
     const clean = { ...process.env };
     delete clean.BETTER_TRIGGER_API_KEY;
+    delete clean.BETTER_TRIGGER_API_KEYS;
     delete clean.BETTER_TRIGGER_HOST;
     delete clean.BETTER_TRIGGER_ALLOW_UNAUTHENTICATED;
     const child = spawn('bun', [MAIN, ...args], {
@@ -75,6 +76,16 @@ function runCli(
 }
 
 const TIMEOUT = 30_000;
+
+/** An OS-assigned port, released before the CLI is handed it. */
+async function freePort(): Promise<number> {
+  const server = createServer();
+  const port = await new Promise<number>((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
+  });
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
 
 describe('listen posture', () => {
   it(
@@ -175,6 +186,51 @@ describe('listen posture', () => {
       });
       expect(code).toBe(1);
       expect(out).toContain('exposes the API to the network');
+    },
+    TIMEOUT,
+  );
+
+  /* ------------------------------------------------ key configuration (O6) */
+
+  it(
+    'counts BETTER_TRIGGER_API_KEYS-only as authenticated — the post-rotation state',
+    async () => {
+      // Rotation leaves the primary key removed: the extras list alone must
+      // still count as "a key is configured", or an extras-only daemon could
+      // not bind a non-loopback host at all. (The daemon still dies at the
+      // absent database afterwards, like every other boot test here — only
+      // the output is asserted.)
+      const { out } = await runCli(['--host', '0.0.0.0'], {
+        BETTER_TRIGGER_API_KEYS: 'sk-rotated-111111111111',
+      });
+      expect(out).not.toContain('exposes the API to the network');
+      expect(out).not.toContain('BETTER_TRIGGER_API_KEY');
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'boots an extras-only daemon past the check to the listening state',
+    async () => {
+      const port = await freePort();
+      const { out } = await runCli(
+        ['--no-migrate', '--host', '0.0.0.0', '--port', String(port)],
+        { BETTER_TRIGGER_API_KEYS: 'sk-rotated-111111111111' },
+        /listening on http:/,
+      );
+      expect(out).toContain('listening on');
+      expect(out).not.toContain('API is unauthenticated');
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'counts an expired-suffix key as configured too (it still guards the API)',
+    async () => {
+      const { out } = await runCli(['--host', '0.0.0.0'], {
+        BETTER_TRIGGER_API_KEYS: 'sk-old@2000-01-01',
+      });
+      expect(out).not.toContain('exposes the API to the network');
     },
     TIMEOUT,
   );

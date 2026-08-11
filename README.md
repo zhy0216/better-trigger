@@ -158,6 +158,29 @@ without spending a retry attempt.
 says the exposure is deliberate. Browser origins are loopback-only by default;
 add others with `--cors-origin`.
 
+For deployments that are explicitly on the network, the daemon also ships the
+security edge that makes that survivable (see the
+[worker README](./apps/worker/README.md#network-exposure) for the full
+detail):
+
+- **Multiple keys + rotation** — `BETTER_TRIGGER_API_KEYS` adds keys alongside
+  the primary, each optionally carrying a `key@2030-01-01` expiry suffix
+  (past it: `401 key_expired`). Rotation is coexistence: add the new key, let
+  old requests drain, remove the old one.
+- **Rate limiting** — `trigger` / `batch-trigger` / `retry` / `cancel` are
+  token-bucket limited per key and per endpoint (defaults 50/s and 200/s,
+  knobs `BETTER_TRIGGER_RATE_LIMIT_RPS` / `_GLOBAL_RPS` / `_BURST`, `0`
+  disables), answered `429 rate_limited` — a hostile or misconfigured client
+  cannot create runs without bound. In-memory per process: for an exact
+  fleet-wide cap, rate-limit at the reverse proxy.
+- **Audit log** — one JSON line per API request to stdout (`requestId`, key
+  fingerprint, caller, task/run ids, status, rejection reason); payloads and
+  Authorization headers are never recorded, and the `requestId` doubles as the
+  production-500 correlation id and the `x-request-id` response header.
+- **TLS / proxy / DB** — terminate TLS at a reverse proxy in front of the
+  daemon, never trust `X-Forwarded-For` for enforcement, and keep Postgres
+  reachable only by the daemon; the SDK never opens a database connection.
+
 **Limits** (all overridable by env): request body 1 MiB
 (`BETTER_TRIGGER_BODY_LIMIT`, over it `413`), 500 items per `batchTrigger`
 (`BETTER_TRIGGER_MAX_BATCH`), 1 MiB of serialized payload across one

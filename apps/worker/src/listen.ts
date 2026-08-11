@@ -15,6 +15,7 @@
 import { serve, type ServerType } from '@hono/node-server';
 import type { AddressInfo } from 'node:net';
 import type { Hono } from 'hono';
+import type { Env } from 'hono';
 
 export interface ListenOptions {
   /** TCP port. 0 asks the OS for a free one (tests). */
@@ -24,8 +25,8 @@ export interface ListenOptions {
 }
 
 /** Start the HTTP server on exactly `opts.host`:`opts.port`. */
-export function startHttpServer(
-  app: Hono,
+export function startHttpServer<E extends Env>(
+  app: Hono<E>,
   opts: ListenOptions,
   onListening?: (info: AddressInfo) => void,
 ): ServerType {
