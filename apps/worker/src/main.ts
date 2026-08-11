@@ -27,15 +27,21 @@ import {
   parseDuration,
   type Namespace,
 } from '@better-trigger/core';
-import { createPool, migrate } from '@better-trigger/db';
+import { createPool, DEFAULT_DATABASE_URL, migrate } from '@better-trigger/db';
 import { createKernel, MIN_RETENTION_MS, type OrchestratorCounters } from '@better-trigger/kernel';
 import { setResultResolver } from 'better-trigger/internal';
 import { createApp } from './app';
 import { startHttpServer } from './listen';
 import { parseOriginList, setCorsOrigins } from './middleware';
 import { loadTasks } from './loader';
-import { describeError, formatCrashContext } from './observability';
+import { createNotifyListener, createWakeSignal, type NotifyPayload } from './notify';
+import {
+  createNotifyCounters,
+  describeError,
+  formatCrashContext,
+} from './observability';
 import { startWorkerRuntime, type WorkerHandle } from './runtime';
+import { createWaiterRegistry } from './waiters';
 
 const USAGE = `better-trigger-worker — durable task daemon
 
@@ -541,9 +547,19 @@ interface Daemon {
   server: { close(): void } | null;
   worker: WorkerHandle | null;
   stopOrchestrator: (() => void) | null;
+  /** The dedicated LISTEN connection + waiter registry (PF2). Stopped before
+   *  the pool: it is an independent pg.Client, which pool.end() does not
+   *  close. */
+  notify: { stop(): Promise<void> } | null;
   pool: { end(): Promise<void> } | null;
 }
-const daemon: Daemon = { server: null, worker: null, stopOrchestrator: null, pool: null };
+const daemon: Daemon = {
+  server: null,
+  worker: null,
+  stopOrchestrator: null,
+  notify: null,
+  pool: null,
+};
 
 /** One exit at a time: a second signal (or a crash mid-drain) must not restart it. */
 let exiting = false;
@@ -623,6 +639,15 @@ async function runHandoff(): Promise<void> {
     } catch (err) {
       handoffStepFailed('orchestrator', err);
       steps.push('orchestrator(failed)');
+    }
+  }
+  if (daemon.notify) {
+    try {
+      await daemon.notify.stop();
+      steps.push('notify');
+    } catch (err) {
+      handoffStepFailed('notify', err);
+      steps.push('notify(failed)');
     }
   }
   if (daemon.pool) {
@@ -773,14 +798,57 @@ async function main(): Promise<void> {
 
   const kernel = createKernel({ pool });
 
+  /* ---- notification fast-path (PF2) ------------------------------------- */
+  // One dedicated LISTEN connection (a plain pg.Client, never a pool checkout
+  // — a released client would be idle-destroyed after 10s, silently killing
+  // the LISTEN) delivers:
+  //   - `work` notifications → wake the claim loops (wake hub into runtime);
+  //   - `terminal` notifications → settle the waiter registry, but only for
+  //     namespaces this daemon serves — foreign-namespace waiters keep
+  //     polling (notifications are an optimization, never the correctness
+  //     source).
+  // The waiter registry replaces the per-request kernel waitForResult poll
+  // (one shared 1s sweep + notifications instead of ~4 QPS per waiter); its
+  // own poller is what keeps every waiter correct when the LISTEN is down.
+  const notifyCounters = createNotifyCounters();
+  const wake = createWakeSignal();
+  const waiters = createWaiterRegistry({ pool, counters: notifyCounters });
+  const notifyListener = createNotifyListener({
+    connectionString: opts.databaseUrl ?? process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
+    logger: console,
+    counters: notifyCounters,
+    onNotify: (payload: NotifyPayload) => {
+      if (payload.type === 'work') {
+        notifyCounters.claimWakes += 1;
+        wake.emit();
+        return;
+      }
+      const serving = opts.namespaces.some(
+        (ns) => ns.projectId === payload.projectId && ns.env === payload.env,
+      );
+      if (serving) void waiters.resolve(payload.runId);
+    },
+  });
+  // Both fast-path resources stop together, before the pool: the LISTEN
+  // client is an independent connection pool.end() does not close, and the
+  // registry's poll timer must not keep querying after the pool is gone.
+  daemon.notify = {
+    stop: async () => {
+      await notifyListener.stop();
+      waiters.stop(); // rejects every pending /result waiter (shutdown error)
+    },
+  };
+
   // RunHandle.result() inside a run resolves through the kernel rather than
   // looping back over this process's own HTTP surface. Handles minted inside a
   // run carry their namespace (the executor's), which is what re-scopes the
   // lookup; anything without one (a handle that lost its provenance) falls back
-  // to the default namespace rather than being refused.
+  // to the default namespace rather than being refused. The waiter registry
+  // serves it like the HTTP route, so in-process waiters share the same sweep
+  // and notifications.
   setResultResolver({
     waitForResult: (runId, namespace, o) =>
-      kernel.waitForResult(runId, namespace ?? DEFAULT_NAMESPACE, o),
+      waiters.register(runId, namespace ?? DEFAULT_NAMESPACE, o),
   });
 
   let worker: WorkerHandle | null = null;
@@ -795,6 +863,8 @@ async function main(): Promise<void> {
         // One sink for the whole daemon: the runtime's best-effort catches
         // (heartbeat / claim / execute) report here rather than nowhere.
         logger: console,
+        // PF2: `work` notifications resolve the idle claim sleeps immediately.
+        wake,
         orchestrator: {
           timerIntervalMs: opts.timerIntervalMs,
           cronIntervalMs: opts.cronIntervalMs,
@@ -856,7 +926,8 @@ async function main(): Promise<void> {
     const app = createApp({
       kernel,
       pool,
-      metrics: { worker, orchestrator: orchestratorCounters },
+      metrics: { worker, orchestrator: orchestratorCounters, notify: notifyCounters },
+      waiters,
       // The DB gauges /metrics exports are namespace-labelled per configured
       // namespace — an operator must be able to tell default/prod's queue from
       // acme/staging's (C2).

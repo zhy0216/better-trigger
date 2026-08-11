@@ -15,6 +15,7 @@ import {
   type Namespace,
   type StepSnapshot,
 } from '@better-trigger/core';
+import { notifyWork } from './notify';
 
 export interface EnqueueArgs {
   runId: string;
@@ -691,6 +692,11 @@ export async function releaseClaims(
         RETURNING run_id`,
       [args.workerId, ...runs.flatMap((r) => [r.run_id, r.project_id, r.env])],
     );
+
+    // Handed-back runs are claimable at once: wake the other daemons' claim
+    // loops inside the tx (delivered at COMMIT) so a shutdown does not park
+    // work behind their idle backoff. Harmless when nothing was released.
+    if (released.rows.length > 0) await notifyWork(client);
 
     await client.query('COMMIT');
     return { releasedRunIds: released.rows.map((r) => r.run_id) };

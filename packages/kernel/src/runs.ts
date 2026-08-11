@@ -95,6 +95,7 @@ import {
 } from '@better-trigger/core';
 import { stepFingerprint } from './fingerprint';
 import { runId as genRunId } from './ids';
+import { notifyTerminal, notifyWork } from './notify';
 import { enqueue, removeFromQueue } from './queue';
 
 /** Upper bound for a delay before a run becomes available: 10 years in ms. */
@@ -401,9 +402,17 @@ export interface CreateRunArgs {
 /**
  * Create a run + enqueue it. If options.idempotencyKey matches an existing run
  * for the same task, the existing run id is returned with idempotent=true.
+ *
+ * The `work` notification is sent inside the tx only when a NEW run was
+ * enqueued — an idempotency conflict created no work, so it notifies nothing
+ * (PF2; the notification is delivered at COMMIT, so a rollback sends nothing).
  */
 export async function createRun(pool: Pool, args: CreateRunArgs): Promise<CreatedRun> {
-  return withTx(pool, (c) => createRunIn(c, args));
+  return withTx(pool, async (c) => {
+    const created = await createRunIn(c, args);
+    if (!created.idempotent) await notifyWork(c);
+    return created;
+  });
 }
 
 export async function createRunIn(
@@ -646,6 +655,7 @@ export async function batchTrigger(
   }
   const runIds = await withTx(pool, async (client) => {
     const ids: string[] = [];
+    let createdAny = false;
     for (const item of items) {
       const created = await createRunIn(client, {
         taskId: item.taskId,
@@ -656,7 +666,12 @@ export async function batchTrigger(
         requireTask: true,
       });
       ids.push(created.runId);
+      if (!created.idempotent) createdAny = true;
     }
+    // One aggregate `work` notification for the whole batch (the payload is
+    // run-id-less by design, so 500 items cost one NOTIFY, far under the
+    // 8000-byte cap) — only when at least one NEW run was enqueued.
+    if (createdAny) await notifyWork(client);
     return ids;
   });
   return { runIds };
@@ -1003,6 +1018,10 @@ export async function waitForChildRun(
     );
     await removeFromQueue(client, args.runId, args.namespace);
 
+    // The child is new executable work — wake the claim loops from the
+    // parent's tx. The idempotent early returns above never reach this point.
+    await notifyWork(client);
+
     return { childRunId: child.runId };
   });
 }
@@ -1081,6 +1100,9 @@ export async function batchTriggerChild(
         codeVersion: parent.code_version,
       }),
     });
+    // The children are new executable work; the idempotent early return above
+    // (existing step row) never reaches this point.
+    await notifyWork(client);
     return stepOutcome.ok
       ? { ok: true as const, runIds }
       : { ok: false as const, failure: stepOutcome };
@@ -1281,6 +1303,11 @@ export async function completeRun(pool: Pool, args: CompleteRunArgs): Promise<vo
     if (run.parent_run_id) {
       await wakeParentIfWaiting(client, args.runId, { ok: true, output: args.output });
     }
+    // Terminal: result waiters wake. If a parent was woken inside the same tx,
+    // it may also be claimable again — the extra `work` notification is
+    // harmless when it was not (the claim scan just comes back empty).
+    await notifyTerminal(client, args.runId, args.namespace);
+    if (run.parent_run_id) await notifyWork(client);
   });
 }
 
@@ -1317,6 +1344,11 @@ export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult
 
     if (!willRetry) {
       await terminalFail(client, run, args.error);
+      // Terminal (no retry): wake result waiters, and the parent if there is
+      // one to wake. The extra `work` notification is harmless when no parent
+      // actually got re-enqueued.
+      await notifyTerminal(client, args.runId, args.namespace);
+      if (run.parent_run_id) await notifyWork(client);
       return { willRetry: false };
     }
 
@@ -1335,6 +1367,11 @@ export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult
         WHERE run_id = $1 AND project_id = $3 AND env = $4`,
       [args.runId, nextAt, args.namespace.projectId, args.namespace.env],
     );
+    // Retry branch: the run is NOT terminal, so waiters must keep waiting —
+    // only the claim loops get the `work` notification (the run is claimable
+    // again after its backoff; a wake before available_at just comes back
+    // empty).
+    await notifyWork(client);
     return { willRetry: true, nextAttemptAt: nextAt.toISOString() };
   });
 }
@@ -1372,6 +1409,11 @@ export async function cancelRun(
         error: { message: 'child canceled' },
       });
     }
+    // Terminal: wake result waiters (and the claim loops if a parent may have
+    // been re-enqueued — harmless when it was not). The already-terminal
+    // no-op early return above never reaches this point.
+    await notifyTerminal(client, runId, namespace);
+    if (run.parent_run_id) await notifyWork(client);
   });
 }
 
@@ -1409,6 +1451,7 @@ export async function retryRun(
       triggerType: 'retry',
       namespace,
     });
+    await notifyWork(client);
     return { runId: created.runId };
   });
 }

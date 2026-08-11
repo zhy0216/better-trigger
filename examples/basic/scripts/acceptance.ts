@@ -74,6 +74,11 @@ const HARNESSES: Harness[] = [
     what: 'task stats aggregate only the 24h window; lastRunAt stays all-history',
   },
   {
+    name: 'notify',
+    file: 'notify.ts',
+    what: 'notification fast-path: claim wake, waiter registry, LISTEN loss, duplicate-safety',
+  },
+  {
     name: 'constraints',
     file: 'constraints.ts',
     what: 'database-level FKs and CHECK constraints are enforced',

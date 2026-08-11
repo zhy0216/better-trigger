@@ -152,6 +152,33 @@ Either way, prefer `replay: 'strict'` on tasks whose ledgers matter: it turns a
 drifted replay into a terminal `AbortError` instead of a run that completes
 while reporting success for a step whose body never executed.
 
+### Notification fast-path (PF2)
+
+The daemon keeps one **dedicated LISTEN connection** (`pg.Client`, never a pool
+checkout) on a single `bt` channel. The kernel's write paths — trigger /
+batch-trigger / child creation / wait resume / cron fire / complete / fail /
+cancel / retry / reaper — run `SELECT pg_notify(...)` as the last statement of
+their transaction, so a notification is only delivered when the transaction
+actually commits. Two payload shapes, ids only:
+
+- `{ type: 'work' }` — something became claimable. The daemon wakes its idle
+  claim loops immediately instead of waiting out the 300ms→2s idle backoff.
+- `{ type: 'terminal', runId, projectId, env }` — a run reached a terminal
+  state. The daemon's **in-process waiter registry** settles every `result()`
+  waiter for that run at once.
+
+`result()` waiters (HTTP `/runs/:id/result` and in-process `RunHandle.result()`)
+go through the registry: N waiters share one 1s sweep (`WHERE id = ANY(...)`)
+plus terminal notifications, instead of N independent ~4 QPS poll loops. The
+kernel's `waitForResult` poll remains the fallback everywhere.
+
+Notifications are a **latency optimization, never a correctness source**: every
+consumer keeps its polling fallback, the LISTEN connection re-establishes
+itself with backoff (and re-issues LISTEN) after a drop, and terminal
+notifications are ignored for namespaces this daemon does not serve. The
+relevant metrics are `notifications_received_total`, `listen_reconnects_total`,
+`waiter_resolutions_total`, `waiter_timeouts_total` and `claim_wakes_total`.
+
 ### Network exposure
 
 The daemon binds `127.0.0.1`, so out of the box only this machine can reach it.
@@ -361,6 +388,11 @@ their errors have been swallowing them all afternoon. Everything is prefixed
 | `orchestrator_errors_total{loop}` | counter | Background loop iterations that threw |
 | `stranded_runs` | gauge | Due runs pinned to a code version no online worker serves. `0` unless `--pin-code-version` is on — **alert on this one** |
 | `stranded_runs_by_version{task_id,code_version}` | gauge | Which build has to come back. Present only while something is stranded |
+| `notifications_received_total` | counter | pg_notify messages received on the `bt` channel (the notification fast-path) |
+| `listen_reconnects_total` | counter | Times the LISTEN connection dropped and re-established itself |
+| `waiter_resolutions_total` | counter | `result()` waiters settled by the in-process registry |
+| `waiter_timeouts_total` | counter | `result()` waiters that hit their deadline (latest non-terminal status) |
+| `claim_wakes_total` | counter | Times a work notification woke the idle claim loops |
 
 Two gauges come from one SQL round trip (2s deadline); everything else is a
 live in-process counter, so a scrape stays cheap. The endpoint answers `200`

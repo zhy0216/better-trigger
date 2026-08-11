@@ -24,6 +24,7 @@ import {
   type ResolvedTaskDefinition,
 } from 'better-trigger/internal';
 import { Executor } from './executor';
+import { sleepWithWake, type WakeSignal } from './notify';
 import {
   createThrottledLogger,
   createWorkerCounters,
@@ -98,6 +99,14 @@ export interface WorkerDeps {
   /** Daemon-level default retry, inherited by task definitions without their
    *  own (feeds both registration manifests and executor-side backoff). */
   defaultRetry?: RetryPolicy;
+  /**
+   * PF2: the process-level claim-wake signal. A `work` notification from the
+   * daemon's LISTEN connection emits on it, which resolves the idle claim
+   * loops' backoff sleeps immediately instead of waiting out 300ms→2s. Absent
+   * (embedded hosts, tests) → plain polling backoff, which stays the
+   * correctness fallback either way.
+   */
+  wake?: WakeSignal | null;
   /** Invoked after all loops stop (any stop path). */
   onStopped?: () => Promise<void>;
 }
@@ -251,8 +260,12 @@ export async function startWorkerRuntime(
       }
 
       if (!run) {
-        // Nothing due: exponential idle backoff 300ms → 2s, ± jitter.
-        await sleep(jittered(idleBackoff));
+        // Nothing due: exponential idle backoff 300ms → 2s, ± jitter. A `work`
+        // notification (PF2) resolves the sleep early when a new run was
+        // enqueued elsewhere, so a fresh trigger is not parked behind the
+        // backoff; the sleep alone remains the fallback when the LISTEN
+        // connection is down.
+        await sleepWithWake(jittered(idleBackoff), deps.wake ?? null);
         idleBackoff = Math.min(IDLE_POLL_MAX_MS, idleBackoff * 2);
         continue;
       }

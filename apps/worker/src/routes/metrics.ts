@@ -32,7 +32,12 @@ import {
   createOrchestratorCounters,
   type OrchestratorCounters,
 } from '@better-trigger/kernel';
-import { createWorkerCounters, type WorkerCounters } from '../observability';
+import {
+  createNotifyCounters,
+  createWorkerCounters,
+  type NotifyCounters,
+  type WorkerCounters,
+} from '../observability';
 
 /** Every metric name is emitted under this prefix; see renderMetrics. */
 const PREFIX = 'better_trigger_';
@@ -55,6 +60,9 @@ export interface MetricsSources {
   /** Orchestrator loop counters — the worker's, or the bookkeeping-only
    *  orchestrator an API-only process starts for itself. */
   orchestrator?: OrchestratorCounters | null;
+  /** Notification fast-path counters (PF2) — the LISTEN connection's
+   *  deliveries and reconnects, and how many waiters/claim sleeps it settled. */
+  notify?: NotifyCounters | null;
 }
 
 export type MetricType = 'counter' | 'gauge';
@@ -272,6 +280,7 @@ export async function collectMetrics(
   const worker = sources.worker ?? null;
   const counters = worker?.counters ?? createWorkerCounters();
   const orchestrator = sources.orchestrator ?? createOrchestratorCounters();
+  const notify = sources.notify ?? createNotifyCounters();
   const gauges = await gaugesOrNull(pool, namespaces);
 
   const families: MetricFamily[] = [
@@ -400,6 +409,36 @@ export async function collectMetrics(
       samples: [
         { value: orchestrator.stranded.groups.reduce((n, g) => n + g.count, 0) },
       ],
+    },
+    {
+      name: 'notifications_received_total',
+      help: 'pg_notify messages this daemon received on the bt channel (PF2 notification fast-path).',
+      type: 'counter',
+      samples: [{ value: notify.notificationsReceived }],
+    },
+    {
+      name: 'listen_reconnects_total',
+      help: 'Times the LISTEN connection dropped and re-established itself. Polling covers the gap, so a high rate means an unstable database link rather than lost correctness.',
+      type: 'counter',
+      samples: [{ value: notify.listenReconnects }],
+    },
+    {
+      name: 'waiter_resolutions_total',
+      help: 'Result waiters settled by the in-process registry: reached a terminal state, or the run vanished (not_found).',
+      type: 'counter',
+      samples: [{ value: notify.waiterResolutions }],
+    },
+    {
+      name: 'waiter_timeouts_total',
+      help: 'Result waiters that hit their deadline and returned the latest non-terminal status.',
+      type: 'counter',
+      samples: [{ value: notify.waiterTimeouts }],
+    },
+    {
+      name: 'claim_wakes_total',
+      help: 'Times a work notification woke the idle claim loops instead of waiting out the idle backoff.',
+      type: 'counter',
+      samples: [{ value: notify.claimWakes }],
     },
   );
 

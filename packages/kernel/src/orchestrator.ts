@@ -61,6 +61,7 @@ import {
   upsertStep,
   withTx,
 } from './runs';
+import { notifyTerminal, notifyWork } from './notify';
 
 const WORKER_OFFLINE_MS = 120_000;
 const WORKER_OFFLINE_SCAN_MS = 30_000;
@@ -377,6 +378,10 @@ export function startOrchestrator(
                 `child run was deleted before it finished (waits.child_run_id is NULL) — ` +
                 `no result can ever arrive; parent failed`,
             });
+            // The wait's run went terminal: wake its result waiters, and the
+            // claim loops if it may have woken a parent of its own.
+            await notifyTerminal(client, w.run_id, wNs);
+            if (run.parent_run_id) await notifyWork(client);
           } else {
             // Defensive: a run that is not 'waiting' cannot be stranded by its
             // wait — never clobber its state, just retire the stale wait row.
@@ -438,6 +443,10 @@ export function startOrchestrator(
              SET available_at = now(), locked_by = NULL, locked_at = NULL, lease_until = NULL`,
           [w.run_id, wNs.projectId, wNs.env, run.priority, run.concurrency_key],
         );
+        // The resumed run is claimable again — wake the claim loops. This is
+        // the "resume → work" notification PF2 asks for; a resume that rolled
+        // back (or an early no-op return above) sends nothing.
+        await notifyWork(client);
       });
     }
   }
@@ -487,6 +496,9 @@ export function startOrchestrator(
           [s.id, created.runId, next, s.project_id, s.env],
         );
       }
+      // At least one schedule fired in this tx → wake the claim loops with a
+      // single aggregate `work` notification (see runs.ts batchTrigger).
+      if (due.rows.length > 0) await notifyWork(client);
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
@@ -501,9 +513,13 @@ export function startOrchestrator(
     const client = await pool.connect();
     // Tallied locally and folded into the shared counters only after COMMIT —
     // a tx that rolls back recovered nothing, and a metric that counts the
-    // attempt would report recoveries that never happened.
+    // attempt would report recoveries that never happened. Same for the
+    // notifications: they are sent inside the tx, so a rollback delivers none.
     let requeued = 0;
     let failed = 0;
+    // (runId, namespace, hasParent) of the runs this tick failed terminally —
+    // for the per-run `terminal` notifications sent before COMMIT.
+    const failedTerminal: Array<{ runId: string; qNs: Namespace; hasParent: boolean }> = [];
     try {
       await client.query('BEGIN');
       const stale = await client.query<{
@@ -564,6 +580,7 @@ export function startOrchestrator(
               `attempt ${run.attempt}/${run.max_attempts} unaffected)`,
           });
           failed += 1;
+          failedTerminal.push({ runId: q.run_id, qNs, hasParent: run.parent_run_id !== null });
         } else {
           await client.query(
             `UPDATE runs
@@ -581,6 +598,14 @@ export function startOrchestrator(
           );
           requeued += 1;
         }
+      }
+      // Inside the tx, so only a COMMIT delivers them: requeued runs are
+      // claimable again (`work`), worker-lost runs went terminal (`terminal`,
+      // plus `work` when the terminal-fail woke a waiting parent).
+      if (requeued > 0) await notifyWork(client);
+      for (const t of failedTerminal) {
+        await notifyTerminal(client, t.runId, t.qNs);
+        if (t.hasParent) await notifyWork(client);
       }
       await client.query('COMMIT');
       counters.reaperRequeued += requeued;

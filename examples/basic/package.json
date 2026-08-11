@@ -15,6 +15,7 @@
     "graceful-restart": "bun scripts/graceful-restart.ts",
     "retention": "bun scripts/retention.ts",
     "stats": "bun scripts/stats.ts",
+    "notify": "bun scripts/notify.ts",
     "constraints": "bun scripts/constraints.ts",
     "concurrency": "bun scripts/concurrency.ts",
     "test:acceptance": "bun scripts/acceptance.ts",

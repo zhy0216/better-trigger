@@ -16,6 +16,7 @@ import { triggerRoutes } from './routes/trigger';
 import { runRoutes } from './routes/runs';
 import { dashboardRoutes } from './routes/dashboard';
 import { metricsRoutes, type MetricsSources } from './routes/metrics';
+import type { WaiterRegistry } from './waiters';
 
 export interface AppDeps {
   /** The kernel backing trigger/cancel/retry (owned by the caller). */
@@ -26,6 +27,12 @@ export interface AppDeps {
    *  when the caller has neither (an embedded app, a test): the endpoint then
    *  reports the database gauges and zeros. */
   metrics?: MetricsSources;
+  /**
+   * PF2: the in-process result-waiter registry, when the caller owns one (the
+   * daemon does). /result then waits through it — one shared 1s sweep plus
+   * terminal notifications — instead of one kernel poll loop per request.
+   */
+  waiters?: WaiterRegistry;
   /** Namespaces this daemon serves — /metrics labels its queue/in-flight
    *  gauges per namespace with these. Absent → default/prod. */
   namespaces?: readonly Namespace[];
@@ -95,7 +102,7 @@ export function createApp(deps: AppDeps): Hono {
 
   const v1 = new Hono();
   v1.route('/', triggerRoutes(deps));
-  v1.route('/', runRoutes(deps));
+  v1.route('/', runRoutes({ kernel: deps.kernel, waiters: deps.waiters }));
   v1.route('/', dashboardRoutes(deps));
   v1.route('/', metricsRoutes({ pool: deps.pool, metrics: deps.metrics, namespaces: deps.namespaces }));
 

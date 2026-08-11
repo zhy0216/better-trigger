@@ -8,12 +8,13 @@
 import { Hono } from 'hono';
 import type { Kernel } from '@better-trigger/kernel';
 import type { OkResponse, RetryRunResponse } from '../types';
+import type { WaiterRegistry } from '../waiters';
 import { namespaceFromQuery } from '../namespace';
 
 /** Upper bound on a single long-poll, so a request cannot outlive a proxy. */
 const MAX_RESULT_WAIT_MS = 30_000;
 
-export function runRoutes(deps: { kernel: Kernel }): Hono {
+export function runRoutes(deps: { kernel: Kernel; waiters?: WaiterRegistry }): Hono {
   const { kernel } = deps;
   const app = new Hono();
 
@@ -52,7 +53,15 @@ export function runRoutes(deps: { kernel: Kernel }): Hono {
     const id = c.req.param('id');
     const timeoutMs = clampQuery(c.req.query('timeoutMs'), 0, MAX_RESULT_WAIT_MS, 5_000);
     const pollMs = clampQuery(c.req.query('pollMs'), 50, 5_000, 250);
-    const result = await kernel.waitForResult(id, namespaceFromQuery(c), { timeoutMs, pollMs });
+    const namespace = namespaceFromQuery(c);
+    const opts = { timeoutMs, pollMs };
+    // PF2: with an in-process waiter registry, N concurrent waiters share one
+    // 1s sweep (plus terminal notifications) instead of N independent 4-QPS
+    // poll loops. The kernel poll stays as the fallback for embedded hosts
+    // that do not own a registry.
+    const result = deps.waiters
+      ? await deps.waiters.register(id, namespace, opts)
+      : await kernel.waitForResult(id, namespace, opts);
     return c.json(result);
   });
 

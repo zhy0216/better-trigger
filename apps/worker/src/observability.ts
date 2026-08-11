@@ -132,6 +132,37 @@ export function createWorkerCounters(): WorkerCounters {
 }
 
 /**
+ * Counters for the notification fast-path (PF2, todos/02-performance.md):
+ * how much the LISTEN connection delivers, how often it had to re-establish
+ * itself, and how many result waiters / claim sleeps it settled instead of a
+ * poll. Plain monotonic totals on a plain object, like WorkerCounters — the
+ * metrics route reads them live, no registry.
+ */
+export interface NotifyCounters {
+  /** pg_notify messages received on the bt channel (any payload). */
+  notificationsReceived: number;
+  /** Times the LISTEN connection dropped and had to re-establish itself. */
+  listenReconnects: number;
+  /** Result waiters settled by the in-process registry (terminal, or the run
+   *  vanished). */
+  waiterResolutions: number;
+  /** Result waiters that hit their deadline (latest non-terminal status). */
+  waiterTimeouts: number;
+  /** Work notifications that woke the idle claim loops. */
+  claimWakes: number;
+}
+
+export function createNotifyCounters(): NotifyCounters {
+  return {
+    notificationsReceived: 0,
+    listenReconnects: 0,
+    waiterResolutions: 0,
+    waiterTimeouts: 0,
+    claimWakes: 0,
+  };
+}
+
+/**
  * The line a fatal fault leaves behind (main.ts's crash handlers). Which worker
  * died, and what it was executing when it did: those run ids are the runs that
  * stay 'running' until the lease reaper picks them up, and once the process is

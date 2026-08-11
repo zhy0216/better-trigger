@@ -22,6 +22,7 @@ daemon (and the harnesses' direct-SQL assertions) ever sees `DATABASE_URL`.
 | `scripts/worker-lost.ts` + `scripts/worker-lost-tasks.ts` | Reaper recovery then terminal-fail: the first lost worker costs a `recovery` and not the child's only attempt, the second exhausts the recovery budget → `worker lost`, waiting parent woken with `ok: false`. |
 | `scripts/retention.ts` | Data retention through the FK cascades: a manual `DELETE FROM runs` takes steps/logs with it, the 0007 migration survives a database full of orphans, and the real `prune` CLI. |
 | `scripts/stats.ts` | The `/tasks` stats window is real: runs created 26h ago never leak into the 24h p50/p95/successRate, `lastRunAt` stays all-history, and a no-run task renders zero/null. |
+| `scripts/notify.ts` + `scripts/notify-tasks.ts` | The notification fast-path (PF2): a fresh run is claimed without the idle backoff, 8 concurrent `result()` waiters settle through the in-process registry, killing the daemons' LISTEN backends degrades to polling and reconnects, and duplicate notifications never duplicate a run. |
 | `scripts/claim-scan-bench.ts` | Plan bench, not a correctness scenario: `EXPLAIN (ANALYZE, BUFFERS)` of the claim candidate scan over a 50k-row backlog, with and without `queue_claimable_idx`. |
 | `scripts/stats-bench.ts` | Plan bench: `EXPLAIN (ANALYZE, BUFFERS)` of the `/tasks` aggregation over ~1M runs (95% predating the 24h window), with and without `runs_created_idx`. |
 | `scripts/retention.ts` | Data retention through the FK cascades: a manual `DELETE FROM runs` takes steps/logs with it, the 0007 migration survives a database full of orphans, and the real `prune` CLI. |
@@ -84,9 +85,10 @@ bun run --filter @better-trigger/example-basic replay-drift  # 17 checks · db _
 bun run --filter @better-trigger/example-basic crash         # 14 checks · db _crash · :4902
 bun run --filter @better-trigger/example-basic worker-lost   #  8 checks · db _worker_lost · :4904
 bun run --filter @better-trigger/example-basic stats         #  4 checks · db _stats · :4906
+bun run --filter @better-trigger/example-basic notify        #  4 checks · db _notify · :4907
 bun run --filter @better-trigger/example-basic constraints    #  8 checks · db _constraints · no daemon
 
-bun run test:acceptance                                      # all eleven, one exit code
+bun run test:acceptance                                      # all twelve, one exit code
 ```
 
 `crash`, `worker-lost` and `replay-drift` run **two** daemons: an API node (no
