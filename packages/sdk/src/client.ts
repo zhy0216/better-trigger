@@ -10,8 +10,15 @@
    error family are rethrown as KernelError so `err.code === 'task_not_found'`
    reads the same whether it crossed a wire or not. Everything else (transport
    failures, 401s, 5xx) becomes HttpError.
+
+   Request bodies are encoded with core's safeSerializeJson — not raw
+   JSON.stringify, which throws a TypeError on a circular structure or a
+   BigInt. That local throw used to be caught by the fetch guard below and
+   misreported as "is the worker daemon running?"; it now surfaces as a
+   KernelError with code 'serialization_error', the same code the daemon would
+   answer with if the body had reached it.
    ============================================================================= */
-import { KernelError, type KernelErrorCode } from '@better-trigger/core';
+import { KernelError, safeSerializeJson, type KernelErrorCode } from '@better-trigger/core';
 
 /** Failure that is not part of the kernel error family (transport, auth, 5xx). */
 export class HttpError extends Error {
@@ -42,6 +49,7 @@ const KERNEL_CODES = new Set<string>([
   'stale_lease',
   'task_not_found',
   'bad_request',
+  'serialization_error',
   'payload_too_large',
   'conflict',
 ]);
@@ -99,6 +107,18 @@ export class HttpClient {
     const { method = 'GET', body, signal } = opts;
     const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
 
+    // Encode the body before the timeout controller and abort listener exist:
+    // a body that cannot be serialized (circular, BigInt) is the caller's
+    // mistake, reported as a KernelError('serialization_error') — NOT as an
+    // HttpError blaming the daemon — and it must not leave a pending timer or
+    // a dangling abort listener behind.
+    let bodyStr: string | undefined;
+    if (body !== undefined) {
+      const serialized = safeSerializeJson(body, undefined, 'request body');
+      if (!serialized.ok) throw new KernelError('serialization_error', serialized.message);
+      bodyStr = serialized.json;
+    }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const onAbort = () => controller.abort();
@@ -113,7 +133,7 @@ export class HttpClient {
       res = await this.doFetch(this.base + PREFIX + path, {
         method,
         headers,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
+        body: bodyStr,
         signal: controller.signal,
       });
     } catch (err) {

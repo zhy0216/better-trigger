@@ -10,3 +10,4 @@ export * from './errors';
 export * from './duration';
 export * from './backoff';
 export * from './kernel-errors';
+export * from './serialize';

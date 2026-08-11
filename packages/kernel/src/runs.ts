@@ -68,9 +68,11 @@ import {
   parseDuration,
   resolveRetryPolicy,
   RunNotRunningError,
+  safeSerializeJson,
   StaleLeaseError,
   TaskNotFoundError,
   type CreatedRun,
+  type KernelErrorCode,
   type LogEntry,
   type LogLevel,
   type LogRecord,
@@ -110,6 +112,36 @@ const MAX_DELAY_MS = 315_576_000_000;
 const DEFAULT_MAX_BATCH_ITEMS = 500;
 const DEFAULT_MAX_PAYLOAD_BYTES = 256 * 1024;
 
+/* Serialized-size caps for the other values that land verbatim in jsonb/text
+   columns (C3): step output/error (run_steps), run output/error (runs) and
+   log data (logs). Same reasoning as the payload cap — the value is copied
+   into a column, re-read on every replay and rendered in the dashboard, so an
+   unbounded one is a memory and a storage problem; big objects belong in
+   object storage with only a reference in the value (see
+   apps/worker/README.md "Request limits"). Unlike the payload cap, a value
+   that fails these caps must still leave a trace: a step whose output cannot
+   be recorded is written as a FAILED step with a stable diagnostic, an error
+   record that is too big degrades to a SerializationError stub, and an
+   over-limit log line keeps its message and omits its data. Every limit is
+   overridable by env and read per call (same pattern as maxPayloadBytes). */
+const DEFAULT_STEP_OUTPUT_MAX_BYTES = 256 * 1024;
+const DEFAULT_RUN_OUTPUT_MAX_BYTES = 256 * 1024;
+const DEFAULT_ERROR_MAX_BYTES = 64 * 1024;
+const DEFAULT_LOG_DATA_MAX_BYTES = 16 * 1024;
+/** Per-line message cap: an over-long message is truncated (with an ellipsis)
+ *  rather than dropped — the line must survive, its verbosity may not. */
+const DEFAULT_LOG_MESSAGE_MAX_BYTES = 64 * 1024;
+/** Per-INSERT cap for logs: the batch the executor flushes is split into as
+ *  many statements as it takes to stay under this AND under pg's bind-param
+ *  ceiling (LOG_INSERT_CHUNK rows). */
+const DEFAULT_LOG_BATCH_MAX_BYTES = 256 * 1024;
+/** JSON envelope a child's output gains when it is copied into the parent's
+ *  trigger-and-wait step row — {"id":"run_…","ok":true,"output":<out>} — so
+ *  completeRun caps the child output against the tighter of the two output
+ *  caps minus this margin: the parent-step copy can then never overflow and
+ *  strand the parent in a replay loop (see completeRun). */
+const STEP_OUTPUT_ENVELOPE_BYTES = 128;
+
 /* How many times the reaper may hand a run back after a worker vanished under
    it. Deliberately generous: infrastructure churn (a deploy, an OOM kill, a
    laptop that slept) is not the user's code failing, so it must not eat
@@ -135,6 +167,23 @@ const maxBatchItems = () => envLimit('BETTER_TRIGGER_MAX_BATCH', DEFAULT_MAX_BAT
 /** Max serialized payload size for one run (BETTER_TRIGGER_MAX_PAYLOAD_BYTES). */
 const maxPayloadBytes = () =>
   envLimit('BETTER_TRIGGER_MAX_PAYLOAD_BYTES', DEFAULT_MAX_PAYLOAD_BYTES);
+/** Max serialized step output/error (BETTER_TRIGGER_STEP_OUTPUT_MAX_BYTES). */
+const stepOutputMaxBytes = () =>
+  envLimit('BETTER_TRIGGER_STEP_OUTPUT_MAX_BYTES', DEFAULT_STEP_OUTPUT_MAX_BYTES);
+/** Max serialized run output (BETTER_TRIGGER_RUN_OUTPUT_MAX_BYTES). */
+const runOutputMaxBytes = () =>
+  envLimit('BETTER_TRIGGER_RUN_OUTPUT_MAX_BYTES', DEFAULT_RUN_OUTPUT_MAX_BYTES);
+/** Max serialized error record (BETTER_TRIGGER_ERROR_MAX_BYTES). */
+const errorMaxBytes = () => envLimit('BETTER_TRIGGER_ERROR_MAX_BYTES', DEFAULT_ERROR_MAX_BYTES);
+/** Max serialized `data` on one log line (BETTER_TRIGGER_LOG_DATA_MAX_BYTES). */
+const logDataMaxBytes = () =>
+  envLimit('BETTER_TRIGGER_LOG_DATA_MAX_BYTES', DEFAULT_LOG_DATA_MAX_BYTES);
+/** Max serialized message on one log line (BETTER_TRIGGER_LOG_MESSAGE_MAX_BYTES). */
+const logMessageMaxBytes = () =>
+  envLimit('BETTER_TRIGGER_LOG_MESSAGE_MAX_BYTES', DEFAULT_LOG_MESSAGE_MAX_BYTES);
+/** Max serialized payload of one log INSERT (BETTER_TRIGGER_LOG_BATCH_MAX_BYTES). */
+const logBatchMaxBytes = () =>
+  envLimit('BETTER_TRIGGER_LOG_BATCH_MAX_BYTES', DEFAULT_LOG_BATCH_MAX_BYTES);
 
 /**
  * Reaper recovery budget stamped on new runs (BETTER_TRIGGER_MAX_RECOVERIES).
@@ -158,6 +207,32 @@ function assertBatchSize(items: TriggerItem[]): void {
       `items must contain at most ${max} entries (split larger fan-outs into batches)`,
     );
   }
+}
+
+/** Turn a safeSerializeJson failure into the KernelError the host maps to a
+ *  4xx (serialization_error → 400, payload_too_large → 413). */
+function throwSerializeFailure(res: { ok: false; code: KernelErrorCode; message: string }): never {
+  throw new KernelError(res.code, res.message);
+}
+
+/**
+ * Serialize an error record (runs.error / run_steps.error) for storage,
+ * degrading instead of failing the write: a run or step that cannot record
+ * its own error must still transition — a failed failure-report would strand
+ * the run in a reap/retry loop. On failure the stored record is a stable
+ * SerializationError that names the problem.
+ */
+function serializeErrorForStorage(error: SerializedError): string {
+  const res = safeSerializeJson(error, errorMaxBytes(), 'error');
+  if (res.ok) return res.json;
+  // The degraded record is fixed-shape and small; if even it cannot fit an
+  // operator-tuned tiny cap, fall back to a literal (always valid JSON).
+  const stub = safeSerializeJson(
+    { name: 'SerializationError', message: `error could not be stored: ${res.message}` },
+    errorMaxBytes(),
+    'error',
+  );
+  return stub.ok ? stub.json : '{"name":"SerializationError","message":"error could not be stored"}';
 }
 
 /* ---------------------------------------------------------------------------
@@ -382,18 +457,15 @@ export async function createRunIn(
 
   // Serialize the payload once, up front: it is what actually reaches pg, so it
   // is what has to be measured, and doing it before the first query means an
-  // oversized body costs one JSON.stringify instead of a round trip plus a row.
-  // (JSON.stringify returns undefined for a function / symbol payload; pg binds
-  // that as NULL, so keep the same meaning with an explicit 'null'.)
-  const payloadJson = JSON.stringify(args.payload ?? null) ?? 'null';
-  const payloadLimit = maxPayloadBytes();
-  if (Buffer.byteLength(payloadJson) > payloadLimit) {
-    throw new KernelError(
-      'bad_request',
-      `payload must serialize to at most ${payloadLimit} bytes ` +
-        `(store large objects elsewhere and pass a reference)`,
-    );
-  }
+  // oversized or unserializable body costs one canonicalization instead of a
+  // round trip plus a row. (safeSerializeJson — not raw JSON.stringify: a
+  // circular / BigInt payload would otherwise throw a TypeError that reads as
+  // a 500, and an over-limit one must surface as payload_too_large, the same
+  // family the HTTP body cap uses. `?? null` keeps the pre-existing meaning
+  // of an undefined payload — it stores NULL.)
+  const payloadSerialized = safeSerializeJson(args.payload ?? null, maxPayloadBytes(), 'payload');
+  if (!payloadSerialized.ok) throwSerializeFailure(payloadSerialized);
+  const payloadJson = payloadSerialized.json;
 
   // Resolve task config (retry policy, concurrency limit/key default, and the
   // code version currently registered for the task — stamped on the run below).
@@ -616,9 +688,16 @@ export interface ReportStepArgs {
 /** Step-row payload without the fencing credentials. */
 export type StepWriteArgs = Omit<ReportStepArgs, 'workerId' | 'fencingToken'>;
 
+/** Result of a step-row write: ok, or the reason the reported output could
+ *  not be recorded (the row itself was still written — as a failed step whose
+ *  error carries the diagnostic, so the run's timeline keeps its evidence). */
+export type StepWriteOutcome =
+  | { ok: true }
+  | { ok: false; code: KernelErrorCode; message: string };
+
 export async function reportStep(pool: Pool, args: ReportStepArgs): Promise<void> {
   assertNamespace(args.namespace);
-  await withTx(pool, async (client) => {
+  const outcome = await withTx(pool, async (client) => {
     await assertOwnedRunning(
       client,
       args.runId,
@@ -626,8 +705,13 @@ export async function reportStep(pool: Pool, args: ReportStepArgs): Promise<void
       args.fencingToken,
       args.namespace,
     );
-    await upsertStep(client, args);
+    return upsertStep(client, args);
   });
+  if (!outcome.ok) {
+    // The failed row (with the diagnostic) is already committed — throwing
+    // here lets the executor fail the run without rolling the row back.
+    throw new KernelError(outcome.code, outcome.message);
+  }
 }
 
 /**
@@ -653,7 +737,38 @@ export async function reportStep(pool: Pool, args: ReportStepArgs): Promise<void
  * (orchestrator) and wakeParentIfWaiting — so the immutability rule holds for
  * all of them.
  */
-export async function upsertStep(client: PoolClient, args: StepWriteArgs): Promise<void> {
+export async function upsertStep(client: PoolClient, args: StepWriteArgs): Promise<StepWriteOutcome> {
+  // Serialize before the write: output/error land verbatim in jsonb columns,
+  // so they are bounded like the payload (C3). An output that cannot be
+  // serialized (circular / BigInt / over the cap) makes the STEP a failed one
+  // with a stable diagnostic — the fn produced a value that can never be
+  // recorded, so replaying would hit the same wall; the caller (reportStep)
+  // turns the returned failure into a run failure after the tx commits. An
+  // error record that cannot be serialized degrades instead (the failed-row
+  // evidence must land whatever the error looks like).
+  let status = args.status;
+  let outputJson: string | null = null;
+  let errorJson: string | null = null;
+  let failure: StepWriteOutcome | null = null;
+
+  if (args.output !== undefined) {
+    const res = safeSerializeJson(args.output, stepOutputMaxBytes(), 'output');
+    if (res.ok) {
+      outputJson = res.json;
+    } else {
+      failure = { ok: false, code: res.code, message: res.message };
+      status = 'failed';
+      errorJson = serializeErrorForStorage({
+        name: 'SerializationError',
+        message: res.message,
+      });
+    }
+  }
+  if (failure === null && args.error !== undefined) {
+    const res = safeSerializeJson(args.error, errorMaxBytes(), 'error');
+    errorJson = res.ok ? res.json : serializeErrorForStorage(args.error);
+  }
+
   const res = await client.query(
     `INSERT INTO run_steps
        (run_id, project_id, env, seq, kind, label, status, output, error, attempt, started_at, finished_at, fingerprint)
@@ -676,16 +791,16 @@ export async function upsertStep(client: PoolClient, args: StepWriteArgs): Promi
       args.seq,
       args.kind,
       args.label ?? null,
-      args.status,
-      args.output !== undefined ? JSON.stringify(args.output) : null,
-      args.error !== undefined ? JSON.stringify(args.error) : null,
+      status,
+      outputJson,
+      errorJson,
       args.attempt,
       args.startedAt,
       args.finishedAt,
       args.fingerprint ?? null,
     ],
   );
-  if (res.rowCount === 1) return; // inserted, or overwrote a non-completed row
+  if (res.rowCount === 1) return failure ?? { ok: true }; // inserted, or overwrote a non-completed row
 
   // Conflict on a 'completed' row: the WHERE clause refused the update. Same
   // transaction, so the row below is the row the INSERT conflicted with.
@@ -697,13 +812,13 @@ export async function upsertStep(client: PoolClient, args: StepWriteArgs): Promi
   const row = existing.rows[0];
   // Defensive: no row or a non-completed row means the write actually applied
   // via a path rowCount cannot see; nothing to protect here.
-  if (!row || row.status !== 'completed') return;
+  if (!row || row.status !== 'completed') return { ok: true };
 
   const stored = row.fingerprint ?? null;
   const incoming = args.fingerprint ?? null;
   // NULL on either side = a ledger (or a reporter) that predates fingerprints:
   // replay proceeds leniently, the recorded row stays untouched.
-  if (stored === null || incoming === null || stored === incoming) return;
+  if (stored === null || incoming === null || stored === incoming) return { ok: true };
 
   throw new NonDeterminismError(
     `step fingerprint mismatch at run ${args.runId} seq ${args.seq}` +
@@ -759,7 +874,11 @@ export async function suspendRun(
     if (resumeAt.getTime() <= Date.now()) {
       // Already due — record the wait step as completed, keep running, with
       // the executor's fingerprint (the waits path below would carry it too).
-      await upsertStep(client, {
+      // The output is a literal null, so the write cannot actually fail its
+      // serialization check; the outcome is checked anyway so a defensive
+      // failure surfaces as a 4xx-class KernelError instead of a silent
+      // mismatch between the step row and the caller's expectation.
+      const outcome = await upsertStep(client, {
         runId: args.runId,
         namespace: args.namespace,
         seq: args.seq,
@@ -772,6 +891,7 @@ export async function suspendRun(
         finishedAt: new Date().toISOString(),
         fingerprint: args.fingerprint,
       });
+      if (!outcome.ok) throw new KernelError(outcome.code, outcome.message);
       return { resumed: true };
     }
 
@@ -910,7 +1030,7 @@ export async function batchTriggerChild(
   // inside a task can park exactly the same long write tx on the queue.
   assertBatchSize(args.items);
   assertNamespace(args.namespace);
-  return withTx(pool, async (client) => {
+  const outcome = await withTx(pool, async (client) => {
     const parent = await assertOwnedRunning(
       client,
       args.runId,
@@ -927,7 +1047,7 @@ export async function batchTriggerChild(
     );
     if (existing.rows[0]) {
       const out = existing.rows[0].output as { runIds?: string[] } | null;
-      if (out?.runIds) return { runIds: out.runIds };
+      if (out?.runIds) return { ok: true as const, runIds: out.runIds };
     }
 
     const runIds: string[] = [];
@@ -943,7 +1063,7 @@ export async function batchTriggerChild(
       runIds.push(child.runId);
     }
 
-    await upsertStep(client, {
+    const stepOutcome = await upsertStep(client, {
       runId: args.runId,
       namespace: args.namespace,
       seq: args.seq,
@@ -961,9 +1081,21 @@ export async function batchTriggerChild(
         codeVersion: parent.code_version,
       }),
     });
-
-    return { runIds };
+    return stepOutcome.ok
+      ? { ok: true as const, runIds }
+      : { ok: false as const, failure: stepOutcome };
   });
+
+  if (!outcome.ok) {
+    // The batch step's output could not be recorded (e.g. an operator-tuned
+    // tiny step cap): the children and the failed step row are already
+    // committed in the same tx, and the children must NOT be re-created, so
+    // throwing AFTER the commit lets the executor fail the run non-retryably
+    // (isUnfixableKernelError → AbortError) — a replay of this seq would
+    // otherwise spin up the whole fan-out a second time.
+    throw new KernelError(outcome.failure.code, outcome.failure.message);
+  }
+  return { runIds: outcome.runIds };
 }
 
 /* ---------------------------------------------------------------------------
@@ -976,7 +1108,7 @@ export async function batchTriggerChild(
  * caller's transaction (which holds the CHILD's locks — the parent's rows are
  * re-acquired here in canonical order: queue → runs → wait row).
  */
-async function wakeParentIfWaiting(
+export async function wakeParentIfWaiting(
   client: PoolClient,
   childRunId: string,
   result: { ok: boolean; output?: unknown; error?: SerializedError },
@@ -1029,7 +1161,7 @@ async function wakeParentIfWaiting(
   // upsertStep applies the C1 immutability rule like any other step write: a
   // completed row is never overwritten — an equal (or NULL-compatible)
   // fingerprint is an idempotent no-op, a differing one rejects the write.
-  await upsertStep(client, {
+  const outcome = await upsertStep(client, {
     runId: wait.run_id,
     namespace: parentNs,
     seq: wait.step_seq,
@@ -1042,6 +1174,15 @@ async function wakeParentIfWaiting(
     finishedAt: new Date().toISOString(),
     fingerprint: wait.fingerprint ?? undefined,
   });
+  if (!outcome.ok) {
+    // Defensive: completeRun caps the child output against the tighter of the
+    // two output caps, so a child result that fits runs.output always fits the
+    // parent's step row. If that invariant ever breaks, the child's terminal
+    // tx must NOT commit: a parent whose wait resolved to an unrecordable step
+    // row would replay into a duplicate child. Throwing rolls the child's
+    // completion back (it stays 'running' for the lease reaper).
+    throw new KernelError(outcome.code, outcome.message);
+  }
 
   // Re-enqueue the parent.
   if (parent && parent.status === 'waiting') {
@@ -1081,7 +1222,7 @@ export async function terminalFail(
     `UPDATE runs
         SET status = 'failed', error = $2, finished_at = now(), updated_at = now()
       WHERE id = $1 AND project_id = $3 AND env = $4`,
-    [run.id, JSON.stringify(error), ns.projectId, ns.env],
+    [run.id, serializeErrorForStorage(error), ns.projectId, ns.env],
   );
   await removeFromQueue(client, run.id, ns);
   await client.query(
@@ -1113,11 +1254,24 @@ export async function completeRun(pool: Pool, args: CompleteRunArgs): Promise<vo
       args.fencingToken,
       args.namespace,
     );
+    // Serialize before the write, like the payload: the output lands verbatim
+    // in runs.output AND is copied into the parent's trigger-and-wait step
+    // row, so it is capped by the tighter of the two output caps minus the
+    // envelope the step wrapper adds — that guarantees the parent-step copy
+    // can never overflow and strand the parent in a replay loop. On failure
+    // nothing was written (the tx rolls back) and the executor fails the run:
+    // a value that can never be stored must not complete a run.
+    const serialized = safeSerializeJson(
+      args.output ?? null,
+      Math.min(runOutputMaxBytes(), Math.max(1, stepOutputMaxBytes() - STEP_OUTPUT_ENVELOPE_BYTES)),
+      'output',
+    );
+    if (!serialized.ok) throwSerializeFailure(serialized);
     await client.query(
       `UPDATE runs
           SET status = 'completed', output = $2, finished_at = now(), updated_at = now()
         WHERE id = $1 AND project_id = $3 AND env = $4`,
-      [args.runId, JSON.stringify(args.output ?? null), args.namespace.projectId, args.namespace.env],
+      [args.runId, serialized.json, args.namespace.projectId, args.namespace.env],
     );
     await removeFromQueue(client, args.runId, args.namespace);
     if (run.parent_run_id) {
@@ -1168,7 +1322,7 @@ export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult
       `UPDATE runs
           SET status = 'queued', attempt = attempt + 1, error = $2, updated_at = now()
         WHERE id = $1 AND project_id = $3 AND env = $4`,
-      [args.runId, JSON.stringify(args.error), args.namespace.projectId, args.namespace.env],
+      [args.runId, serializeErrorForStorage(args.error), args.namespace.projectId, args.namespace.env],
     );
     // Keep the queue row but release the claim (owner + lease) and push
     // availability out. runs.fencing_token stays — it only grows via claims.
@@ -1262,6 +1416,93 @@ export async function retryRun(
 /** Rows per INSERT. 5 bind params each (+1 shared run_id) → 5001 params, well
  *  under pg's 65535. */
 const LOG_INSERT_CHUNK = 1000;
+/** Fixed per-row allowance for the VALUES syntax, casts and separators around
+ *  one row's parameters, added to the parameter bytes when packing chunks. */
+const LOG_ROW_SQL_OVERHEAD_BYTES = 64;
+
+/** One log line prepared for binding: everything JSON-encoded up front. */
+interface PreparedLogRow {
+  stepSeq: number | null;
+  level: string;
+  message: string;
+  dataJson: string | null;
+  ts: string;
+  /** Estimated bytes the row occupies in one INSERT statement's parameters. */
+  bytes: number;
+}
+
+const utf8Bytes = (s: string): number => new TextEncoder().encode(s).length;
+
+/** Truncate a string to at most maxBytes UTF-8 bytes, appending '…' (3 bytes)
+ *  when it was cut. Iterates code points so a multi-byte character is never
+ *  split. */
+function truncateUtf8(s: string, maxBytes: number): string {
+  if (utf8Bytes(s) <= maxBytes) return s;
+  const budget = Math.max(0, maxBytes - 3);
+  let out = '';
+  let used = 0;
+  for (const ch of s) {
+    const b = utf8Bytes(ch);
+    if (used + b > budget) break;
+    out += ch;
+    used += b;
+  }
+  return `${out}…`;
+}
+
+function preparedRowBytes(r: PreparedLogRow): number {
+  return (
+    utf8Bytes(String(r.stepSeq)) +
+    utf8Bytes(r.level) +
+    utf8Bytes(r.message) +
+    utf8Bytes(r.dataJson ?? 'null') +
+    utf8Bytes(r.ts) +
+    LOG_ROW_SQL_OVERHEAD_BYTES
+  );
+}
+
+/**
+ * Serialize one log line's data and cap its message; an over-limit or
+ * unserializable data value is replaced with a small diagnostic record so the
+ * LINE survives (logs must not be lost; data may be).
+ */
+function prepareLogRow(e: LogEntry): PreparedLogRow {
+  let dataJson: string | null = null;
+  if (e.data !== undefined) {
+    const res = safeSerializeJson(e.data, logDataMaxBytes(), 'data');
+    if (res.ok) dataJson = res.json;
+    else dataJson = JSON.stringify({ omitted: true, reason: res.message });
+  }
+  const row: PreparedLogRow = {
+    stepSeq: e.stepSeq ?? null,
+    level: e.level,
+    message: truncateUtf8(e.message, logMessageMaxBytes()),
+    dataJson,
+    ts: e.ts,
+    bytes: 0,
+  };
+  return { ...row, bytes: preparedRowBytes(row) };
+}
+
+/**
+ * A single line that already exceeds the whole batch cap: drop its data
+ * first, then trim the message, so the line still fits inside one statement.
+ */
+function shrinkRowForBatch(row: PreparedLogRow, maxBytes: number): PreparedLogRow {
+  let next: PreparedLogRow = row;
+  if (next.dataJson !== null) {
+    next = {
+      ...next,
+      dataJson: JSON.stringify({ omitted: true, reason: 'data omitted: line exceeds the log batch cap' }),
+    };
+  }
+  if (preparedRowBytes(next) > maxBytes) {
+    // Budget for the message = what the row leaves after everything else.
+    const budget = Math.max(0, maxBytes - (preparedRowBytes(next) - utf8Bytes(next.message)));
+    next = { ...next, message: truncateUtf8(next.message, budget) };
+  }
+  return { ...next, bytes: preparedRowBytes(next) };
+}
 
 /**
  * Append log lines to a run. Best effort in both directions: no fencing (a
@@ -1298,31 +1539,57 @@ export async function appendLogs(
   if (entries.length === 0) return;
   assertNamespace(namespace);
 
-  // Chunk inserts so a single call can never exceed pg's 65535 bind-param
-  // limit (5 params/row → cap at LOG_INSERT_CHUNK rows per statement); each
-  // chunk re-checks the run, so a run that goes terminal mid-flush simply stops
-  // absorbing the remaining chunks.
-  for (let start = 0; start < entries.length; start += LOG_INSERT_CHUNK) {
-    const chunk = entries.slice(start, start + LOG_INSERT_CHUNK);
+  // Prepare every line up front (per-line data cap + message cap applied
+  // here), shrink any line that would alone exceed the batch cap, then pack
+  // chunks by BOTH bounds: pg's 65535 bind-param ceiling (LOG_INSERT_CHUNK
+  // rows per statement) and the serialized byte cap for one statement
+  // (BETTER_TRIGGER_LOG_BATCH_MAX_BYTES) — a flush over the byte cap is split
+  // into more statements, never a single oversized one. Each chunk re-checks
+  // the run, so a run that goes terminal mid-flush simply stops absorbing the
+  // remaining chunks.
+  const maxBatchBytes = logBatchMaxBytes();
+  const rows: PreparedLogRow[] = [];
+  for (const e of entries) {
+    let row = prepareLogRow(e);
+    if (preparedRowBytes(row) > maxBatchBytes) {
+      row = shrinkRowForBatch(row, maxBatchBytes);
+    }
+    // Under an operator-tuned cap smaller than the smallest possible line the
+    // line cannot be written at all; drop it rather than emit an oversized
+    // INSERT (a 1-byte cap cannot be honored any other way).
+    if (preparedRowBytes(row) <= maxBatchBytes) rows.push(row);
+  }
+  const chunks: PreparedLogRow[][] = [];
+  let current: PreparedLogRow[] = [];
+  let currentBytes = 0;
+  for (const row of rows) {
+    if (
+      current.length > 0 &&
+      (current.length >= LOG_INSERT_CHUNK || currentBytes + row.bytes > maxBatchBytes)
+    ) {
+      chunks.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(row);
+    currentBytes += row.bytes;
+  }
+  if (current.length > 0) chunks.push(current);
+
+  for (const chunk of chunks) {
     const values: string[] = [];
     // $1 is the run id, $2/$3 the namespace (shared by the SELECT list and the
     // EXISTS test); row params start at $4.
     const params: unknown[] = [runId, namespace.projectId, namespace.env];
     let i = 4;
-    for (const e of chunk) {
+    for (const r of chunk) {
       // Casts are required, not decoration: inside a VALUES sub-select pg has no
       // target column to infer an untyped parameter from, so it would settle on
       // text and then refuse to assign text to step_seq / data / ts.
       values.push(
         `($${i++}::int, $${i++}::text, $${i++}::text, $${i++}::jsonb, $${i++}::timestamptz)`,
       );
-      params.push(
-        e.stepSeq ?? null,
-        e.level,
-        e.message,
-        e.data !== undefined ? JSON.stringify(e.data) : null,
-        e.ts,
-      );
+      params.push(r.stepSeq, r.level, r.message, r.dataJson, r.ts);
     }
     await pool.query(
       `INSERT INTO logs (project_id, env, run_id, step_seq, level, message, data, ts)

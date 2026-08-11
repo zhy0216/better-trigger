@@ -46,6 +46,11 @@ export function canonicalStringify(value: unknown): string {
 }
 
 function canonicalize(value: unknown, seen: WeakSet<object>): unknown {
+  // BigInt has no JSON spelling (JSON.stringify throws on it). Hash a stable
+  // marker instead so two computations of the same value agree — the payload
+  // itself will be refused by createRunIn's serialization check anyway, so no
+  // fingerprint that matters is ever compared across a stored value.
+  if (typeof value === 'bigint') return { __bigint: value.toString() };
   if (value === null || typeof value !== 'object') return value;
   if (typeof (value as JsonObject).toJSON === 'function') {
     return canonicalize((value as JsonObject).toJSON?.(), seen);

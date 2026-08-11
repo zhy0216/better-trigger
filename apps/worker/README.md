@@ -104,7 +104,12 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_CONCURRENCY` | `5` | Concurrent execution slots |
 | `BETTER_TRIGGER_BODY_LIMIT` | `1048576` (1 MiB) | Max request body in bytes; over it the API answers `413 payload_too_large` |
 | `BETTER_TRIGGER_MAX_BATCH` | `500` | Max items in one `batchTrigger`; over it `400 bad_request` — split the fan-out |
-| `BETTER_TRIGGER_MAX_PAYLOAD_BYTES` | `262144` (256 KiB) | Max serialized payload per run; over it `400 bad_request` |
+| `BETTER_TRIGGER_MAX_PAYLOAD_BYTES` | `262144` (256 KiB) | Max serialized payload per run; over it `413 payload_too_large` |
+| `BETTER_TRIGGER_STEP_OUTPUT_MAX_BYTES` | `262144` (256 KiB) | Max serialized output/error per step row; over it the step records as **failed** with a `SerializationError` diagnostic and the run fails |
+| `BETTER_TRIGGER_RUN_OUTPUT_MAX_BYTES` | `262144` (256 KiB) | Max serialized run output; over it the run fails `413 payload_too_large` |
+| `BETTER_TRIGGER_ERROR_MAX_BYTES` | `65536` (64 KiB) | Max serialized error record (message/name/stack); a larger one is stored as a `SerializationError` stub so the failure itself still lands |
+| `BETTER_TRIGGER_LOG_DATA_MAX_BYTES` | `16384` (16 KiB) | Max serialized `data` on one log line; an over-limit line keeps its message and stores `{ omitted: true, reason }` in `data` |
+| `BETTER_TRIGGER_LOG_BATCH_MAX_BYTES` | `262144` (256 KiB) | Max serialized payload of one log INSERT; a flush over it is split into more statements |
 | `BETTER_TRIGGER_API_KEY` | _(unset)_ | When set, every `/api/v1/*` call (except `/health`) requires `Authorization: Bearer <key>`. Unset = local mode, no auth. |
 | `BETTER_TRIGGER_PIN_CODE_VERSION` | _(unset)_ | `1`/`true` = same as `--pin-code-version` |
 | `BETTER_TRIGGER_VERSION` | _(hashed)_ | Code version reported on registration. Defaults to a per-task hash of id + cron + `run()` source; setting it makes every task report this one value instead |
@@ -219,14 +224,27 @@ curl -X POST http://localhost:4848/api/v1/trigger \
 ### Request limits
 
 One request should not be able to take the daemon down — and a mistyped loop
-does the same damage as a hostile caller. Three caps, all overridable through
-the environment variables in the table above:
+does the same damage as a hostile caller. Several caps, all overridable
+through the environment variables in the table above:
 
 | Cap | Default | Refusal |
 |---|---|---|
 | Request body | 1 MiB | `413 payload_too_large` |
 | `batchTrigger` items | 500 | `400 bad_request` |
-| Serialized payload per run | 256 KiB | `400 bad_request` |
+| Serialized payload per run | 256 KiB | `413 payload_too_large` |
+| Serialized step output / error | 256 KiB | step records **failed** with a `SerializationError` diagnostic; the run fails |
+| Serialized run output | 256 KiB | `413 payload_too_large`; the run fails |
+| Serialized error record | 64 KiB | stored as a `SerializationError` stub |
+| Serialized log-line `data` | 16 KiB | line kept, `data` becomes `{ omitted: true, reason }` |
+| Serialized bytes per log INSERT | 256 KiB | flush split into more statements |
+
+Values that JSON cannot represent at all — a circular structure, a BigInt, a
+top-level function — are refused the same way everywhere, as
+`400 serialization_error` naming the offending field (payload / output / data),
+never as a raw `TypeError` that would read as a 500 (or, in the SDK, as a dead
+daemon). The one deliberate exception is the error record: a run (or step)
+must still land its failure even when the error text itself is enormous, so
+that is degraded rather than refused.
 
 The body cap is enforced by middleware before anything buffers the request, so
 a 500MB POST never reaches the heap. The batch cap is about the transaction:
@@ -241,15 +259,29 @@ for (let i = 0; i < items.length; i += 500) {
 }
 ```
 
-The payload cap is the usual durable-execution advice: a payload is copied into
-`runs.payload`, read back on every replay and rendered in the dashboard, so keep
-large objects in object storage and pass a reference. Raising the caps is one
-env var each, but the transaction and the heap behind them do not change:
+The payload/output caps are the usual durable-execution advice: a payload is
+copied into `runs.payload`, re-read on every replay and rendered in the
+dashboard, and a step or run output is copied into its jsonb column the same
+way — so keep large objects in object storage and pass a **reference** (the
+object key / URL) in the value, exactly as you would for a database column:
+
+```ts
+const key = `uploads/${ctx.run.id}`;
+await putObject(key, hugeBuffer);              // object storage
+await ctx.step("enrich", () => { ... });       // payload/output stay small
+return { objectKey: key, rows: 123 };          // a reference, not the bytes
+```
+
+A payload or output that is over its cap fails the run with a stable
+`payload_too_large` / `serialization_error` code — nothing is silently
+truncated. Raising the caps is one env var each, but the transaction and the
+heap behind them do not change:
 
 ```bash
 BETTER_TRIGGER_BODY_LIMIT=4194304 \
 BETTER_TRIGGER_MAX_BATCH=2000 \
-BETTER_TRIGGER_MAX_PAYLOAD_BYTES=1048576 better-trigger-worker
+BETTER_TRIGGER_MAX_PAYLOAD_BYTES=1048576 \
+BETTER_TRIGGER_RUN_OUTPUT_MAX_BYTES=1048576 better-trigger-worker
 ```
 
 A value that is absent, zero, negative or unparseable falls back to the default
@@ -347,11 +379,13 @@ token. Set `BETTER_TRIGGER_API_KEY` and it closes with the rest of the API.
 
 Errors use a uniform envelope: `{ error: { code, message } }` (plus a
 `requestId` on one branch, below). Kernel error codes map to statuses —
-`400 bad_request`, `404 not_found` / `task_not_found`, `409 run_not_running` /
-`stale_lease` / `conflict` (e.g. retrying a run that is not terminal),
-`413 payload_too_large` (body over `BETTER_TRIGGER_BODY_LIMIT`, refused by
-middleware before the route runs) — everything else is `500 internal_error`.
-The SDK maps the kernel codes back onto `KernelError` client-side.
+`400 bad_request` / `serialization_error` (a value JSON cannot represent, or a
+shape the kernel refuses), `404 not_found` / `task_not_found`, `409
+run_not_running` / `stale_lease` / `conflict` (e.g. retrying a run that is not
+terminal), `413 payload_too_large` (body over `BETTER_TRIGGER_BODY_LIMIT`
+refused by middleware before the route runs, or a payload/output over its
+serialized cap) — everything else is `500 internal_error`. The SDK maps the
+kernel codes back onto `KernelError` client-side.
 
 > **Error-code drift vs v1**: retrying a run that is not terminal now answers
 > `409 conflict` (v1 said `400 invalid_state`), and triggering an unknown task

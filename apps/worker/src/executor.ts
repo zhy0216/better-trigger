@@ -82,6 +82,20 @@ function isAbandonment(err: unknown): boolean {
   );
 }
 
+/**
+ * A KernelError that retrying cannot fix: the offending value (a payload, a
+ * step output or a run output) is deterministic, so a replay reproduces the
+ * same failure — same reasoning as NonDeterminismError. Fail the run
+ * non-retryably instead of burning attempts on a value that can never be
+ * stored.
+ */
+function isUnfixableKernelError(err: unknown): err is KernelError {
+  return (
+    err instanceof KernelError &&
+    (err.code === 'serialization_error' || err.code === 'payload_too_large')
+  );
+}
+
 /** Outcome of a single execution pass. */
 export type ExecutionResult =
   | { type: 'completed'; output: unknown }
@@ -257,6 +271,13 @@ export class Executor implements RunExecutor {
         });
       } catch (err) {
         if (isAbandonment(err)) return { type: 'abandoned' };
+        if (isUnfixableKernelError(err)) {
+          // The run's output can never be recorded (circular, BigInt, over the
+          // cap): fail the run instead of leaving it to the lease reaper —
+          // a retry would replay the same unserializable value.
+          await this.failRun(serializeError(err), undefined, true, undefined);
+          return { type: 'failed' };
+        }
         throw err;
       }
       return { type: 'completed', output };
@@ -437,12 +458,25 @@ export class Executor implements RunExecutor {
    * drifts.
    */
   private fingerprint(kind: StepKind, label: string | null, input: unknown): string {
-    return stepFingerprint({
-      kind,
-      label,
-      input,
-      codeVersion: this.run.codeVersion,
-    });
+    try {
+      return stepFingerprint({
+        kind,
+        label,
+        input,
+        codeVersion: this.run.codeVersion,
+      });
+    } catch (err) {
+      // A circular persistable input (a child payload, step options): the
+      // fingerprint cannot be computed, and neither could the kernel persist
+      // the value — a deterministic problem, so fail the run non-retryably
+      // instead of burning attempts (same semantics as serialization_error).
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new AbortError(
+        `this call's persistable inputs are not JSON-serializable (${reason}) — ` +
+          `the value can never be recorded, so run ${this.run.id} fails ` +
+          `instead of retrying`,
+      );
+    }
   }
 
   /**
@@ -691,6 +725,13 @@ export class Executor implements RunExecutor {
         // already left the recorded row intact.
         throw new AbortError(err.message);
       }
+      if (isUnfixableKernelError(err)) {
+        // The step's output (or error) could not be recorded; the kernel has
+        // already written the step row as failed with the diagnostic. Failing
+        // the run non-retryably leaves the timeline intact — a retry would
+        // replay the same unserializable value.
+        throw new AbortError(err.message);
+      }
       throw err;
     }
   }
@@ -780,6 +821,9 @@ export class Executor implements RunExecutor {
         this.abandoned = true;
         throw this.endExecution();
       }
+      // A child payload that cannot be created (unserializable / over the
+      // cap) is deterministic: fail the parent run non-retryably.
+      if (isUnfixableKernelError(err)) throw new AbortError(err.message);
       throw err;
     }
     this.endSignal = 'suspend'; // waiting on the child run — same as ctx.wait
@@ -823,6 +867,9 @@ export class Executor implements RunExecutor {
         this.abandoned = true;
         throw this.endExecution();
       }
+      // A child payload that cannot be created (unserializable / over the
+      // cap) is deterministic: fail the parent run non-retryably.
+      if (isUnfixableKernelError(err)) throw new AbortError(err.message);
       throw err;
     }
   }

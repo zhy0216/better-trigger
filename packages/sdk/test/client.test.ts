@@ -9,7 +9,7 @@
    injected.
    ============================================================================= */
 import { KernelError, type KernelErrorCode } from '@better-trigger/core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { HttpClient, HttpError } from '../src/client';
 
 /** A fetch stub that answers every call with `res` and records the calls. */
@@ -87,6 +87,7 @@ describe('HttpClient — error mapping', () => {
     ['stale_lease', 409],
     ['task_not_found', 404],
     ['bad_request', 400],
+    ['serialization_error', 400],
     ['payload_too_large', 413],
     ['conflict', 409],
   ] as const;
@@ -204,6 +205,45 @@ describe('HttpClient — error mapping', () => {
       .request('/runs', { signal: controller.signal })
       .catch((e: unknown) => e);
     expect(err).toBe(abortError);
+  });
+
+  it('reports a locally unserializable body as KernelError(serialization_error), not a transport failure', async () => {
+    // The body is encoded client-side before fetch is even called: a circular
+    // (or BigInt) body used to throw a TypeError inside the fetch call, which
+    // the guard below misread as "is the worker daemon running?".
+    const { fetch, calls } = stubFetch(new Response('{"ok":true}', { status: 200 }));
+    const circular: Record<string, unknown> = { a: 1 };
+    circular.self = circular;
+
+    const err = await client(fetch)
+      .request('/trigger', { method: 'POST', body: circular })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(KernelError);
+    expect((err as KernelError).code).toBe('serialization_error');
+    expect((err as KernelError).message).toContain('request body');
+    expect(calls).toHaveLength(0); // never hit the network
+  });
+
+  it('leaves no pending timer or abort listener behind when the body cannot be serialized', async () => {
+    // Encoding happens before the per-request timeout controller exists, so a
+    // local serialization failure must not leak a timer that would fire into
+    // nothing (or an abort listener dangling on the caller's signal).
+    vi.useFakeTimers();
+    try {
+      const { fetch, calls } = stubFetch(new Response('{"ok":true}', { status: 200 }));
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+
+      await client(fetch)
+        .request('/trigger', { method: 'POST', body: circular })
+        .catch(() => {});
+
+      expect(vi.getTimerCount()).toBe(0);
+      expect(calls).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('aborts the request once the per-request timeout elapses', async () => {

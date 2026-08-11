@@ -103,6 +103,17 @@ describe('internal_error in production', () => {
     });
     expect(errorSpy).not.toHaveBeenCalled();
   });
+
+  it('maps serialization_error to 400 with the stable envelope', async () => {
+    const err = new KernelError('serialization_error', 'payload is not JSON-serializable: boom');
+    const res = await makeApp(err).fetch(post());
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: { code: 'serialization_error', message: err.message },
+    });
+    // Kernel-error messages are ours: no production redaction, no requestId.
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe('internal_error outside production', () => {

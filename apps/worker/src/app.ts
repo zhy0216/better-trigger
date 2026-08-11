@@ -34,6 +34,7 @@ export interface AppDeps {
 /** HTTP status per kernel error code; anything unknown falls through to 500. */
 const STATUS_BY_CODE: Partial<Record<KernelErrorCode, 400 | 404 | 409 | 413>> = {
   bad_request: 400,
+  serialization_error: 400,
   not_found: 404,
   task_not_found: 404,
   run_not_running: 409,

@@ -42,6 +42,7 @@ import { Cron } from 'croner';
 import type { Pool } from 'pg';
 import {
   DEFAULT_NAMESPACE,
+  KernelError,
   assertNamespace,
   type Namespace,
 } from '@better-trigger/core';
@@ -348,7 +349,7 @@ export function startOrchestrator(
         // suspend time — not something recomputed from resume_at, which would
         // drift whenever the wait's declared duration differs from the elapsed
         // wall-clock time.
-        await upsertStep(client, {
+        const outcome = await upsertStep(client, {
           runId: w.run_id,
           namespace: wNs,
           seq: w.step_seq,
@@ -361,6 +362,13 @@ export function startOrchestrator(
           finishedAt: new Date().toISOString(),
           fingerprint: w.fingerprint ?? undefined,
         });
+        // Defensive: the wait step's output is a literal null, so the write
+        // cannot actually fail its serialization check. If it ever does, do
+        // NOT leave the wait 'completed' with a missing step row — roll the
+        // resume back (the run stays 'waiting') and let the orchestrator's
+        // loop error counter/log surface it, instead of silently desyncing
+        // the ledger.
+        if (!outcome.ok) throw new KernelError(outcome.code, outcome.message);
         await client.query(
           `UPDATE runs SET status = 'queued', updated_at = now()
             WHERE id = $1 AND project_id = $2 AND env = $3`,

@@ -3,7 +3,8 @@
    Transport-neutral domain errors raised by kernel operations. Hosts that
    expose the kernel over HTTP map codes to statuses (run_not_running /
    stale_lease / conflict → 409, not_found / task_not_found → 404,
-   bad_request → 400, payload_too_large → 413, anything else → 500).
+   bad_request / serialization_error → 400, payload_too_large → 413,
+   anything else → 500).
    ============================================================================= */
 
 export type KernelErrorCode =
@@ -13,8 +14,18 @@ export type KernelErrorCode =
   | 'task_not_found'
   | 'bad_request'
   /**
-   * The request body exceeded the host's cap (BETTER_TRIGGER_BODY_LIMIT). Raised
-   * by the HTTP host rather than by a kernel call — it lives in this union so
+   * A value could not be serialized to JSON at all (circular structure,
+   * BigInt, top-level undefined/function/symbol) on its way into a jsonb/text
+   * column or onto the wire. Raised by safeSerializeJson's callers — the
+   * kernel persistence paths and the SDK's local request encoding — so it is
+   * never a raw TypeError that reads as a 500 (or as a dead daemon).
+   */
+  | 'serialization_error'
+  /**
+   * The request body exceeded the host's cap (BETTER_TRIGGER_BODY_LIMIT), or a
+   * payload / output / log value exceeded its serialized-size cap
+   * (BETTER_TRIGGER_MAX_PAYLOAD_BYTES and friends). Raised by the HTTP host
+   * and by the kernel's capped persistence paths — it lives in this union so
    * clients see one error family: a caller that sends too much gets a
    * KernelError with a stable code, not a bare transport failure.
    */

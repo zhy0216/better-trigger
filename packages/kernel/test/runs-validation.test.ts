@@ -175,7 +175,9 @@ describe('payload size cap', () => {
     const { run, sqls } = create({}, blob(256 * 1024));
     await expect(run).rejects.toBeInstanceOf(KernelError);
     await run.catch((err: KernelError) => {
-      expect(err.code).toBe('bad_request');
+      // payload_too_large (413), not bad_request (400): the same stable code
+      // family the HTTP body cap uses — "you sent too much" is one error (C3).
+      expect(err.code).toBe('payload_too_large');
       expect(err.message).toMatch(/payload must serialize to at most 262144 bytes/);
     });
     // Not even the tasks lookup — the check runs before the first query.
@@ -191,7 +193,7 @@ describe('payload size cap', () => {
   it('honours BETTER_TRIGGER_MAX_PAYLOAD_BYTES', async () => {
     process.env.BETTER_TRIGGER_MAX_PAYLOAD_BYTES = '16';
     const small = create({}, blob(64));
-    await expect(small.run).rejects.toMatchObject({ code: 'bad_request' });
+    await expect(small.run).rejects.toMatchObject({ code: 'payload_too_large' });
     expect(small.sqls).toEqual([]);
 
     const ok = create({}, 'x');
@@ -204,7 +206,7 @@ describe('payload size cap', () => {
     // that a naive .length check would have let through.
     process.env.BETTER_TRIGGER_MAX_PAYLOAD_BYTES = '128';
     const { run, sqls } = create({}, '中'.repeat(100));
-    await expect(run).rejects.toMatchObject({ code: 'bad_request' });
+    await expect(run).rejects.toMatchObject({ code: 'payload_too_large' });
     expect(sqls).toEqual([]);
   });
 });
