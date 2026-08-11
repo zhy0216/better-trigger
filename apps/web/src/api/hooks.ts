@@ -14,6 +14,7 @@ import {
   adaptSchedules,
   type AdaptedRunDetail,
 } from './adapter';
+import { appendTailPage, mergeRunPages } from './mergeRuns';
 import type { Task, Run, Schedule } from '../types';
 import type { WorkerSummary } from './client';
 
@@ -133,22 +134,99 @@ export function useTasks(): PollResult<Task[]> {
   );
 }
 
+export interface RunsResult extends PollResult<Run[]> {
+  /** Fetch the next (older) page and append it to the list. Resolves false
+   *  when the server said there is no next page (or the request failed). */
+  loadMore: () => Promise<boolean>;
+  /** True while a loadMore request is in flight (drives the button). */
+  loadingMore: boolean;
+  /** False once the server reported no further pages — all runs loaded. */
+  hasMore: boolean;
+}
+
+/**
+ * PF3: the runs list consumes the server's keyset `nextCursor` instead of
+ * forever showing only the first page. Page 1 is still polled every 2s (the
+ * live head), while appended pages live in separate state so a poll tick
+ * replaces the head without wiping them — a "load more" reading view, not a
+ * cursor that must survive refreshes.
+ */
 export function useRuns(
   env: string,
   filters: RunFilters = {},
   enabled: boolean = true,
-): PollResult<Run[]> {
+): RunsResult {
   const status = filters.status;
   const taskId = filters.taskId;
-  const limit = filters.limit;
-  return usePoll<Run[]>(
+  const pageLimit = filters.limit ?? 50;
+
+  const base = usePoll<{ runs: Run[]; nextCursor: string | null }>(
     async (signal) => {
-      const res = await api.runs({ env, status, taskId, limit: limit ?? 50 }, signal);
-      return adaptRuns(res.runs);
+      const res = await api.runs({ env, status, taskId, limit: pageLimit }, signal);
+      return { runs: adaptRuns(res.runs), nextCursor: res.nextCursor };
     },
-    [env, status, taskId, limit],
+    [env, status, taskId, pageLimit],
     enabled,
   );
+
+  const [tail, setTail] = React.useState<Run[]>([]);
+  // Continuation cursor for the tail pages, INDEPENDENT of the polled head:
+  //   undefined  paging not started — the first loadMore uses the head's cursor
+  //   null       started and exhausted — no more pages
+  //   string     the last loaded page's cursor
+  // The head poll must never touch it (see the loadMore comment below).
+  const [tailCursor, setTailCursor] = React.useState<string | null | undefined>(undefined);
+  const [loadingMore, setLoadingMore] = React.useState(false);
+
+  // The polled head's own keyset. It only answers "are there more runs at
+  // all" BEFORE paging has started — once the user has loaded an older page,
+  // head movement must not re-open paging: a fresh run advancing the head
+  // would reset a tail cursor that had gone null, and the next loadMore would
+  // fetch runs NEWER than the tail and append them out of order
+  // ("...2,1,51" after the list had finished). The price is that runs that
+  // slide off the head into the gap are only reachable by refreshing filters.
+  const headHasMore = (base.data?.nextCursor ?? null) !== null;
+
+  // A filter/env change invalidates appended pages — they were loaded for the
+  // previous query.
+  const depsKey = JSON.stringify([env, status, taskId, pageLimit]);
+  React.useEffect(() => {
+    setTail([]);
+    setTailCursor(undefined);
+    setLoadingMore(false);
+  }, [depsKey]);
+
+  const loadMore = React.useCallback(async (): Promise<boolean> => {
+    if (loadingMore || !enabled) return false;
+    if (tailCursor === null) return false; // already loaded everything
+    const cursor = tailCursor ?? base.data?.nextCursor ?? null;
+    if (cursor === null) return false; // the head page itself was the last page
+    setLoadingMore(true);
+    try {
+      const res = await api.runs({ env, status, taskId, limit: pageLimit, cursor });
+      setTail((prev) => appendTailPage(prev, adaptRuns(res.runs)));
+      // Only the user's own paging advances the tail cursor.
+      setTailCursor(res.nextCursor);
+      return res.nextCursor !== null;
+    } catch {
+      return false;
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, enabled, tailCursor, base.data?.nextCursor, env, status, taskId, pageLimit]);
+
+  const head = base.data?.runs ?? [];
+  const data = base.data === null ? null : mergeRunPages(head, tail);
+  const hasMore = tailCursor === undefined ? headHasMore : tailCursor !== null;
+
+  return {
+    data,
+    loading: base.loading,
+    error: base.error,
+    loadMore,
+    loadingMore,
+    hasMore,
+  };
 }
 
 export function useRun(runId: string | null): PollResult<AdaptedRunDetail> {

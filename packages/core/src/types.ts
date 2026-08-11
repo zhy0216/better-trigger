@@ -257,12 +257,30 @@ export interface LogRecord {
   ts: string;
 }
 
-/** Run + its full ledger (logs capped at 1000). */
+/**
+ * Run + ledger snapshot (PF3, todos/02-performance.md). The run row, steps,
+ * waits and logs are read inside ONE REPEATABLE READ transaction, so the parts
+ * cannot come from different points in time. steps/waits are capped (newest
+ * kept, `stepsTruncated`/`waitsTruncated` flag the cut) and logs are paged:
+ * the newest page by default, older pages via `logsBefore` — all so a very
+ * long agent run cannot produce an unbounded JSON response.
+ */
 export interface RunDetailResult {
   run: RunRecord;
+  /** Newest `stepsLimit` (default 500) steps, ascending by seq. */
   steps: RunStepRecord[];
+  /** True when older steps were omitted at the cap. */
+  stepsTruncated: boolean;
+  /** Newest `waitsLimit` (default 500) waits, ascending by id. */
   waits: WaitRecord[];
+  /** True when older waits were omitted at the cap. */
+  waitsTruncated: boolean;
+  /** Newest `logsLimit` (default 200) logs, ascending by id (chronological). */
   logs: LogRecord[];
+  /** Pass as `?logsBefore=` to fetch the older page. The id of the oldest log
+   *  in this page when older logs exist; null when this page is the earliest
+   *  (or the run has no logs). */
+  logsNextCursor: number | null;
 }
 
 /* ---------------------------------------------------------------------------

@@ -117,7 +117,7 @@ const trigger = betterTrigger({
 | `cancelRun(runId)` | Cancel a non-terminal run (terminal → no-op). |
 | `retryRun(runId)` | Re-run a failed/canceled run as a **new** run. → `{ runId }` |
 | `getRun(runId)` | Full run record. |
-| `getRunDetail(runId)` | `{ run, steps, waits, logs }` (logs capped at 1000). |
+| `getRunDetail(runId, opts?)` | `{ run, steps, stepsTruncated, waits, waitsTruncated, logs, logsNextCursor }` — one snapshot; newest 200 logs by default, `opts.logsBefore` pages older logs. |
 | `waitForResult(runId, opts?)` | Wait for a terminal state. → `{ status, output?, error? }` |
 | `health()` | Daemon liveness probe. → `{ ok, version }` |
 | `setDefault()` | Make this instance the module-level default. |

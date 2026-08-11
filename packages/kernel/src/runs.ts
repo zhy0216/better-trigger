@@ -101,6 +101,16 @@ import { enqueue, removeFromQueue } from './queue';
 /** Upper bound for a delay before a run becomes available: 10 years in ms. */
 const MAX_DELAY_MS = 315_576_000_000;
 
+/* Run-detail read caps (PF3): steps/waits and the logs page are bounded so a
+   very long agent run cannot produce an unbounded detail JSON. Logs are paged
+   through the id-based `logsBefore` cursor; steps/waits are simply capped at
+   the newest rows with a truncated flag (full pagination for them is future
+   work, todos/02-performance.md PF3). */
+const DEFAULT_DETAIL_LOGS_LIMIT = 200;
+const DEFAULT_DETAIL_STEPS_LIMIT = 500;
+const DEFAULT_DETAIL_WAITS_LIMIT = 500;
+const MAX_DETAIL_PAGE = 5000;
+
 /* Input size limits. Both are enforced here rather than only at the HTTP edge
    because child runs (triggerAndWait / batchTriggerChild) never cross HTTP at
    all — the kernel is the one boundary every created run passes through.
@@ -1660,12 +1670,12 @@ const durationMs = (started: Date | null, finished: Date | null): number | null 
   started && finished ? finished.getTime() - started.getTime() : null;
 
 export async function getRunRecord(
-  pool: Pool,
+  db: Pool | PoolClient,
   runId: string,
   namespace: Namespace,
 ): Promise<RunRecord> {
   assertNamespace(namespace);
-  const runRes = await pool.query<{
+  const runRes = await db.query<{
     id: string;
     task_id: string;
     status: string;
@@ -1717,16 +1727,91 @@ export async function getRunRecord(
   };
 }
 
-/** Run + steps + waits + logs (logs capped at 1000 rows, oldest first). */
+/** Options for getRunDetail (PF3). All limits optional; defaults keep a single
+ *  detail page bounded (~200 log lines, 500 steps / 500 waits at most). */
+export interface RunDetailOptions {
+  /** Page size for logs — the newest N lines, ascending in the response.
+   *  Default 200; capped at MAX_DETAIL_PAGE. */
+  logsLimit?: number;
+  /** Return only logs with id < logsBefore — the page strictly older than the
+   *  one whose oldest line carries this id (the response's logsNextCursor). */
+  logsBefore?: number;
+  /** Cap on steps rows (newest kept). Default 500; capped at MAX_DETAIL_PAGE. */
+  stepsLimit?: number;
+  /** Cap on waits rows (newest kept). Default 500; capped at MAX_DETAIL_PAGE. */
+  waitsLimit?: number;
+}
+
+/** Clamp an optional count to [1, max] with a fallback — a page size of 0 or a
+ *  negative one is a caller bug, refused before it reaches pg as `LIMIT 0`. */
+function detailLimit(name: string, v: number | undefined, fallback: number): number {
+  if (v === undefined) return fallback;
+  if (!Number.isSafeInteger(v) || v < 1) {
+    throw new KernelError('bad_request', `${name} must be a positive integer`);
+  }
+  return Math.min(v, MAX_DETAIL_PAGE);
+}
+
+/**
+ * Run + steps + waits + logs from ONE snapshot. All four reads run in a single
+ * REPEATABLE READ transaction (a dedicated connection from the pool, released
+ * on every path), so a run changing mid-read cannot produce a detail whose
+ * parts disagree: the run status, ledger and logs all reflect the same point
+ * in time (PF3, todos/02-performance.md).
+ *
+ * Logs come back as the NEWEST page (default 200 lines) in ascending id order
+ * (chronological display); `logsNextCursor` carries the oldest line's id when
+ * older logs exist, and passing it back as `logsBefore` fetches the previous
+ * page — so a 1200-line run shows its last error by default and pages back to
+ * the beginning. steps/waits are capped at the newest rows with a truncated
+ * flag.
+ */
 export async function getRunDetail(
   pool: Pool,
   runId: string,
   namespace: Namespace,
+  opts: RunDetailOptions = {},
 ): Promise<RunDetailResult> {
   assertNamespace(namespace);
-  const run = await getRunRecord(pool, runId, namespace);
+  const logsLimit = detailLimit('logsLimit', opts.logsLimit, DEFAULT_DETAIL_LOGS_LIMIT);
+  const stepsLimit = detailLimit('stepsLimit', opts.stepsLimit, DEFAULT_DETAIL_STEPS_LIMIT);
+  const waitsLimit = detailLimit('waitsLimit', opts.waitsLimit, DEFAULT_DETAIL_WAITS_LIMIT);
+  const logsBefore = opts.logsBefore;
+  if (logsBefore !== undefined && (!Number.isSafeInteger(logsBefore) || logsBefore < 1)) {
+    throw new KernelError('bad_request', 'logsBefore must be a positive integer');
+  }
 
-  const stepsRes = await pool.query<{
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+    const detail = await readRunDetail(client, runId, namespace, {
+      logsLimit,
+      logsBefore,
+      stepsLimit,
+      waitsLimit,
+    });
+    await client.query('COMMIT');
+    return detail;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/** The four reads of getRunDetail, executed on an already-open tx client. */
+async function readRunDetail(
+  client: PoolClient,
+  runId: string,
+  namespace: Namespace,
+  opts: Required<Pick<RunDetailOptions, 'logsLimit' | 'stepsLimit' | 'waitsLimit'>> & {
+    logsBefore?: number;
+  },
+): Promise<RunDetailResult> {
+  const run = await getRunRecord(client, runId, namespace);
+
+  const stepsRes = await client.query<{
     seq: number;
     kind: string;
     label: string | null;
@@ -1738,10 +1823,15 @@ export async function getRunDetail(
     finished_at: Date | null;
   }>(
     `SELECT seq, kind, label, status, output, error, attempt, started_at, finished_at
-       FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY seq ASC`,
-    [runId, namespace.projectId, namespace.env],
+       FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
+      ORDER BY seq DESC LIMIT $4`,
+    [runId, namespace.projectId, namespace.env, opts.stepsLimit + 1],
   );
-  const steps: RunStepRecord[] = stepsRes.rows.map((s) => ({
+  // Newest rows kept, oldest cut — the extra probe row (limit+1) is the proof
+  // that older ones exist, and doubles as the truncation flag.
+  const stepsTruncated = stepsRes.rows.length > opts.stepsLimit;
+  const keptSteps = stepsTruncated ? stepsRes.rows.slice(0, opts.stepsLimit) : stepsRes.rows;
+  const steps: RunStepRecord[] = keptSteps.reverse().map((s) => ({
     seq: s.seq,
     kind: s.kind as StepKind,
     label: s.label,
@@ -1753,7 +1843,7 @@ export async function getRunDetail(
     finishedAt: iso(s.finished_at),
   }));
 
-  const waitsRes = await pool.query<{
+  const waitsRes = await client.query<{
     id: number;
     step_seq: number;
     kind: string;
@@ -1762,10 +1852,13 @@ export async function getRunDetail(
     status: string;
   }>(
     `SELECT id, step_seq, kind, resume_at, child_run_id, status
-       FROM waits WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY id ASC`,
-    [runId, namespace.projectId, namespace.env],
+       FROM waits WHERE run_id = $1 AND project_id = $2 AND env = $3
+      ORDER BY id DESC LIMIT $4`,
+    [runId, namespace.projectId, namespace.env, opts.waitsLimit + 1],
   );
-  const waits: WaitRecord[] = waitsRes.rows.map((w) => ({
+  const waitsTruncated = waitsRes.rows.length > opts.waitsLimit;
+  const keptWaits = waitsTruncated ? waitsRes.rows.slice(0, opts.waitsLimit) : waitsRes.rows;
+  const waits: WaitRecord[] = keptWaits.reverse().map((w) => ({
     id: Number(w.id),
     stepSeq: w.step_seq,
     kind: w.kind as WaitKind,
@@ -1774,19 +1867,29 @@ export async function getRunDetail(
     status: w.status as WaitRecord['status'],
   }));
 
-  const logsRes = await pool.query<{
+  // Newest page, id-descending in SQL, reversed in memory for chronological
+  // display; `id < $n` walks back through older pages via the cursor.
+  const logsSql = opts.logsBefore === undefined
+    ? `SELECT id, step_seq, level, message, data, ts
+         FROM logs WHERE run_id = $1 AND project_id = $2 AND env = $3
+        ORDER BY id DESC LIMIT $4`
+    : `SELECT id, step_seq, level, message, data, ts
+         FROM logs WHERE run_id = $1 AND project_id = $2 AND env = $3 AND id < $4
+        ORDER BY id DESC LIMIT $5`;
+  const logsParams = opts.logsBefore === undefined
+    ? [runId, namespace.projectId, namespace.env, opts.logsLimit + 1]
+    : [runId, namespace.projectId, namespace.env, opts.logsBefore, opts.logsLimit + 1];
+  const logsRes = await client.query<{
     id: number;
     step_seq: number | null;
     level: string;
     message: string;
     data: unknown;
     ts: Date;
-  }>(
-    `SELECT id, step_seq, level, message, data, ts
-       FROM logs WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY id ASC LIMIT 1000`,
-    [runId, namespace.projectId, namespace.env],
-  );
-  const logs: LogRecord[] = logsRes.rows.map((l) => ({
+  }>(logsSql, logsParams);
+  const logsTruncated = logsRes.rows.length > opts.logsLimit;
+  const keptLogs = logsTruncated ? logsRes.rows.slice(0, opts.logsLimit) : logsRes.rows;
+  const logs: LogRecord[] = keptLogs.reverse().map((l) => ({
     id: Number(l.id),
     stepSeq: l.step_seq,
     level: l.level as LogLevel,
@@ -1794,8 +1897,10 @@ export async function getRunDetail(
     data: l.data,
     ts: l.ts.toISOString(),
   }));
+  const oldestId = logs.length > 0 ? logs[0]!.id : null;
+  const logsNextCursor = logsTruncated && oldestId !== null ? oldestId : null;
 
-  return { run, steps, waits, logs };
+  return { run, steps, stepsTruncated, waits, waitsTruncated, logs, logsNextCursor };
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));

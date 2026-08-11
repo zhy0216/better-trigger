@@ -348,7 +348,7 @@ SDK also parses are aliases of the read models in `@better-trigger/core`.
 | `GET /health?deep=1` | readiness: `SELECT 1` (2s deadline) + `{ db, pool: { total, idle, waiting } }`; 503 when the DB does not answer. Also open — a container healthcheck has no key. This is what the image's `HEALTHCHECK` runs. |
 | `GET /tasks` | `{ tasks: TaskSummary[] }` (24h-window runs24h/p50/p95/successRate/trend, all-history `lastRunAt`; cached 10s per namespace) |
 | `GET /runs?env=&taskId=&status=&limit=&cursor=` | `{ runs: RunSummary[], nextCursor }` (keyset on `created_at + id`) |
-| `GET /runs/:id` | `{ run, steps, waits, logs }` (logs capped at 1000) |
+| `GET /runs/:id?logsBefore=` | `{ run, steps, stepsTruncated, waits, waitsTruncated, logs, logsNextCursor }` — one snapshot; newest 200 logs by default, older pages via `logsBefore` |
 | `GET /schedules` | `{ schedules: ScheduleSummary[] }` |
 | `PATCH /schedules/:id` | `{ enabled }` → `{ ok }` (re-computes `nextRunAt` when enabling) |
 | `GET /workers` | `{ workers: WorkerSummary[] }` |
@@ -366,6 +366,21 @@ p50/p95, successRate, trend); `lastRunAt` is the task's most recent run over
 **all history**. The response is cached per namespace for 10s
 (`BETTER_TRIGGER_STATS_TTL_MS`), so the dashboard's 2s poll does not re-run
 the aggregations on every tick.
+
+**`GET /runs/:id` is one snapshot, and its pages have a hard size (PF3).** The
+run row, steps, waits and logs are read inside a single `REPEATABLE READ`
+transaction, so the four parts always agree — the run status you see is the
+status its ledger was read under. Logs come back as the **newest 200 lines in
+chronological order** (a long run's final error is on the page by default);
+`logsNextCursor` carries the oldest line's id when older logs exist, and
+passing it back as `?logsBefore=` fetches the previous page — repeat until the
+cursor is `null`. Steps and waits are capped at the newest 500 rows each, with
+`stepsTruncated` / `waitsTruncated` set when the cap cut older rows (full
+pagination for them is future work). Size bound: one detail response is at
+most 200 log lines (each ≤ the 16 KiB per-line `data` cap) plus 500 steps
+(each ≤ the 256 KiB step output / 64 KiB error caps) plus 500 waits plus the
+run record — worst case dominated by per-row caps; typical pages are a few
+KiB. `logsBefore` is validated (`400 bad_request` on a non-positive integer).
 
 ### Metrics
 

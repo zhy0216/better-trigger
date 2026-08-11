@@ -87,10 +87,17 @@ export interface BetterTrigger {
    */
   getRun(runId: string, namespace?: Namespace): Promise<RunRecord>;
   /**
-   * Run + steps + waits + logs (logs capped at 1000). `namespace` scopes the
-   * request; absent → server default (default/prod).
+   * Run + steps + waits + logs from one REPEATABLE READ snapshot (PF3). Logs
+   * are the NEWEST page (200 lines) by default; pass `opts.logsBefore` (the
+   * previous response's `logsNextCursor`) to fetch the older page, until the
+   * cursor is null. `namespace` scopes the request; absent → server default
+   * (default/prod).
    */
-  getRunDetail(runId: string, namespace?: Namespace): Promise<RunDetailResult>;
+  getRunDetail(
+    runId: string,
+    namespace?: Namespace,
+    opts?: { logsBefore?: number },
+  ): Promise<RunDetailResult>;
   /**
    * Wait for a run to reach a terminal state (timeout → latest status).
    * `namespace` scopes the poll; absent → default/prod. RunHandle.result()
@@ -268,8 +275,12 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
       return http.request<RunRecord>(`/runs/${encodeURIComponent(runId)}/record${nsQuery(namespace)}`);
     },
 
-    getRunDetail(runId, namespace) {
-      return http.request<RunDetailResult>(`/runs/${encodeURIComponent(runId)}${nsQuery(namespace)}`);
+    getRunDetail(runId, namespace, opts) {
+      const qs = nsQuery(namespace);
+      const cursor = opts?.logsBefore !== undefined ? `logsBefore=${opts.logsBefore}` : '';
+      return http.request<RunDetailResult>(
+        `/runs/${encodeURIComponent(runId)}${qs}${cursor ? (qs ? '&' : '?') + cursor : ''}`,
+      );
     },
 
     async waitForResult(runId, namespace, opts) {

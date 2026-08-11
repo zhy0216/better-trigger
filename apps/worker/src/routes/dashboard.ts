@@ -6,15 +6,12 @@
 import { Hono } from 'hono';
 import type { Pool } from 'pg';
 import type { Namespace } from '@better-trigger/core';
-import { KernelError, nextCronAt } from '@better-trigger/kernel';
+import { getRunDetail, KernelError, nextCronAt } from '@better-trigger/kernel';
 import type {
   HealthPoolStats,
   HealthResponse,
-  LogRow,
   OkResponse,
-  RunDetail,
   RunDetailResponse,
-  RunStepRow,
   RunsResponse,
   RunSummary,
   ScheduleSummary,
@@ -22,7 +19,6 @@ import type {
   TaskSummary,
   TasksResponse,
   UpdateScheduleRequest,
-  WaitRow,
   WorkerSummary,
   WorkersResponse,
 } from '../types';
@@ -323,131 +319,26 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
   /* ------------------------------------------------------ runs/:id */
   app.get('/runs/:id', async (c) => {
     const id = c.req.param('id');
-    // Scoped like the rest of the dashboard: the run row is predicated on the
-    // namespace so an id from another namespace reads as not_found, and the
-    // projectId it carries is part of the wire shape (RunRecord).
+    // Scoped like the rest of the dashboard: the namespace is resolved from the
+    // query so an id from another namespace reads as not_found, and the run
+    // row carries its projectId as part of the wire shape (RunRecord).
     const ns = namespaceFromQuery(c);
-    const runRes = await pool.query<{
-      id: string;
-      task_id: string;
-      status: string;
-      trigger_type: string;
-      code_version: string | null;
-      project_id: string;
-      env: string;
-      attempt: number;
-      max_attempts: number;
-      payload: unknown;
-      output: unknown;
-      error: unknown;
-      parent_run_id: string | null;
-      idempotency_key: string | null;
-      queued_at: Date | null;
-      created_at: Date;
-      started_at: Date | null;
-      finished_at: Date | null;
-    }>(
-      `SELECT id, task_id, status, trigger_type, code_version, project_id, env, attempt, max_attempts,
-              payload, output, error, parent_run_id, idempotency_key,
-              queued_at, created_at, started_at, finished_at
-         FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
-      [id, ns.projectId, ns.env],
-    );
-    const r = runRes.rows[0];
-    if (!r) return c.json({ error: { code: 'not_found', message: 'run not found' } }, 404);
-
-    const run: RunDetail = {
-      id: r.id,
-      taskId: r.task_id,
-      status: r.status as RunDetail['status'],
-      trigger: r.trigger_type as RunDetail['trigger'],
-      codeVersion: r.code_version,
-      projectId: r.project_id,
-      env: r.env,
-      attempt: r.attempt,
-      durationMs: durationMs(r.started_at, r.finished_at),
-      createdAt: r.created_at.toISOString(),
-      startedAt: iso(r.started_at),
-      finishedAt: iso(r.finished_at),
-      payload: r.payload,
-      output: r.output,
-      error: (r.error as RunDetail['error']) ?? null,
-      parentRunId: r.parent_run_id,
-      idempotencyKey: r.idempotency_key,
-      maxAttempts: r.max_attempts,
-      queuedAt: iso(r.queued_at),
-    };
-
-    const stepsRes = await pool.query<{
-      seq: number;
-      kind: string;
-      label: string | null;
-      status: string;
-      output: unknown;
-      error: unknown;
-      attempt: number;
-      started_at: Date | null;
-      finished_at: Date | null;
-    }>(
-      `SELECT seq, kind, label, status, output, error, attempt, started_at, finished_at
-         FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY seq ASC`,
-      [id, ns.projectId, ns.env],
-    );
-    const steps: RunStepRow[] = stepsRes.rows.map((s) => ({
-      seq: s.seq,
-      kind: s.kind as RunStepRow['kind'],
-      label: s.label,
-      status: s.status as RunStepRow['status'],
-      output: s.output,
-      error: (s.error as RunStepRow['error']) ?? null,
-      attempt: s.attempt,
-      startedAt: iso(s.started_at),
-      finishedAt: iso(s.finished_at),
-    }));
-
-    const waitsRes = await pool.query<{
-      id: number;
-      step_seq: number;
-      kind: string;
-      resume_at: Date | null;
-      child_run_id: string | null;
-      status: string;
-    }>(
-      `SELECT id, step_seq, kind, resume_at, child_run_id, status
-         FROM waits WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY id ASC`,
-      [id, ns.projectId, ns.env],
-    );
-    const waitRows: WaitRow[] = waitsRes.rows.map((w) => ({
-      id: Number(w.id),
-      stepSeq: w.step_seq,
-      kind: w.kind as WaitRow['kind'],
-      resumeAt: iso(w.resume_at),
-      childRunId: w.child_run_id,
-      status: w.status as WaitRow['status'],
-    }));
-
-    const logsRes = await pool.query<{
-      id: number;
-      step_seq: number | null;
-      level: string;
-      message: string;
-      data: unknown;
-      ts: Date;
-    }>(
-      `SELECT id, step_seq, level, message, data, ts
-         FROM logs WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY id ASC LIMIT 1000`,
-      [id, ns.projectId, ns.env],
-    );
-    const logRows: LogRow[] = logsRes.rows.map((l) => ({
-      id: Number(l.id),
-      stepSeq: l.step_seq,
-      level: l.level as LogRow['level'],
-      message: l.message,
-      data: l.data,
-      ts: l.ts.toISOString(),
-    }));
-
-    const res: RunDetailResponse = { run, steps, waits: waitRows, logs: logRows };
+    // PF3: the whole detail — run, steps, waits, logs — comes from the kernel's
+    // ONE REPEATABLE READ snapshot. This route must not re-query those tables
+    // itself: a second copy of the SQL would drift, and separate reads could
+    // disagree mid-run. The kernel is the single source of truth.
+    const logsBefore = c.req.query('logsBefore');
+    const detail = await getRunDetail(pool, id, ns, {
+      // Absent → the newest page; anything else is validated here so a typo
+      // costs one parse, and re-validated in the kernel.
+      logsBefore:
+        logsBefore === undefined || logsBefore === ''
+          ? undefined
+          : intQuery(c, 'logsBefore', { min: 1, max: Number.MAX_SAFE_INTEGER, fallback: 1 }),
+    });
+    // not_found (another namespace / no such run) surfaces as the kernel's
+    // 404 through app.onError, same envelope as the dashboard's own 404s.
+    const res: RunDetailResponse = detail;
     return c.json(res);
   });
 

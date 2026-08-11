@@ -74,6 +74,11 @@ const HARNESSES: Harness[] = [
     what: 'task stats aggregate only the 24h window; lastRunAt stays all-history',
   },
   {
+    name: 'run-detail',
+    file: 'run-detail.ts',
+    what: 'run detail serves one snapshot; newest-first logs page back via cursor (PF3)',
+  },
+  {
     name: 'notify',
     file: 'notify.ts',
     what: 'notification fast-path: claim wake, waiter registry, LISTEN loss, duplicate-safety',

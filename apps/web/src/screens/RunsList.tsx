@@ -30,7 +30,12 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
   const [live, setLive] = React.useState(true);
   // env + status filtering happen server-side. `live` gates polling — Paused
   // stops requests and holds current data, resuming refreshes immediately.
-  const { data: source, error } = useRuns(env, { status: FILTER_TO_SERVER[filter] }, live);
+  // PF3: loadMore consumes the server's nextCursor (older pages append).
+  const { data: source, error, loadMore, loadingMore, hasMore } = useRuns(
+    env,
+    { status: FILTER_TO_SERVER[filter] },
+    live,
+  );
   const runs = (source ?? []).filter((r) => !q || r.task.includes(q) || r.id.includes(q));
 
   const colT = '112px 150px minmax(0,1fr) 96px 130px 96px 92px';
@@ -98,6 +103,18 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
         ))}
         {runs.length === 0 && (
           <div style={{ padding: '48px 0', textAlign: 'center', color: 'var(--fg-subtle)', fontSize: 13 }}>No runs match these filters.</div>
+        )}
+        {hasMore && (
+          <div style={{ padding: '10px 16px', borderTop: '1px solid var(--divider)' }}>
+            <button onClick={() => void loadMore()} disabled={loadingMore}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: 32, borderRadius: 8,
+                border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--fg-muted)', cursor: 'pointer',
+                fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500,
+              }}>
+              {loadingMore ? 'Loading…' : 'Load more'}
+            </button>
+          </div>
         )}
       </Card>
       )}

@@ -72,10 +72,14 @@ tasks        id text PK · name text · file_path text · trigger_source text('a
              · latest_code_version text · created_at/updated_at timestamptz
 
 runs         id text PK ('run_'+随机) · task_id text · status text
-             ('queued'|'running'|'waiting'|'completed'|'failed'|'canceled')
+             ('queued'|'running'|'waiting'|'completed'|'failed'|'canceled',
+             **CHECK 约束**,见下)
              · payload jsonb · output jsonb · error jsonb({message,stack?,name?})
              · trigger_type text('api'|'schedule'|'subtask'|'retry'|'dashboard')
-             · parent_run_id text · idempotency_key text
+             · parent_run_id text(**FK → runs(id) ON DELETE SET NULL**:
+               父 run 被删时子 run 活着,只清血缘指针 —— CASCADE 会误删还在执行的
+               子 run,RESTRICT 会让 prune 在批量删除父子对时失败;见 C5)
+             · idempotency_key text
              · code_version text(创建时从 tasks.latest_code_version 盖章;**不是 pin**,
                claim 不按它过滤,仅用于事后追溯"这份账本是按哪版代码写的")
              · attempt int DEFAULT 1 · max_attempts int(锁定触发时的策略)
@@ -91,13 +95,17 @@ runs         id text PK ('run_'+随机) · task_id text · status text
                 优雅关停归还走的是 UPDATE,queue 行还在,priority 自然保住)
              · queued_at/started_at/finished_at/created_at/updated_at timestamptz
              UNIQUE (task_id, idempotency_key)(部分索引 WHERE idempotency_key IS NOT NULL)
+             CHECK(attempt >= 1)、CHECK(0 <= recoveries <= max_recoveries)
 
 run_steps    run_id text + seq int 复合 PK(run_id **FK → runs(id) ON DELETE CASCADE**)
              · kind text('step'|'wait'|'trigger-and-wait'|
-             'batch-trigger'|'now'|'random'|'uuid') · label text · status text('completed'|'failed')
-             · output jsonb · error jsonb · attempt int · started_at/finished_at timestamptz
+             'batch-trigger'|'now'|'random'|'uuid',**CHECK**) · label text
+             · status text('completed'|'failed',**CHECK**) · output jsonb · error jsonb
+             · attempt int(**CHECK >= 1**) · started_at/finished_at timestamptz
 
-queue        id bigserial PK · run_id text UNIQUE · available_at timestamptz · priority int DEFAULT 0
+queue        id bigserial PK · run_id text UNIQUE(**FK → runs(id) ON DELETE CASCADE**:
+             删 run 即删它的排队行,手工 psql DELETE 也留不下 orphan queue)
+             · available_at timestamptz · priority int DEFAULT 0
              · locked_by text · locked_at timestamptz · lease_until timestamptz · concurrency_key text
              (**`locked_by IS NULL` = 未被占用**;三列同进同出,claim 一起写、归还/reaper 一起清)
              索引 (available_at, priority desc) 与 (concurrency_key),外加两个部分索引,
@@ -109,23 +117,44 @@ queue        id bigserial PK · run_id text UNIQUE · available_at timestamptz �
              两个谓词都只覆盖各自那一小撮行(可领取的 / 在飞的),把积压里占绝大多数的
              「已 claim 且租约未到期」整个排除在索引之外
 
-waits        id bigserial PK · run_id text · step_seq int · kind text('duration'|'until'|'run')
-             · resume_at timestamptz · child_run_id text · status text('pending'|'completed'|'canceled')
+waits        id bigserial PK · run_id text(**FK → runs(id) ON DELETE CASCADE**)
+             · step_seq int · kind text('duration'|'until'|'run',**CHECK**)
+             · resume_at timestamptz · child_run_id text(**FK → runs(id) ON DELETE
+             SET NULL**:被等待的子 run 被删时,wait 行保留、child_run_id 置 NULL,父
+             run 由编排器 wait 扫描判失败(ChildLostError)—— CASCADE 会把父 run
+             永久卡在 'waiting'(无 wait 无 queue,无路径恢复);prune 只删终态子
+             run,其父 wait 早已被 wakeParentIfWaiting 解决,置 NULL 的只是历史指针)
+             · status text('pending'|'completed'|'canceled',**CHECK**)
              · created_at timestamptz;索引 (status, resume_at) 与 (child_run_id)
 
 logs         id bigserial PK · run_id text(**FK → runs(id) ON DELETE CASCADE**)
-             · step_seq int · level text · message text
+             · step_seq int · level text('debug'|'info'|'warn'|'error',**CHECK**) · message text
              · data jsonb · ts timestamptz;索引 (run_id, id)
 
-schedules    id text PK ('sch_'+随机) · task_id text UNIQUE · cron_pattern text · cron_tz text
+schedules    id text PK ('sch_'+随机) · task_id text UNIQUE(**复合 FK
+             (project_id, env, task_id) → tasks(project_id, env, id) ON DELETE CASCADE**:
+             删 task 即删它的 cron 注册;syncSchedules 与 task upsert 同事务,不会造出
+             没有 task 的 schedule) · cron_pattern text · cron_tz text
              · enabled boolean DEFAULT true · next_run_at timestamptz · last_run_at timestamptz
              · last_run_id text · created_at/updated_at
 
 workers      id text PK ('wkr_'+随机) · name text · code_version text · runtime text
              · tasks jsonb(string[]) · concurrency int · started_at · last_heartbeat_at
-             · status text('online'|'offline')
+             · status text('online'|'offline',**CHECK**)
              (**每次进程启动插一行新的**,下线只改 status —— 靠 §2.1 的保留策略清理)
 ```
+
+以上 FK / CHECK 全部来自迁移 0011(C5,todos/01-correctness.md)。迁移先扫描并清理
+orphan(不存在的 run/task 的 queue / waits 行直接删除,孤儿 `parent_run_id` 与
+`waits.child_run_id` 置 NULL —— 与 FK 自身的 ON DELETE 行为一致),再加约束,所以带脏数据
+的旧库也能自动迁移;之后**手工 DELETE 或非法状态写不进去**。注意两个 ON DELETE SET NULL
+的语义:`runs.parent_run_id` 被置 NULL 的子 run 照常执行(只丢血缘指针);
+`waits.child_run_id` 被置 NULL 的父 run 会被编排器的 wait 扫描以 `ChildLostError`
+判失败(子 run 被删,结果永远不会来;不判失败父 run 会永远 'waiting' 卡死)。
+CHECK 约束假定存量 status/kind/level 值已在合法集合内(引擎写出的值必然如此):若
+库里有手工写入的非法值,0011 的 `ADD CONSTRAINT CHECK` 会失败并停掉所有 daemon 的
+启动,此时需先手工修复该行(具体 UPDATE 语句见 0011 头部注释),迁移不会替你猜。
+priority 没有 CHECK:应用层显式允许 int32 范围内任意值(负优先级合法,见 §3.5),与列类型一致即可。
 
 ### 2.1 数据保留(默认不删任何东西)
 
@@ -140,8 +169,12 @@ workers      id text PK ('wkr_'+随机) · name text · code_version text · run
   逻辑与 `prune` 完全同一份实现。**不给这个参数就没有这个循环**:默认行为不能是悄悄删用户数据。
 
 `logs.run_id` / `run_steps.run_id` 上的 `ON DELETE CASCADE`(迁移 0007)是这件事的支点 ——
-删 run 就是删它的日志和步骤账本,不需要第二份「删干净」的 SQL。`waits` / `queue` 没有这个
-外键(终态 run 上它们本就是空的),由 prune 显式按 run_id 删。窗口有下限(60s):
+删 run 就是删它的日志和步骤账本,不需要第二份「删干净」的 SQL。迁移 0011(C5)把同一
+支点扩展到了 `waits`(run 删 → 它的 wait 删;被等待的子 run 删 → 父的 wait 删)和
+`queue`(run 删 → 排队行删),所以**任何**删除路径(prune、CLI、手工 psql)都留不下
+orphan。prune 仍会在删 runs 之前手删一遍 queue 行 —— 这不是历史包袱,而是锁序:
+queue 是规范锁序的 1 号位(见 §3.2),先拿它再拿 runs,才能避免级联从 runs 锁背后去
+够 queue 行时与 reaper 互相等待。窗口有下限(60s):
 `--older-than 0` 会删掉调用方正在 poll 结果的那个 run,直接拒绝而不是照做。
 
 ## 3. 引擎语义(不变量,重点读)
@@ -278,7 +311,7 @@ SELECT q.id AS queue_id, q.run_id,
 - `GET /health?deep=1` → `{ ok, version, db:{ ok, error? }, pool:{ total, idle, waiting } }`(就绪探针:`SELECT 1`,2s 超时;DB 不通 → 503。与浅层同路径以保持免鉴权;body 不含 pg 错误原文/主机名)
 - `GET /tasks` → `{ tasks: [{ id, name, filePath, triggerSource, cronPattern, runs24h, p50Ms, p95Ms, successRate(0-100, 无运行=null), trend: number[12](近 24h 每 2h 运行数), lastRunAt }] }`(stats 用 `percentile_cont` 一次 SQL 聚合)
 - `GET /runs?env=&taskId=&status=&limit=50&cursor=` → `{ runs: [{ id, taskId, status, trigger: trigger_type, codeVersion, env, attempt, durationMs(终态=finished-started; running=null), createdAt, startedAt, finishedAt }], nextCursor }`(按 created_at desc,cursor = 上页最后 run 的 created_at+id)
-- `GET /runs/:id` → `{ run:{...全字段含 payload/output/error}, steps:[run_steps 全字段], waits:[...], logs:[{id, stepSeq, level, message, data, ts}] }`(logs 上限 1000 条)
+- `GET /runs/:id?logsBefore=` → `{ run:{...全字段含 payload/output/error}, steps:[run_steps 全字段], stepsTruncated, waits:[...], waitsTruncated, logs:[{id, stepSeq, level, message, data, ts}], logsNextCursor }`(PF3:run/steps/waits/logs 在**同一个 REPEATABLE READ 快照**里读,四部分永不同帧;logs 默认返回**最新 200 条、按 id 正序**(时间序),`logsNextCursor` = 本页最旧一条的 id,有更旧日志时非 null,把它作为 `?logsBefore=` 即翻到上一页,直到 cursor 为 null —— 1200 条日志的任务默认页能看到最后一条错误;steps/waits 各上限最新 500 条,截断时 `stepsTruncated`/`waitsTruncated` 置 true,完整分页是后续工作;`logsBefore` 非正整数 → 400)
 - `POST /runs/:id/cancel` / `POST /runs/:id/retry`(见 3.7)
 - `GET /schedules` → `{ schedules: [{ id, taskId, cronPattern, cronTz, enabled, nextRunAt, lastRunAt, lastRunStatus(查 last_run_id 的 status) }] }`
 - `PATCH /schedules/:id` `{ enabled }` → 更新(enable 时重算 next_run_at)
