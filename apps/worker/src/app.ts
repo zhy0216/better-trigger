@@ -12,6 +12,7 @@ import type { Namespace } from '@better-trigger/core';
 import { KernelError, type Kernel, type KernelErrorCode } from '@better-trigger/kernel';
 import type { ApiErrorBody } from './types';
 import { authMiddleware, corsMiddleware } from './middleware';
+import { dashboardStatic } from './static';
 import { triggerRoutes } from './routes/trigger';
 import { runRoutes } from './routes/runs';
 import { dashboardRoutes } from './routes/dashboard';
@@ -49,6 +50,15 @@ export interface AppDeps {
   /** Namespaces this daemon serves — /metrics labels its queue/in-flight
    *  gauges per namespace with these. Absent → default/prod. */
   namespaces?: readonly Namespace[];
+  /**
+   * O3 (todos/03-operability.md): the built dashboard. Points at the
+   * directory holding apps/web's dist content (the daemon embeds it at
+   * dist/public; see scripts/copy-public.mjs). When set, the daemon serves it
+   * same-origin: `/` and SPA deep links answer index.html, /assets/* answer
+   * the hashed files. Absent → non-API paths keep the JSON 404 (pre-O3
+   * behavior, and what --no-serve callers never see anyway).
+   */
+  publicDir?: string;
 }
 
 /** HTTP status per kernel error code; anything unknown falls through to 500. */
@@ -128,6 +138,11 @@ export function createApp(deps: AppDeps): Hono {
   );
 
   app.route('/api/v1', v1);
+
+  // O3: serve the embedded dashboard on everything outside /api/ — index.html
+  // on / and SPA deep links, hashed files under /assets/. Without a built
+  // dashboard it passes through and notFound keeps answering as before.
+  app.use('*', dashboardStatic(deps.publicDir));
 
   // Uniform error handler.
   app.onError((err, c) => {

@@ -21,6 +21,8 @@
    stop the loops, close the server, end the pool. An escaping rejection or an
    uncaught exception takes that same path and then exits non-zero.
    ============================================================================= */
+import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import {
   assertNamespace,
   DEFAULT_NAMESPACE,
@@ -952,6 +954,12 @@ async function main(): Promise<void> {
       // namespace — an operator must be able to tell default/prod's queue from
       // acme/staging's (C2).
       namespaces: opts.namespaces,
+      // O3: the embedded dashboard. In the built package this module sits in
+      // dist/, so ./public resolves to dist/public — the directory
+      // scripts/copy-public.mjs fills with apps/web's build output. Under a
+      // source checkout (bun --watch, dev) it points at src/public, which does
+      // not exist, so non-API paths keep their 404 — dev runs Vite standalone.
+      publicDir: fileURLToPath(new URL('./public', import.meta.url)),
     });
     server = startHttpServer(app, { port: opts.port, host: opts.host });
     daemon.server = server;

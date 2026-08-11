@@ -16,7 +16,7 @@
    the daemon's own listen wiring and reads back the address it bound to.
    ============================================================================= */
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
@@ -275,4 +275,138 @@ describe('bind address', () => {
     expect(six.address).toBe('::1');
     expect(six.family).toBe('IPv6');
   });
+});
+
+/*
+ * O3: --no-serve must not open an HTTP surface, so it serves no dashboard
+ * either. Both halves need a live process to probe, but booting the daemon
+ * needs a database that answers — so this stands in a FAKE postgres: a net
+ * server that accepts connections and never speaks, which parks the daemon's
+ * boot on the pg handshake (notify listener + runtime registration) without
+ * ever letting it fail. The positive control proves the probe works: the same
+ * setup WITHOUT --no-serve does open the port.
+ */
+describe('--no-serve never opens a listener', () => {
+  /** An OS-assigned port, released before the CLI is handed it. */
+  async function freePort(): Promise<string> {
+    const server = createServer();
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    return String(port);
+  }
+
+  /** Accepts connections and says nothing: pg hangs on the handshake. */
+  async function fakePostgres(): Promise<{ port: number; close(): void }> {
+    const server = createServer();
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', () => resolve());
+    });
+    return {
+      port: (server.address() as AddressInfo).port,
+      close: () => server.close(),
+    };
+  }
+
+  function probeOpen(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const sock = createConnection({ host: '127.0.0.1', port });
+      sock.on('connect', () => {
+        sock.destroy();
+        resolve(true);
+      });
+      sock.on('error', () => resolve(false));
+    });
+  }
+
+  function cleanEnv(pgPort: number): Record<string, string> {
+    const env: Record<string, string> = { ...process.env } as Record<string, string>;
+    delete env.BETTER_TRIGGER_API_KEY;
+    delete env.BETTER_TRIGGER_HOST;
+    delete env.BETTER_TRIGGER_ALLOW_UNAUTHENTICATED;
+    env.DATABASE_URL = `postgres://127.0.0.1:${pgPort}/better_trigger_hanging`;
+    return env;
+  }
+
+  function spawnCli(
+    args: string[],
+    env: Record<string, string>,
+  ): { child: ReturnType<typeof spawn>; closed: Promise<void>; wait(): Promise<string> } {
+    let out = '';
+    const child = spawn('bun', [MAIN, ...args], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', (d: Buffer) => (out += d.toString()));
+    child.stderr.on('data', (d: Buffer) => (out += d.toString()));
+    // The ONE close promise both consumers await — a listener registered after
+    // 'close' already fired would never resolve (and exitCode is null for a
+    // signal-killed child, so it cannot double as the state check).
+    const closed = new Promise<void>((resolve) => child.on('close', () => resolve()));
+    const wait = async (): Promise<string> => {
+      await closed;
+      return out;
+    };
+    return { child, closed, wait };
+  }
+
+  async function kill(
+    child: ReturnType<typeof spawn>,
+    closed: Promise<void>,
+  ): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill('SIGKILL');
+    await closed;
+  }
+
+  it(
+    'boots an executor-only node and never opens the HTTP port',
+    async () => {
+      const pg = await fakePostgres();
+      const port = Number(await freePort());
+      try {
+        const { child, closed, wait } = spawnCli(
+          ['--no-serve', '--tasks', 'test/fixtures/tasks-a.mjs', '--no-migrate', '--port', String(port)],
+          cleanEnv(pg.port),
+        );
+        // Give the boot time to reach (and park on) the database handshake —
+        // the serve branch, the only place a listener opens, comes later.
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        expect(await probeOpen(port)).toBe(false);
+        await kill(child, closed);
+        expect(await wait()).not.toContain('listening on');
+      } finally {
+        pg.close();
+      }
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'the probe is honest: the same setup WITHOUT --no-serve does listen',
+    async () => {
+      const pg = await fakePostgres();
+      const port = Number(await freePort());
+      let open = false;
+      let spawned: ReturnType<typeof spawnCli> | null = null;
+      try {
+        spawned = spawnCli(
+          ['--port', String(port), '--no-migrate'],
+          cleanEnv(pg.port),
+        );
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline && !open) {
+          if (spawned.child.exitCode !== null || spawned.child.signalCode !== null) break;
+          open = await probeOpen(port);
+          if (!open) await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        expect(open).toBe(true);
+      } finally {
+        if (spawned !== null) await kill(spawned.child, spawned.closed);
+        pg.close();
+      }
+    },
+    TIMEOUT,
+  );
 });

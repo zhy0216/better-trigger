@@ -21,6 +21,12 @@ subsequent requests. A manually entered key is memory-only: it is not written
 to `localStorage`, `sessionStorage`, cookies, or any other persistent store,
 and a page refresh clears it.
 
+The daemon serves the production build itself (`apps/worker` embeds `dist/`),
+so that build defaults to **same-origin** API access: without
+`VITE_BT_API_URL` it talks to the origin it was loaded from, works from any
+host:port the daemon is reached at, and needs no CORS. Only the Vite dev
+server falls back to `http://localhost:4848` when `VITE_BT_API_URL` is unset.
+
 For local development only, `VITE_BT_API_KEY` can provide the initial key:
 
 ```bash

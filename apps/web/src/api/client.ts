@@ -55,7 +55,12 @@ export function getApiKeyVersion(): number {
 }
 
 export const API_BASE_URL: string =
-  (import.meta.env.VITE_BT_API_URL as string | undefined) ?? 'http://localhost:4848';
+  (import.meta.env.VITE_BT_API_URL as string | undefined) ??
+  // Vite dev (standalone on :5173) falls back to the daemon's default port; a
+  // production build is served BY the daemon (O3), so it talks to the same
+  // origin it was loaded from — no VITE_BT_API_URL, no CORS, works from any
+  // host:port the daemon is reached at.
+  (import.meta.env.DEV ? 'http://localhost:4848' : '');
 
 const PREFIX = '/api/v1';
 

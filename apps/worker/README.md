@@ -52,6 +52,32 @@ compiled JavaScript.
 Run any number of daemons against one database — every claim and scan uses
 `FOR UPDATE SKIP LOCKED`, so there is no leader election.
 
+### Serving the dashboard
+
+The worker **embeds the built dashboard** and serves it from the same port as
+the API (O3). The build pipeline (`scripts/copy-public.mjs`, part of `bun run
+build`) builds `apps/web` and copies its `dist` into `dist/public`, which
+travels with the published package and the Docker image. At runtime:
+
+- `/` and `/index.html` → the dashboard shell (`Cache-Control: no-cache`, so
+  every load revalidates and a daemon restart always serves the new bundle).
+- `/runs/…`, `/schedules`, … → SPA deep links answer `index.html` too, so a
+  refresh of a bookmarked run page never 404s.
+- `/assets/*` → the hashed build files, served `immutable` for a year — the
+  content-hash names are what makes "no stale bundle after restart" work.
+- `/api/v1/*` and any other `/api*` path are untouched: API routes answer as
+  before, unknown ones keep the JSON 404.
+
+Because the dashboard is same-origin, production needs one port and no CORS
+configuration, and the built client talks to the origin it was loaded from —
+no `VITE_BT_API_URL` needed. A build without the dashboard (`dist/public`
+missing, e.g. a source checkout that has not run the web build) behaves
+exactly as before: non-API paths answer the JSON 404. For dashboard
+development, run Vite standalone (see `apps/web/README.md`).
+
+`--no-serve` (executor-only) starts no HTTP server, so it serves nothing —
+static hosting only exists on the same surface as the API.
+
 ### Task loading
 
 Every export of a `--tasks` module that looks like a `task()` handle is
