@@ -29,6 +29,8 @@ daemon (and the harnesses' direct-SQL assertions) ever sees `DATABASE_URL`.
 | `scripts/retention.ts` | Data retention through the FK cascades: a manual `DELETE FROM runs` takes steps/logs with it, the 0007 migration survives a database full of orphans, and the real `prune` CLI. |
 | `scripts/constraints.ts` | C5 database-level constraints: the five FKs (queue/waits.run_id cascade, `parent_run_id` + `child_run_id` SET NULL, schedules→tasks cascade) and the ten CHECK enums actually fire — a manual run delete leaves no orphan, a deleted child run's parent is failed by the orchestrator instead of stranded, an illegal status is refused with 23514, the 0011 migration cleans orphans instead of bricking daemon boots, and prune/cancel/retry keep every relation intact. |
 | `scripts/health-pool.ts` | PF4 probe pool on a live Postgres: `statement_timeout` is server-side effective (pg_settings says 1000ms), a never-returning probe (`SELECT pg_sleep(30)`) is cancelled at ~1s with 57014 `query_canceled` and the connection returns (consecutive probes never exhaust max=2), concurrent probes queue through max=2 without losing work, and 10 concurrent `/metrics` scrapes against a real daemon share one lock-blocked gauge query (single-flight) instead of piling up on the probe pool. |
+| `scripts/rolling-deploy.ts` | O5 rolling deploy with pinning: two builds of `drift-lenient` overlap on one database, the shared code version does not churn (C4), overlap runs drain on the old build, and after it leaves the v1-stamped backlog waits (stranded) instead of drifting. |
+| `scripts/migration.ts` | O5 migration upgrade/downgrade-compat: a hand-built 0007-era schema with seeded data upgrades to latest without loss, the new constraints fire (23514/23503), the old schema stays a strict subset, old-shape writes keep working, and a re-run `migrate()` is a no-op. |
 
 The scaffolding every scenario shares — database provisioning, daemon spawn /
 health-wait / SIGKILL, polling, the marker-file probe, the scenario runner and
@@ -90,8 +92,10 @@ bun run --filter @better-trigger/example-basic stats         #  4 checks · db _
 bun run --filter @better-trigger/example-basic notify        #  4 checks · db _notify · :4907
 bun run --filter @better-trigger/example-basic constraints    #  8 checks · db _constraints · no daemon
 bun run --filter @better-trigger/example-basic health-pool    #  4 checks · db _health_pool · daemon (part 4)
+bun run --filter @better-trigger/example-basic rolling-deploy #  8 checks · db _roll · :4911
+bun run --filter @better-trigger/example-basic migration      #  7 checks · db _migrate · no daemon
 
-bun run test:acceptance                                      # all thirteen, one exit code
+bun run test:acceptance                                      # all sixteen, one exit code
 ```
 
 `crash`, `worker-lost` and `replay-drift` run **two** daemons: an API node (no

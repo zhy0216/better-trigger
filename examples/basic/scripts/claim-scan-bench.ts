@@ -230,7 +230,7 @@ async function main(s: Scenario): Promise<void> {
     // `DESC NULLS LAST` index (drizzle's default for .desc()) produces, since
     // `ORDER BY priority DESC` is NULLS FIRST — hence .nullsFirst() in
     // packages/db/src/schema.ts.
-    s.assert(!/->  Sort/.test(after.text), `unexpected Sort node:\n${after.text}`);
+    s.assert(!/-> {2}Sort/.test(after.text), `unexpected Sort node:\n${after.text}`);
   });
 
   await s.check('reads at least 4x fewer buffers than the unindexed plan', async () => {
@@ -284,7 +284,7 @@ async function main(s: Scenario): Promise<void> {
       /Index Scan using queue_claimable_idx on queue/.test(delayed.text),
       `expected an index scan on queue_claimable_idx, got:\n${delayed.text}`,
     );
-    s.assert(!/->  Sort/.test(delayed.text), `unexpected Sort node:\n${delayed.text}`);
+    s.assert(!/-> {2}Sort/.test(delayed.text), `unexpected Sort node:\n${delayed.text}`);
   });
 
   // Baseline for the same rows with the delay removed: flip the 27k future
@@ -303,7 +303,7 @@ async function main(s: Scenario): Promise<void> {
       /Index Scan using queue_claimable_idx on queue/.test(baseline.text),
       `expected an index scan on queue_claimable_idx, got:\n${baseline.text}`,
     );
-    s.assert(!/->  Sort/.test(baseline.text), `unexpected Sort node:\n${baseline.text}`);
+    s.assert(!/-> {2}Sort/.test(baseline.text), `unexpected Sort node:\n${baseline.text}`);
   });
 
   await s.check('the scan skips only a bounded slice of the delayed rows', async () => {

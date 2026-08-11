@@ -34,6 +34,12 @@ services:
     build:
       context: .
       dockerfile: apps/worker/Dockerfile
+      # O4 build provenance: the image has no .git, so the commit identity is
+      # injected as a build arg and baked into /health, /metrics and
+      # workers.code_version. Build with:
+      #   GIT_SHA=$(git rev-parse --short HEAD) docker compose build worker
+      args:
+        GIT_SHA: ${GIT_SHA:-}
     container_name: better-trigger-worker
     restart: unless-stopped
     depends_on:

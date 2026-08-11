@@ -86,7 +86,10 @@ const HOLD_MS = 1_200;
  * packages/kernel/src/queue.ts CONCURRENCY_LOCK_CLASS on purpose: this scenario
  * is an independent witness of the namespace PF7 pinned, so it must not read
  * the value from the code it is checking. Both halves of the key derivation are
- * duplicated for the same reason — the `bt:cc:` prefix below and this constant.
+ * duplicated for the same reason — the `bt:cc:<project>:<env>:<key>` shape
+ * below and this constant (the namespace prefix is C2's, so the scenario holds
+ * the same (classid, objid) pair the engine's claims contend on for
+ * default/prod runs).
  */
 const CONCURRENCY_LOCK_CLASS = 0x62_74_63_63; // 'btcc'
 /** The key held hostage in step 4; never triggered before that step. */
@@ -356,10 +359,12 @@ async function main(s: Scenario): Promise<void> {
   );
 
   /* -- 5. the lock is better-trigger's own, on the key PF7 names ----------- */
-  // Hold (classid 'btcc', hashtext('bt:cc:<key>')) from here and the limiter
-  // cannot proceed past its lock: the claim transaction blocks, no run of that
-  // key starts, and pg_locks shows it waiting on OUR lock.
-  const lockKey = `bt:cc:${GATED_GROUP}`;
+  // Hold (classid 'btcc', hashtext('bt:cc:default:prod:<key>')) from here and
+  // the limiter cannot proceed past its lock: the claim transaction blocks, no
+  // run of that key starts, and pg_locks shows it waiting on OUR lock. The key
+  // is namespace-qualified (C2) — these runs are default/prod, the same pair
+  // the claim computes for them.
+  const lockKey = `bt:cc:default:prod:${GATED_GROUP}`;
   const holder = await s.pool.connect();
   let holding = false;
   const release = async (): Promise<void> => {

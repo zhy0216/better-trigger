@@ -158,6 +158,9 @@ describe('swallowed suspend signal', () => {
     // its swallow-and-keep-going stretch, and this warn is the only trace the
     // user will ever get of why their "sent" email has no step row.
     const { kernel, calls } = fakeKernel();
+    // Assigned after the task closure captures it (TDZ pattern) — `const`
+    // would be a compile error, so the assignment is deliberately deferred.
+    // eslint-disable-next-line prefer-const
     let ex!: Executor;
     const task: ExecutorTask = {
       id: 'demo',
@@ -187,6 +190,9 @@ describe('swallowed suspend signal', () => {
     const task: ExecutorTask = {
       id: 'demo',
       run: async (_payload, ctx) => {
+        // The rethrow wrapper is the documented suspend-signal shape; this
+        // test pins it, so the "useless" wrapper is the point.
+        // eslint-disable-next-line no-useless-catch
         try {
           await ctx.wait.for('1h');
         } catch (err) {
@@ -272,6 +278,7 @@ describe('every durable primitive is guarded', () => {
 
   it.each(entries)('%s refuses to run after a swallowed signal', async (_name, call, named) => {
     const { kernel, calls } = fakeKernel();
+    // eslint-disable-next-line prefer-const
     let ex!: Executor;
     let caught: any;
     const task: ExecutorTask = {

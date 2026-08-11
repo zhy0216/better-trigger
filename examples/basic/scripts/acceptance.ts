@@ -1,10 +1,11 @@
 /* =============================================================================
    @better-trigger/example-basic — acceptance suite entry point.
 
-   The fourteen scenarios in this directory are the project's real correctness
+   The sixteen scenarios in this directory are the project's real correctness
    evidence (exactly-once steps under SIGKILL, fencing, replay drift, version
-   pinning, worker loss, graceful restart, per-key concurrency limits, retention
-   cascades, probe-pool behaviour on a live Postgres).
+   pinning, rolling deploys, migration upgrades, worker loss, graceful
+   restart, per-key concurrency limits, retention cascades, probe-pool
+   behaviour on a live Postgres).
    Each one is a `runScenario()` call from @better-trigger/testing, so it
    already provisions its own database, spawns its own daemons, runs its own
    teardown and exits non-zero on any failed assertion — this script only runs
@@ -50,6 +51,16 @@ const HARNESSES: Harness[] = [
     name: 'code-version-pinning',
     file: 'code-version-pinning.ts',
     what: 'a pinned claim refuses runs it cannot replay, and says so',
+  },
+  {
+    name: 'rolling-deploy',
+    file: 'rolling-deploy.ts',
+    what: 'two code versions overlap; each claims and drains its own runs',
+  },
+  {
+    name: 'migration',
+    file: 'migration.ts',
+    what: '0007→latest upgrade preserves data and fires new constraints; old schema stays a subset',
   },
   {
     name: 'concurrency',

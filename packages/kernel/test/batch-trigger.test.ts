@@ -17,7 +17,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_NAMESPACE, KernelError, TaskNotFoundError, type TriggerItem } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, TaskNotFoundError } from '@better-trigger/core';
 import { batchTrigger } from '../src/runs';
 
 interface Stmt {
@@ -241,7 +241,7 @@ describe('batchTrigger byte cap on the total payload', () => {
     await expect(
       batchTrigger(
         pool,
-        items(500, (i) => ({ taskId: 't', payload: blob(3 * 1024) })),
+        items(500, () => ({ taskId: 't', payload: blob(3 * 1024) })),
         DEFAULT_NAMESPACE,
       ),
     ).rejects.toMatchObject({

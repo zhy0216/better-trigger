@@ -40,7 +40,6 @@ import {
   portFromEnv,
   runScenario,
   sleep,
-  spawnDaemon,
   startDaemon,
   waitFor,
   waitForTasks,

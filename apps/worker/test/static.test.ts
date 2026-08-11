@@ -10,7 +10,7 @@
    (node's http client does not normalize the request line), so double-encoded
    traversal and encoded API separators cannot hide behind URL semantics.
    ============================================================================= */
-import { createServer as createHttpServer, request as httpRequest } from 'node:http';
+import { request as httpRequest } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

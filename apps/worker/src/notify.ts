@@ -20,7 +20,7 @@
    without knowing anything about Postgres.
    ============================================================================= */
 import pg from 'pg';
-import type { NotifyCounters, WorkerLogger } from './observability';
+import type { NotifyCounters } from './observability';
 
 const { Client } = pg;
 
@@ -82,7 +82,11 @@ function plainSleep(ms: number): Promise<void> {
 export function sleepWithWake(ms: number, wake: WakeSignal | null | undefined): Promise<void> {
   if (!wake) return plainSleep(ms);
   return new Promise<void>((resolve) => {
+    // Deferred assignment on purpose: `finish` may be invoked synchronously
+    // by `wake.subscribe`, before either binding exists — const would TDZ.
+    // eslint-disable-next-line prefer-const
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // eslint-disable-next-line prefer-const
     let unsubscribe: (() => void) | undefined;
     const finish = () => {
       if (timer !== undefined) clearTimeout(timer);

@@ -10,7 +10,7 @@
    Driven through createApp with stub deps — no Postgres involved.
    ============================================================================= */
 import type { Pool } from 'pg';
-import { KernelError, type Kernel } from '@better-trigger/kernel';
+import { KernelError, type Kernel, type KernelErrorCode } from '@better-trigger/kernel';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
 
@@ -152,6 +152,37 @@ describe('internal_error outside production', () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
       error: { code: 'bad_request', message: 'taskId is required' },
+    });
+  });
+});
+
+describe('STATUS_BY_CODE — the full kernel-code → HTTP-status table', () => {
+  const CODES: Array<[KernelErrorCode, number]> = [
+    ['bad_request', 400],
+    ['serialization_error', 400],
+    ['not_found', 404],
+    ['task_not_found', 404],
+    ['run_not_running', 409],
+    ['stale_lease', 409],
+    ['conflict', 409],
+    ['payload_too_large', 413],
+  ];
+
+  it.each(CODES)('maps %s → %i with the stable envelope', async (code, status) => {
+    const res = await makeApp(new KernelError(code, `boom: ${code}`)).fetch(post());
+    expect(res.status).toBe(status);
+    expect(await res.json()).toEqual({
+      error: { code, message: `boom: ${code}` },
+    });
+    // Kernel-code answers are ours: never redacted, never a requestId.
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('leaves a code outside the table to fall through to internal_error', async () => {
+    const res = await makeApp(new KernelError('unknown_code' as never, 'x')).fetch(post());
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({
+      error: { code: 'internal_error', message: 'x' },
     });
   });
 });

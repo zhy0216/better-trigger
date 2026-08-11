@@ -22,6 +22,7 @@
     "health-pool": "bun scripts/health-pool.ts",
     "concurrency": "bun scripts/concurrency.ts",
     "test:acceptance": "bun scripts/acceptance.ts",
+    "lint": "eslint .",
     "bench:claim-scan": "bun scripts/claim-scan-bench.ts",
     "bench:stats": "bun scripts/stats-bench.ts",
     "typecheck": "tsc --noEmit"

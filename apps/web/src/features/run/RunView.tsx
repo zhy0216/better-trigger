@@ -242,8 +242,10 @@ const LOG_TONE: Record<string, string> = {
 
 interface LogEntry { spanId: string; lvl: string; msg: string; ms: number; label: string }
 
-function LogStream({ trace, logs, t, selectedId, scoped, setScoped }: {
+function LogStream({ trace, logs, t, selectedId, scoped, setScoped, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs }: {
   trace: Trace; logs: Record<string, LogLine[]>; t: number; selectedId: string; scoped: boolean; setScoped: React.Dispatch<React.SetStateAction<boolean>>;
+  /** PF3 logs paging: fetch the next older page and append it to the stream. */
+  onLoadOlderLogs: () => Promise<boolean>; loadingOlderLogs: boolean; hasOlderLogs: boolean;
 }) {
   const lines = React.useMemo<LogEntry[]>(() => {
     const out: LogEntry[] = [];
@@ -265,6 +267,15 @@ function LogStream({ trace, logs, t, selectedId, scoped, setScoped }: {
         <span style={{ fontSize: 12.5, fontWeight: 600 }}>Logs</span>
         <span style={{ fontSize: 11, color: 'var(--fg-subtle)' }} className="tnum">{visible.length} lines</span>
         <div style={{ flex: 1 }} />
+        {hasOlderLogs && (
+          <button onClick={() => void onLoadOlderLogs()} disabled={loadingOlderLogs}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--border)',
+              background: 'var(--surface)', color: 'var(--fg-muted)', cursor: 'pointer',
+            }}>
+            <Icon name="chevronUp" size={12} /> {loadingOlderLogs ? 'Loading…' : 'Load older logs'}
+          </button>
+        )}
         <button onClick={() => setScoped((v) => !v)}
           style={{
             display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--border)',
@@ -293,7 +304,7 @@ interface WakeInfo {
 }
 
 export function RunView({ vizStyle = 'waterfall', runId = null, onBack }: { vizStyle?: VizStyle; runId?: string | null; onBack?: () => void }) {
-  const { data: detail, error } = useRun(runId);
+  const { data: detail, error, loadOlderLogs, loadingOlderLogs, hasOlderLogs } = useRun(runId);
 
   let body: React.ReactNode;
   if (!runId) {
@@ -309,7 +320,10 @@ export function RunView({ vizStyle = 'waterfall', runId = null, onBack }: { vizS
   } else if (!detail) {
     body = <div style={{ flex: 1, overflowY: 'auto' }}>{error ? <ErrorState message={error} /> : <LoadingState />}</div>;
   } else {
-    body = <RunDetail key={runId} detail={detail} vizStyle={vizStyle} />;
+    body = (
+      <RunDetail key={runId} detail={detail} vizStyle={vizStyle}
+        onLoadOlderLogs={loadOlderLogs} loadingOlderLogs={loadingOlderLogs} hasOlderLogs={hasOlderLogs} />
+    );
   }
 
   return (
@@ -329,7 +343,10 @@ export function RunView({ vizStyle = 'waterfall', runId = null, onBack }: { vizS
   );
 }
 
-function RunDetail({ detail, vizStyle }: { detail: AdaptedRunDetail; vizStyle: VizStyle }) {
+function RunDetail({ detail, vizStyle, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs }: {
+  detail: AdaptedRunDetail; vizStyle: VizStyle;
+  onLoadOlderLogs: () => Promise<boolean>; loadingOlderLogs: boolean; hasOlderLogs: boolean;
+}) {
   const trace = detail.trace;
   const logs: Record<string, LogLine[]> = detail.spanLogs;
   const [selectedId, setSelectedId] = React.useState(trace.spans[0]?.id ?? '');
@@ -355,7 +372,8 @@ function RunDetail({ detail, vizStyle }: { detail: AdaptedRunDetail; vizStyle: V
               ))}
             </div>
           </div>
-          <LogStream trace={trace} logs={logs} t={t} selectedId={selected?.id ?? ''} scoped={scoped} setScoped={setScoped} />
+          <LogStream trace={trace} logs={logs} t={t} selectedId={selected?.id ?? ''} scoped={scoped} setScoped={setScoped}
+            onLoadOlderLogs={onLoadOlderLogs} loadingOlderLogs={loadingOlderLogs} hasOlderLogs={hasOlderLogs} />
         </div>
         <Inspector span={selected} t={t} trace={trace} wake={wake} />
       </div>

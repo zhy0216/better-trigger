@@ -16,10 +16,10 @@ import { describe, expect, it } from 'vitest';
 import { appendTailPage, mergeRunPages } from '../src/api/mergeRuns';
 import type { Run } from '../src/types';
 
-const run = (id: number, label = `r${id}`): Run => ({
+const run = (id: number): Run => ({
   id: String(id),
   task: 't',
-  status: 'completed',
+  status: 'success',
   version: 'v',
   env: 'prod',
   trigger: 'api',

@@ -236,10 +236,11 @@ bun run check:drift    # packages/db schema.ts vs. the generated migrations (off
 bun run check:exports  # publint + attw on the published core/sdk artifacts
 ```
 
-`test:acceptance` runs `examples/basic/scripts/acceptance.ts`: e2e, fencing,
-replay-drift, concurrency, crash (exactly-once under `SIGKILL`), worker-lost,
-graceful-restart and retention. Each provisions its own database from
-`DATABASE_URL`, spawns its own daemons and exits non-zero on a failed
+`test:acceptance` runs every harness in `examples/basic/scripts/acceptance.ts`
+(e2e, fencing, replay-drift, code-version-pinning, rolling-deploy, migration,
+concurrency, crash, worker-lost, graceful-restart, retention, stats, run-detail,
+notify, batch-perf, constraints, health-pool). Each provisions its own database
+from `DATABASE_URL`, spawns its own daemons and exits non-zero on a failed
 assertion. Pass names to run a subset: `bun scripts/acceptance.ts fencing crash`.
 Everything above runs on every PR — see
 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).

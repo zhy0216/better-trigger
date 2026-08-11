@@ -61,6 +61,13 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
+      # O5: every production TypeScript package lints through the shared
+      # flat config (eslint.config.mjs) — web picks it up from its own
+      # config, the rest resolve it from the repo root. Runs first so a
+      # lint regression fails in seconds, before the build.
+      - name: Lint
+        run: bun run lint
+
       # core must stay at zero runtime dependencies and the SDK must depend on
       # nothing but core — see docs/architecture.md on the client/daemon split.
       - name: Dependency guard

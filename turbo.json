@@ -6,6 +6,15 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
     },
+    // Package-specific override: the worker embeds apps/web's dist into its own
+    // (scripts/copy-public.mjs), so its build depends on web's build AND output
+    // — otherwise turbo could serve a cached worker dist/public that predates
+    // the latest dashboard build. Scoped to the worker only: applied globally,
+    // every package's build would depend on web and the graph would cycle.
+    "@better-trigger/worker#build": {
+      "dependsOn": ["^build", "@better-trigger/web#build"],
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+    },
     "dev": {
       "cache": false,
       "persistent": true

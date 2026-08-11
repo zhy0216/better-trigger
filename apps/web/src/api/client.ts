@@ -68,11 +68,18 @@ export class ApiError extends Error {
   status: number;
   /** machine-readable code from the server error envelope, when present. */
   code: string | null;
-  constructor(status: number, message: string, code: string | null = null) {
+  /**
+   * Correlation id the daemon stamps on a production `internal_error` (the
+   * message there is generic): grep the server log for it to get the real
+   * error. Absent unless the envelope carried one.
+   */
+  requestId?: string;
+  constructor(status: number, message: string, code: string | null = null, requestId?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.requestId = requestId;
   }
 }
 
@@ -96,14 +103,18 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   if (!res.ok) {
     let msg = res.statusText;
     let code: string | null = null;
+    let requestId: string | undefined;
     try {
       const j = await res.json();
       // server error envelope is { error: { code, message } } (see 409 cases in
       // contract §4); also tolerate flat { error: string } / { message: string }.
+      // Production internal_error adds requestId to the envelope — parsed the
+      // same way the SDK's HttpError does.
       const err = j?.error;
       if (err && typeof err === 'object') {
         if (typeof err.message === 'string') msg = err.message;
         if (typeof err.code === 'string') code = err.code;
+        if (typeof err.requestId === 'string') requestId = err.requestId;
       } else if (typeof err === 'string') {
         msg = err;
       } else if (typeof j?.message === 'string') {
@@ -113,7 +124,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     } catch {
       /* non-json error body */
     }
-    throw new ApiError(res.status, msg, code);
+    throw new ApiError(res.status, msg, code, requestId);
   }
   return (await res.json()) as T;
 }
@@ -195,8 +206,12 @@ export const api = {
     const q = qs.toString();
     return request('/runs' + (q ? '?' + q : ''), { signal });
   },
-  run(runId: string, signal?: AbortSignal): Promise<RunDetailResponse> {
-    return request('/runs/' + encodeURIComponent(runId) + '?projectId=' + PROJECT_ID, { signal });
+  run(runId: string, opts: { logsBefore?: number } = {}, signal?: AbortSignal): Promise<RunDetailResponse> {
+    const qs = new URLSearchParams({ projectId: PROJECT_ID });
+    // PF3 logs paging: pass the previous page's logsNextCursor to fetch the
+    // older page (a long run's log tail is reached by walking the chain).
+    if (opts.logsBefore != null) qs.set('logsBefore', String(opts.logsBefore));
+    return request('/runs/' + encodeURIComponent(runId) + '?' + qs, { signal });
   },
   schedules(signal?: AbortSignal): Promise<SchedulesResponse> {
     return request('/schedules?projectId=' + PROJECT_ID, { signal });

@@ -6,7 +6,7 @@
    useConnection() exposes the aggregate state so the UI can show a live dot.
    ============================================================================= */
 import React from 'react';
-import { api, ApiError, getApiKeyVersion, subscribeApiKey, type RunFilters, type RunDetailResponse } from './client';
+import { api, ApiError, getApiKeyVersion, subscribeApiKey, type RunFilters, type RunDetailResponse, type RunLog } from './client';
 import {
   adaptTasks,
   adaptRuns,
@@ -250,15 +250,87 @@ export function useRuns(
   };
 }
 
-export function useRun(runId: string | null): PollResult<AdaptedRunDetail> {
-  return usePoll<AdaptedRunDetail>(
-    async (signal) => {
-      const detail: RunDetailResponse = await api.run(runId!, signal);
-      return adaptRunDetail(detail);
-    },
+export interface RunDetailResult extends PollResult<AdaptedRunDetail> {
+  /** Fetch the next (older) log page and append it to the log stream.
+   *  Resolves false when there is no older page (or the request failed). */
+  loadOlderLogs: () => Promise<boolean>;
+  /** True while a loadOlderLogs request is in flight (drives the button). */
+  loadingOlderLogs: boolean;
+  /** False once the server reported no older logs — all logs loaded. */
+  hasOlderLogs: boolean;
+}
+
+/**
+ * PF3 logs paging: the detail endpoint serves the newest 200 log lines with a
+ * `logsNextCursor` when older ones exist; this hook walks that chain. The
+ * polled head stays the newest page, appended pages live in separate state
+ * (keyed off their own cursors), and the combined stream is deduped by log id
+ * — a head that slides forward between polls must not duplicate a line.
+ */
+export function useRun(runId: string | null): RunDetailResult {
+  const base = usePoll<RunDetailResponse>(
+    async (signal) => api.run(runId!, undefined, signal),
     [runId],
     runId !== null,
   );
+
+  const [olderLogs, setOlderLogs] = React.useState<RunLog[]>([]);
+  // Continuation cursor for the older pages, INDEPENDENT of the polled head:
+  //   undefined  paging not started — the first load uses the head's cursor
+  //   null       started and exhausted — no older page
+  //   number     the last loaded page's cursor
+  const [olderCursor, setOlderCursor] = React.useState<number | null | undefined>(undefined);
+  const [loadingOlderLogs, setLoadingOlderLogs] = React.useState(false);
+
+  // A runId change invalidates loaded pages (RunDetail is keyed by runId, so
+  // this is belt-and-braces for the same effect).
+  React.useEffect(() => {
+    setOlderLogs([]);
+    setOlderCursor(undefined);
+    setLoadingOlderLogs(false);
+  }, [runId]);
+
+  const loadOlderLogs = React.useCallback(async (): Promise<boolean> => {
+    if (runId == null || loadingOlderLogs) return false;
+    if (olderCursor === null) return false; // already loaded everything
+    const cursor = olderCursor ?? base.data?.logsNextCursor ?? null;
+    if (cursor === null) return false; // the head page itself has no older logs
+    setLoadingOlderLogs(true);
+    try {
+      const res = await api.run(runId, { logsBefore: cursor });
+      // Append the older page; the head may have slid forward between polls,
+      // so rows the newer pages already carry are dropped (dedupe by log id).
+      setOlderLogs((prev) => {
+        const seen = new Set(prev.map((l) => l.id));
+        return [...prev, ...res.logs.filter((l) => !seen.has(l.id))];
+      });
+      setOlderCursor(res.logsNextCursor);
+      return res.logsNextCursor !== null;
+    } catch {
+      return false;
+    } finally {
+      setLoadingOlderLogs(false);
+    }
+  }, [runId, loadingOlderLogs, olderCursor, base.data?.logsNextCursor]);
+
+  const data = React.useMemo<AdaptedRunDetail | null>(() => {
+    if (base.data === null) return null;
+    const seen = new Set<number>();
+    const unique = [...base.data.logs, ...olderLogs].filter((l) => !seen.has(l.id) && seen.add(l.id));
+    return adaptRunDetail({ ...base.data, logs: unique });
+  }, [base.data, olderLogs]);
+
+  const hasOlderLogs =
+    olderCursor === undefined ? (base.data?.logsNextCursor ?? null) !== null : olderCursor !== null;
+
+  return {
+    data,
+    loading: base.loading,
+    error: base.error,
+    loadOlderLogs,
+    loadingOlderLogs,
+    hasOlderLogs,
+  };
 }
 
 export function useSchedules(): PollResult<Schedule[]> {

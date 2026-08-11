@@ -21,7 +21,6 @@
    stop the loops, close the server, end the pool. An escaping rejection or an
    uncaught exception takes that same path and then exits non-zero.
    ============================================================================= */
-import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   assertNamespace,

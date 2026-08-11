@@ -163,6 +163,55 @@ function stepSpanStatus(st: RunStep): RunStatus {
   return st.status === 'failed' ? 'failed' : 'success';
 }
 
+/**
+ * t0 = min(run.startedAt, all steps[].startedAt) — the waterfall's origin.
+ * Exported so the run-detail pagination groups older log pages against the
+ * same origin the trace was built on.
+ */
+export function detailT0(
+  run: { startedAt: string | null; createdAt: string | null },
+  steps: Array<{ startedAt: string | null }>,
+  now: number,
+): number {
+  const candidates: number[] = [];
+  const runStart = parseTs(run.startedAt);
+  if (runStart != null) candidates.push(runStart);
+  steps.forEach((st) => {
+    const t = parseTs(st.startedAt);
+    if (t != null) candidates.push(t);
+  });
+  return candidates.length ? Math.min(...candidates) : (parseTs(run.createdAt) ?? now);
+}
+
+/**
+ * Group raw log records onto span ids the way adaptRunDetail does: by the
+ * visible steps' seq (span id 's' + (i+1) over the FILTERED step list),
+ * falling back to the root 's0' for null seqs and unknown step seqs. Exported
+ * so pages fetched by the run-detail pagination land in the same buckets.
+ */
+export function groupLogsBySpan(
+  steps: RunStep[],
+  logs: RunLog[],
+  t0: number,
+): Record<string, LogLine[]> {
+  const visibleSteps = steps.filter((st) => !isHiddenStepKind(st.kind));
+  const seqToSpanId = new Map<number, string>();
+  visibleSteps.forEach((st, i) => {
+    seqToSpanId.set(st.seq, 's' + (i + 1));
+  });
+  const spanLogs: Record<string, LogLine[]> = {};
+  const pushLog = (spanId: string, line: LogLine) => {
+    (spanLogs[spanId] ??= []).push(line);
+  };
+  logs.forEach((lg: RunLog) => {
+    const spanId = lg.stepSeq != null ? seqToSpanId.get(lg.stepSeq) ?? 's0' : 's0';
+    const at = parseTs(lg.ts);
+    const ms = at != null ? Math.max(0, at - t0) : 0;
+    pushLog(spanId, [lg.level, lg.message, Math.round(ms) + 'ms']);
+  });
+  return spanLogs;
+}
+
 export interface AdaptedRunDetail {
   trace: Trace;
   spanLogs: Record<string, LogLine[]>;
@@ -186,14 +235,7 @@ export function adaptRunDetail(detail: RunDetailResponse, now: number = Date.now
   const status = mapStatus(run.status);
 
   // ---- t0: earliest of run.startedAt and every step's startedAt ----
-  const candidates: number[] = [];
-  const runStart = parseTs(run.startedAt);
-  if (runStart != null) candidates.push(runStart);
-  steps.forEach((st) => {
-    const t = parseTs(st.startedAt);
-    if (t != null) candidates.push(t);
-  });
-  const t0 = candidates.length ? Math.min(...candidates) : (parseTs(run.createdAt) ?? now);
+  const t0 = detailT0(run, steps, now);
 
   // ---- visible steps → level-1 spans, keyed by seq for log grouping ----
   const visibleSteps = steps.filter((st) => !isHiddenStepKind(st.kind));
@@ -256,16 +298,7 @@ export function adaptRunDetail(detail: RunDetailResponse, now: number = Date.now
   spans.push(...childSpans);
 
   // ---- per-span logs (logs grouped by stepSeq; null → root s0) ----
-  const spanLogs: Record<string, LogLine[]> = {};
-  const pushLog = (spanId: string, line: LogLine) => {
-    (spanLogs[spanId] ??= []).push(line);
-  };
-  logs.forEach((lg: RunLog) => {
-    const spanId = lg.stepSeq != null ? seqToSpanId.get(lg.stepSeq) ?? 's0' : 's0';
-    const at = parseTs(lg.ts);
-    const ms = at != null ? Math.max(0, at - t0) : 0;
-    pushLog(spanId, [lg.level, lg.message, Math.round(ms) + 'ms']);
-  });
+  const spanLogs = groupLogsBySpan(steps, logs, t0);
 
   // ---- payload (Record<string, string|number> per types.ts) ----
   const payload = toPayloadRecord(run.payload);

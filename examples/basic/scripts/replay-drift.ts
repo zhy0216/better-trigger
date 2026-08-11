@@ -18,7 +18,10 @@
    the deploys). Shape: an API node (no --tasks) serves HTTP and runs the
    orchestrator across the whole test, while executor nodes are swapped under it:
 
-     deploy #1 (replay-drift-tasks-v1.ts) → both runs suspend on the wait → kill
+     deploy #1 (replay-drift-tasks-v1.ts) → both runs suspend on the wait →
+                                            graceful stop (a deploy is a
+                                            graceful stop; see the C4 note at
+                                            the swap site)
      deploy #2 (replay-drift-tasks-v2.ts) → resumes the waits, then replays them
                                             against a run() with a step inserted
                                             at seq 1, where v1's ledger holds
@@ -42,7 +45,6 @@
 import { fileURLToPath } from 'node:url';
 import {
   createMarker,
-  killDaemon,
   portFromEnv,
   readLatestCodeVersion,
   runScenario,
@@ -125,8 +127,14 @@ async function main(s: Scenario): Promise<void> {
     s.ok(`① runs.code_version stamped at trigger time (${V1} / ${V1_LENIENT})`);
   }
 
-  await killDaemon(executor);
-  s.ok('deploy #1 killed while both runs were waiting');
+  // A deploy is a graceful stop (same choice as code-version-pinning.ts): the
+  // SIGTERM marks the worker row offline immediately, which is what lets
+  // deploy #2's registration through the C4 guard below. A SIGKILL would hold
+  // the metadata for the 2-minute heartbeat window (the dead row still counts
+  // as "served"), and the redeploy would be stalled until the offline marker
+  // ages it out.
+  await executor.stop();
+  s.ok('deploy #1 stopped gracefully while both runs were waiting');
 
   // The API node is bookkeeping-only ({ waits: false, cron: false } — main.ts),
   // so with no executor alive nothing resumes the waits: the runs stay suspended

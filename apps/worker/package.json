@@ -27,6 +27,7 @@
   "scripts": {
     "build": "bun scripts/write-build-info.mjs && tsup && bun scripts/copy-public.mjs",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
     "dev": "bun --watch src/main.ts",
     "start": "node dist/main.js",
     "test": "vitest run"
