@@ -55,7 +55,7 @@ flows through to `triggerAndWait`.
 
 ```bash
 DATABASE_URL=postgres://localhost:5432/better_trigger \
-  bunx --bun better-trigger-worker --tasks ./tasks.ts
+  bunx --bun @better-trigger/worker --tasks ./tasks.ts
 ```
 
 It applies migrations, registers the tasks, claims runs straight from Postgres

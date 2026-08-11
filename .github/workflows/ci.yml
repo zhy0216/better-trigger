@@ -75,6 +75,11 @@ jobs:
         run: bun run check:drift
 
       - name: Build
+        env:
+          # O4 build provenance: write-build-info.mjs prefers this trusted env
+          # over the live git checkout, so the build metadata (health, metrics,
+          # workers.code_version) is stamped with the exact commit under test.
+          BT_GIT_SHA: ${{ github.sha }}
         run: bun run build
 
       # publint + attw on the built tarballs: the dual ESM/CJS maps and the
@@ -87,6 +92,78 @@ jobs:
 
       - name: Unit tests
         run: bun run test
+
+      # O4: the registry artifact must work OUTSIDE the workspace. Each pack
+      # is what would ship: `bun pm pack` rewrites workspace:* deps to the
+      # workspace versions (npm 11 pack does not), so the tarballs install
+      # from a clean temp dir with registry resolution only — proving a
+      # release cannot be "workspace runs, registry package does not".
+      # The worker tarball is additionally checked to carry the embedded
+      # dashboard (O3: dist/public must travel with the package), and its CLI
+      # is exercised --help before any database is needed. The SDK tarball is
+      # import-checked in both module systems.
+      - name: Pack + clean-install smoke (O4)
+        run: |
+          set -euo pipefail
+          pack_dir=$(mktemp -d)
+          for pkg in packages/core packages/kernel packages/db packages/sdk apps/worker; do
+            (cd "$pkg" && bun pm pack --destination "$pack_dir" --quiet)
+          done
+          install_dir=$(mktemp -d)
+          (
+            cd "$install_dir"
+            npm init -y >/dev/null 2>&1
+            npm install --no-audit --no-fund "$pack_dir"/*.tgz
+          )
+          # The packed worker must ship the dashboard it promises to serve.
+          check_dir=$(mktemp -d)
+          tar -xzf "$pack_dir"/better-trigger-worker-*.tgz -C "$check_dir"
+          test -f "$check_dir/package/dist/public/index.html"
+          # CLI smoke from the clean install: --help must answer, no DB needed.
+          "$install_dir/node_modules/.bin/better-trigger-worker" --help |
+            grep -q -- '--tasks'
+          # SDK smoke from the clean install, both module systems — run with
+          # the install dir as cwd, or require/import would resolve the
+          # workspace copy and the check would be vacuous.
+          (cd "$install_dir" && node -e \
+            "const bt = require('better-trigger'); if (typeof bt.task !== 'function') process.exit(1)")
+          (cd "$install_dir" && node --input-type=module -e \
+            "import('better-trigger').then((m) => { if (typeof m.task !== 'function') process.exit(1) })")
+          # Phase B — registry dependency correctness. Stage A installed the
+          # five tarballs together, which cannot prove the worker's internal
+          # deps would resolve from a registry. What CAN be proven here: (1)
+          # the packed worker declares EXACT versions for its @better-trigger/*
+          # deps (workspace:* must have been rewritten), and (2) those versions
+          # are all in this pack set — the release order core→db→kernel→sdk→
+          # worker guarantees they are published before the worker. A full
+          # registry simulation (verdaccio &c.) is deliberately not added: the
+          # tarballs ARE the published artifact, so version-exactness plus
+          # installability is the maximum the repository can verify.
+          # Plus the prepack guard: the dist inside the tarball must carry the
+          # version the manifest declares — "new manifest + stale dist" fails
+          # here instead of shipping.
+          ver=$(node -e \
+            "console.log(JSON.parse(require('fs').readFileSync('$check_dir/package/package.json','utf8')).version)")
+          grep -rqF "\"$ver\"" "$check_dir/package/dist" || {
+            echo "dist does not carry the packed version $ver (stale dist?)"
+            exit 1
+          }
+          node -e '
+            const fs = require("fs"), cp = require("child_process"), path = require("path");
+            const packDir = process.argv[1], checkDir = process.argv[2];
+            const worker = JSON.parse(fs.readFileSync(path.join(checkDir, "package", "package.json"), "utf8"));
+            const versions = {};
+            for (const f of fs.readdirSync(packDir)) {
+              if (!f.endsWith(".tgz")) continue;
+              const p = JSON.parse(cp.execSync("tar -xzOf " + JSON.stringify(path.join(packDir, f)) + " package/package.json").toString());
+              versions[p.name] = p.version;
+            }
+            for (const [name, spec] of Object.entries(worker.dependencies)) {
+              if (!name.startsWith("@better-trigger/")) continue;
+              if (!/^\d+\.\d+\.\d+$/.test(spec)) throw new Error("unrewritten workspace dep " + name + "=" + spec);
+              if (versions[name] !== spec) throw new Error(name + "@" + spec + " not in this pack set " + JSON.stringify(versions));
+            }
+          ' "$pack_dir" "$check_dir"
 
       - name: Acceptance harnesses
         run: bun run test:acceptance

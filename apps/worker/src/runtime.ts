@@ -32,6 +32,10 @@ import {
   type WorkerCounters,
   type WorkerLogger,
 } from './observability';
+// O4: the build metadata injected at build time (package version + commit).
+// workers.code_version IS this identity, so /health, /metrics, the boot log
+// and worker registration all trace to the same commit — see resolveCodeVersion.
+import { BUILD_SHA, BUILD_VERSION } from './generated/build-info';
 
 /** Options accepted by startWorkerRuntime(). */
 export interface StartOptions {
@@ -145,7 +149,10 @@ export async function startWorkerRuntime(
   // pairs, so the two arrays are built from one map and never re-derived.
   const taskVersions = definitions.map(resolveTaskVersion);
 
-  const codeVersion = resolveCodeVersion(definitions);
+  // Worker-level identity (workers.code_version) is the BUILD identity — the
+  // same value /health reports; task-level versions (runs.code_version, what
+  // pinning matches) stay per-task hashes. Two concepts, two fields (O4).
+  const codeVersion = resolveCodeVersion();
   const manifests = definitions.map((d, i) => ({
     ...toManifest(d),
     codeVersion: taskVersions[i]!,
@@ -419,44 +426,39 @@ function taskSignature(d: ResolvedTaskDefinition<any, any>): string {
 }
 
 /**
- * Derive a stable code version from env, or from a hash of the task set: ids +
- * cron config + **a fingerprint of each run function's source**.
+ * The BUILD identity of this process: the same value /health and /metrics
+ * report (O4) — `0.1.0+<sha>`, version-only outside a git checkout — so
+ * `workers.code_version` traces to the same commit as the health response and
+ * the published package version.
  *
- * The body hash is the point: replay keys steps by position, so editing a run()
- * — inserting a step, moving a wait — is exactly what invalidates in-flight
- * ledgers, and a version that ignores the body reports "same code" across
- * precisely the deploy that could corrupt them. Same source on two processes →
- * same version; a changed body → a new version.
+ * This is the *deploy* identity: one value per worker, and deliberately NOT
+ * derived from task source. Replay safety lives in resolveTaskVersion() below
+ * — the per-task hash that stamps `runs.code_version` and that
+ * `--pin-code-version` matches claims on. Editing a run() therefore moves the
+ * task version (protecting in-flight ledgers) without churning the worker
+ * version (keeping the build traceable), and the C1 step fingerprint makes
+ * the ledger itself detect replay drift regardless.
  *
- * This is the *deploy* identity, and it lands on workers.code_version alone:
- * "which build is this process running", one value per worker, changed by any
- * task's edit. What a run is stamped with — and what version pinning matches
- * on — is resolveTaskVersion() below, per task.
- *
- * Caveat: source text also changes under a different bundler/minifier without
- * any semantic change, so a rebuild can churn the version. Set
- * BETTER_TRIGGER_VERSION (git sha, image tag) to take over completely.
+ * BETTER_TRIGGER_VERSION still wins: a deployment that names its own version
+ * (a git sha, an image tag) overrides both this and every task version at
+ * once — the coarse behaviour is what such a deployment is asking for.
  */
-export function resolveCodeVersion(
-  definitions: Array<ResolvedTaskDefinition<any, any>>,
-): string {
+export function resolveCodeVersion(): string {
   const env = envVersion();
   if (env) return env;
-
-  const signature = definitions.map(taskSignature).sort().join('\n');
-  const hash = createHash('sha256').update(signature).digest('hex').slice(0, 12);
-  return `v_${hash}`;
+  return BUILD_SHA === undefined ? BUILD_VERSION : `${BUILD_VERSION}+${BUILD_SHA}`;
 }
 
 /**
  * One task's own version — the value stamped on every run of that task, and
  * what `--pin-code-version` matches a claim against.
  *
- * Same ingredients as resolveCodeVersion, hashed over ONE definition instead of
- * the set, so editing task A leaves task B's version (and therefore task B's
- * in-flight runs) untouched. Under pinning that is the difference between "the
- * runs I changed wait for a worker that can replay them" and "every run in the
- * process is frozen to a build I just replaced".
+ * Where resolveCodeVersion is the build identity (one value per process),
+ * this is the replay identity, hashed over ONE definition (id + cron + run
+ * body source), so editing task A leaves task B's version — and therefore
+ * task B's in-flight runs — untouched. Under pinning that is the difference
+ * between "the runs I changed wait for a worker that can replay them" and
+ * "every run in the process is frozen to a build I just replaced".
  *
  * BETTER_TRIGGER_VERSION still wins: a deployment that names its own version is
  * asking for exactly the coarse behaviour, all tasks moving together.

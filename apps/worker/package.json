@@ -25,7 +25,7 @@
   },
   "homepage": "https://github.com/zhy0216/better-trigger#readme",
   "scripts": {
-    "build": "tsup && bun scripts/copy-public.mjs",
+    "build": "bun scripts/write-build-info.mjs && tsup && bun scripts/copy-public.mjs",
     "typecheck": "tsc --noEmit",
     "dev": "bun --watch src/main.ts",
     "start": "node dist/main.js",

@@ -37,7 +37,7 @@ export const onboarding = task({
 ```bash
 # daemon:加载 tasks、迁移、执行、serve :4848
 DATABASE_URL=postgres://localhost:5432/better_trigger \
-  bunx --bun better-trigger-worker --tasks ./tasks.ts
+  bunx --bun @better-trigger/worker --tasks ./tasks.ts
 ```
 
 ```ts

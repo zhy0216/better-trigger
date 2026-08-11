@@ -25,8 +25,12 @@ import type {
 import { computeTaskStats } from '../stats';
 import { intQuery, requireBoolean, safeJson } from '../http';
 import { namespaceFromQuery } from '../namespace';
-
-const VERSION = '0.1.0';
+// O4: the build metadata injected at build time (package version + git sha,
+// see scripts/write-build-info.mjs). The committed fallback serves source
+// checkouts; dist/ always carries the values the build was made from, so
+// /health.version matches the published package version and `sha` names the
+// commit it was built from.
+import { BUILD_SHA, BUILD_VERSION } from '../generated/build-info';
 
 /** Deadline for the deep probe's SELECT 1 — a hung DB must not hang the probe. */
 const DEEP_PROBE_TIMEOUT_MS = 2000;
@@ -221,11 +225,11 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
   app.get('/health', async (c) => {
     const deep = c.req.query('deep');
     if (deep !== '1' && deep !== 'true') {
-      const res: HealthResponse = { ok: true, version: VERSION };
+      const res: HealthResponse = { ok: true, version: BUILD_VERSION, sha: BUILD_SHA };
       return c.json(res);
     }
     const db = await probe();
-    const res: HealthResponse = { ok: db.ok, version: VERSION, db, pool: poolStats(pool) };
+    const res: HealthResponse = { ok: db.ok, version: BUILD_VERSION, sha: BUILD_SHA, db, pool: poolStats(pool) };
     return c.json(res, db.ok ? 200 : 503);
   });
 

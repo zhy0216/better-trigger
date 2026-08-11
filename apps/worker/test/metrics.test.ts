@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
 import { renderMetrics, type MetricFamily } from '../src/routes/metrics';
 import { createWorkerCounters, type WorkerCounters } from '../src/observability';
+import { BUILD_SHA, BUILD_VERSION } from '../src/generated/build-info';
 
 /* ------------------------------------------------------- the parser under use */
 
@@ -243,6 +244,14 @@ describe('exposition format', () => {
     }
   });
 
+  it('exports the build identity: same version/sha /health reports (O4)', async () => {
+    const { families } = await scrape();
+    const expected = { version: BUILD_VERSION, ...(BUILD_SHA ? { sha: BUILD_SHA } : {}) };
+    // The info-style gauge makes "which commit is this scrape from" answerable
+    // without hitting /health — and pins the metric to the injected metadata.
+    expect(sampleValue(families, 'better_trigger_build_info', expected)).toBe(1);
+  });
+
   it('names counters *_total and never suffixes a gauge with it', async () => {
     const { families } = await scrape();
     for (const family of families.values()) {
@@ -385,7 +394,9 @@ describe('database gauges', () => {
     expect(sampleValue(families, 'better_trigger_db_up')).toBe(0);
     expect(families.has('better_trigger_queue_depth')).toBe(false);
     expect(families.has('better_trigger_inflight_runs')).toBe(false);
-    // In-process metrics survive the outage.
+    // In-process metrics survive the outage — including the build identity,
+    // which needs no database to be true.
+    expect(families.has('better_trigger_build_info')).toBe(true);
     expect(families.has('better_trigger_claim_errors_total')).toBe(true);
   });
 

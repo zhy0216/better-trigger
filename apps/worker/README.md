@@ -20,8 +20,16 @@ docker compose up -d postgres        # postgres:16 on :5432
 
 # 2. Run the daemon
 DATABASE_URL=postgres://localhost:5432/better_trigger \
-  bunx --bun better-trigger-worker --tasks ./src/tasks.ts
+  bunx --bun @better-trigger/worker --tasks ./src/tasks.ts
 ```
+
+The registry package is **`@better-trigger/worker`** (its binary is
+`better-trigger-worker`), so outside a repo checkout run it by package name —
+`npx @better-trigger/worker ...` works too. Inside this repo's workspace the
+bare bin `bunx --bun better-trigger-worker` resolves as well; the CI
+clean-install smoke (O4) installs the packed tarball in a temp directory and
+runs `better-trigger-worker --help`, so "workspace works, registry package
+doesn't" cannot ship.
 
 `docker compose up -d` (no service name) skips both steps: it also starts this
 daemon in a container with `--tasks /app/examples/basic/src/tasks.ts`, published
@@ -140,7 +148,7 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_STATS_TTL_MS` | `10000` | Cache TTL for `/tasks` stats (per namespace); `0` disables the cache |
 | `BETTER_TRIGGER_API_KEY` | _(unset)_ | When set, every `/api/v1/*` call (except `/health`) requires `Authorization: Bearer <key>`. Unset = local mode, no auth. |
 | `BETTER_TRIGGER_PIN_CODE_VERSION` | _(unset)_ | `1`/`true` = same as `--pin-code-version` |
-| `BETTER_TRIGGER_VERSION` | _(hashed)_ | Code version reported on registration. Defaults to a per-task hash of id + cron + `run()` source; setting it makes every task report this one value instead |
+| `BETTER_TRIGGER_VERSION` | _(build identity)_ | Code version reported on registration. Defaults to the build identity (`0.1.0+<git sha>`, the same value `/health` reports; version-only outside git); setting it overrides the worker-level version AND every per-task version at once |
 
 ### Code versions and redeploys
 
@@ -161,6 +169,18 @@ answerable after the fact.
 stamped with the version this process serves for that task.** A run whose task
 was edited mid-flight stays queued for a worker that can still replay it,
 instead of being handed to code that will drift.
+
+**Build provenance (O4).** `workers.code_version` — what the dashboard's
+workers page and `/metrics` report as this process's version — is the **build
+identity**: the same `0.1.0+<git-sha>` `/health` and `better_trigger_build_info`
+report (version-only for builds outside a git checkout, like the Docker image
+built without a `GIT_SHA` build arg). That is a *deploy* value, deliberately
+not derived from task source. The *replay* value is the per-task
+`tasks.latest_code_version` stamped on `runs.code_version`, which is what
+`--pin-code-version` matches on — editing a `run()` moves it without churning
+the build identity, and the step fingerprint makes the ledger itself detect
+replay drift. `BETTER_TRIGGER_VERSION` overrides **both** at once: set it to
+your own git sha / image tag to name deploys exactly as your pipeline does.
 
 That is a real trade, not a free win:
 
@@ -376,7 +396,7 @@ SDK also parses are aliases of the read models in `@better-trigger/core`.
 
 | Method · Path | Response |
 |---|---|
-| `GET /health` | `{ ok, version }` — liveness, never touches the DB (always open, no auth) |
+| `GET /health` | `{ ok, version, sha? }` — liveness, never touches the DB (always open, no auth). `version` is the package version baked into the build — the same value the published tarball carries — and `sha` is the git commit it was built from (absent when built outside a git checkout, e.g. the Docker image). Together they make the running artifact traceable to a release **and** a commit |
 | `GET /health?deep=1` | readiness: `SELECT 1` (2s deadline) + `{ db, pool: { total, idle, waiting } }`; 503 when the DB does not answer. Also open — a container healthcheck has no key. This is what the image's `HEALTHCHECK` runs. The probe runs on a **dedicated probe pool** (see below), never a business connection. |
 | `GET /tasks` | `{ tasks: TaskSummary[] }` (24h-window runs24h/p50/p95/successRate/trend, all-history `lastRunAt`; cached 10s per namespace) |
 | `GET /runs?env=&taskId=&status=&limit=&cursor=` | `{ runs: RunSummary[], nextCursor }` (keyset on `created_at + id`) |

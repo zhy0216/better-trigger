@@ -95,10 +95,16 @@ export interface HealthPoolStats {
  * GET /api/v1/health (liveness) · GET /api/v1/health?deep=1 (readiness).
  * `db` and `pool` are present on the deep probe only, where `ok: false` is
  * answered with 503.
+ *
+ * `version` is the package version baked into the build (O4) — the same value
+ * the published tarball carries — and `sha` is the git commit the build was
+ * made from (absent when built outside a git checkout). Together they make
+ * /health.version traceable to a commit.
  */
 export interface HealthResponse {
   ok: boolean;
   version: string;
+  sha?: string;
   db?: { ok: true } | { ok: false; error: 'timeout' | 'query_failed' };
   pool?: HealthPoolStats;
 }

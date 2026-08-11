@@ -7,6 +7,9 @@
 export { createApp, type AppDeps } from './app';
 export { type MetricsSources } from './routes/metrics';
 export { loadTasks, type LoadedTasks } from './loader';
+// O4: build metadata (package version + git sha) — the same values /health
+// reports, so an embedded host can stamp its own observability with them.
+export { BUILD_SHA, BUILD_VERSION } from './generated/build-info';
 export {
   startWorkerRuntime,
   resolveCodeVersion,

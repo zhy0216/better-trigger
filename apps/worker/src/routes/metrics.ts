@@ -38,6 +38,9 @@ import {
   type NotifyCounters,
   type WorkerCounters,
 } from '../observability';
+// O4: the build metadata injected at build time — the same values /health
+// reports, so "which commit is this scrape from" is answerable in Prometheus.
+import { BUILD_SHA, BUILD_VERSION } from '../generated/build-info';
 
 /** Every metric name is emitted under this prefix; see renderMetrics. */
 const PREFIX = 'better_trigger_';
@@ -305,6 +308,17 @@ export async function collectMetrics(
       help: 'Whether the metrics query reached Postgres on this scrape (1) or failed/timed out (0). The queue and in-flight gauges are absent when 0.',
       type: 'gauge',
       samples: [{ value: g ? 1 : 0 }],
+    },
+    // One sample per build (O4): a gauge whose value is always 1, labelled
+    // with the package version and git sha this process was built from — the
+    // same values /health reports. `sha` is absent for non-git builds.
+    {
+      name: 'build_info',
+      help: 'The @better-trigger/worker build this process runs: package version and the git commit it was built from (absent when built outside a git checkout).',
+      type: 'gauge',
+      samples: [
+        { labels: { version: BUILD_VERSION, ...(BUILD_SHA ? { sha: BUILD_SHA } : {}) }, value: 1 },
+      ],
     },
   ];
 

@@ -17,6 +17,15 @@ FROM oven/bun:1.3-slim AS base
 WORKDIR /app
 
 # ---- build -----------------------------------------------------------------
+# O4 build provenance: the build stage has NO .git (only the listed paths are
+# copied), so the commit identity is injected instead. scripts/write-build-info
+# .mjs reads BT_GIT_SHA before falling back to git rev-parse (which fails here)
+# — pass it when building:  GIT_SHA=$(git rev-parse --short HEAD) docker compose
+# build worker  (CI passes $GITHUB_SHA). Without it the image degrades to
+# version-only build metadata.
+ARG GIT_SHA=
+ENV BT_GIT_SHA=$GIT_SHA
+FROM base AS build
 # Manifests first for layer caching: the install layer only invalidates when a
 # package.json / bun.lock changes. Every workspace member's package.json must
 # be present (root workspaces glob + bun.lock cover apps/*, packages/*,

@@ -65,7 +65,7 @@ serves the API on `:4848`:
 
 ```bash
 DATABASE_URL=postgres://localhost:5432/better_trigger \
-  bunx --bun better-trigger-worker --tasks ./tasks.ts
+  bunx --bun @better-trigger/worker --tasks ./tasks.ts
 ```
 
 Then trigger from anywhere:
@@ -86,9 +86,22 @@ The daemon runs your TypeScript task modules directly under `bun`. Under plain
 
 ### Dashboard
 
+The daemon serves the built dashboard itself: `docker compose up` and open
+<http://127.0.0.1:4848> — same origin as the API, no second port, no CORS. A
+deep link (e.g. a `/runs/...` URL you bookmarked) refreshes to the dashboard
+instead of a 404, and hashed assets are served `immutable` so a daemon restart
+always hands out the new bundle.
+
+For dashboard development, run Vite standalone — it proxies nothing, so point
+it at the daemon:
+
 ```bash
 cd apps/web && VITE_BT_API_URL=http://localhost:4848 bun run dev   # :5173
 ```
+
+(Without `VITE_BT_API_URL` the dev server targets `http://localhost:4848`
+anyway; a production build — what the daemon serves — talks to the origin it
+was loaded from, so it works from any host:port.)
 
 If the daemon uses `BETTER_TRIGGER_API_KEY`, the dashboard prompts for a key
 after a `401` and keeps a manually entered token only in page memory. Refreshing
@@ -157,11 +170,15 @@ represent (circular structure, BigInt) is refused with `400 serialization_error`
 naming the field — never a raw `TypeError` that would read as a 500.
 
 **Observability.** `GET /api/v1/health` is always open (no key needed) and
-answers `{ ok, version }`; `?deep=1` adds a database probe and pool stats and
-returns `503` when the database is down. `GET /api/v1/metrics` renders
+answers `{ ok, version, sha? }` — `version` is the package version baked into
+the build (the same value the published tarball carries) and `sha` the git
+commit it was built from, so the running artifact is traceable to a release
+and a commit; `?deep=1` adds a database probe and pool stats and returns
+`503` when the database is down. `GET /api/v1/metrics` renders
 Prometheus text — queue depth, in-flight runs, run outcomes, claim/heartbeat
-error counters, reaper recoveries, orchestrator loop errors — and stays `200`
-with `db_up 0` when Postgres is unreachable.
+error counters, reaper recoveries, orchestrator loop errors, plus a
+`better_trigger_build_info{version,sha}` gauge — and stays `200` with
+`db_up 0` when Postgres is unreachable.
 
 **Retention** is off by default: the daemon deletes no history unless asked.
 `--retention 30d` turns on an hourly GC that removes terminal runs (steps and

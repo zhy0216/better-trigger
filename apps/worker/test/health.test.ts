@@ -15,6 +15,10 @@ import type { Pool } from 'pg';
 import type { Kernel } from '@better-trigger/kernel';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
+// O4: the injected build metadata (package version + git sha) is the single
+// version source — the tests assert against it, never a hardcoded literal, so
+// a version bump can never leave /health behind.
+import { BUILD_SHA, BUILD_VERSION } from '../src/generated/build-info';
 
 const kernel = {} as unknown as Kernel;
 
@@ -88,8 +92,23 @@ describe('shallow /health (liveness)', () => {
     const query = vi.fn(async () => ({ rows: [] }));
     const res = await makeApp(query).fetch(get('/api/v1/health'));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, version: '0.1.0' });
+    expect(await res.json()).toEqual({ ok: true, version: BUILD_VERSION, sha: BUILD_SHA });
     expect(query).not.toHaveBeenCalled();
+  });
+
+  it('reports the injected build metadata, not a hardcoded literal', async () => {
+    const res = await healthy().fetch(get('/api/v1/health'));
+    const body = (await res.json()) as { version: string; sha?: string };
+    // The semver is the package version — the value the published tarball
+    // carries — so /health.version is traceable to the release, and `sha` to
+    // the commit it was built from (absent outside a git checkout).
+    expect(body.version).toBe(BUILD_VERSION);
+    expect(body.version).toMatch(/^\d+\.\d+\.\d+$/);
+    if (BUILD_SHA !== undefined) {
+      expect(body.sha).toBe(BUILD_SHA);
+      // git short sha, optionally with the -dirty marker of an uncommitted tree.
+      expect(body.sha).toMatch(/^[0-9a-f]{7,}(-dirty)?$/);
+    }
   });
 
   it('stays 200 while the database is down', async () => {
@@ -97,7 +116,7 @@ describe('shallow /health (liveness)', () => {
     // container killed and restarted over a failure a restart cannot fix.
     const res = await dbDown().fetch(get('/api/v1/health'));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, version: '0.1.0' });
+    expect(await res.json()).toEqual({ ok: true, version: BUILD_VERSION, sha: BUILD_SHA });
   });
 });
 
@@ -110,7 +129,8 @@ describe('deep /health?deep=1 (readiness)', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       ok: true,
-      version: '0.1.0',
+      version: BUILD_VERSION,
+      sha: BUILD_SHA,
       db: { ok: true },
       pool: { total: 5, idle: 1, waiting: 2 },
     });
@@ -128,7 +148,8 @@ describe('deep /health?deep=1 (readiness)', () => {
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({
       ok: false,
-      version: '0.1.0',
+      version: BUILD_VERSION,
+      sha: BUILD_SHA,
       db: { ok: false, error: 'query_failed' },
       pool: { total: 3, idle: 2, waiting: 0 },
     });

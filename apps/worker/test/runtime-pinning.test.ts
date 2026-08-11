@@ -71,8 +71,9 @@ describe('registration', () => {
     // Two tasks, two different versions — this is the property that keeps an
     // edit to one from freezing the in-flight runs of the other.
     expect(reg!.tasks[0]!.codeVersion).not.toBe(reg!.tasks[1]!.codeVersion);
-    // And the worker-level version is still its own thing: which build is this.
-    expect(reg!.codeVersion).toMatch(/^v_[0-9a-f]{12}$/);
+    // And the worker-level version is the BUILD identity (O4): the same
+    // `0.1.0+<sha>` /health reports, so registration traces to a commit.
+    expect(reg!.codeVersion).toMatch(/^\d+\.\d+\.\d+(\+[0-9a-f]+(-dirty)?)?$/);
     expect(reg!.codeVersion).not.toBe(reg!.tasks[0]!.codeVersion);
   }, 10_000);
 });

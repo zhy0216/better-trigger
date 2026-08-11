@@ -44,6 +44,7 @@ import {
 } from './observability';
 import { startWorkerRuntime, type WorkerHandle } from './runtime';
 import { createWaiterRegistry } from './waiters';
+import { BUILD_SHA, BUILD_VERSION } from './generated/build-info';
 
 const USAGE = `better-trigger-worker — durable task daemon
 
@@ -118,10 +119,11 @@ Env:
                            acme/prod,acme/staging)
   BETTER_TRIGGER_PIN_CODE_VERSION
                            Same as --pin-code-version (set to 1/true)
-  BETTER_TRIGGER_VERSION   Code version this build reports, overriding the
-                           source-derived one. Set it to a git sha or image tag
-                           to stop rebuilds from churning versions — and note
-                           that it applies to every task at once, so under
+  BETTER_TRIGGER_VERSION   Code version reported on registration, overriding
+                           the default build identity (0.1.0+<git sha>, the
+                           same value /health reports). Set it to a git sha or
+                           image tag to name deploys as your pipeline does —
+                           and note it applies to every task at once, so under
                            --pin-code-version one task's edit moves them all.
   BETTER_TRIGGER_BODY_LIMIT
                            Max request body in bytes (default 1048576 = 1 MiB).
@@ -979,6 +981,9 @@ async function main(): Promise<void> {
         '/app/examples/basic/src/tasks.ts if you just want something to run).',
     );
   }
+  console.log(
+    `[better-trigger] build ${BUILD_VERSION}${BUILD_SHA ? ` (git ${BUILD_SHA})` : ' (no git checkout)'}`,
+  );
   console.log(
     server
       ? `[better-trigger] listening on http://${hostForUrl(opts.host)}:${opts.port}` +
