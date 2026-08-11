@@ -165,7 +165,7 @@ export function createKernel(opts: KernelOptions): Kernel {
     getRunDetail: (runId, namespace) => getRunDetail(pool, runId, namespace),
     waitForResult: (runId, namespace, o) => waitForResult(pool, runId, namespace, o),
 
-    registerWorker: (args) => registerWorker(pool, args),
+    registerWorker: (args) => registerWorker(pool, { ...args, logger: args.logger ?? logger }),
     deregisterWorker: (args) => deregisterWorker(pool, args),
     heartbeat: (args) => heartbeat(pool, args),
     releaseClaims: (args) => releaseClaims(pool, args),

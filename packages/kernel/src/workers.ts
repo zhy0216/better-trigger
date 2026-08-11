@@ -12,6 +12,7 @@ import {
   type Namespace,
   type TaskManifest,
 } from '@better-trigger/core';
+import type { KernelLogger } from './kernel';
 import { scheduleId as genScheduleId, workerId as genWorkerId } from './ids';
 import { nextCronAt } from './orchestrator';
 
@@ -27,6 +28,12 @@ export interface RegisterWorkerArgs {
    */
   namespaces: readonly Namespace[];
   tasks: TaskManifest[];
+  /**
+   * Sink for registration warnings (todos/01-correctness.md C4): a task
+   * metadata update refused because a different code version is already
+   * registered and still served. Defaults to console.
+   */
+  logger?: KernelLogger;
 }
 
 /**
@@ -51,6 +58,7 @@ export async function registerWorker(
     }
   }
   const id = genWorkerId();
+  const logger: KernelLogger = args.logger ?? console;
   // What this process serves, as (task id, code version) pairs. It used to be a
   // bare array of ids; the pairs are what the stranded-run scan needs to answer
   // "is any online worker still able to replay this run's ledger", and there is
@@ -86,12 +94,21 @@ export async function registerWorker(
     // Upsert each task definition in every namespace this worker serves — a
     // staging worker registering the same task id must not touch the prod task
     // row, and vice versa (C2).
+    //
+    // C4: upsertTask returns whether THIS worker became the task's metadata
+    // owner (first registration, same-version refresh, or takeover of an
+    // unserved version). Only the owner may sync that task's schedule — a
+    // rejected (non-owner) registration must not rewrite the cron pattern the
+    // owner registered, push a due fire into the future, or delete the
+    // owner's schedule because this older manifest dropped the cron.
     for (const ns of args.namespaces) {
+      const ownerTasks: TaskManifest[] = [];
       for (const t of args.tasks) {
-        await upsertTask(client, t, t.codeVersion ?? args.codeVersion, ns);
+        const owner = await upsertTask(client, t, t.codeVersion ?? args.codeVersion, ns, logger);
+        if (owner) ownerTasks.push(t);
       }
-      // Sync schedules: upsert cron tasks (preserve enabled), delete others.
-      await syncSchedules(client, args.tasks, ns);
+      // Sync schedules of OWNED tasks only (preserve enabled), delete others'.
+      await syncSchedules(client, ownerTasks, ns);
     }
 
     await client.query('COMMIT');
@@ -138,15 +155,45 @@ export async function deregisterWorker(
  * tasks.latest_code_version, which is what every new run of the task is stamped
  * with — so an edit to one task must not move the version of the runs of
  * another, or version-pinned claims would strand runs nobody touched.
+ *
+ * C4 owner/version rule (todos/01-correctness.md): the metadata row belongs to
+ * the FIRST version that claims it and is still being served, so a restarting
+ * OLD worker can never roll a NEW worker's metadata back (last-writer-wins
+ * did exactly that in a rolling deploy). The conflict update is guarded:
+ *
+ *   1. stored latest_code_version IS NULL          — first registration wins
+ *   2. incoming == stored                          — same build re-registering:
+ *                                                    idempotent metadata refresh
+ *   3. incoming != stored AND no online worker is  — the stored version's
+ *      serving the STORED version for this task      workers are gone (deploy
+ *      in this namespace                            finished, or rolled back):
+ *                                                    takeover is safe
+ *
+ * otherwise (different version whose workers are still alive) the update is
+ * skipped and a warn is logged. Registration timestamps cannot order the two
+ * cases — an old worker restarting and a new worker deploying both register
+ * "now" — so "still served" is the only signal that separates them. The
+ * subquery looks up the STORED version (tasks.latest_code_version, built into
+ * the jsonb pair with jsonb_build_object) — never the incoming one, which the
+ * registering worker's own row (inserted earlier in this same transaction,
+ * online with a fresh heartbeat) would otherwise always match and block every
+ * takeover. A stored version is "served" by a workers row that is online,
+ * heartbeating within the same 2-minute window the offline marker uses
+ * (orchestrator.ts WORKER_OFFLINE_MS), serves this namespace (C2) and lists
+ * this (task id, stored version) pair. The guard lives in the upsert itself
+ * (one atomic statement, no check-then-write race); a refused update comes
+ * back as rowCount 0 and the caller is NOT the metadata owner (see
+ * registerWorker — only the owner syncs that task's schedule).
  */
 async function upsertTask(
   client: PoolClient,
   t: TaskManifest,
   codeVersion: string,
   namespace: Namespace,
-): Promise<void> {
+  logger: KernelLogger,
+): Promise<boolean> {
   const triggerSource = t.cron ? 'schedule' : 'api';
-  await client.query(
+  const res = await client.query(
     `INSERT INTO tasks
        (id, project_id, env, name, file_path, trigger_source, cron_pattern, cron_tz, retry,
         concurrency_limit, latest_code_version, created_at, updated_at)
@@ -160,7 +207,18 @@ async function upsertTask(
            retry = EXCLUDED.retry,
            concurrency_limit = EXCLUDED.concurrency_limit,
            latest_code_version = EXCLUDED.latest_code_version,
-           updated_at = now()`,
+           updated_at = now()
+     WHERE tasks.latest_code_version IS NULL
+        OR tasks.latest_code_version = EXCLUDED.latest_code_version
+        OR NOT EXISTS (
+          SELECT 1 FROM workers w
+           WHERE w.status = 'online'
+             AND w.last_heartbeat_at > now() - INTERVAL '2 minutes'
+             AND w.namespaces @> $12::jsonb
+             AND w.tasks @> jsonb_build_array(
+                   jsonb_build_object('id', tasks.id, 'codeVersion', tasks.latest_code_version)
+                 )
+        )`,
     [
       t.id,
       namespace.projectId,
@@ -173,10 +231,51 @@ async function upsertTask(
       t.retry ? JSON.stringify(t.retry) : null,
       t.concurrencyLimit ?? null,
       codeVersion,
+      // $12: this namespace — the (task id, stored version) pair the subquery
+      // matches is built in SQL from the target row, not bound from the
+      // incoming manifest (which would match the registering worker's own row).
+      JSON.stringify([namespace]),
     ],
   );
+  if (res.rowCount === 0) {
+    // The guard refused the overwrite: the stored version is different AND
+    // still served. Name it (one indexed read on a rare path) so the log says
+    // which build owns the metadata instead of only that ours lost.
+    const stored = await client.query<{ latest_code_version: string | null }>(
+      `SELECT latest_code_version FROM tasks
+        WHERE project_id = $1 AND env = $2 AND id = $3`,
+      [namespace.projectId, namespace.env, t.id],
+    );
+    logger.warn(
+      `[registration] task ${t.id} in ${namespace.projectId}/${namespace.env}: ` +
+        `code version ${codeVersion} NOT applied — ` +
+        `${stored.rows[0]?.latest_code_version ?? '(none)'} is already registered ` +
+        `and still served by an online worker; keeping the live version`,
+    );
+    return false;
+  }
+  return true;
 }
 
+/**
+ * Upsert cron schedules for the OWNED tasks of this registration and remove
+ * schedules for owned tasks that lost their cron — see registerWorker: the
+ * caller only passes tasks whose metadata upsert succeeded (owner), so a
+ * non-owner registration can never rewrite or delete another version's
+ * schedule (C4).
+ *
+ * next_run_at is only recomputed when the schedule actually CHANGED — the
+ * pattern or the timezone. last-writer-wins recomputed it on every
+ * registration, so a worker restarting during a rolling deploy pushed an
+ * already-due schedule's fire into the future and silently skipped it. Same
+ * pattern + timezone ⇒ the existing next_run_at is kept verbatim (a due
+ * schedule stays due); a fresh INSERT still computes it normally. There is
+ * deliberately NO disabled→enabled branch here: this statement never changes
+ * `enabled` (the INSERT binds true, the SET does not mention it), so the only
+ * disabled→enabled transition is the dashboard PATCH, which recomputes
+ * next_run_at itself — and a disabled row's NULL next_run_at must survive a
+ * registration with the same pattern, not be refilled.
+ */
 async function syncSchedules(
   client: PoolClient,
   tasks: TaskManifest[],
@@ -197,7 +296,12 @@ async function syncSchedules(
        ON CONFLICT (project_id, env, task_id) DO UPDATE
          SET cron_pattern = EXCLUDED.cron_pattern,
              cron_tz = EXCLUDED.cron_tz,
-             next_run_at = CASE WHEN schedules.enabled THEN EXCLUDED.next_run_at ELSE NULL END,
+             next_run_at = CASE
+               WHEN schedules.cron_pattern IS DISTINCT FROM EXCLUDED.cron_pattern
+                 OR schedules.cron_tz IS DISTINCT FROM EXCLUDED.cron_tz
+               THEN EXCLUDED.next_run_at
+               ELSE schedules.next_run_at
+             END,
              updated_at = now()`,
       [
         genScheduleId(),
