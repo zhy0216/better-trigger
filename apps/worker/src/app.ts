@@ -23,6 +23,19 @@ export interface AppDeps {
   kernel: Kernel;
   /** The pg Pool for dashboard read queries (owned by the caller). */
   pool: Pool;
+  /**
+   * PF4 (todos/02-performance.md): a small dedicated pool — createHealthPool()
+   * — for the /health?deep=1 and /metrics probes. A probe that hangs (or a
+   * scrape storm against a half-dead database) must never hold a business-pool
+   * connection, and its statement_timeout is what actually cancels the probe
+   * query server-side. The daemon (main.ts) always passes it. Tests and
+   * embedded callers may omit it: the probes then share the business pool,
+   * which is safe for a healthy database but means a hung database can hold
+   * business connections through the probes — production deployments should
+   * run through the daemon (which wires a real probe pool), or pass their own
+   * createHealthPool() here.
+   */
+  probePool?: Pool;
   /** Live counters /metrics reads off the runtime and the orchestrator. Absent
    *  when the caller has neither (an embedded app, a test): the endpoint then
    *  reports the database gauges and zeros. */
@@ -104,7 +117,15 @@ export function createApp(deps: AppDeps): Hono {
   v1.route('/', triggerRoutes(deps));
   v1.route('/', runRoutes({ kernel: deps.kernel, waiters: deps.waiters }));
   v1.route('/', dashboardRoutes(deps));
-  v1.route('/', metricsRoutes({ pool: deps.pool, metrics: deps.metrics, namespaces: deps.namespaces }));
+  v1.route(
+    '/',
+    metricsRoutes({
+      pool: deps.pool,
+      probePool: deps.probePool,
+      metrics: deps.metrics,
+      namespaces: deps.namespaces,
+    }),
+  );
 
   app.route('/api/v1', v1);
 

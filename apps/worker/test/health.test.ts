@@ -18,10 +18,20 @@ import { createApp } from '../src/app';
 
 const kernel = {} as unknown as Kernel;
 
-/** An app whose pool answers `query` with `impl`, and carries pg's counters. */
-const makeApp = (impl: () => Promise<unknown>, counts?: Partial<Record<string, number>>) => {
+/**
+ * An app whose pool answers `query` with `impl`, and carries pg's counters.
+ * The deep probe checks out a client explicitly (pool.connect() + release),
+ * so the stub's connect() hands back a client whose query is `impl` and whose
+ * release is recorded in `releases` — that is what makes the connection-return
+ * contract assertable without a real Postgres.
+ */
+const makeApp = (
+  impl: () => Promise<unknown>,
+  counts?: Partial<Record<string, number>>,
+  releases?: boolean[],
+) => {
   const pool = {
-    query: impl,
+    connect: async () => ({ query: impl, release: () => releases?.push(true) }),
     totalCount: 3,
     idleCount: 2,
     waitingCount: 0,
@@ -39,6 +49,27 @@ const dbDown = () =>
   });
 
 const get = (path: string) => new Request(`http://localhost:4848${path}`);
+
+/**
+ * An app with the two pools a PF4 daemon owns: the business `pool` (whose
+ * `query` must never see a probe) and the dedicated `probePool` (whose
+ * connect()/client is what /health?deep=1 exercises). Pass only the business
+ * pool and the probe falls back to it, exactly like an embedded
+ * createApp({ kernel, pool }).
+ */
+const makeProbeApp = (
+  businessQuery: () => Promise<unknown>,
+  probeClientQuery: () => Promise<unknown>,
+  counts?: Partial<Record<string, number>>,
+  probeReleases?: boolean[],
+) =>
+  createApp({
+    kernel,
+    pool: { query: businessQuery, totalCount: 3, idleCount: 2, waitingCount: 0, ...counts } as unknown as Pool,
+    probePool: {
+      connect: async () => ({ query: probeClientQuery, release: () => probeReleases?.push(true) }),
+    } as unknown as Pool,
+  });
 
 let savedKey: string | undefined;
 
@@ -162,6 +193,117 @@ describe('deep /health?deep=1 (readiness)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('deep /health?deep=1 — dedicated probe pool (PF4)', () => {
+  it('probes through the probe pool, never the business pool', async () => {
+    // The whole point of the separate pool: the probe's SELECT 1 must not
+    // borrow a connection the business queries need (a probe storm then cannot
+    // deplete the business pool). The pool stats still describe the business
+    // pool — that is the pool whose saturation a readiness check should see.
+    const businessQuery = vi.fn(async () => {
+      throw new Error('business query should not run');
+    });
+    const probeQuery = vi.fn(async () => ({ rows: [{ '?column?': 1 }] }));
+    const releases: boolean[] = [];
+    const app = makeProbeApp(businessQuery, probeQuery, undefined, releases);
+
+    const res = await app.fetch(get('/api/v1/health?deep=1'));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { db: unknown; pool: unknown }).toMatchObject({
+      db: { ok: true },
+      pool: { total: 3, idle: 2, waiting: 0 },
+    });
+    expect(probeQuery).toHaveBeenCalledWith('SELECT 1');
+    expect(businessQuery).not.toHaveBeenCalled();
+    // The checked-out client came back to the probe pool.
+    expect(releases).toEqual([true]);
+  });
+
+  it('answers 503 at the deadline when the probe hangs, leaving the business pool untouched', async () => {
+    // 验收: a probe that never returns must (a) answer the HTTP request within
+    // the deadline and (b) never hold a business connection. The real
+    // cancellation of the hung query is the probe pool's statement_timeout —
+    // covered at the pool level (packages/db pool.test.ts) and against a real
+    // Postgres (examples/basic scripts/health-pool.ts) — so this pins the
+    // route side: the deadline fires, the checked-out client is released, and
+    // the business pool saw nothing.
+    vi.useFakeTimers();
+    try {
+      const businessQuery = vi.fn(async () => {
+        throw new Error('business query should not run');
+      });
+      const releases: boolean[] = [];
+      const app = makeProbeApp(businessQuery, () => new Promise(() => {}), undefined, releases);
+      const pending = app.fetch(get('/api/v1/health?deep=1'));
+      await vi.advanceTimersByTimeAsync(2000);
+      const res = await pending;
+
+      expect(res.status).toBe(503);
+      expect((await res.json()) as { db: unknown }).toMatchObject({
+        ok: false,
+        db: { ok: false, error: 'timeout' },
+      });
+      // The hung query outlived the deadline, yet the connection came back:
+      // the probe's finally released the checked-out client exactly once (pg
+      // discards a client released with an in-flight query, so the probe pool
+      // keeps its full capacity for the next probe).
+      expect(releases).toEqual([true]);
+      expect(businessQuery).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns the checked-out client exactly once on success', async () => {
+    const releases: boolean[] = [];
+    const app = makeProbeApp(async () => ({ rows: [] }), async () => ({ rows: [{ '?column?': 1 }] }), undefined, releases);
+    const res = await app.fetch(get('/api/v1/health?deep=1'));
+    expect(res.status).toBe(200);
+    // The query settled before the deadline, so the continuation released —
+    // and the deadline's finally did not double-release.
+    expect(releases).toEqual([true]);
+  });
+
+  it('concurrent deep probes share ONE probe query (single-flight)', async () => {
+    // 并发场景: N simultaneous probes must not queue N queries on the probe
+    // pool — the first probe's outcome IS the answer for all of them, so the
+    // pool never has more than one probe query in flight.
+    let resolveGate: (() => void) | undefined;
+    const probeQuery = vi.fn(
+      () =>
+        new Promise<{ rows: unknown[] }>((resolve) => {
+          resolveGate = () => resolve({ rows: [{ '?column?': 1 }] });
+        }),
+    );
+    const connects = vi.fn(async () => ({ query: probeQuery, release: () => {} }));
+    const app = createApp({
+      kernel,
+      pool: { query: async () => ({ rows: [] }), totalCount: 3, idleCount: 2, waitingCount: 0 } as unknown as Pool,
+      probePool: { connect: connects } as unknown as Pool,
+    });
+
+    const pending = [
+      app.fetch(get('/api/v1/health?deep=1')),
+      app.fetch(get('/api/v1/health?deep=1')),
+      app.fetch(get('/api/v1/health?deep=1')),
+      app.fetch(get('/api/v1/health?deep=1')),
+    ];
+    // Let the first probe start (connect + query) before checking the count.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(connects).toHaveBeenCalledTimes(1);
+    expect(probeQuery).toHaveBeenCalledTimes(1);
+
+    resolveGate!();
+    for (const p of pending) {
+      const res = await p;
+      expect(res.status).toBe(200);
+      expect((await res.json()) as { db: unknown }).toMatchObject({ db: { ok: true } });
+    }
+    expect(connects).toHaveBeenCalledTimes(1);
+    expect(probeQuery).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -18,6 +18,7 @@
     "notify": "bun scripts/notify.ts",
     "run-detail": "bun scripts/run-detail.ts",
     "constraints": "bun scripts/constraints.ts",
+    "health-pool": "bun scripts/health-pool.ts",
     "concurrency": "bun scripts/concurrency.ts",
     "test:acceptance": "bun scripts/acceptance.ts",
     "bench:claim-scan": "bun scripts/claim-scan-bench.ts",

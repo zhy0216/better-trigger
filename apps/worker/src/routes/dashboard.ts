@@ -4,7 +4,7 @@
    · GET /workers (online-only + LIMIT by default). See docs/backend-contract.md §5.
    ============================================================================= */
 import { Hono } from 'hono';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import type { Namespace } from '@better-trigger/core';
 import { getRunDetail, KernelError, nextCronAt } from '@better-trigger/kernel';
 import type {
@@ -72,15 +72,44 @@ function workerTaskIds(raw: unknown): string[] {
  * refused connection: a dead peer, a saturated pool or a paused container all
  * leave the query pending forever, and a probe that waits with it is no better
  * than no probe at all — a timeout counts as unhealthy.
+ *
+ * The caller hands the *probe pool* (PF4), never the business pool: a hung or
+ * failing probe can therefore not hold a business connection, and the probe
+ * pool's statement_timeout is what actually cancels the query — PostgreSQL
+ * kills the SELECT 1 after ~1s and the connection returns to the pool. The
+ * race below is then only the HTTP answer deadline, not the resource safety
+ * net (which is why it can stay at 2s, ahead of the query's own 1s).
  */
 async function probeDb(pool: Pool): Promise<NonNullable<HealthResponse['db']>> {
-  // Both outcomes are folded into a value so the race's winner *is* the answer
-  // — 'ok' | 'query_failed' | 'timeout' — instead of one of the three arriving
-  // as a throw. This is presentation, not safety: `Promise.race` subscribes to
-  // every input, so the loser rejecting after the deadline is still an
-  // *observed* rejection and never becomes an unhandledRejection.
-  const query = pool.query('SELECT 1').then(
-    () => 'ok' as const,
+  // The connection lifecycle is ours (fix direction B): pool.connect() +
+  // client.release(), exactly once per outcome, so a probe can never strand a
+  // checked-out client. The continuation releases on success and on query
+  // failure; the finally below releases when the deadline won — whichever
+  // fires first sets `released`, so the late path is a no-op (and pg-pool
+  // discards a client released with an in-flight query, so capacity is
+  // preserved even when the query outlives the deadline).
+  let client: PoolClient | null = null;
+  let released = false;
+  const releaseOnce = (c: PoolClient): void => {
+    if (!released) {
+      released = true;
+      c.release();
+    }
+  };
+  const query = pool.connect().then(
+    (c) => {
+      client = c;
+      return c.query('SELECT 1').then(
+        () => {
+          releaseOnce(c);
+          return 'ok' as const;
+        },
+        () => {
+          releaseOnce(c);
+          return 'query_failed' as const;
+        },
+      );
+    },
     () => 'query_failed' as const,
   );
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -93,8 +122,10 @@ async function probeDb(pool: Pool): Promise<NonNullable<HealthResponse['db']>> {
   } finally {
     // A pending timer holds the event loop open, so a probe that answered in a
     // millisecond would still pin the process for the full deadline — and a
-    // SIGTERM landing right after a healthcheck would wait on it.
+    // SIGTERM landing right after a healthcheck would wait on it. Release
+    // whatever the continuation acquired if it has not released already.
     clearTimeout(timer);
+    if (client) releaseOnce(client);
   }
 }
 
@@ -104,8 +135,26 @@ function poolStats(pool: Pool): HealthPoolStats {
   return { total: n(pool.totalCount), idle: n(pool.idleCount), waiting: n(pool.waitingCount) };
 }
 
-export function dashboardRoutes(deps: { pool: Pool }): Hono {
+export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
   const { pool } = deps;
+  // PF4: probes run on the dedicated probe pool (createHealthPool) when the
+  // caller wired one — a hung/failing probe then cannot hold a business
+  // connection, no matter how often it is called. Tests and embedded callers
+  // may omit it and share the business pool (see AppDeps.probePool for the
+  // trade-off).
+  const probePool = deps.probePool ?? pool;
+  // PF4 single-flight guard: concurrent deep probes share ONE probe query.
+  // Without it a healthcheck storm could queue N queries on the probe pool
+  // (bounded at max 2, but still queued and still each taking ~1s of
+  // statement_timeout); with it the first probe's outcome IS the answer for
+  // every concurrent caller, and the pool never has more than one in flight.
+  let inflightProbe: Promise<NonNullable<HealthResponse['db']>> | null = null;
+  const probe = (): Promise<NonNullable<HealthResponse['db']>> => {
+    inflightProbe ??= probeDb(probePool).finally(() => {
+      inflightProbe = null;
+    });
+    return inflightProbe;
+  };
   const app = new Hono();
 
   // /tasks response cache, keyed by namespace, TTL'd via statsTtlMs(). Lives
@@ -175,7 +224,7 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
       const res: HealthResponse = { ok: true, version: VERSION };
       return c.json(res);
     }
-    const db = await probeDb(pool);
+    const db = await probe();
     const res: HealthResponse = { ok: db.ok, version: VERSION, db, pool: poolStats(pool) };
     return c.json(res, db.ok ? 200 : 503);
   });

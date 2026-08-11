@@ -153,6 +153,21 @@ function makeApp(fx: Fixture = {}) {
   });
 }
 
+/**
+ * An app with both pools, like the daemon wires them (PF4): the business pool
+ * must never see a scrape, and the dedicated probe pool is what the gauge query
+ * runs on. probeQuery defaults to the failing shape — a scrape storm against a
+ * half-dead database is the exact scenario the separation exists for.
+ */
+function makeProbeApp(businessQuery: () => Promise<unknown>, probeQuery: () => Promise<unknown>) {
+  return createApp({
+    kernel,
+    pool: { query: businessQuery } as unknown as Pool,
+    probePool: { query: probeQuery } as unknown as Pool,
+    metrics: { worker: null, orchestrator: null },
+  });
+}
+
 const get = (path = '/api/v1/metrics') => new Request(`http://localhost:4848${path}`);
 
 /** Scrape an app and hand back the parsed families. */
@@ -403,9 +418,118 @@ describe('database gauges', () => {
   // `Promise.race` subscribes to *every* input, so the loser's late rejection
   // is already observed by the race itself — it never reaches
   // process.on('unhandledRejection'), whatever gaugesOrNull does with the
-  // winner. A test asserting that handler stays silent is green against any
-  // implementation, i.e. it is not a test. The property worth pinning — a hung
-  // query degrades the scrape instead of hanging it — is covered above.
+  // winner. The property worth pinning — a hung query degrades the scrape
+  // instead of hanging it — is covered above.
+});
+
+describe('database gauges — dedicated probe pool (PF4)', () => {
+  it('scrapes through the probe pool, never the business pool', async () => {
+    const businessQuery = vi.fn(async () => {
+      throw new Error('business query should not run');
+    });
+    const probeQuery = vi.fn(async () => ({ rows: [GAUGE_ROW] }));
+    const app = makeProbeApp(businessQuery, probeQuery);
+
+    const res = await app.fetch(get());
+
+    expect(res.status).toBe(200);
+    const families = parseExposition(await res.text());
+    expect(sampleValue(families, 'better_trigger_db_up')).toBe(1);
+    expect(sampleValue(families, 'better_trigger_queue_depth', {
+      project_id: 'default', env: 'prod', state: 'available',
+    })).toBe(7);
+    expect(probeQuery).toHaveBeenCalledTimes(1);
+    expect(businessQuery).not.toHaveBeenCalled();
+  });
+
+  it('100 concurrent failed scrapes share one failed probe, keep db_up 0, and leave the business pool untouched', async () => {
+    // 验收 (PF4): after 100 failed scrapes a business query must still get a
+    // connection. Two mechanisms deliver it: the probe pool is separate (a
+    // failing scrape borrows a probe connection at most, never a business
+    // one) and the single-flight guard folds the whole storm into ONE probe
+    // query — so 100 concurrent failures issue exactly one (failed) probe
+    // query and cannot pile up pending work on the pool.
+    const businessQuery = vi.fn(async () => ({ rows: [] }));
+    const probeQuery = vi.fn(async () => {
+      throw new Error('connect ECONNREFUSED 10.0.0.4:5432');
+    });
+    const app = makeProbeApp(businessQuery, probeQuery);
+
+    const results = await Promise.all(
+      Array.from({ length: 100 }, async () => {
+        const res = await app.fetch(get());
+        expect(res.status).toBe(200);
+        return parseExposition(await res.text());
+      }),
+    );
+    for (const families of results) {
+      expect(sampleValue(families, 'better_trigger_db_up')).toBe(0);
+      // The in-process counters keep the scrape meaningful while the DB is
+      // down — db_up 0 is a signal, not an empty payload.
+      expect(families.has('better_trigger_claim_errors_total')).toBe(true);
+    }
+
+    expect(probeQuery).toHaveBeenCalledTimes(1);
+    expect(businessQuery).not.toHaveBeenCalled();
+    await expect(businessQuery()).resolves.toEqual({ rows: [] });
+  });
+
+  it('100 concurrent scrapes share ONE gauge query (single-flight)', async () => {
+    // 并发场景: a scrape storm must not queue N gauge queries on the probe
+    // pool — all concurrent scrapes get the first probe's outcome, so the
+    // pool never has more than one probe query in flight (the "never
+    // accumulates pending queries" property, now true under concurrency too).
+    let resolveGate: (() => void) | undefined;
+    const probeQuery = vi.fn(
+      () =>
+        new Promise<{ rows: typeof GAUGE_ROW[] }>((resolve) => {
+          resolveGate = () => resolve({ rows: [GAUGE_ROW] });
+        }),
+    );
+    const app = makeProbeApp(async () => ({ rows: [] }), probeQuery);
+
+    const scrapes = Array.from({ length: 100 }, () => app.fetch(get()));
+    // Let the first scrape start its probe before checking the count.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(probeQuery).toHaveBeenCalledTimes(1);
+
+    resolveGate!();
+    const responses = await Promise.all(scrapes);
+    for (const res of responses) {
+      expect(res.status).toBe(200);
+      const families = parseExposition(await res.text());
+      expect(sampleValue(families, 'better_trigger_db_up')).toBe(1);
+    }
+    expect(probeQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('100 hung scrapes still answer at the deadline and never touch the business pool', async () => {
+    // The never-returning-probe half of the acceptance: a query that never
+    // settles (a paused container, a black-holed network) must not accumulate
+    // pending work that blocks the business pool. Each scrape answers with
+    // db_up 0 at the 2s deadline, and the business pool sees nothing.
+    vi.useFakeTimers();
+    try {
+      const businessQuery = vi.fn(async () => {
+        throw new Error('business query should not run');
+      });
+      const app = makeProbeApp(businessQuery, () => new Promise(() => {}));
+
+      for (let i = 0; i < 100; i++) {
+        const pending = app.fetch(get());
+        await vi.advanceTimersByTimeAsync(2000);
+        const res = await pending;
+        expect(res.status).toBe(200);
+        const families = parseExposition(await res.text());
+        expect(sampleValue(families, 'better_trigger_db_up')).toBe(0);
+      }
+      // Every scrape disarmed its own deadline timer — no timer pile-up.
+      expect(vi.getTimerCount()).toBe(0);
+      expect(businessQuery).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('in-process counters', () => {

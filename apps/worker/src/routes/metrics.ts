@@ -45,7 +45,12 @@ const PREFIX = 'better_trigger_';
 /** Content type of the Prometheus text exposition format (version 0.0.4). */
 const CONTENT_TYPE = 'text/plain; version=0.0.4; charset=utf-8';
 
-/** Deadline for the gauge query — a hung DB must not hang the scrape. */
+/**
+ * Deadline for the gauge query's HTTP answer — a hung DB must not hang the
+ * scrape. The query itself is cancelled earlier, server-side, by the probe
+ * pool's statement_timeout (1s, PF4), so this deadline never outlives a live
+ * query: it only bounds queueing behind other probes.
+ */
 const QUERY_TIMEOUT_MS = 2000;
 
 /**
@@ -242,9 +247,11 @@ async function queryGauges(
  * queryGauges under a deadline, folded to null on any failure. Same shape as
  * the deep health probe's race, and for the same reason: folding both outcomes
  * into a value makes the race's winner *be* the answer instead of one outcome
- * arriving as a throw. This is presentation, not safety — `Promise.race`
- * subscribes to every input, so a loser rejecting after the deadline is still
- * an *observed* rejection and never becomes an unhandledRejection.
+ * arriving as a throw. This is presentation, not safety — the query itself is
+ * cancelled by the probe pool's statement_timeout, so the loser's rejection is
+ * PostgreSQL's, and `Promise.race` subscribes to every input, so a late
+ * rejection is still an *observed* rejection and never becomes an
+ * unhandledRejection.
  */
 async function gaugesOrNull(
   pool: Pool,
@@ -271,30 +278,39 @@ async function gaugesOrNull(
  * A process without a worker still exports the runtime counters as zeros: a
  * series that disappears between scrapes breaks rate() and reads as an outage
  * of the metric rather than an absence of the subsystem.
+ *
+ * `gauges` lets the route hand in a value it loaded through its single-flight
+ * guard (PF4) instead of this function issuing its own query: pass
+ * `undefined` to load here (the default — tests, embedded callers), pass the
+ * guarded `DbGauges[] | null` to reuse one shared probe for every concurrent
+ * scrape.
  */
 export async function collectMetrics(
   pool: Pool,
   sources: MetricsSources = {},
   namespaces: readonly Namespace[] = [DEFAULT_NAMESPACE],
+  gauges?: DbGauges[] | null,
 ): Promise<MetricFamily[]> {
   const worker = sources.worker ?? null;
   const counters = worker?.counters ?? createWorkerCounters();
   const orchestrator = sources.orchestrator ?? createOrchestratorCounters();
   const notify = sources.notify ?? createNotifyCounters();
-  const gauges = await gaugesOrNull(pool, namespaces);
+  // `undefined` means "load it" (the pre-PF4 path); `null` is a *failed* load
+  // and must not trigger a second query.
+  const g = gauges === undefined ? await gaugesOrNull(pool, namespaces) : gauges;
 
   const families: MetricFamily[] = [
     {
       name: 'db_up',
       help: 'Whether the metrics query reached Postgres on this scrape (1) or failed/timed out (0). The queue and in-flight gauges are absent when 0.',
       type: 'gauge',
-      samples: [{ value: gauges ? 1 : 0 }],
+      samples: [{ value: g ? 1 : 0 }],
     },
   ];
 
   // Omitted rather than zeroed when the DB is unreachable: "queue depth 0" and
   // "queue depth unknown" must not look the same to an alert.
-  if (gauges) {
+  if (g) {
     // One sample per configured namespace × state: the (project_id, env) label
     // pair is what keeps one namespace's backlog out of another's alert.
     families.push(
@@ -302,19 +318,19 @@ export async function collectMetrics(
         name: 'queue_depth',
         help: 'Rows in the queue table by namespace and state: available (due, unclaimed), scheduled (not due yet), claimed (leased to a worker).',
         type: 'gauge',
-        samples: gauges.flatMap((g) => [
-          { labels: { project_id: g.projectId, env: g.env, state: 'available' }, value: g.queueAvailable },
-          { labels: { project_id: g.projectId, env: g.env, state: 'scheduled' }, value: g.queueScheduled },
-          { labels: { project_id: g.projectId, env: g.env, state: 'claimed' }, value: g.queueClaimed },
+        samples: g.flatMap((gg) => [
+          { labels: { project_id: gg.projectId, env: gg.env, state: 'available' }, value: gg.queueAvailable },
+          { labels: { project_id: gg.projectId, env: gg.env, state: 'scheduled' }, value: gg.queueScheduled },
+          { labels: { project_id: gg.projectId, env: gg.env, state: 'claimed' }, value: gg.queueClaimed },
         ]),
       },
       {
         name: 'inflight_runs',
         help: 'Runs in status running by namespace, across every worker on this database.',
         type: 'gauge',
-        samples: gauges.map((g) => ({
-          labels: { project_id: g.projectId, env: g.env },
-          value: g.running,
+        samples: g.map((gg) => ({
+          labels: { project_id: gg.projectId, env: gg.env },
+          value: gg.running,
         })),
       },
     );
@@ -466,18 +482,40 @@ export async function collectMetrics(
 
 export function metricsRoutes(deps: {
   pool: Pool;
+  /** PF4: dedicated probe pool for the gauge query — a failed or hung scrape
+   *  must never hold a business connection, and the pool's statement_timeout
+   *  cancels the query server-side. Tests and embedded callers may omit it
+   *  and share the business pool. */
+  probePool?: Pool;
   metrics?: MetricsSources;
   /** Namespaces whose queue/in-flight gauges this daemon exports (default
    *  default/prod — the daemon's own configured scope, passed from main). */
   namespaces?: readonly Namespace[];
 }): Hono {
   const app = new Hono();
+  const probePool = deps.probePool ?? deps.pool;
+  const namespaces = deps.namespaces ?? [DEFAULT_NAMESPACE];
+  // PF4 single-flight guard: concurrent scrapes share ONE gauge query. Without
+  // it a scrape storm could queue N queries on the probe pool (bounded at
+  // max 2, but still queued and each paying statement_timeout); with it every
+  // concurrent scrape gets the same probe's outcome, so the pool never has
+  // more than one probe query in flight and a scrape storm cannot pile up
+  // pending work on a half-dead database.
+  let inflightGauges: Promise<DbGauges[] | null> | null = null;
+  const loadGauges = (): Promise<DbGauges[] | null> => {
+    inflightGauges ??= gaugesOrNull(probePool, namespaces).finally(() => {
+      inflightGauges = null;
+    });
+    return inflightGauges;
+  };
 
   app.get('/metrics', async (c) => {
+    const gauges = await loadGauges();
     const families = await collectMetrics(
-      deps.pool,
+      probePool,
       deps.metrics ?? {},
-      deps.namespaces ?? [DEFAULT_NAMESPACE],
+      namespaces,
+      gauges,
     );
     // Always 200, even with the database down: a scrape that fails tells the
     // operator "no data", while a scrape that succeeds with db_up 0 tells them

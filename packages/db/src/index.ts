@@ -5,5 +5,5 @@
    ============================================================================= */
 export * as schema from './schema';
 export * from './schema';
-export { createPool, DEFAULT_DATABASE_URL, type PoolLogger } from './pool';
+export { createPool, createHealthPool, DEFAULT_DATABASE_URL, type PoolLogger } from './pool';
 export { migrate } from './migrate';

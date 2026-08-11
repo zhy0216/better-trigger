@@ -345,7 +345,7 @@ SDK also parses are aliases of the read models in `@better-trigger/core`.
 | Method · Path | Response |
 |---|---|
 | `GET /health` | `{ ok, version }` — liveness, never touches the DB (always open, no auth) |
-| `GET /health?deep=1` | readiness: `SELECT 1` (2s deadline) + `{ db, pool: { total, idle, waiting } }`; 503 when the DB does not answer. Also open — a container healthcheck has no key. This is what the image's `HEALTHCHECK` runs. |
+| `GET /health?deep=1` | readiness: `SELECT 1` (2s deadline) + `{ db, pool: { total, idle, waiting } }`; 503 when the DB does not answer. Also open — a container healthcheck has no key. This is what the image's `HEALTHCHECK` runs. The probe runs on a **dedicated probe pool** (see below), never a business connection. |
 | `GET /tasks` | `{ tasks: TaskSummary[] }` (24h-window runs24h/p50/p95/successRate/trend, all-history `lastRunAt`; cached 10s per namespace) |
 | `GET /runs?env=&taskId=&status=&limit=&cursor=` | `{ runs: RunSummary[], nextCursor }` (keyset on `created_at + id`) |
 | `GET /runs/:id?logsBefore=` | `{ run, steps, stepsTruncated, waits, waitsTruncated, logs, logsNextCursor }` — one snapshot; newest 200 logs by default, older pages via `logsBefore` |
@@ -355,9 +355,21 @@ SDK also parses are aliases of the read models in `@better-trigger/core`.
 | `GET /metrics` | Prometheus text (`text/plain; version=0.0.4`), not JSON — see below |
 
 Point a **readiness** probe at `?deep=1`, never a **liveness** one. The deep
-probe borrows a client from the pool (pg defaults to `max: 10`), so when the
-pool is saturated it queues behind the work and can hit its own 2s deadline —
-a busy daemon would be killed and restarted for being busy. Liveness is the
+probe runs on its own **probe pool** (PF4): a small dedicated pool
+(`max: 2`) created by `createHealthPool()`, separate from the business pool.
+Its connections carry `statement_timeout=1000` (and a 1s connect timeout), so
+PostgreSQL itself cancels a probe query after 1s and the connection returns to
+the pool — a hung or repeatedly-failing probe can never hold a business
+connection, and the 2s deadline is only the HTTP answer. Concurrent probes and
+scrapes are **single-flight** (one in-flight probe per route; everyone else
+shares its outcome), so a probe storm cannot pile up queued queries on the
+probe pool either. `pool` in the response is still the **business** pool's
+counters — that is the pool whose saturation a readiness check should see.
+Embedded callers that assemble `createApp({ kernel, pool })` without a
+`probePool` get the probe on the business pool instead — fine for a healthy
+database, but a hung one can then hold business connections through the
+probes: production deployments should run through the daemon (`main.ts` wires
+a real probe pool), or pass their own `createHealthPool()` in. Liveness is the
 plain `/health`, which answers without touching Postgres for exactly this
 reason.
 
@@ -409,10 +421,14 @@ their errors have been swallowing them all afternoon. Everything is prefixed
 | `waiter_timeouts_total` | counter | `result()` waiters that hit their deadline (latest non-terminal status) |
 | `claim_wakes_total` | counter | Times a work notification woke the idle claim loops |
 
-Two gauges come from one SQL round trip (2s deadline); everything else is a
-live in-process counter, so a scrape stays cheap. The endpoint answers `200`
-even with the database down — a successful scrape reporting `db_up 0` says more
-than a failed scrape, and the counters are what say how long it has been wrong.
+Two gauges come from one SQL round trip (2s deadline), run on the same
+dedicated probe pool as the health probe — a failing or hung scrape borrows a
+probe connection at most, never a business one, `statement_timeout` cancels
+the query server-side, and concurrent scrapes share a single in-flight probe
+(single-flight); everything else is a live in-process counter, so a scrape
+stays cheap. The endpoint answers `200` even with the database down —
+a successful scrape reporting `db_up 0` says more than a failed scrape, and
+the counters are what say how long it has been wrong.
 
 > **`runs_total` is labelled `outcome`, and it is not `runs.status`.** The label
 > carries the *executor's verdict on one execution pass*: `failed` there is an

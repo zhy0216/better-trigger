@@ -27,7 +27,7 @@ import {
   parseDuration,
   type Namespace,
 } from '@better-trigger/core';
-import { createPool, DEFAULT_DATABASE_URL, migrate } from '@better-trigger/db';
+import { createHealthPool, createPool, DEFAULT_DATABASE_URL, migrate } from '@better-trigger/db';
 import { createKernel, MIN_RETENTION_MS, type OrchestratorCounters } from '@better-trigger/kernel';
 import { setResultResolver } from 'better-trigger/internal';
 import { createApp } from './app';
@@ -552,6 +552,9 @@ interface Daemon {
    *  close. */
   notify: { stop(): Promise<void> } | null;
   pool: { end(): Promise<void> } | null;
+  /** PF4: the dedicated health/metrics probe pool, ended after the business
+   *  pool (no new probe requests can arrive once the server is closed). */
+  probePool: { end(): Promise<void> } | null;
 }
 const daemon: Daemon = {
   server: null,
@@ -559,6 +562,7 @@ const daemon: Daemon = {
   stopOrchestrator: null,
   notify: null,
   pool: null,
+  probePool: null,
 };
 
 /** One exit at a time: a second signal (or a crash mid-drain) must not restart it. */
@@ -657,6 +661,15 @@ async function runHandoff(): Promise<void> {
     } catch (err) {
       handoffStepFailed('pool', err);
       steps.push('pool(failed)');
+    }
+  }
+  if (daemon.probePool) {
+    try {
+      await daemon.probePool.end();
+      steps.push('probePool');
+    } catch (err) {
+      handoffStepFailed('probePool', err);
+      steps.push('probePool(failed)');
     }
   }
   console.log(
@@ -794,6 +807,12 @@ async function main(): Promise<void> {
 
   const pool = createPool(opts.databaseUrl); // falls back to DATABASE_URL
   daemon.pool = pool;
+  // PF4: a small dedicated pool for the /health?deep=1 and /metrics probes.
+  // It has its own max/statement_timeout/connect-timeout, so a hung or
+  // repeatedly-failing probe can never hold a business-pool connection and
+  // never accumulates pending queries.
+  const probePool = createHealthPool(opts.databaseUrl);
+  daemon.probePool = probePool;
   if (opts.migrate) await migrate(pool);
 
   const kernel = createKernel({ pool });
@@ -926,6 +945,7 @@ async function main(): Promise<void> {
     const app = createApp({
       kernel,
       pool,
+      probePool,
       metrics: { worker, orchestrator: orchestratorCounters, notify: notifyCounters },
       waiters,
       // The DB gauges /metrics exports are namespace-labelled per configured

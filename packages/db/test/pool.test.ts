@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
-import { createPool } from '../src/pool';
+import { createHealthPool, createPool } from '../src/pool';
 
 const execFileAsync = promisify(execFile);
 const UNREACHABLE = 'postgres://better_trigger@127.0.0.1:1/none';
@@ -43,6 +43,42 @@ describe('createPool — idle client errors', () => {
     const pool = createPool(UNREACHABLE, { error: () => {} });
     pool.emit('error', new Error('boom'));
     expect(pool.ended).toBe(false);
+    await pool.end();
+  });
+});
+
+describe('createHealthPool — probe pool config (PF4)', () => {
+  it('caps probe connections at 2, whatever the business pool does', async () => {
+    const pool = createHealthPool(UNREACHABLE, { error: () => {} });
+    expect(pool.options.max).toBe(2);
+    await pool.end();
+  });
+
+  it('arms a server-side statement_timeout so a hung probe query is cancelled', async () => {
+    // node-postgres sends statement_timeout as `-c statement_timeout=...` in
+    // the connection startup packet: PostgreSQL itself cancels the query after
+    // this and the connection returns to the pool. It must sit below the
+    // routes' 2s HTTP deadline (todos/02-performance.md PF4).
+    const pool = createHealthPool(UNREACHABLE, { error: () => {} });
+    expect(pool.options.statement_timeout).toBe(1000);
+    await pool.end();
+  });
+
+  it('arms a connection-establishment timeout for a black-holed network', async () => {
+    const pool = createHealthPool(UNREACHABLE, { error: () => {} });
+    expect(pool.options.connectionTimeoutMillis).toBe(1000);
+    await pool.end();
+  });
+
+  it('attaches the same idle-client error listener as the business pool', async () => {
+    const logged: unknown[][] = [];
+    const pool = createHealthPool(UNREACHABLE, { error: (...args) => logged.push(args) });
+
+    expect(() => pool.emit('error', new Error('boom'))).not.toThrow();
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toEqual(['[better-trigger] idle client error:', 'boom']);
+    expect(pool.ended).toBe(false);
+
     await pool.end();
   });
 });
