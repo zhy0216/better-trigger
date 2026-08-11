@@ -8,6 +8,12 @@
    ============================================================================= */
 import { AssertionFailure, describeError } from './assert';
 
+/** Structural namespace shape — testing has no dependency on @better-trigger/core. */
+interface Namespace {
+  projectId: string;
+  env: string;
+}
+
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -59,11 +65,13 @@ export async function waitFor(
 /**
  * Anything that can answer "what status is this run in?" — the HTTP client and
  * the kernel both satisfy the object form, so a scenario can poll whichever
- * surface it is testing without an adapter.
+ * surface it is testing without an adapter. The optional namespace parameter
+ * matches the kernel's namespace-scoped getRun (C2); a single-arg reader (the
+ * SDK client) satisfies the same shape.
  */
 export type RunStatusReader =
   | ((runId: string) => Promise<string>)
-  | { getRun(runId: string): Promise<{ status: string }> };
+  | { getRun(runId: string, namespace?: Namespace): Promise<{ status: string }> };
 
 function readStatus(reader: RunStatusReader): (runId: string) => Promise<string> {
   if (typeof reader === 'function') return reader;

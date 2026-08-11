@@ -111,6 +111,9 @@ export type WorkerSummary = WorkerSummaryModel;
 export type WorkersResponse = WorkersResponseModel;
 
 export interface RunFilters {
+  /** Project scope of the runs list (default 'default' — the server-side
+   *  namespace default). */
+  projectId?: string;
   env?: string;
   taskId?: string;
   status?: string;
@@ -120,12 +123,27 @@ export interface RunFilters {
 
 /* ---- endpoints (backend-contract §5) ------------------------------------- */
 
+/**
+ * Every read/control call names the namespace it means. The server defaults
+ * missing params to default/prod, but the dashboard says it explicitly: the
+ * "single namespace by default" visibility boundary is a property of the UI,
+ * not something it stumbles into. projectId stays 'default' (there is no
+ * project switcher in the UI); env follows the TopBar's EnvSwitcher.
+ */
+const PROJECT_ID = 'default';
+
+function nsQuery(params: URLSearchParams): void {
+  params.set('projectId', PROJECT_ID);
+}
+
 export const api = {
   health(signal?: AbortSignal): Promise<{ ok: boolean; version: string }> {
     return request('/health', { signal });
   },
   tasks(signal?: AbortSignal): Promise<TasksResponse> {
-    return request('/tasks', { signal });
+    const qs = new URLSearchParams();
+    nsQuery(qs);
+    return request('/tasks?' + qs, { signal });
   },
   runs(filters: RunFilters = {}, signal?: AbortSignal): Promise<RunsResponse> {
     const qs = new URLSearchParams();
@@ -135,25 +153,36 @@ export const api = {
     if (filters.status && filters.status !== 'all') qs.set('status', filters.status);
     if (filters.limit) qs.set('limit', String(filters.limit));
     if (filters.cursor) qs.set('cursor', filters.cursor);
+    nsQuery(qs);
     const q = qs.toString();
     return request('/runs' + (q ? '?' + q : ''), { signal });
   },
   run(runId: string, signal?: AbortSignal): Promise<RunDetailResponse> {
-    return request('/runs/' + encodeURIComponent(runId), { signal });
+    return request('/runs/' + encodeURIComponent(runId) + '?projectId=' + PROJECT_ID, { signal });
   },
   schedules(signal?: AbortSignal): Promise<SchedulesResponse> {
-    return request('/schedules', { signal });
+    return request('/schedules?projectId=' + PROJECT_ID, { signal });
   },
   setScheduleEnabled(id: string, enabled: boolean, signal?: AbortSignal): Promise<unknown> {
-    return request('/schedules/' + encodeURIComponent(id), { method: 'PATCH', body: { enabled }, signal });
+    return request('/schedules/' + encodeURIComponent(id) + '?projectId=' + PROJECT_ID, {
+      method: 'PATCH',
+      body: { enabled },
+      signal,
+    });
   },
   workers(signal?: AbortSignal): Promise<WorkersResponse> {
-    return request('/workers', { signal });
+    return request('/workers?projectId=' + PROJECT_ID, { signal });
   },
   cancelRun(runId: string, signal?: AbortSignal): Promise<unknown> {
-    return request('/runs/' + encodeURIComponent(runId) + '/cancel', { method: 'POST', signal });
+    return request('/runs/' + encodeURIComponent(runId) + '/cancel?projectId=' + PROJECT_ID, {
+      method: 'POST',
+      signal,
+    });
   },
   retryRun(runId: string, signal?: AbortSignal): Promise<{ runId: string }> {
-    return request('/runs/' + encodeURIComponent(runId) + '/retry', { method: 'POST', signal });
+    return request('/runs/' + encodeURIComponent(runId) + '/retry?projectId=' + PROJECT_ID, {
+      method: 'POST',
+      signal,
+    });
   },
 };

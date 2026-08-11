@@ -40,9 +40,18 @@
    ============================================================================= */
 import { Cron } from 'croner';
 import type { Pool } from 'pg';
+import {
+  DEFAULT_NAMESPACE,
+  assertNamespace,
+  type Namespace,
+} from '@better-trigger/core';
 import type { KernelLogger } from './kernel';
 import { prune } from './prune';
-import { scanStrandedRuns, type StrandedScan } from './queue';
+import {
+  namespacePredicate,
+  scanStrandedRuns,
+  type StrandedScan,
+} from './queue';
 import {
   createRunIn,
   lockRunRow,
@@ -141,6 +150,14 @@ export interface OrchestratorOptions {
   stranded?: boolean;
   /** Stranded-run scan interval (default 30s). Only used when `stranded`. */
   strandedIntervalMs?: number;
+  /**
+   * Namespaces this daemon serves. Every loop (wait scan, cron scan, reaper,
+   * stranded scan, retention GC) filters its SQL on these pairs — a daemon
+   * configured for staging never resumes prod waits or fires prod crons (C2).
+   * Absent ⇒ [DEFAULT_NAMESPACE] ('default'/'prod'), resolved once here, at
+   * this boundary.
+   */
+  namespaces?: readonly Namespace[];
 }
 
 /**
@@ -213,6 +230,22 @@ export function startOrchestrator(
   const retentionMs = opts.retentionMs;
   const strandedIntervalMs = opts.strandedIntervalMs ?? STRANDED_SCAN_MS;
 
+  // The one boundary default in the kernel: absent config means the legacy
+  // single-namespace world ('default'/'prod'). Every loop below filters on
+  // these pairs and never defaults again.
+  const namespaces: readonly Namespace[] = (opts.namespaces ?? [DEFAULT_NAMESPACE]).map(
+    (ns) => {
+      assertNamespace(ns);
+      return ns;
+    },
+  );
+  const nsParams: unknown[] = [];
+  const nsPredicate = namespacePredicate('waits', namespaces, nsParams);
+  const cronNsParams: unknown[] = [];
+  const cronNsPredicate = namespacePredicate('schedules', namespaces, cronNsParams);
+  const reapNsParams: unknown[] = [];
+  const reapNsPredicate = namespacePredicate('q', namespaces, reapNsParams);
+
   const timers: NodeJS.Timeout[] = [];
   const running = {
     waits: false,
@@ -251,20 +284,26 @@ export function startOrchestrator(
     // Phase 1 — discover due timer waits with a plain read, holding no locks.
     // fingerprint rides along: the executor computed it from the DECLARED wait
     // (duration string / until instant) when it suspended, and the resume must
-    // stamp the completed step row with that same value (C1).
+    // stamp the completed step row with that same value (C1). project_id/env
+    // ride along so every statement below re-scopes on the wait's namespace
+    // (C2) — a staging daemon never resumes prod waits.
     const due = await pool.query<{
       id: number;
       run_id: string;
+      project_id: string;
+      env: string;
       step_seq: number;
       fingerprint: string | null;
     }>(
-      `SELECT id, run_id, step_seq, fingerprint
+      `SELECT id, run_id, project_id, env, step_seq, fingerprint
          FROM waits
         WHERE status = 'pending'
           AND kind IN ('duration','until')
           AND resume_at <= now()
+          AND ${nsPredicate}
         ORDER BY resume_at ASC
         LIMIT 50`,
+      nsParams,
     );
 
     // Phase 2 — one short tx per wait, acquiring the canonical lock order
@@ -284,19 +323,26 @@ export function startOrchestrator(
     // exactly one instance gets past it, and it re-checks status under the
     // lock. Position 1 stays blocking — see the runs.ts header for why.
     for (const w of due.rows) {
+      const wNs: Namespace = { projectId: w.project_id, env: w.env };
       await withTx(pool, async (client) => {
-        await client.query(`SELECT run_id FROM queue WHERE run_id = $1 FOR UPDATE`, [
-          w.run_id,
-        ]);
-        const run = await tryLockRunRow(client, w.run_id);
+        await client.query(
+          `SELECT run_id FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
+          [w.run_id, wNs.projectId, wNs.env],
+        );
+        const run = await tryLockRunRow(client, w.run_id, wNs);
         if (!run) return; // run vanished, or another instance has it — next tick
         const lockedWait = await client.query<{ id: number }>(
-          `SELECT id FROM waits WHERE id = $1 AND status = 'pending' FOR UPDATE SKIP LOCKED`,
-          [w.id],
+          `SELECT id FROM waits WHERE id = $1 AND status = 'pending' FOR UPDATE SKIP LOCKED
+             AND project_id = $2 AND env = $3`,
+          [w.id, wNs.projectId, wNs.env],
         );
         if (!lockedWait.rows[0]) return; // already resumed/canceled, or held
 
-        await client.query(`UPDATE waits SET status = 'completed' WHERE id = $1`, [w.id]);
+        await client.query(
+          `UPDATE waits SET status = 'completed' WHERE id = $1
+             AND project_id = $2 AND env = $3`,
+          [w.id, wNs.projectId, wNs.env],
+        );
         // upsertStep applies the C1 immutability rule (a completed row is never
         // overwritten), and the fingerprint is the one the executor computed at
         // suspend time — not something recomputed from resume_at, which would
@@ -304,6 +350,7 @@ export function startOrchestrator(
         // wall-clock time.
         await upsertStep(client, {
           runId: w.run_id,
+          namespace: wNs,
           seq: w.step_seq,
           kind: 'wait',
           label: undefined, // the ledger row stores NULL (upsertStep binds ?? null)
@@ -315,8 +362,9 @@ export function startOrchestrator(
           fingerprint: w.fingerprint ?? undefined,
         });
         await client.query(
-          `UPDATE runs SET status = 'queued', updated_at = now() WHERE id = $1`,
-          [w.run_id],
+          `UPDATE runs SET status = 'queued', updated_at = now()
+            WHERE id = $1 AND project_id = $2 AND env = $3`,
+          [w.run_id, wNs.projectId, wNs.env],
         );
         // Priority comes off the runs row, not a literal: suspendRun deleted the
         // queue row that held it, so this is always the INSERT branch, and a
@@ -326,11 +374,11 @@ export function startOrchestrator(
         // priority alone: reaching it means a queue row survived the suspend,
         // and that row's own value is then the more trustworthy of the two.
         await client.query(
-          `INSERT INTO queue (run_id, available_at, priority, concurrency_key, env)
-           VALUES ($1, now(), $2, $3, $4)
+          `INSERT INTO queue (run_id, project_id, env, available_at, priority, concurrency_key)
+           VALUES ($1, $2, $3, now(), $4, $5)
            ON CONFLICT (run_id) DO UPDATE
              SET available_at = now(), locked_by = NULL, locked_at = NULL, lease_until = NULL`,
-          [w.run_id, run.priority, run.concurrency_key, run.env],
+          [w.run_id, wNs.projectId, wNs.env, run.priority, run.concurrency_key],
         );
       });
     }
@@ -341,19 +389,25 @@ export function startOrchestrator(
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      // Namespace-scoped: a staging daemon fires only staging schedules, and
+      // the schedule's project_id rides along so the run is created in the
+      // schedule's own namespace (C2).
       const due = await client.query<{
         id: string;
         task_id: string;
         cron_pattern: string;
         cron_tz: string | null;
+        project_id: string;
         env: string;
       }>(
-        `SELECT id, task_id, cron_pattern, cron_tz, env
+        `SELECT id, task_id, cron_pattern, cron_tz, project_id, env
            FROM schedules
           WHERE enabled = true AND next_run_at IS NOT NULL AND next_run_at <= now()
+            AND ${cronNsPredicate}
           ORDER BY next_run_at ASC
           LIMIT 50
           FOR UPDATE SKIP LOCKED`,
+        cronNsParams,
       );
 
       for (const s of due.rows) {
@@ -363,7 +417,7 @@ export function startOrchestrator(
           taskId: s.task_id,
           payload: null,
           triggerType: 'schedule',
-          env: s.env,
+          namespace: { projectId: s.project_id, env: s.env },
         });
 
         // Next fire computed from now → missed windows are skipped (no catch-up).
@@ -371,8 +425,8 @@ export function startOrchestrator(
         await client.query(
           `UPDATE schedules
               SET last_run_at = now(), last_run_id = $2, next_run_at = $3, updated_at = now()
-            WHERE id = $1`,
-          [s.id, created.runId, next],
+            WHERE id = $1 AND project_id = $4 AND env = $5`,
+          [s.id, created.runId, next, s.project_id, s.env],
         );
       }
       await client.query('COMMIT');
@@ -397,6 +451,8 @@ export function startOrchestrator(
       const stale = await client.query<{
         id: number;
         run_id: string;
+        project_id: string;
+        env: string;
       }>(
         // `lease_until IS NOT NULL` is redundant against `<= now()`, and not
         // load-bearing for the plan: PG derives it from the comparison itself
@@ -406,21 +462,29 @@ export function startOrchestrator(
         // in-flight subset" instead of relying on the planner's inference.
         // ORDER BY matches that index's key order (no sort node) and, with the
         // LIMIT, makes the batch the OLDEST expired leases — see REAP_BATCH.
-        `SELECT q.id, q.run_id
+        // Namespace-scoped: a daemon only reaps leases it is configured for
+        // (C2); project_id/env ride along for the per-row statements below.
+        `SELECT q.id, q.run_id, q.project_id, q.env
            FROM queue q
           WHERE q.lease_until IS NOT NULL
             AND q.lease_until <= now()
+            AND ${reapNsPredicate}
           ORDER BY q.lease_until ASC
           LIMIT ${REAP_BATCH}
           FOR UPDATE SKIP LOCKED`,
+        reapNsParams,
       );
 
       for (const q of stale.rows) {
+        const qNs: Namespace = { projectId: q.project_id, env: q.env };
         // Queue row already held via SKIP LOCKED → lock the runs row second
         // (canonical order; see runs.ts header).
-        const run = await lockRunRow(client, q.run_id);
+        const run = await lockRunRow(client, q.run_id, qNs);
         if (!run) {
-          await client.query(`DELETE FROM queue WHERE id = $1`, [q.id]);
+          await client.query(
+            `DELETE FROM queue WHERE id = $1 AND project_id = $2 AND env = $3`,
+            [q.id, qNs.projectId, qNs.env],
+          );
           continue;
         }
         // A lost worker is infrastructure, not the user's code failing: it
@@ -446,16 +510,16 @@ export function startOrchestrator(
           await client.query(
             `UPDATE runs
                 SET status = 'queued', recoveries = recoveries + 1, updated_at = now()
-              WHERE id = $1`,
-            [q.run_id],
+              WHERE id = $1 AND project_id = $2 AND env = $3`,
+            [q.run_id, qNs.projectId, qNs.env],
           );
           // Release the claim. runs.fencing_token is deliberately untouched —
           // the next claim's token++ is what invalidates the lost worker's
           // writes.
           await client.query(
             `UPDATE queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = now()
-              WHERE id = $1`,
-            [q.id],
+              WHERE id = $1 AND project_id = $2 AND env = $3`,
+            [q.id, qNs.projectId, qNs.env],
           );
           requeued += 1;
         }
@@ -493,7 +557,7 @@ export function startOrchestrator(
    */
   async function gc(): Promise<void> {
     if (retentionMs === undefined) return;
-    const res = await prune(pool, { olderThanMs: retentionMs });
+    const res = await prune(pool, { olderThanMs: retentionMs, namespaces });
     counters.gcRunsDeleted += res.runs;
     counters.gcWorkersDeleted += res.workers;
     if (res.runs > 0 || res.workers > 0) {
@@ -515,7 +579,7 @@ export function startOrchestrator(
    * drain) gets its own line for the same reason.
    */
   async function scanStranded(): Promise<void> {
-    const scan = await scanStrandedRuns(pool);
+    const scan = await scanStrandedRuns(pool, namespaces);
     const before = counters.stranded;
     counters.stranded = scan;
     if (signatureOf(before) === signatureOf(scan)) return;

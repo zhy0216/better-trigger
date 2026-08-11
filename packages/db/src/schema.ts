@@ -22,23 +22,28 @@ import {
 } from 'drizzle-orm/pg-core';
 
 /* ---------------------------------------------------------------------------
- * tasks
+ * tasks — namespace-scoped: PK is (project_id, env, id), so the same task id
+ * can exist independently in every namespace (C2, todos/01-correctness.md).
  * ------------------------------------------------------------------------- */
-export const tasks = pgTable('tasks', {
-  id: text('id').primaryKey(),
-  projectId: text('project_id').notNull().default('default'),
-  env: text('env').notNull().default('prod'),
-  name: text('name').notNull(),
-  filePath: text('file_path'),
-  triggerSource: text('trigger_source').notNull().default('api'),
-  cronPattern: text('cron_pattern'),
-  cronTz: text('cron_tz'),
-  retry: jsonb('retry'),
-  concurrencyLimit: integer('concurrency_limit'),
-  latestCodeVersion: text('latest_code_version'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const tasks = pgTable(
+  'tasks',
+  {
+    id: text('id').notNull(),
+    projectId: text('project_id').notNull().default('default'),
+    env: text('env').notNull().default('prod'),
+    name: text('name').notNull(),
+    filePath: text('file_path'),
+    triggerSource: text('trigger_source').notNull().default('api'),
+    cronPattern: text('cron_pattern'),
+    cronTz: text('cron_tz'),
+    retry: jsonb('retry'),
+    concurrencyLimit: integer('concurrency_limit'),
+    latestCodeVersion: text('latest_code_version'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.projectId, t.env, t.id] })],
+);
 
 /* ---------------------------------------------------------------------------
  * runs
@@ -87,13 +92,15 @@ export const runs = pgTable(
   },
   (t) => [
     // Partial UNIQUE backing the idempotent-trigger upsert
-    // (ON CONFLICT (task_id, idempotency_key) WHERE idempotency_key IS NOT NULL).
+    // (ON CONFLICT (project_id, env, task_id, idempotency_key) WHERE
+    // idempotency_key IS NOT NULL). Namespace-scoped: the same task + key in
+    // two namespaces creates two independent runs (C2).
     uniqueIndex('runs_task_idempotency_uniq')
-      .on(t.taskId, t.idempotencyKey)
+      .on(t.projectId, t.env, t.taskId, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} IS NOT NULL`),
-    index('runs_task_created_idx').on(t.taskId, t.createdAt),
-    index('runs_status_concurrency_idx').on(t.status, t.concurrencyKey),
-    index('runs_created_idx').on(t.createdAt),
+    index('runs_task_created_idx').on(t.projectId, t.env, t.taskId, t.createdAt),
+    index('runs_status_concurrency_idx').on(t.projectId, t.env, t.status, t.concurrencyKey),
+    index('runs_created_idx').on(t.projectId, t.env, t.createdAt),
   ],
 );
 
@@ -149,15 +156,17 @@ export const queue = pgTable(
     concurrencyKey: text('concurrency_key'),
   },
   (t) => [
-    index('queue_available_priority_idx').on(t.availableAt, t.priority.desc()),
-    index('queue_concurrency_idx').on(t.concurrencyKey),
+    // Namespace prefix on every index: the claim/reaper/scan loops all filter
+    // by (project_id, env) first (C2).
+    index('queue_available_priority_idx').on(t.projectId, t.env, t.availableAt, t.priority.desc()),
+    index('queue_concurrency_idx').on(t.projectId, t.env, t.concurrencyKey),
     // Partial, backing the reaper's expired-lease scan every 10s
     // (WHERE lease_until IS NOT NULL AND lease_until <= now() ORDER BY
     // lease_until ASC — todos/02-performance.md PF1). Only claimed rows carry a
     // lease, so the predicate keeps the index to the in-flight subset instead of
     // the whole backlog, and its key order is the scan's ORDER BY.
     index('queue_lease_until_idx')
-      .on(t.leaseUntil)
+      .on(t.projectId, t.env, t.leaseUntil)
       .where(sql`${t.leaseUntil} IS NOT NULL`),
     // Partial, backing the claim scan's candidate window — the query every
     // execution slot runs on every poll (WHERE available_at <= now() AND
@@ -170,7 +179,7 @@ export const queue = pgTable(
     // `available_at <= now()` stays a filter — now() is not immutable, so it
     // cannot appear in an index predicate.
     index('queue_claimable_idx')
-      .on(t.priority.desc().nullsFirst(), t.id)
+      .on(t.projectId, t.env, t.priority.desc().nullsFirst(), t.id)
       .where(sql`${t.lockedBy} IS NULL`),
   ],
 );
@@ -198,8 +207,8 @@ export const waits = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    index('waits_status_resume_idx').on(t.status, t.resumeAt),
-    index('waits_child_run_idx').on(t.childRunId),
+    index('waits_status_resume_idx').on(t.projectId, t.env, t.status, t.resumeAt),
+    index('waits_child_run_idx').on(t.projectId, t.env, t.childRunId),
   ],
 );
 
@@ -223,29 +232,40 @@ export const logs = pgTable(
     data: jsonb('data'),
     ts: timestamp('ts', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('logs_run_id_idx').on(t.runId, t.id)],
+  (t) => [index('logs_run_id_idx').on(t.projectId, t.env, t.runId, t.id)],
 );
 
 /* ---------------------------------------------------------------------------
- * schedules
+ * schedules — namespace-scoped unique on (project_id, env, task_id): one
+ * schedule per task per namespace (C2). The (project_id, env, next_run_at)
+ * index backs the cron due-scan, which is namespace-filtered.
  * ------------------------------------------------------------------------- */
-export const schedules = pgTable('schedules', {
-  id: text('id').primaryKey(),
-  projectId: text('project_id').notNull().default('default'),
-  env: text('env').notNull().default('prod'),
-  taskId: text('task_id').notNull().unique(),
-  cronPattern: text('cron_pattern').notNull(),
-  cronTz: text('cron_tz'),
-  enabled: boolean('enabled').notNull().default(true),
-  nextRunAt: timestamp('next_run_at', { withTimezone: true }),
-  lastRunAt: timestamp('last_run_at', { withTimezone: true }),
-  lastRunId: text('last_run_id'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const schedules = pgTable(
+  'schedules',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().default('default'),
+    env: text('env').notNull().default('prod'),
+    taskId: text('task_id').notNull(),
+    cronPattern: text('cron_pattern').notNull(),
+    cronTz: text('cron_tz'),
+    enabled: boolean('enabled').notNull().default(true),
+    nextRunAt: timestamp('next_run_at', { withTimezone: true }),
+    lastRunAt: timestamp('last_run_at', { withTimezone: true }),
+    lastRunId: text('last_run_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('schedules_task_id_unique').on(t.projectId, t.env, t.taskId),
+    index('schedules_next_run_idx').on(t.projectId, t.env, t.nextRunAt),
+  ],
+);
 
 /* ---------------------------------------------------------------------------
- * workers
+ * workers — one row per worker process (globally unique id); the namespaces
+ * jsonb column declares which namespaces the worker serves
+ * ([{projectId, env}, ...]). Task manifests live in the tasks jsonb.
  * ------------------------------------------------------------------------- */
 export const workers = pgTable('workers', {
   id: text('id').primaryKey(),
@@ -255,6 +275,10 @@ export const workers = pgTable('workers', {
   codeVersion: text('code_version').notNull(),
   runtime: text('runtime').notNull(),
   tasks: jsonb('tasks').notNull(),
+  /** Namespaces this worker claims runs from, e.g. [{"projectId":"default","env":"prod"}]. */
+  namespaces: jsonb('namespaces')
+    .notNull()
+    .default(sql`'[{"projectId":"default","env":"prod"}]'::jsonb`),
   concurrency: integer('concurrency').notNull(),
   startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
   lastHeartbeatAt: timestamp('last_heartbeat_at', { withTimezone: true }).notNull().defaultNow(),

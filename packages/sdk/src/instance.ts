@@ -11,6 +11,7 @@
    ============================================================================= */
 import type {
   CreatedRun,
+  Namespace,
   RunDetailResult,
   RunRecord,
   RunStatus,
@@ -19,6 +20,7 @@ import type {
   WaitForResultOptions,
   WaitResult,
 } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { HttpClient, type HttpClientOptions } from './client';
 import { registry } from './registry';
 import type { TaskHandle } from './task';
@@ -62,18 +64,44 @@ export interface BetterTrigger {
     payload: TPayload,
     options?: TriggerOptions,
   ): Promise<RunHandle>;
-  /** Trigger many runs in one all-or-nothing transaction. */
-  batchTrigger(items: TriggerItem[]): Promise<RunHandle[]>;
-  /** Cancel a non-terminal run (terminal → no-op). */
-  cancelRun(runId: string): Promise<void>;
-  /** Re-run a failed/canceled run as a NEW run. */
-  retryRun(runId: string): Promise<{ runId: string }>;
-  /** Full run record. */
-  getRun(runId: string): Promise<RunRecord>;
-  /** Run + steps + waits + logs (logs capped at 1000). */
-  getRunDetail(runId: string): Promise<RunDetailResult>;
-  /** Wait for a run to reach a terminal state (timeout → latest status). */
-  waitForResult(runId: string, opts?: WaitForResultOptions): Promise<WaitResult>;
+  /**
+   * Trigger many runs in one all-or-nothing transaction. `options` (projectId
+   * / env only) names the namespace the whole batch runs in; absent →
+   * default/prod. Per-item options are data — they never split a batch across
+   * namespaces.
+   */
+  batchTrigger(items: TriggerItem[], options?: TriggerOptions): Promise<RunHandle[]>;
+  /**
+   * Cancel a non-terminal run (terminal → no-op). `namespace` scopes the
+   * request; absent → server default (default/prod).
+   */
+  cancelRun(runId: string, namespace?: Namespace): Promise<void>;
+  /**
+   * Re-run a failed/canceled run as a NEW run. `namespace` scopes the request;
+   * absent → server default (default/prod).
+   */
+  retryRun(runId: string, namespace?: Namespace): Promise<{ runId: string }>;
+  /**
+   * Full run record. `namespace` scopes the request; absent → server default
+   * (default/prod).
+   */
+  getRun(runId: string, namespace?: Namespace): Promise<RunRecord>;
+  /**
+   * Run + steps + waits + logs (logs capped at 1000). `namespace` scopes the
+   * request; absent → server default (default/prod).
+   */
+  getRunDetail(runId: string, namespace?: Namespace): Promise<RunDetailResult>;
+  /**
+   * Wait for a run to reach a terminal state (timeout → latest status).
+   * `namespace` scopes the poll; absent → default/prod. RunHandle.result()
+   * passes the namespace its handle was minted with, so callers only need this
+   * when polling a run id they got out of band.
+   */
+  waitForResult(
+    runId: string,
+    namespace: Namespace | undefined,
+    opts?: WaitForResultOptions,
+  ): Promise<WaitResult>;
   /** Daemon liveness probe. */
   health(): Promise<{ ok: boolean; version: string }>;
 
@@ -93,7 +121,11 @@ const TERMINAL: readonly RunStatus[] = ['completed', 'failed', 'canceled'];
 
 /** Anything able to poll a run to a terminal state. */
 export interface RunResultResolver {
-  waitForResult(runId: string, opts?: WaitForResultOptions): Promise<WaitResult>;
+  waitForResult(
+    runId: string,
+    namespace: Namespace | undefined,
+    opts?: WaitForResultOptions,
+  ): Promise<WaitResult>;
 }
 
 /**
@@ -118,12 +150,14 @@ export function requireDefaultInstance(): BetterTrigger {
 /**
  * Build a RunHandle. Handles minted by an instance bind result() to it;
  * handles minted inside a run resolve the installed resolver (worker) or the
- * default instance lazily, at result() call time.
+ * default instance lazily, at result() call time. `namespace` — the scope the
+ * run was created in — rides along so result() polls that exact scope.
  */
 export function makeRunHandle(
   id: string,
   instance?: BetterTrigger,
   idempotent?: boolean,
+  namespace?: Namespace,
 ): RunHandle {
   return {
     id,
@@ -135,7 +169,7 @@ export function makeRunHandle(
           `run ${id}: cannot await a result — no betterTrigger instance registered`,
         );
       }
-      return target.waitForResult(id, opts);
+      return target.waitForResult(id, namespace, opts);
     },
   };
 }
@@ -147,6 +181,29 @@ export function makeRunHandle(
 function env(name: string): string | undefined {
   return (globalThis as { process?: { env?: Record<string, string | undefined> } }).process
     ?.env?.[name];
+}
+
+/**
+ * The namespace a trigger call means: projectId/env from its options, default
+ * 'default'/'prod'. Resolution is a plain default here — validation happens
+ * server-side (assertNamespace → 400 bad_request) so the client never guesses
+ * what the daemon accepts.
+ */
+function nsFromOptions(options: TriggerOptions | undefined): Namespace {
+  return {
+    projectId: options?.projectId ?? DEFAULT_NAMESPACE.projectId,
+    env: options?.env ?? DEFAULT_NAMESPACE.env,
+  };
+}
+
+/**
+ * The `?projectId=&env=` query that scopes a run-id request; empty when no
+ * namespace was given (the server defaults to default/prod). Same shape the
+ * waitForResult long-poll uses.
+ */
+function nsQuery(namespace: Namespace | undefined): string {
+  if (namespace === undefined) return '';
+  return `?${new URLSearchParams({ projectId: namespace.projectId, env: namespace.env })}`;
 }
 
 /**
@@ -181,36 +238,41 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
         method: 'POST',
         body: { taskId, payload, options: opts },
       });
-      return makeRunHandle(created.runId, instance, created.idempotent);
+      // The handle remembers the namespace it was created in, so its result()
+      // polls the same scope.
+      return makeRunHandle(created.runId, instance, created.idempotent, nsFromOptions(opts));
     },
 
-    async batchTrigger(items) {
+    async batchTrigger(items, options) {
       const res = await http.request<{ runIds: string[] }>('/batch-trigger', {
         method: 'POST',
-        body: { items },
+        body: { items, options },
       });
-      return res.runIds.map((id) => makeRunHandle(id, instance));
+      return res.runIds.map((id) => makeRunHandle(id, instance, undefined, nsFromOptions(options)));
     },
 
-    async cancelRun(runId) {
-      await http.request(`/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
-    },
-
-    retryRun(runId) {
-      return http.request<{ runId: string }>(`/runs/${encodeURIComponent(runId)}/retry`, {
+    async cancelRun(runId, namespace) {
+      await http.request(`/runs/${encodeURIComponent(runId)}/cancel${nsQuery(namespace)}`, {
         method: 'POST',
       });
     },
 
-    getRun(runId) {
-      return http.request<RunRecord>(`/runs/${encodeURIComponent(runId)}/record`);
+    retryRun(runId, namespace) {
+      return http.request<{ runId: string }>(
+        `/runs/${encodeURIComponent(runId)}/retry${nsQuery(namespace)}`,
+        { method: 'POST' },
+      );
     },
 
-    getRunDetail(runId) {
-      return http.request<RunDetailResult>(`/runs/${encodeURIComponent(runId)}`);
+    getRun(runId, namespace) {
+      return http.request<RunRecord>(`/runs/${encodeURIComponent(runId)}/record${nsQuery(namespace)}`);
     },
 
-    async waitForResult(runId, opts) {
+    getRunDetail(runId, namespace) {
+      return http.request<RunDetailResult>(`/runs/${encodeURIComponent(runId)}${nsQuery(namespace)}`);
+    },
+
+    async waitForResult(runId, namespace, opts) {
       const deadline = Date.now() + (opts?.timeoutMs ?? 30_000);
       const pollMs = opts?.pollMs;
       for (;;) {
@@ -219,6 +281,12 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
         const slice = Math.max(0, Math.min(deadline - Date.now(), MAX_LONGPOLL_MS));
         const query = new URLSearchParams({ timeoutMs: String(slice) });
         if (pollMs !== undefined) query.set('pollMs', String(pollMs));
+        // Namespace travels as query params, matching the runs routes
+        // (?projectId=&env=); the server defaults to default/prod when absent.
+        if (namespace !== undefined) {
+          query.set('projectId', namespace.projectId);
+          query.set('env', namespace.env);
+        }
         const res = await http.request<WaitResult>(
           `/runs/${encodeURIComponent(runId)}/result?${query}`,
           // Give the request headroom over the server-side wait it asked for.

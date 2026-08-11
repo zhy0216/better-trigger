@@ -160,7 +160,7 @@ async function main(s: Scenario): Promise<void> {
 
   /* -- executor #4: reclaim and finish ------------------------------------- */
   proc = spawnExecutor();
-  const result = await client.waitForResult(handle.id, { timeoutMs: 60_000 });
+  const result = await client.waitForResult(handle.id, undefined, { timeoutMs: 60_000 });
 
   /* -- final assertions ---------------------------------------------------- */
   s.assert(result.status === 'completed', `run should complete, got '${result.status}'`);

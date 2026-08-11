@@ -185,7 +185,7 @@ async function main(s: Scenario): Promise<void> {
   /* -- executor #2 picks the run up and finishes it ------------------------ */
   proc = spawnExecutor();
   // Shorter than the lease on purpose: a pass here cannot have come from expiry.
-  const result = await client.waitForResult(handle.id, { timeoutMs: 30_000 });
+  const result = await client.waitForResult(handle.id, undefined, { timeoutMs: 30_000 });
   const elapsed = Date.now() - restartedAt;
 
   s.assert(result.status === 'completed', `run should complete, got '${result.status}'`);

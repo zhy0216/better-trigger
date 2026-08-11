@@ -21,7 +21,12 @@
    stop the loops, close the server, end the pool. An escaping rejection or an
    uncaught exception takes that same path and then exits non-zero.
    ============================================================================= */
-import { parseDuration } from '@better-trigger/core';
+import {
+  assertNamespace,
+  DEFAULT_NAMESPACE,
+  parseDuration,
+  type Namespace,
+} from '@better-trigger/core';
 import { createPool, migrate } from '@better-trigger/db';
 import { createKernel, MIN_RETENTION_MS, type OrchestratorCounters } from '@better-trigger/kernel';
 import { setResultResolver } from 'better-trigger/internal';
@@ -68,6 +73,14 @@ Options:
                            Stranded-run scan interval   (default 30000). Only
                            used with --pin-code-version, which is what starts
                            that loop.
+  --namespace <projectId>/<env>
+                           A namespace this worker serves (repeatable, or
+                           comma-separated; env BETTER_TRIGGER_NAMESPACES).
+                           Runs, tasks, schedules and queues are isolated per
+                           (projectId, env) pair: a worker registers its tasks
+                           in, claims from, and resumes/crons only the
+                           namespaces listed here. Default: default/prod —
+                           the namespace every pre-namespace row lives in.
   --database-url <s>       Postgres connection string   (env DATABASE_URL)
   --no-migrate             Skip applying migrations at boot
   --no-serve               Execute tasks without serving HTTP (executor-only
@@ -92,6 +105,9 @@ Env:
                            Same as --allow-unauthenticated (set to 1/true)
   BETTER_TRIGGER_CORS_ORIGIN
                            Same as --cors-origin (comma-separated)
+  BETTER_TRIGGER_NAMESPACES
+                           Same as --namespace (comma-separated, e.g.
+                           acme/prod,acme/staging)
   BETTER_TRIGGER_PIN_CODE_VERSION
                            Same as --pin-code-version (set to 1/true)
   BETTER_TRIGGER_VERSION   Code version this build reports, overriding the
@@ -124,6 +140,12 @@ are tasks or schedules.
 Options:
   --older-than <duration>  Retention window: "30d", "72h", "1w". Required.
   --dry-run                Report what would be deleted and delete nothing.
+  --namespace <projectId>/<env>
+                           Namespaces to prune (repeatable, or comma-separated;
+                           env BETTER_TRIGGER_NAMESPACES). A pruner only ever
+                           deletes history inside these pairs — it can never
+                           remove another namespace's runs. Default:
+                           default/prod.
   --database-url <s>       Postgres connection string   (env DATABASE_URL)
   --no-migrate             Skip applying migrations first. The cascade that
                            removes steps and logs is a constraint added by
@@ -153,12 +175,16 @@ interface Options {
   serve: boolean;
   /** Claim only runs whose code version this process still serves. */
   pinCodeVersion: boolean;
+  /** Namespaces this worker serves (claim / register / orchestrator scope). */
+  namespaces: Namespace[];
 }
 
 /** `better-trigger-worker prune ...` — the one-shot maintenance subcommand. */
 interface PruneOptions {
   olderThanMs: number;
   dryRun: boolean;
+  /** Namespaces whose history this prune deletes (never outside them). */
+  namespaces: Namespace[];
   databaseUrl?: string;
   migrate: boolean;
 }
@@ -250,6 +276,47 @@ function requireDuration(flag: string, raw: string): number {
   return ms;
 }
 
+/**
+ * One `<projectId>/<env>` namespace spec from the CLI. The '/' is required —
+ * `--namespace acme` is a typo, not an env of 'acme'. assertNamespace then
+ * rejects empty / over-long / ':'-bearing parts, and the rethrow names the
+ * flag, so the startup error says which configuration was wrong.
+ */
+function parseNamespace(flag: string, raw: string): Namespace {
+  const slash = raw.indexOf('/');
+  if (slash <= 0 || slash === raw.length - 1) {
+    throw new Error(`${flag} must be "<projectId>/<env>", got "${raw}"`);
+  }
+  const ns: Namespace = { projectId: raw.slice(0, slash), env: raw.slice(slash + 1) };
+  try {
+    assertNamespace(ns);
+  } catch (err) {
+    throw new Error(`${flag} "${raw}": ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return ns;
+}
+
+/**
+ * Namespace specs out of one flag value / env var — comma-separated like
+ * --tasks — validated and deduped. registerWorker upserts per namespace, so a
+ * duplicate would be harmless but would churn the workers row's namespaces
+ * array for nothing.
+ */
+function parseNamespaces(flag: string, raw: string): Namespace[] {
+  const seen = new Set<string>();
+  const out: Namespace[] = [];
+  for (const part of raw.split(',')) {
+    const s = part.trim();
+    if (s === '') continue;
+    const ns = parseNamespace(flag, s);
+    const key = `${ns.projectId}/${ns.env}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(ns);
+  }
+  return out;
+}
+
 function parseArgs(argv: string[]): Options {
   const opts: Options = {
     tasks: [],
@@ -266,6 +333,9 @@ function parseArgs(argv: string[]): Options {
     migrate: true,
     serve: true,
     pinCodeVersion: envFlag(process.env.BETTER_TRIGGER_PIN_CODE_VERSION),
+    // --namespace flags append to the env list; parseArgs defaults the result
+    // to [DEFAULT_NAMESPACE] once both sources are in.
+    namespaces: parseNamespaces('BETTER_TRIGGER_NAMESPACES', process.env.BETTER_TRIGGER_NAMESPACES ?? ''),
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -355,10 +425,24 @@ function parseArgs(argv: string[]): Options {
         // that may not match their ledger.
         opts.pinCodeVersion = inline === undefined ? true : boolValue(flag, inline);
         break;
+      case '--namespace':
+        opts.namespaces.push(...parseNamespaces(flag, value()));
+        break;
       default:
         throw new Error(`unknown option "${flag}" (try --help)`);
     }
   }
+
+  // Dedup across env + flags, and default to the namespace every pre-namespace
+  // row lives in: a daemon configured for nothing serves exactly default/prod.
+  const seen = new Set<string>();
+  opts.namespaces = opts.namespaces.filter((ns) => {
+    const key = `${ns.projectId}/${ns.env}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (opts.namespaces.length === 0) opts.namespaces = [DEFAULT_NAMESPACE];
 
   return opts;
 }
@@ -372,6 +456,7 @@ function parsePruneArgs(argv: string[]): PruneOptions {
   let olderThanMs: number | undefined;
   const opts: Omit<PruneOptions, 'olderThanMs'> = {
     dryRun: false,
+    namespaces: parseNamespaces('BETTER_TRIGGER_NAMESPACES', process.env.BETTER_TRIGGER_NAMESPACES ?? ''),
     databaseUrl: process.env.DATABASE_URL,
     migrate: true,
   };
@@ -403,6 +488,9 @@ function parsePruneArgs(argv: string[]): PruneOptions {
       case '--dry-run':
         opts.dryRun = inline === undefined ? true : boolValue(flag, inline);
         break;
+      case '--namespace':
+        opts.namespaces.push(...parseNamespaces(flag, value()));
+        break;
       case '--database-url':
         opts.databaseUrl = value();
         break;
@@ -419,6 +507,16 @@ function parsePruneArgs(argv: string[]): PruneOptions {
   if (olderThanMs === undefined) {
     throw new Error('prune requires --older-than <duration>, e.g. --older-than 30d');
   }
+  // Same dedup + default as the daemon: prune is namespace-scoped, and a bare
+  // `prune` must only ever see default/prod — never silently every namespace.
+  const seen = new Set<string>();
+  opts.namespaces = opts.namespaces.filter((ns) => {
+    const key = `${ns.projectId}/${ns.env}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (opts.namespaces.length === 0) opts.namespaces = [DEFAULT_NAMESPACE];
   return { ...opts, olderThanMs };
 }
 
@@ -617,7 +715,11 @@ async function runPrune(argv: string[]): Promise<void> {
   if (opts.migrate && !opts.dryRun) await migrate(pool);
 
   const kernel = createKernel({ pool });
-  const res = await kernel.prune({ olderThanMs: opts.olderThanMs, dryRun: opts.dryRun });
+  const res = await kernel.prune({
+    olderThanMs: opts.olderThanMs,
+    dryRun: opts.dryRun,
+    namespaces: opts.namespaces,
+  });
 
   const tag = res.dryRun ? '[dry-run] would delete' : 'deleted';
   console.log(
@@ -672,8 +774,14 @@ async function main(): Promise<void> {
   const kernel = createKernel({ pool });
 
   // RunHandle.result() inside a run resolves through the kernel rather than
-  // looping back over this process's own HTTP surface.
-  setResultResolver({ waitForResult: (runId, o) => kernel.waitForResult(runId, o) });
+  // looping back over this process's own HTTP surface. Handles minted inside a
+  // run carry their namespace (the executor's), which is what re-scopes the
+  // lookup; anything without one (a handle that lost its provenance) falls back
+  // to the default namespace rather than being refused.
+  setResultResolver({
+    waitForResult: (runId, namespace, o) =>
+      kernel.waitForResult(runId, namespace ?? DEFAULT_NAMESPACE, o),
+  });
 
   let worker: WorkerHandle | null = null;
   // Whichever orchestrator this process ends up owning — the runtime's, or the
@@ -707,6 +815,7 @@ async function main(): Promise<void> {
         name: opts.name,
         leaseMs: opts.leaseMs,
         pinCodeVersion: opts.pinCodeVersion,
+        namespaces: opts.namespaces,
       },
     );
     daemon.worker = worker;
@@ -730,6 +839,9 @@ async function main(): Promise<void> {
       // executes-nothing daemon means exactly that and nothing else.
       stranded: opts.pinCodeVersion,
       strandedIntervalMs: opts.strandedIntervalMs,
+      // Every loop is scoped to the daemon's namespaces — an API-only node
+      // configured for staging never resumes prod waits or fires prod crons.
+      namespaces: opts.namespaces,
     });
     daemon.stopOrchestrator = () => orchestrator.stop();
     orchestratorCounters = orchestrator.counters;
@@ -745,6 +857,10 @@ async function main(): Promise<void> {
       kernel,
       pool,
       metrics: { worker, orchestrator: orchestratorCounters },
+      // The DB gauges /metrics exports are namespace-labelled per configured
+      // namespace — an operator must be able to tell default/prod's queue from
+      // acme/staging's (C2).
+      namespaces: opts.namespaces,
     });
     server = startHttpServer(app, { port: opts.port, host: opts.host });
     daemon.server = server;
@@ -789,6 +905,13 @@ async function main(): Promise<void> {
         `no online worker has stay queued — see better_trigger_stranded_runs.`,
     );
   }
+  // Which namespaces this daemon serves is the single most load-bearing
+  // configuration line there is: it decides which runs get picked up at all,
+  // so it should be a state the operator was told about, like pinning above.
+  console.log(
+    `[better-trigger] serving namespace(s): ` +
+      opts.namespaces.map((n) => `${n.projectId}/${n.env}`).join(', '),
+  );
   // Unauthenticated-by-default is the product choice, but it should be a known
   // state rather than a forgotten one — so name it, with the address it
   // actually applies to. The exposed case gets the louder warning below.

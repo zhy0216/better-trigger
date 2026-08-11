@@ -13,6 +13,7 @@
    ============================================================================= */
 import type { PoolClient } from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { createRunIn } from '../src/runs';
 
 const makeClient = () => {
@@ -35,7 +36,12 @@ const makeClient = () => {
 /** The value bound to max_recoveries in the INSERT the call issued. */
 async function stampedBudget(): Promise<number> {
   const { client, stmts } = makeClient();
-  await createRunIn(client, { taskId: 't', payload: null, triggerType: 'api' });
+  await createRunIn(client, {
+      taskId: 't',
+      payload: null,
+      triggerType: 'api',
+      namespace: DEFAULT_NAMESPACE,
+    });
   const insert = stmts.find((s) => /INSERT INTO runs/.test(s.sql));
   expect(insert).toBeDefined();
   // Column list and VALUES list are written side by side; find the position of

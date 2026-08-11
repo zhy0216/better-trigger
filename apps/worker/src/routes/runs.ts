@@ -8,6 +8,7 @@
 import { Hono } from 'hono';
 import type { Kernel } from '@better-trigger/kernel';
 import type { OkResponse, RetryRunResponse } from '../types';
+import { namespaceFromQuery } from '../namespace';
 
 /** Upper bound on a single long-poll, so a request cannot outlive a proxy. */
 const MAX_RESULT_WAIT_MS = 30_000;
@@ -19,7 +20,11 @@ export function runRoutes(deps: { kernel: Kernel }): Hono {
   /* -------------------------------------------------------- cancel */
   app.post('/runs/:id/cancel', async (c) => {
     const id = c.req.param('id');
-    await kernel.cancelRun(id);
+    // Run ids are globally unique, but isolation is explicit: the caller says
+    // which namespace it means (?projectId=&env=, default default/prod) and
+    // the kernel predicates on the pair — a cancel can never reach a run in a
+    // namespace the caller did not name (C2).
+    await kernel.cancelRun(id, namespaceFromQuery(c));
     const res: OkResponse = { ok: true };
     return c.json(res);
   });
@@ -27,7 +32,7 @@ export function runRoutes(deps: { kernel: Kernel }): Hono {
   /* --------------------------------------------------------- retry */
   app.post('/runs/:id/retry', async (c) => {
     const id = c.req.param('id');
-    const { runId } = await kernel.retryRun(id);
+    const { runId } = await kernel.retryRun(id, namespaceFromQuery(c));
     const res: RetryRunResponse = { runId };
     return c.json(res);
   });
@@ -36,7 +41,7 @@ export function runRoutes(deps: { kernel: Kernel }): Hono {
   // Light sibling of the dashboard's /runs/:id: the run row alone, no
   // steps/waits/logs — this is what SDK polling loops hit.
   app.get('/runs/:id/record', async (c) => {
-    const run = await kernel.getRun(c.req.param('id'));
+    const run = await kernel.getRun(c.req.param('id'), namespaceFromQuery(c));
     return c.json(run);
   });
 
@@ -47,7 +52,7 @@ export function runRoutes(deps: { kernel: Kernel }): Hono {
     const id = c.req.param('id');
     const timeoutMs = clampQuery(c.req.query('timeoutMs'), 0, MAX_RESULT_WAIT_MS, 5_000);
     const pollMs = clampQuery(c.req.query('pollMs'), 50, 5_000, 250);
-    const result = await kernel.waitForResult(id, { timeoutMs, pollMs });
+    const result = await kernel.waitForResult(id, namespaceFromQuery(c), { timeoutMs, pollMs });
     return c.json(result);
   });
 

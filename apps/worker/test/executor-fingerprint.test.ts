@@ -45,7 +45,7 @@ function fakeKernel() {
       calls.waitForChildRun.push(input);
       return { childRunId: 'child_1' };
     },
-    appendLogs: async (_runId: string, logs: LogEntry[]) => {
+    appendLogs: async (_runId: string, _namespace: unknown, logs: LogEntry[]) => {
       calls.logs.push(...logs);
     },
   } as unknown as Kernel;
@@ -59,6 +59,7 @@ const claimed = (steps: StepSnapshot[] = []): ClaimedRun => ({
   attempt: 1,
   maxAttempts: 3,
   codeVersion: null,
+  projectId: 'default',
   env: 'dev',
   steps,
   fencingToken: 7,

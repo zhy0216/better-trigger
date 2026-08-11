@@ -196,7 +196,7 @@ async function main(s: Scenario): Promise<void> {
   await executor.stop();
   executor = spawnExecutor(V1_MODULE, 'deploy-v1-again');
 
-  const result = await client.waitForResult(run.id, { timeoutMs: 60_000 });
+  const result = await client.waitForResult(run.id, undefined, { timeoutMs: 60_000 });
   s.assert(
     result.status === 'completed',
     `a worker back on '${V1}' should claim and finish the run, got '${result.status}'`,

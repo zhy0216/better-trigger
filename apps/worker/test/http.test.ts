@@ -111,7 +111,9 @@ describe('body parsing', () => {
     const res = await app.fetch(post('/trigger', JSON.stringify({ taskId: 't', payload: { a: 1 } })));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ runId: 'run_1', idempotent: false });
-    expect(calls.trigger).toEqual([{ taskId: 't', payload: { a: 1 }, options: undefined }]);
+    expect(calls.trigger).toEqual([
+      { taskId: 't', payload: { a: 1 }, options: undefined, namespace: { projectId: 'default', env: 'prod' } },
+    ]);
   });
 
   it('covers /batch-trigger too', async () => {
@@ -212,7 +214,7 @@ describe('GET /runs query params', () => {
     const { app, calls } = makeApp();
     const res = await app.fetch(get('/runs?cursor=2026-07-30T08%3A00%3A00.000Z%7Crun_9'));
     expect(res.status).toBe(200);
-    expect(calls.query[0]?.params).toEqual(['2026-07-30T08:00:00.000Z', 'run_9', 51]);
+    expect(calls.query[0]?.params).toEqual(['default', 'prod', '2026-07-30T08:00:00.000Z', 'run_9', 51]);
     expect(errorSpy).not.toHaveBeenCalled();
   });
 });

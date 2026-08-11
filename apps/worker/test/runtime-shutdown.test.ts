@@ -15,6 +15,7 @@
    business and a handover spends none of it.
    ============================================================================= */
 import type { ClaimedRun } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import type { Kernel } from '@better-trigger/kernel';
 import { isRunAborted, task, type RunAbortedError } from 'better-trigger';
 import { describe, expect, it } from 'vitest';
@@ -27,6 +28,7 @@ const RUN: ClaimedRun = {
   attempt: 1,
   maxAttempts: 3,
   codeVersion: null,
+  projectId: 'default',
   env: 'dev',
   steps: [],
   fencingToken: 1,
@@ -144,7 +146,7 @@ describe('startWorkerRuntime().stop()', () => {
       }),
     );
 
-    const handle = await startWorkerRuntime({ kernel }, { tasks: [slow], concurrency: 1 });
+    const handle = await startWorkerRuntime({ kernel }, { tasks: [slow], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] });
     await stepStarted;
 
     const t0 = Date.now();
@@ -171,14 +173,16 @@ describe('startWorkerRuntime().stop() hand-back (C3)', () => {
 
     const handle = await startWorkerRuntime(
       { kernel },
-      { tasks: [blockingTask(() => started())], concurrency: 1 },
+      { tasks: [blockingTask(() => started())], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await stepStarted;
     await handle.stop();
 
-    // Both scoped to this worker: releasing by worker id is what keeps a
-    // shutting-down daemon from touching another daemon's claims.
-    expect(calls.releaseClaims).toEqual([{ workerId: handle.workerId }]);
+    // Both scoped to this worker + its namespaces: releasing by worker id is
+    // what keeps a shutting-down daemon from touching another daemon's claims.
+    expect(calls.releaseClaims).toEqual([
+      { workerId: handle.workerId, namespaces: [DEFAULT_NAMESPACE] },
+    ]);
     expect(calls.deregisterWorker).toEqual([{ workerId: handle.workerId }]);
     // Still a handover, not a failure — nothing is reported for the attempt,
     // so nothing can charge one.
@@ -199,7 +203,7 @@ describe('startWorkerRuntime().stop() hand-back (C3)', () => {
     const handle = await startWorkerRuntime(
       { kernel },
       // leaseMs/3 floors at MIN_HEARTBEAT_MS, so this beats every 500ms.
-      { tasks: [blockingTask(() => started())], concurrency: 1, leaseMs: 1_500 },
+      { tasks: [blockingTask(() => started())], concurrency: 1, leaseMs: 1_500, namespaces: [DEFAULT_NAMESPACE] },
     );
     await stepStarted;
     await sleep(700); // at least one heartbeat while the run is in flight
@@ -228,7 +232,7 @@ describe('startWorkerRuntime().stop() hand-back (C3)', () => {
 
     const handle = await startWorkerRuntime(
       { kernel },
-      { tasks: [blockingTask(() => started())], concurrency: 1, leaseMs: 1_500 },
+      { tasks: [blockingTask(() => started())], concurrency: 1, leaseMs: 1_500, namespaces: [DEFAULT_NAMESPACE] },
     );
     await stepStarted;
     // Gated rather than timed: the tick is held open until this test lets go, so
@@ -269,7 +273,7 @@ describe('startWorkerRuntime().stop() hand-back (C3)', () => {
         kernel,
         logger: { warn: (...a: unknown[]) => warnings.push(a), error: () => {} },
       },
-      { tasks: [blockingTask(() => started())], concurrency: 1 },
+      { tasks: [blockingTask(() => started())], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await stepStarted;
 

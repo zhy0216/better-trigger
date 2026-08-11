@@ -1,0 +1,548 @@
+/* =============================================================================
+   @better-trigger/kernel — C2 namespace isolation (projectId + env).
+
+   The isolation contract, pinned at the SQL level against stub clients (no
+   Postgres):
+
+     - idempotency is per namespace: the same task + idempotency key in two
+       namespaces must resolve two DIFFERENT existing runs — the unique index
+       and the conflict lookup are both (project_id, env, …)-scoped;
+     - a claim can only ever take runs inside the worker's namespace pairs, and
+       the pairing is VALUES-based — two separate `= ANY` arrays would combine
+       in a cartesian product and leak runs across namespaces;
+     - the concurrency-limiter advisory lock key embeds the namespace, so prod
+       and staging throttle independently and can never serialize each other;
+     - every SQL statement in the kernel that touches a namespace-scoped table
+       carries a namespace marker (project_id / env / namespaces), with a small
+       documented allowlist of statements keyed by globally-unique ids or ids
+       selected by an already-scoped statement.
+   ============================================================================= */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import type { Pool, PoolClient } from 'pg';
+import { describe, expect, it } from 'vitest';
+import type { Namespace } from '@better-trigger/core';
+import { heartbeat, releaseClaims, scanStrandedRuns, claimRuns } from '../src/queue';
+import { createRunIn } from '../src/runs';
+import { prune } from '../src/prune';
+
+const NS_STAGING: Namespace = { projectId: 'acme', env: 'staging' };
+const NS_PROD: Namespace = { projectId: 'acme', env: 'prod' };
+
+/* ---------------------------------------------------------------------------
+ * Idempotency isolation
+ * ------------------------------------------------------------------------- */
+
+/**
+ * A client that answers the tasks lookup, then simulates an idempotency
+ * conflict: the INSERT ... ON CONFLICT DO NOTHING returns no row, and the
+ * follow-up lookup hands back the pre-existing run.
+ */
+function conflictClient() {
+  const stmts: { sql: string; params: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      stmts.push({ sql, params });
+      if (/FROM tasks/.test(sql)) {
+        return {
+          rows: [{ id: 't', retry: null, concurrency_limit: null, latest_code_version: null }],
+        };
+      }
+      if (/INSERT INTO runs/.test(sql)) return { rows: [] };
+      if (/SELECT id FROM runs/.test(sql)) return { rows: [{ id: 'existing_run' }] };
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+  return { client, stmts };
+}
+
+describe('idempotency is per namespace (C2)', () => {
+  it('scopes the idempotency lookup by (project_id, env, task_id, key)', async () => {
+    const a = conflictClient();
+    const resA = await createRunIn(a.client, {
+      taskId: 't',
+      payload: null,
+      options: { idempotencyKey: 'k' },
+      triggerType: 'api',
+      namespace: NS_STAGING,
+    });
+    const b = conflictClient();
+    const resB = await createRunIn(b.client, {
+      taskId: 't',
+      payload: null,
+      options: { idempotencyKey: 'k' },
+      triggerType: 'api',
+      namespace: NS_PROD,
+    });
+
+    const lookup = (stmts: { sql: string; params: unknown[] }[]) =>
+      stmts.find((s) => /SELECT id FROM runs/.test(s.sql))!;
+    expect(lookup(a.stmts).params).toEqual(['acme', 'staging', 't', 'k']);
+    expect(lookup(b.stmts).params).toEqual(['acme', 'prod', 't', 'k']);
+    // Both resolve as idempotent hits — each against ITS OWN namespace's run.
+    expect(resA).toEqual({ runId: 'existing_run', idempotent: true });
+    expect(resB).toEqual({ runId: 'existing_run', idempotent: true });
+  });
+
+  it('scopes the ON CONFLICT target by (project_id, env, task_id, idempotency_key)', async () => {
+    const { client, stmts } = conflictClient();
+    await createRunIn(client, {
+      taskId: 't',
+      payload: null,
+      options: { idempotencyKey: 'k' },
+      triggerType: 'api',
+      namespace: NS_STAGING,
+    });
+
+    const insert = stmts.find((s) => /INSERT INTO runs/.test(s.sql))!;
+    expect(insert.sql).toMatch(
+      /ON CONFLICT \(project_id, env, task_id, idempotency_key\)/,
+    );
+    expect(insert.sql).not.toMatch(/ON CONFLICT \(task_id, idempotency_key\)/);
+  });
+
+  it('scopes the task lookup a trigger resolves against', async () => {
+    const { client, stmts } = conflictClient();
+    await createRunIn(client, {
+      taskId: 't',
+      payload: null,
+      triggerType: 'api',
+      namespace: NS_STAGING,
+    });
+
+    const task = stmts.find((s) => /FROM tasks/.test(s.sql))!;
+    expect(task.sql).toMatch(/WHERE project_id = \$1 AND env = \$2 AND id = \$3/);
+    expect(task.params).toEqual(['acme', 'staging', 't']);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * Claim isolation
+ * ------------------------------------------------------------------------- */
+
+function claimPool(candidateRows: unknown[]) {
+  const stmts: { sql: string; params: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      stmts.push({ sql, params });
+      if (/FROM queue q/.test(sql)) return { rows: candidateRows };
+      if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '1' }] };
+      if (/count\(\*\)/.test(sql)) return { rows: [{ n: '1' }] };
+      return { rows: [] };
+    },
+    release: () => {},
+  };
+  return { pool: { connect: async () => client } as unknown as Pool, stmts };
+}
+
+describe('claim scoping (C2)', () => {
+  it('filters candidates by paired (project_id, env) VALUES, never separate ANY arrays', async () => {
+    const { pool, stmts } = claimPool([]);
+
+    await claimRuns(pool, {
+      workerId: 'w1',
+      namespaces: [NS_STAGING, NS_PROD],
+      taskIds: ['t'],
+      limit: 1,
+      leaseMs: 60_000,
+    });
+
+    const cand = stmts.find((s) => /FROM queue q/.test(s.sql))!;
+    expect(cand.sql).toMatch(/\(r\.project_id, r\.env\) IN \(VALUES/);
+    // Two independent ANY arrays would combine in a cartesian product, so a
+    // worker serving (acme, staging) + (other, prod) could claim runs in
+    // (acme, prod) — the exact leak this pairing exists to close.
+    expect(cand.sql).not.toMatch(/r\.project_id = ANY/);
+    expect(cand.sql).not.toMatch(/r\.env = ANY/);
+    // Task ids + window + the two namespace pairs, flattened in order.
+    expect(cand.params).toEqual([['t'], 10, 'acme', 'staging', 'acme', 'prod']);
+  });
+
+  it('matches the task config join on the run namespace too', async () => {
+    const { pool, stmts } = claimPool([]);
+
+    await claimRuns(pool, {
+      workerId: 'w1',
+      namespaces: [NS_STAGING],
+      taskIds: ['t'],
+      limit: 1,
+      leaseMs: 60_000,
+    });
+
+    // A staging run must not pick up the prod task row's concurrency limit.
+    const cand = stmts.find((s) => /FROM queue q/.test(s.sql))!;
+    expect(cand.sql).toMatch(/t\.id = r\.task_id\s+AND t\.project_id = r\.project_id AND t\.env = r\.env/);
+  });
+
+  it('namespaces the concurrency advisory lock key', async () => {
+    const { pool, stmts } = claimPool([
+      {
+        queue_id: 1,
+        run_id: 'run_1',
+        task_id: 't',
+        payload: {},
+        attempt: 0,
+        max_attempts: 3,
+        code_version: null,
+        project_id: 'acme',
+        env: 'staging',
+        concurrency_key: 'tenant-1',
+        concurrency_limit: 1,
+      },
+    ]);
+
+    await claimRuns(pool, {
+      workerId: 'w1',
+      namespaces: [NS_STAGING],
+      taskIds: ['t'],
+      limit: 1,
+      leaseMs: 60_000,
+    });
+
+    const lock = stmts.find((s) => /pg_advisory_xact_lock/.test(s.sql))!;
+    expect(lock.params[1]).toBe('bt:cc:acme:staging:tenant-1');
+    // And the running-count is namespace-scoped, so prod/staging throttle
+    // independently instead of sharing one budget.
+    const count = stmts.find((s) => /count\(\*\)/.test(s.sql))!;
+    expect(count.sql).toMatch(/project_id = \$2 AND env = \$3/);
+  });
+
+  it('returns the claimed run with its namespace', async () => {
+    const { pool } = claimPool([
+      {
+        queue_id: 1,
+        run_id: 'run_1',
+        task_id: 't',
+        payload: {},
+        attempt: 1,
+        max_attempts: 3,
+        code_version: null,
+        project_id: 'acme',
+        env: 'staging',
+        concurrency_key: null,
+        concurrency_limit: null,
+      },
+    ]);
+
+    const claimed = await claimRuns(pool, {
+      workerId: 'w1',
+      namespaces: [NS_STAGING],
+      taskIds: ['t'],
+      limit: 1,
+      leaseMs: 60_000,
+    });
+
+    expect(claimed[0]?.projectId).toBe('acme');
+    expect(claimed[0]?.env).toBe('staging');
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * Placeholder/param alignment (P0 regression)
+ *
+ * namespacePredicate() numbers its VALUES placeholders from params.length + 1,
+ * so the caller must pre-fill ONE params array with everything that comes
+ * before the predicate in SQL order. A fresh array made the predicate restart
+ * at $1 and collide with the literal $n of the earlier clauses — invisible to
+ * the shape-stub tests (they never bind against real Postgres), fatal on one.
+ * These pin the concrete statement+params pairs, and a generic alignment check
+ * (max placeholder === param count, every $1..$N present) catches any future
+ * offset in any of the paths.
+ * ------------------------------------------------------------------------- */
+
+function expectAligned(sql: string, params: unknown[]): void {
+  const nums = [...sql.matchAll(/\$(\d+)/g)].map((m) => Number(m[1]));
+  const max = Math.max(0, ...nums);
+  expect(max, `placeholder max ${max} ≠ ${params.length} params in:\n${sql}`).toBe(
+    params.length,
+  );
+  for (let i = 1; i <= max; i++) {
+    expect(nums, `placeholder $${i} missing in:\n${sql}`).toContain(i);
+  }
+}
+
+function recordPool(handlers: Array<(sql: string, params: unknown[]) => unknown>) {
+  const stmts: { sql: string; params: unknown[] }[] = [];
+  const query = async (sql: string, params: unknown[] = []) => {
+    stmts.push({ sql, params });
+    for (const h of handlers) {
+      const out = h(sql, params);
+      if (out !== undefined) return out;
+    }
+    return { rows: [], rowCount: 0 };
+  };
+  const client = {
+    query,
+    release: () => {},
+  };
+  return {
+    pool: { connect: async () => client, query } as unknown as Pool,
+    stmts,
+  };
+}
+
+describe('placeholder/param alignment on namespace predicates (P0)', () => {
+  it('claimRuns numbers the namespace VALUES after taskIds + window', async () => {
+    const { pool, stmts } = claimPool([]);
+
+    await claimRuns(pool, {
+      workerId: 'w1',
+      namespaces: [NS_STAGING, NS_PROD],
+      taskIds: ['t'],
+      limit: 2,
+      leaseMs: 60_000,
+    });
+
+    const cand = stmts.find((s) => /FROM queue q/.test(s.sql))!;
+    expectAligned(cand.sql, cand.params);
+    // $1 taskIds, $2 window, then the two namespace pairs.
+    expect(cand.params).toEqual([['t'], 10, 'acme', 'staging', 'acme', 'prod']);
+    expect(cand.sql).toMatch(
+      /JOIN runs r ON r\.id = q\.run_id\s+AND r\.project_id = q\.project_id AND r\.env = q\.env/,
+    );
+    expect(cand.sql).toMatch(/\(VALUES \(\$3::text, \$4::text\), \(\$5::text, \$6::text\)\)/);
+  });
+
+  it('claimRuns pinned numbers the namespace VALUES after the code versions', async () => {
+    const { pool, stmts } = claimPool([]);
+
+    await claimRuns(pool, {
+      workerId: 'w1',
+      namespaces: [NS_STAGING],
+      taskIds: ['t'],
+      limit: 1,
+      leaseMs: 60_000,
+      codeVersions: ['v1'],
+    });
+
+    const cand = stmts.find((s) => /FROM queue q/.test(s.sql))!;
+    expectAligned(cand.sql, cand.params);
+    // $1 taskIds, $2 window, $3 codeVersions, then the namespace pair.
+    expect(cand.params).toEqual([['t'], 10, ['v1'], 'acme', 'staging']);
+    expect(cand.sql).toMatch(/unnest\(\$1::text\[\], \$3::text\[\]\)/);
+    expect(cand.sql).toMatch(/\(VALUES \(\$4::text, \$5::text\)\)/);
+  });
+
+  it('heartbeat numbers the renewal and cancel-check predicates after their clauses', async () => {
+    const { pool, stmts } = recordPool([
+      (sql) => (/UPDATE queue/.test(sql) ? { rows: [{ run_id: 'r1' }] } : undefined),
+      (sql) => (/FROM runs/.test(sql) ? { rows: [] } : undefined),
+    ]);
+
+    await heartbeat(pool, {
+      workerId: 'w1',
+      namespaces: [NS_STAGING],
+      runIds: ['r1', 'r2'],
+      leaseMs: 60_000,
+    });
+
+    const renew = stmts.find((s) => /UPDATE queue/.test(s.sql))!;
+    expectAligned(renew.sql, renew.params);
+    // $1 leaseMs, $2 workerId, $3 runIds, then the namespace pair.
+    expect(renew.params).toEqual(['60000', 'w1', ['r1', 'r2'], 'acme', 'staging']);
+    expect(renew.sql).toMatch(/\(VALUES \(\$4::text, \$5::text\)\)/);
+
+    const cancel = stmts.find((s) => /SELECT id FROM runs/.test(s.sql))!;
+    expectAligned(cancel.sql, cancel.params);
+    // $1 runIds, then the namespace pair.
+    expect(cancel.params).toEqual([['r1', 'r2'], 'acme', 'staging']);
+    expect(cancel.sql).toMatch(/\(VALUES \(\$2::text, \$3::text\)\)/);
+  });
+
+  it('scanStrandedRuns numbers the predicate after the LIMIT param', async () => {
+    const sqls: string[] = [];
+    const paramLists: unknown[][] = [];
+    const pool = {
+      query: async (sql: string, p: unknown[] = []) => {
+        sqls.push(sql);
+        paramLists.push(p);
+        return { rows: [] };
+      },
+    } as unknown as Pool;
+
+    await scanStrandedRuns(pool, [NS_STAGING]);
+
+    expectAligned(sqls[0]!, paramLists[0]!);
+    // $1 = the cap+1 limit, then the namespace pair.
+    expect(paramLists[0]).toEqual([21, 'acme', 'staging']);
+    expect(sqls[0]).toMatch(/\(VALUES \(\$2::text, \$3::text\)\)/);
+  });
+
+  it('prune countPrunable numbers the predicate after cutoff + statuses', async () => {
+    const statuses = ['completed', 'failed', 'canceled'];
+    const stmts: { sql: string; params: unknown[] }[] = [];
+    const pool = {
+      query: async (sql: string, params: unknown[] = []) => {
+        stmts.push({ sql, params });
+        if (/WITH doomed AS/.test(sql)) {
+          return { rows: [{ runs: '0', run_steps: '0', logs: '0', waits: '0', queue: '0' }] };
+        }
+        if (/count\(\*\) AS count FROM workers/.test(sql)) return { rows: [{ count: '0' }] };
+        return { rows: [] };
+      },
+    } as unknown as Pool;
+
+    await prune(pool, {
+      olderThanMs: 86_400_000,
+      namespaces: [NS_STAGING],
+      dryRun: true,
+    });
+
+    const doomed = stmts.find((s) => /WITH doomed AS/.test(s.sql))!;
+    expectAligned(doomed.sql, doomed.params);
+    // $1 cutoff (PRUNABLE_RUNS, computed inside prune()), $2 statuses, then
+    // the namespace pair.
+    expect(doomed.params[0]).toBeInstanceOf(Date);
+    expect(doomed.params.slice(1)).toEqual([statuses, 'acme', 'staging']);
+    expect(doomed.sql).toMatch(/\(VALUES \(\$3::text, \$4::text\)\)/);
+  });
+
+  it('prune deleteBatch numbers the predicate after cutoff + statuses + limit', async () => {
+    const statuses = ['completed', 'failed', 'canceled'];
+    const { pool, stmts } = recordPool([
+      (sql) => (/SELECT r\.id FROM runs r/.test(sql) ? { rows: [] } : undefined),
+    ]);
+
+    await prune(pool, {
+      olderThanMs: 86_400_000,
+      namespaces: [NS_STAGING],
+      batchSize: 2,
+    });
+
+    const ids = stmts.find((s) => /SELECT r\.id FROM runs r/.test(s.sql))!;
+    expectAligned(ids.sql, ids.params);
+    // $1 cutoff, $2 statuses, $3 batchSize (LIMIT), then the namespace pair.
+    expect(ids.params[0]).toBeInstanceOf(Date);
+    expect(ids.params.slice(1)).toEqual([statuses, 2, 'acme', 'staging']);
+    expect(ids.sql).toMatch(/LIMIT \$3/);
+    expect(ids.sql).toMatch(/\(VALUES \(\$4::text, \$5::text\)\)/);
+  });
+
+  it('releaseClaims numbers the predicate after the worker id', async () => {
+    const { pool, stmts } = recordPool([
+      (sql) =>
+        /SELECT run_id, project_id, env FROM queue/.test(sql)
+          ? { rows: [] }
+          : undefined,
+    ]);
+
+    await releaseClaims(pool, { workerId: 'w1', namespaces: [NS_STAGING] });
+
+    const held = stmts.find((s) => /SELECT run_id, project_id, env FROM queue/.test(s.sql))!;
+    expectAligned(held.sql, held.params);
+    // $1 workerId (locked_by), then the namespace pair.
+    expect(held.params).toEqual(['w1', 'acme', 'staging']);
+    expect(held.sql).toMatch(/\(VALUES \(\$2::text, \$3::text\)\)/);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * SQL sweep — every business statement carries a namespace marker
+ * ------------------------------------------------------------------------- */
+
+const KERNEL_SRC = fileURLToPath(new URL('../src', import.meta.url));
+const SWEEP_FILES = ['queue.ts', 'runs.ts', 'orchestrator.ts', 'workers.ts', 'prune.ts'];
+
+/** Tables that are namespace-scoped: every statement touching them must carry
+ *  project_id / env / namespaces somewhere. */
+const SCOPED_TABLES = /\b(runs|queue|waits|run_steps|logs|tasks|schedules)\b/;
+const SQLISH = /\b(INSERT INTO|UPDATE|DELETE FROM|SELECT|WITH)\b/;
+const NS_MARKER = /(project_id|env|namespaces)/;
+
+/**
+ * Statements that are legitimately namespace-free. Each entry is a deliberate
+ * exemption, documented next to it:
+ */
+const ALLOWED_WITHOUT_MARKER: RegExp[] = [
+  // workers is global scope (process registry): the id-keyed liveness touch,
+  // the offline marker sweep and deregister all stay marker-free by design.
+  /^\s*UPDATE workers\b/,
+  // prune: the dependent counts and deletes run over ids that came out of an
+  // already namespace-scoped SELECT (same tx), so re-predicating them would be
+  // dead weight, not isolation.
+  /WHERE run_id = ANY\(\$1::text\[\]\)/,
+  /run_id IN \(SELECT id FROM doomed\)/,
+  /DELETE FROM runs WHERE id = ANY/,
+];
+
+/**
+ * A statement that interpolates the kernel's namespace predicate helper
+ * (`namespacePredicate()` in queue.ts, which emits `(alias.project_id,
+ * alias.env) IN (VALUES …)` by construction) is scoped even though the
+ * marker text only exists at runtime.
+ */
+const PREDICATE_INTERPOLATION = /\$\{[a-zA-Z]*Predicate\}/;
+
+/** Every template literal of a source file, comments stripped. */
+function templateLiterals(src: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < src.length) {
+    const start = src.indexOf('`', i);
+    if (start === -1) break;
+    let j = start + 1;
+    let depth = 0;
+    while (j < src.length) {
+      const c = src[j]!;
+      if (c === '\\') {
+        j += 2;
+        continue;
+      }
+      if (c === '$' && src[j + 1] === '{') {
+        depth++;
+        j += 2;
+        continue;
+      }
+      if (c === '}' && depth > 0) {
+        depth--;
+        j++;
+        continue;
+      }
+      if (c === '`' && depth === 0) break;
+      j++;
+    }
+    out.push(src.slice(start + 1, j));
+    i = j + 1;
+  }
+  return out;
+}
+
+/** Template literals of a source file that look like SQL touching a scoped
+ *  table. Comments are stripped first — several of them quote SQL in
+ *  backticks and must not be read as live statements. */
+function sqlStatements(file: string): string[] {
+  const src = readFileSync(`${KERNEL_SRC}/${file}`, 'utf8');
+  const noLineComments = src.replace(/\/\/[^\n]*/g, '');
+  const noComments = noLineComments.replace(/\/\*[\s\S]*?\*\//g, '');
+  const out: string[] = [];
+  for (const literal of templateLiterals(noComments)) {
+    if (!SQLISH.test(literal) || !SCOPED_TABLES.test(literal)) continue;
+    out.push(literal);
+  }
+  return out;
+}
+
+describe('every business SQL statement is namespace-scoped (C2)', () => {
+  it('finds no scoped-table statement without a namespace marker', () => {
+    const offenders: { file: string; sql: string }[] = [];
+    for (const file of SWEEP_FILES) {
+      for (const sql of sqlStatements(file)) {
+        if (NS_MARKER.test(sql)) continue;
+        if (PREDICATE_INTERPOLATION.test(sql)) continue;
+        if (ALLOWED_WITHOUT_MARKER.some((re) => re.test(sql))) continue;
+        offenders.push({ file, sql });
+      }
+    }
+
+    // If this fails, the offender list is the gap: every statement must scope
+    // on the namespace (or be provably keyed by a globally-unique id / a
+    // scoped upstream selection).
+    expect(offenders).toEqual([]);
+  });
+
+  it('the sweep itself is not vacuous — it sees the scoped statements', () => {
+    const all = SWEEP_FILES.flatMap((f) => sqlStatements(f));
+    expect(all.length).toBeGreaterThan(20);
+    expect(all.some((s) => s.includes('project_id'))).toBe(true);
+  });
+});

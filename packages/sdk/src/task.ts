@@ -232,7 +232,9 @@ function makeHandle<TPayload, TOutput>(
           [{ taskId: def.id, payload, options: opts }],
           `trigger:${def.id}`,
         );
-        return makeRunHandle(runIds[0]);
+        // The child lives in the parent's namespace — carry it on the handle so
+        // result() polls the same scope it was created in.
+        return makeRunHandle(runIds[0], undefined, undefined, executor.namespace);
       }
       return requireDefaultInstance().trigger(def.id, payload, opts);
     },
@@ -249,7 +251,7 @@ function makeHandle<TPayload, TOutput>(
           triggerItems,
           `batchTrigger:${def.id}`,
         );
-        return runIds.map((id) => makeRunHandle(id));
+        return runIds.map((id) => makeRunHandle(id, undefined, undefined, executor.namespace));
       }
       return requireDefaultInstance().batchTrigger(triggerItems);
     },

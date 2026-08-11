@@ -22,6 +22,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { startOrchestrator } from '../src/orchestrator';
 import { completeRun, failRun } from '../src/runs';
 
@@ -41,6 +42,7 @@ const runRow = (over: Record<string, unknown> = {}) => ({
   max_recoveries: 10,
   parent_run_id: null,
   payload: null,
+  project_id: 'default',
   env: 'prod',
   concurrency_key: null,
   priority: 0,
@@ -117,7 +119,7 @@ describe('scanWaits re-enqueues a resumed run at its own priority', () => {
     const client = {
       query: async (sql: string, params: unknown[] = []) => {
         stmts.push({ sql, params });
-        if (/FROM runs WHERE id = \$1 FOR UPDATE/.test(sql)) {
+        if (/FROM runs WHERE id = \$1/.test(sql)) {
           return { rows: [runRow({ id: 'run_1', status: 'waiting', priority })] };
         }
         if (/FROM waits WHERE id = \$1/.test(sql)) return { rows: [{ id: 1 }] };
@@ -135,7 +137,7 @@ describe('scanWaits re-enqueues a resumed run at its own priority', () => {
           scanned = true;
           // The executor's declared-wait fingerprint (C1) rides the due rows
           // like the real phase-1 query; the resume stamps it on the step row.
-          return { rows: [{ id: 1, run_id: 'run_1', step_seq: 1, fingerprint: 'fp_wait' }] };
+          return { rows: [{ id: 1, run_id: 'run_1', project_id: 'default', env: 'prod', step_seq: 1, fingerprint: 'fp_wait' }] };
         }
         return { rows: [] };
       },
@@ -201,7 +203,7 @@ describe('wakeParentIfWaiting re-enqueues the parent at its own priority', () =>
             : { rows: [runRow({ id: 'run_child', parent_run_id: 'run_parent' })] };
         }
         if (/FROM waits\s+WHERE child_run_id/.test(sql)) {
-          return { rows: [{ id: 5, run_id: 'run_parent', step_seq: 2 }] };
+          return { rows: [{ id: 5, run_id: 'run_parent', project_id: 'default', env: 'prod', step_seq: 2 }] };
         }
         if (/FROM waits WHERE id = \$1/.test(sql)) return { rows: [{ id: 5 }] };
         return { rows: [] };
@@ -219,6 +221,7 @@ describe('wakeParentIfWaiting re-enqueues the parent at its own priority', () =>
       output: { ok: true },
       workerId: 'w1',
       fencingToken: 1,
+      namespace: DEFAULT_NAMESPACE,
     });
 
     const insert = find(stmts, /INSERT INTO queue/);
@@ -239,6 +242,7 @@ describe('wakeParentIfWaiting re-enqueues the parent at its own priority', () =>
       abort: true,
       workerId: 'w1',
       fencingToken: 1,
+      namespace: DEFAULT_NAMESPACE,
     });
 
     expect(bound(find(stmts, /INSERT INTO queue/), 'priority')).toBe(9);
@@ -271,6 +275,7 @@ describe('the UPDATE re-enqueue paths never touch priority', () => {
       error: { message: 'boom' },
       workerId: 'w1',
       fencingToken: 1,
+      namespace: DEFAULT_NAMESPACE,
     });
     expect(res.willRetry).toBe(true);
 

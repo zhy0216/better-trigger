@@ -155,7 +155,7 @@ async function main(s: Scenario): Promise<void> {
 
   /* -- ③ strict: the drift is refused ------------------------------------- */
   {
-    const result = await client.waitForResult(strictRun.id, { timeoutMs: 60_000 });
+    const result = await client.waitForResult(strictRun.id, undefined, { timeoutMs: 60_000 });
     s.assert(result.status === 'failed', `strict run should fail on drift, got '${result.status}'`);
     s.ok(`③ replay:'strict' failed the run instead of replaying a foreign step row`);
 
@@ -197,7 +197,7 @@ async function main(s: Scenario): Promise<void> {
 
   /* -- lenient: the same ledger silently corrupts -------------------------- */
   {
-    const result = await client.waitForResult(lenientRun.id, { timeoutMs: 60_000 });
+    const result = await client.waitForResult(lenientRun.id, undefined, { timeoutMs: 60_000 });
     s.assert(
       result.status === 'completed',
       `lenient run is expected to COMPLETE (that is the hazard), got '${result.status}'`,

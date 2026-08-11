@@ -43,6 +43,7 @@ interface CandidateRow {
   attempt: number;
   max_attempts: number;
   code_version: string | null;
+  project_id: string;
   env: string;
   concurrency_key: string | null;
   concurrency_limit: number | null;
@@ -56,6 +57,7 @@ const candidate = (over: Partial<CandidateRow> = {}): CandidateRow => ({
   attempt: 2,
   max_attempts: 3,
   code_version: 'v7',
+  project_id: 'default',
   env: 'staging',
   concurrency_key: null,
   concurrency_limit: null,
@@ -80,7 +82,12 @@ function stubPool(rows: CandidateRow[], opts: { steps?: unknown[]; running?: num
   return { pool, stmts };
 }
 
-const ARGS = { workerId: 'w1', taskIds: ['send-email'], leaseMs: 60_000 };
+const ARGS = {
+  workerId: 'w1',
+  namespaces: [{ projectId: 'default', env: 'staging' }],
+  taskIds: ['send-email'],
+  leaseMs: 60_000,
+};
 /** The two statements PF4 deleted, matched on their exact old shapes. */
 const perCandidateReads = (stmts: Stmt[]) =>
   stmts.filter((s) => /FROM (runs|tasks) WHERE id = \$1/.test(s.sql));
@@ -195,7 +202,7 @@ describe('claimRuns candidate fan-out', () => {
     expect(lease.params[2]).toBe(77);
     // Fencing token comes from the runs UPDATE, keyed by run id.
     const bump = stmts.find((s) => /RETURNING fencing_token/.test(s.sql))!;
-    expect(bump.params).toEqual(['run_abc']);
+    expect(bump.params).toEqual(['run_abc', 'default', 'staging']);
   });
 
   it('still applies the concurrency limit carried on the candidate row', async () => {
@@ -216,6 +223,6 @@ describe('claimRuns candidate fan-out', () => {
     // and the key is the run's concurrency_key (falling back to task id).
     const locks = stmts.filter((s) => /pg_advisory_xact_lock/.test(s.sql));
     expect(locks).toHaveLength(1);
-    expect(locks[0]!.params[1]).toBe('bt:cc:tenant-2');
+    expect(locks[0]!.params[1]).toBe('bt:cc:default:staging:tenant-2');
   });
 });

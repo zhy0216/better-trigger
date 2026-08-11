@@ -47,9 +47,12 @@ function shippedIndex(name: string): string | undefined {
 describe('queue_lease_until_idx (reaper scan, PF1)', () => {
   const create = shippedIndex('queue_lease_until_idx');
 
-  it('is created by a migration, on lease_until', () => {
+  it('is created by a migration, on (project_id, env, lease_until)', () => {
     expect(create).toBeDefined();
-    expect(create).toMatch(/ON "queue" USING btree \("lease_until"\)/);
+    // Namespace prefix first (C2): the reaper scan is namespace-filtered.
+    expect(create).toMatch(
+      /ON "queue" USING btree \("project_id","env","lease_until"\)/,
+    );
   });
 
   it('is partial — only claimed rows carry a lease', () => {
@@ -65,13 +68,15 @@ describe('queue_claimable_idx (claim candidate scan, PF2)', () => {
   const create = shippedIndex('queue_claimable_idx');
 
   it('is created by a migration, keyed exactly as the claim scan orders', () => {
-    // (priority DESC, id) — the scan's ORDER BY. `NULLS FIRST` is not decoration:
-    // `ORDER BY priority DESC` is NULLS FIRST, and an index built the other way
-    // (drizzle's default for .desc()) cannot satisfy the sort, so the plan falls
-    // back to reading every claimable row and sorting it on every poll.
+    // (priority DESC, id) — the scan's ORDER BY, after the (project_id, env)
+    // namespace prefix the scan filters on (C2). `NULLS FIRST` is not
+    // decoration: `ORDER BY priority DESC` is NULLS FIRST, and an index built
+    // the other way (drizzle's default for .desc()) cannot satisfy the sort, so
+    // the plan falls back to reading every claimable row and sorting it on
+    // every poll.
     expect(create).toBeDefined();
     expect(create).toMatch(
-      /ON "queue" USING btree \("priority" DESC NULLS FIRST,"id"\)/,
+      /ON "queue" USING btree \("project_id","env","priority" DESC NULLS FIRST,"id"\)/,
     );
   });
 

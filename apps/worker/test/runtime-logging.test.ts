@@ -6,6 +6,7 @@
    fake kernel (no Postgres) whose calls fail on demand.
    ============================================================================= */
 import type { ClaimedRun } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import type { Kernel } from '@better-trigger/kernel';
 import { task } from 'better-trigger';
 import { describe, expect, it } from 'vitest';
@@ -18,6 +19,7 @@ const RUN: ClaimedRun = {
   attempt: 1,
   maxAttempts: 3,
   codeVersion: null,
+  projectId: 'default',
   env: 'dev',
   steps: [],
   fencingToken: 1,
@@ -108,7 +110,7 @@ describe('claim failures', () => {
 
     const handle = await startWorkerRuntime(
       { kernel, logger },
-      { tasks: [ok], concurrency: 1 },
+      { tasks: [ok], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     // The loop survived the outage: a claim after it came back was executed.
     await waitFor(() => calls.completeRun > 0);
@@ -137,7 +139,7 @@ describe('heartbeat failures', () => {
     // leaseMs/3 < the 500ms floor, so the first tick lands at 500ms.
     const handle = await startWorkerRuntime(
       { kernel, logger },
-      { tasks: [ok], concurrency: 1, leaseMs: 1_200 },
+      { tasks: [ok], concurrency: 1, leaseMs: 1_200, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => lines.some((l) => l.includes('heartbeat failed')));
     // Claiming is unaffected — the heartbeat is its own loop.
@@ -161,7 +163,7 @@ describe('an executor that throws out of execute()', () => {
 
     const handle = await startWorkerRuntime(
       { kernel, logger },
-      { tasks: [ok], concurrency: 1 },
+      { tasks: [ok], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => lines.some((l) => l.includes('executor threw')));
     const claims = calls.claims;
@@ -191,7 +193,7 @@ describe('a failed-step row that cannot be written', () => {
 
     const handle = await startWorkerRuntime(
       { kernel, logger },
-      { tasks: [boom], concurrency: 1 },
+      { tasks: [boom], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => lines.some((l) => l.includes('failed-step report failed')));
     // The run itself was still failed — only the step row went missing.
@@ -220,7 +222,7 @@ describe('a failure the executor cannot report', () => {
 
     const handle = await startWorkerRuntime(
       { kernel, logger },
-      { tasks: [boom], concurrency: 1 },
+      { tasks: [boom], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => lines.some((l) => l.includes('failRun report failed')));
     const claims = calls.claims;
@@ -247,7 +249,7 @@ describe('a log flush that fails', () => {
 
     const handle = await startWorkerRuntime(
       { kernel, logger },
-      { tasks: [chatty], concurrency: 1 },
+      { tasks: [chatty], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => lines.some((l) => l.includes('dropped 1 log line(s)')));
     await waitFor(() => calls.completeRun > 0);

@@ -15,6 +15,7 @@
    Together they fail if the id list degenerates to [] or stops being rendered.
    ============================================================================= */
 import type { ClaimedRun } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import type { Kernel } from '@better-trigger/kernel';
 import { task } from 'better-trigger';
 import { describe, expect, it } from 'vitest';
@@ -29,6 +30,7 @@ function claimedRun(id: string): ClaimedRun {
     attempt: 1,
     maxAttempts: 3,
     codeVersion: null,
+    projectId: 'default',
     env: 'dev',
     steps: [],
     fencingToken: 1,
@@ -88,7 +90,7 @@ describe('WorkerHandle.inFlightRunIds()', () => {
 
     const handle = await startWorkerRuntime(
       { kernel: fakeKernel([claimedRun('run_a'), claimedRun('run_b')]) },
-      { tasks: [parked], concurrency: 2 },
+      { tasks: [parked], concurrency: 2, namespaces: [DEFAULT_NAMESPACE] },
     );
     await bothStarted;
 

@@ -11,6 +11,7 @@
    Driven against a fake kernel (no Postgres).
    ============================================================================= */
 import type { TaskManifest } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import type { Kernel } from '@better-trigger/kernel';
 import { task } from 'better-trigger';
 import { describe, expect, it } from 'vitest';
@@ -58,7 +59,7 @@ describe('registration', () => {
   it('reports a per-task version on every manifest, plus the deploy version', async () => {
     const { kernel, calls } = fakeKernel();
 
-    const handle = await startWorkerRuntime({ kernel }, { tasks: [alpha, beta], concurrency: 1 });
+    const handle = await startWorkerRuntime({ kernel }, { tasks: [alpha, beta], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] });
     await handle.stop();
 
     const [reg] = calls.register;
@@ -80,7 +81,7 @@ describe('claim loops', () => {
   it('send no versions by default, so any worker claims any run', async () => {
     const { kernel, calls } = fakeKernel();
 
-    const handle = await startWorkerRuntime({ kernel }, { tasks: [alpha], concurrency: 1 });
+    const handle = await startWorkerRuntime({ kernel }, { tasks: [alpha], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] });
     await waitFor(() => calls.claims.length > 0);
     await handle.stop();
 
@@ -95,7 +96,7 @@ describe('claim loops', () => {
 
     const handle = await startWorkerRuntime(
       { kernel },
-      { tasks: [alpha, beta], concurrency: 1, pinCodeVersion: true },
+      { tasks: [alpha, beta], concurrency: 1, pinCodeVersion: true, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => calls.claims.length > 0);
     await handle.stop();
@@ -116,7 +117,7 @@ describe('claim loops', () => {
 
     const handle = await startWorkerRuntime(
       { kernel },
-      { tasks: [alpha], concurrency: 1, pinCodeVersion: true },
+      { tasks: [alpha], concurrency: 1, pinCodeVersion: true, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => calls.claims.length > 0);
     await handle.stop();

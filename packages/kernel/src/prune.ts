@@ -30,8 +30,12 @@
    flag cannot be defeated by a code path that deletes first and counts after.
    ============================================================================= */
 import type { Pool } from 'pg';
-import { KernelError } from '@better-trigger/core';
+import {
+  KernelError,
+  type Namespace,
+} from '@better-trigger/core';
 import { withTx } from './runs';
+import { assertNamespaces, namespacePredicate } from './queue';
 
 /** Run states that are over. Anything else is live work, whatever its age. */
 const TERMINAL_STATUSES: string[] = ['completed', 'failed', 'canceled'];
@@ -50,6 +54,11 @@ export const MIN_RETENTION_MS = 60_000;
 export interface PruneArgs {
   /** Delete terminal runs / offline workers older than this many ms. */
   olderThanMs: number;
+  /**
+   * Namespaces to prune (C2): a pruner only ever deletes runs inside these
+   * pairs — it can never remove another namespace's history.
+   */
+  namespaces: readonly Namespace[];
   /** Report what would be deleted, delete nothing. Default false. */
   dryRun?: boolean;
   /** Runs deleted per transaction (default PRUNE_BATCH). */
@@ -98,7 +107,7 @@ const num = (v: string | number | undefined | null): number => Number(v ?? 0);
  */
 const RUN_AGE = `COALESCE(r.finished_at, r.updated_at)`;
 
-/** WHERE clause selecting prunable runs. $1 = cutoff. */
+/** WHERE clause selecting prunable runs. $1 = cutoff, $2 = statuses. */
 const PRUNABLE_RUNS = `r.status = ANY($2::text[]) AND ${RUN_AGE} < $1`;
 
 export async function prune(pool: Pool, args: PruneArgs): Promise<PruneResult> {
@@ -109,14 +118,15 @@ export async function prune(pool: Pool, args: PruneArgs): Promise<PruneResult> {
       `retention must be at least ${MIN_RETENTION_MS}ms, got ${olderThanMs}`,
     );
   }
+  assertNamespaces(args.namespaces);
   const dryRun = args.dryRun ?? false;
   const batchSize = args.batchSize ?? PRUNE_BATCH;
   const cutoff = new Date(Date.now() - olderThanMs);
 
   const result = dryRun
-    ? await countPrunable(pool, cutoff)
-    : await deletePrunable(pool, cutoff, batchSize);
-  result.workers = await pruneWorkers(pool, cutoff, dryRun);
+    ? await countPrunable(pool, cutoff, args.namespaces)
+    : await deletePrunable(pool, cutoff, batchSize, args.namespaces);
+  result.workers = await pruneWorkers(pool, cutoff, dryRun, args.namespaces);
   return result;
 }
 
@@ -129,7 +139,15 @@ export async function prune(pool: Pool, args: PruneArgs): Promise<PruneResult> {
  * dependent counts are correlated sub-selects over the same run set, so the
  * report can never describe a different set than the one it counted.
  */
-async function countPrunable(pool: Pool, cutoff: Date): Promise<PruneResult> {
+async function countPrunable(
+  pool: Pool,
+  cutoff: Date,
+  namespaces: readonly Namespace[],
+): Promise<PruneResult> {
+  // $1 cutoff / $2 statuses (PRUNABLE_RUNS) are literal in the SQL; the
+  // namespace pairs continue from $3 in the same array (see namespacePredicate).
+  const params: unknown[] = [cutoff, TERMINAL_STATUSES];
+  const nsPredicate = namespacePredicate('r', namespaces, params);
   const res = await pool.query<{
     runs: string;
     run_steps: string;
@@ -137,13 +155,13 @@ async function countPrunable(pool: Pool, cutoff: Date): Promise<PruneResult> {
     waits: string;
     queue: string;
   }>(
-    `WITH doomed AS (SELECT r.id FROM runs r WHERE ${PRUNABLE_RUNS})
+    `WITH doomed AS (SELECT r.id FROM runs r WHERE ${PRUNABLE_RUNS} AND ${nsPredicate})
      SELECT (SELECT count(*) FROM doomed)                                          AS runs,
             (SELECT count(*) FROM run_steps WHERE run_id IN (SELECT id FROM doomed)) AS run_steps,
             (SELECT count(*) FROM logs      WHERE run_id IN (SELECT id FROM doomed)) AS logs,
             (SELECT count(*) FROM waits     WHERE run_id IN (SELECT id FROM doomed)) AS waits,
             (SELECT count(*) FROM queue     WHERE run_id IN (SELECT id FROM doomed)) AS queue`,
-    [cutoff, TERMINAL_STATUSES],
+    params,
   );
   const row = res.rows[0];
   return {
@@ -170,10 +188,11 @@ async function deletePrunable(
   pool: Pool,
   cutoff: Date,
   batchSize: number,
+  namespaces: readonly Namespace[],
 ): Promise<PruneResult> {
   const total = emptyResult(cutoff, false);
   for (;;) {
-    const batch = await deleteBatch(pool, cutoff, batchSize);
+    const batch = await deleteBatch(pool, cutoff, batchSize, namespaces);
     total.runs += batch.runs;
     total.runSteps += batch.runSteps;
     total.logs += batch.logs;
@@ -187,17 +206,25 @@ async function deleteBatch(
   pool: Pool,
   cutoff: Date,
   batchSize: number,
+  namespaces: readonly Namespace[],
 ): Promise<PruneResult> {
   return withTx(pool, async (client) => {
     const batch = emptyResult(cutoff, false);
     // Oldest first, so an interrupted prune leaves the newest history behind —
-    // and so the next batch is strictly closer to the cutoff.
+    // and so the next batch is strictly closer to the cutoff. The candidate
+    // set is namespace-scoped: ids from this SELECT are the only ids the
+    // dependent deletes below ever touch, so they stay in-namespace too (C2).
+    // $1 cutoff / $2 statuses (PRUNABLE_RUNS) and $3 batchSize (LIMIT) are
+    // literal in the SQL; the namespace pairs continue from $4 in the same
+    // array (see namespacePredicate).
+    const params: unknown[] = [cutoff, TERMINAL_STATUSES, batchSize];
+    const nsPredicate = namespacePredicate('r', namespaces, params);
     const ids = await client.query<{ id: string }>(
       `SELECT r.id FROM runs r
-        WHERE ${PRUNABLE_RUNS}
+        WHERE ${PRUNABLE_RUNS} AND ${nsPredicate}
         ORDER BY ${RUN_AGE} ASC
         LIMIT $3`,
-      [cutoff, TERMINAL_STATUSES, batchSize],
+      params,
     );
     const runIds = ids.rows.map((r) => r.id);
     if (runIds.length === 0) return batch;
@@ -244,23 +271,42 @@ async function deleteBatch(
 }
 
 /**
- * Offline worker rows past the cutoff. Only 'offline' ones: a worker whose
- * heartbeat is merely stale is the offline marker loop's business, and deleting
- * a row the marker is about to update would hide a daemon that is actually
- * still running from the dashboard.
+ * Offline worker rows past the cutoff, scoped to workers that serve at least
+ * one of the given namespaces (C2 — a pruner never deletes a row that never
+ * served its namespaces). Only 'offline' ones: a worker whose heartbeat is
+ * merely stale is the offline marker loop's business, and deleting a row the
+ * marker is about to update would hide a daemon that is actually still running
+ * from the dashboard.
  */
-async function pruneWorkers(pool: Pool, cutoff: Date, dryRun: boolean): Promise<number> {
+async function pruneWorkers(
+  pool: Pool,
+  cutoff: Date,
+  dryRun: boolean,
+  namespaces: readonly Namespace[],
+): Promise<number> {
+  // OR semantics, VALUES pairing: a worker serving ANY of the prune namespaces
+  // is in scope (jsonb `@>` would require ALL of them).
+  const nsParams: unknown[] = [];
+  const start = 2;
+  const values = namespaces
+    .map((_, i) => `($${start + i * 2}::text, $${start + i * 2 + 1}::text)`)
+    .join(', ');
+  for (const ns of namespaces) nsParams.push(ns.projectId, ns.env);
+  const nsScope = `EXISTS (
+      SELECT 1 FROM jsonb_array_elements(w.namespaces) n
+       WHERE (n->>'projectId', n->>'env') IN (VALUES ${values})
+    )`;
   if (dryRun) {
     const res = await pool.query<{ count: string }>(
-      `SELECT count(*) AS count FROM workers
-        WHERE status = 'offline' AND last_heartbeat_at < $1`,
-      [cutoff],
+      `SELECT count(*) AS count FROM workers w
+        WHERE status = 'offline' AND last_heartbeat_at < $1 AND ${nsScope}`,
+      [cutoff, ...nsParams],
     );
     return num(res.rows[0]?.count);
   }
   const res = await pool.query(
-    `DELETE FROM workers WHERE status = 'offline' AND last_heartbeat_at < $1`,
-    [cutoff],
+    `DELETE FROM workers w WHERE status = 'offline' AND last_heartbeat_at < $1 AND ${nsScope}`,
+    [cutoff, ...nsParams],
   );
   return num(res.rowCount);
 }

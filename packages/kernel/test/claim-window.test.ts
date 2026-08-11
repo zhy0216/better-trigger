@@ -24,6 +24,7 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { claimRuns, claimWindow } from '../src/queue';
 
 interface Stmt {
@@ -45,7 +46,12 @@ function stubPool() {
   return { pool, stmts };
 }
 
-const ARGS = { workerId: 'w1', taskIds: ['t1'], leaseMs: 60_000 };
+const ARGS = {
+  workerId: 'w1',
+  namespaces: [DEFAULT_NAMESPACE],
+  taskIds: ['t1'],
+  leaseMs: 60_000,
+};
 const candidateOf = (stmts: Stmt[]) => stmts.find((s) => /FROM queue q/.test(s.sql))!;
 
 describe('claimRuns candidate window', () => {

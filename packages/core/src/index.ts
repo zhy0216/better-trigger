@@ -5,6 +5,7 @@
    instead. Keep it that way.
    ============================================================================= */
 export * from './types';
+export * from './namespace';
 export * from './errors';
 export * from './duration';
 export * from './backoff';

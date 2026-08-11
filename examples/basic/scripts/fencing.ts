@@ -27,7 +27,7 @@
      BT_FENCING_DB   override the provisioned database name (default
                      better_trigger_fencing)
    ============================================================================= */
-import type { LogEntry } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, type LogEntry } from '@better-trigger/core';
 import { createKernel, StaleLeaseError } from '@better-trigger/kernel';
 import { runScenario, sleep, waitForStatus, type Scenario } from '@better-trigger/testing';
 
@@ -126,6 +126,7 @@ async function main(s: Scenario): Promise<void> {
     runtime: 'bun',
     concurrency: 1,
     tasks: manifest,
+    namespaces: [DEFAULT_NAMESPACE],
   });
   const { workerId: workerB } = await kernel.registerWorker({
     name: 'fencing-b',
@@ -133,10 +134,11 @@ async function main(s: Scenario): Promise<void> {
     runtime: 'bun',
     concurrency: 1,
     tasks: manifest,
+    namespaces: [DEFAULT_NAMESPACE],
   });
   s.ok(`registered workers A=${workerA} B=${workerB}`);
 
-  const { runId } = await kernel.trigger({ taskId: 'fenced-task', payload: { n: 1 } });
+  const { runId } = await kernel.trigger({ taskId: 'fenced-task', payload: { n: 1 }, namespace: DEFAULT_NAMESPACE });
 
   /* -- A claims with a tiny lease and goes silent (no heartbeat) ------------ */
   const [claimA] = await kernel.claimRuns({
@@ -144,6 +146,7 @@ async function main(s: Scenario): Promise<void> {
     taskIds: ['fenced-task'],
     limit: 1,
     leaseMs: 300,
+    namespaces: [DEFAULT_NAMESPACE],
   });
   s.assert(claimA && claimA.id === runId, 'worker A should claim the run');
   const tokenA = claimA.fencingToken;
@@ -154,7 +157,7 @@ async function main(s: Scenario): Promise<void> {
   s.cleanup(() => orch.stop());
   await sleep(1_500); // lease long expired; reaper has run several times
 
-  const reaped = await kernel.getRun(runId);
+  const reaped = await kernel.getRun(runId, DEFAULT_NAMESPACE);
   // Since C4 the reaper charges the run a *recovery*, not an attempt: A
   // vanishing is infrastructure, and the run resumes on the same attempt.
   const reapedRecoveries = (
@@ -173,6 +176,7 @@ async function main(s: Scenario): Promise<void> {
     taskIds: ['fenced-task'],
     limit: 1,
     leaseMs: 60_000,
+    namespaces: [DEFAULT_NAMESPACE],
   });
   s.assert(claimB && claimB.id === runId, 'worker B should reclaim the run');
   s.assert(
@@ -197,6 +201,7 @@ async function main(s: Scenario): Promise<void> {
       finishedAt: nowIso(),
       workerId: workerA,
       fencingToken: tokenA,
+      namespace: DEFAULT_NAMESPACE,
     });
     s.fail('stale reportStep from A should have thrown');
   } catch (err) {
@@ -205,7 +210,7 @@ async function main(s: Scenario): Promise<void> {
   }
 
   try {
-    await kernel.completeRun({ runId, output: 'from-A', workerId: workerA, fencingToken: tokenA });
+    await kernel.completeRun({ runId, output: 'from-A', workerId: workerA, fencingToken: tokenA, namespace: DEFAULT_NAMESPACE });
     s.fail('stale completeRun from A should have thrown');
   } catch (err) {
     s.assert(err instanceof StaleLeaseError, `expected StaleLeaseError, got ${String(err)}`);
@@ -227,6 +232,7 @@ async function main(s: Scenario): Promise<void> {
       finishedAt: nowIso(),
       workerId: workerA,
       fencingToken: tokenA,
+      namespace: DEFAULT_NAMESPACE,
     }),
   );
   {
@@ -234,7 +240,7 @@ async function main(s: Scenario): Promise<void> {
       runId,
     ]);
     s.assert(seq99.rows.length === 0, `seq 99 must have no step row, got ${seq99.rows.length}`);
-    const now = await kernel.getRun(runId);
+    const now = await kernel.getRun(runId, DEFAULT_NAMESPACE);
     s.assert(
       now.status === 'running' && now.attempt === 1,
       `run must stay running at attempt 1 after the rejected write, got status='${now.status}' attempt=${now.attempt}`,
@@ -252,8 +258,8 @@ async function main(s: Scenario): Promise<void> {
       label: 'zombie-wait',
       kind: 'duration',
       resumeAt: new Date(Date.now() + 60_000).toISOString(),
-      ...staleCreds,
-    }),
+        namespace: DEFAULT_NAMESPACE,
+      ...staleCreds,    }),
   );
 
   await expectStaleNoop('A failRun (retry-shaped) with stale token', runId, () =>
@@ -261,8 +267,8 @@ async function main(s: Scenario): Promise<void> {
       runId,
       error: { message: 'zombie transient failure' },
       retry: { maxAttempts: 5, baseMs: 100 },
-      ...staleCreds,
-    }),
+        namespace: DEFAULT_NAMESPACE,
+      ...staleCreds,    }),
   );
 
   await expectStaleNoop('A failRun (abort:true) with stale token', runId, () =>
@@ -270,8 +276,8 @@ async function main(s: Scenario): Promise<void> {
       runId,
       error: { message: 'zombie abort' },
       abort: true,
-      ...staleCreds,
-    }),
+        namespace: DEFAULT_NAMESPACE,
+      ...staleCreds,    }),
   );
 
   await expectStaleNoop('A waitForChildRun (triggerAndWait) with stale token', runId, () =>
@@ -281,8 +287,8 @@ async function main(s: Scenario): Promise<void> {
       label: 'zombie-child',
       taskId: 'fenced-task',
       payload: { child: true },
-      ...staleCreds,
-    }),
+        namespace: DEFAULT_NAMESPACE,
+      ...staleCreds,    }),
   );
 
   await expectStaleNoop('A batchTriggerChild with stale token', runId, () =>
@@ -294,8 +300,8 @@ async function main(s: Scenario): Promise<void> {
         { taskId: 'fenced-task', payload: { i: 0 } },
         { taskId: 'fenced-task', payload: { i: 1 } },
       ],
-      ...staleCreds,
-    }),
+        namespace: DEFAULT_NAMESPACE,
+      ...staleCreds,    }),
   );
 
   /* -- logs: no fencing, but still bounded by the run's lifetime (C8) -------
@@ -319,7 +325,7 @@ async function main(s: Scenario): Promise<void> {
     { ts: nowIso(), level: 'error', message: 'zero-seq boundary', stepSeq: 0 },
   ];
 
-  await kernel.appendLogs(runId, flush());
+  await kernel.appendLogs(runId, DEFAULT_NAMESPACE, flush());
   const firstFlush = await countLogs(runId);
   s.assert(firstFlush === 4, `a live run must absorb every line, got ${firstFlush} of 4`);
   // Past LOG_INSERT_CHUNK (1000): proves the chunk loop's bind-param math
@@ -331,7 +337,7 @@ async function main(s: Scenario): Promise<void> {
     stepSeq: i % 3,
     data: { i },
   }));
-  await kernel.appendLogs(runId, bulk);
+  await kernel.appendLogs(runId, DEFAULT_NAMESPACE, bulk);
   const liveLogs = await countLogs(runId);
   s.assert(
     liveLogs === 1_204,
@@ -354,17 +360,19 @@ async function main(s: Scenario): Promise<void> {
     finishedAt: nowIso(),
     workerId: workerB,
     fencingToken: claimB.fencingToken,
+  namespace: DEFAULT_NAMESPACE,
   });
   await kernel.completeRun({
     runId,
     output: 'done-by-B',
     workerId: workerB,
     fencingToken: claimB.fencingToken,
+  namespace: DEFAULT_NAMESPACE,
   });
   s.ok('B reportStep + completeRun accepted under the current token');
 
   /* -- final state --------------------------------------------------------- */
-  const detail = await kernel.getRunDetail(runId);
+  const detail = await kernel.getRunDetail(runId, DEFAULT_NAMESPACE);
   s.assert(detail.run.status === 'completed', `run should be completed, got '${detail.run.status}'`);
   s.assert(
     detail.run.output === 'done-by-B',
@@ -383,14 +391,14 @@ async function main(s: Scenario): Promise<void> {
    * land nowhere and must not raise — the executor's flush path counts a
    * rejection as dropped-log diagnostics, so throwing would trade a silent
    * no-op for a warn storm on every 1s tick of an abandoned run. */
-  await kernel.appendLogs(runId, flush());
+  await kernel.appendLogs(runId, DEFAULT_NAMESPACE, flush());
   const afterTerminal = await countLogs(runId);
   s.assert(
     afterTerminal === liveLogs,
     `a terminal run must absorb nothing, went from ${liveLogs} to ${afterTerminal} lines`,
   );
   // Same statement, same silence, for a run that never existed.
-  await kernel.appendLogs('run_never_existed', flush());
+  await kernel.appendLogs('run_never_existed', DEFAULT_NAMESPACE, flush());
   s.assert(
     (await countLogs('run_never_existed')) === 0,
     'a missing run must not accumulate logs either',
@@ -409,13 +417,14 @@ async function main(s: Scenario): Promise<void> {
    * re-INSERTs it — the post-resume claim's token must therefore be strictly
    * greater than the pre-suspend token (never reset), and a write holding the
    * pre-suspend token must be rejected. ----------------------------------- */
-  const { runId: runId2 } = await kernel.trigger({ taskId: 'fenced-task', payload: { n: 2 } });
+  const { runId: runId2 } = await kernel.trigger({ taskId: 'fenced-task', payload: { n: 2 }, namespace: DEFAULT_NAMESPACE });
 
   const [preClaim] = await kernel.claimRuns({
     workerId: workerB,
     taskIds: ['fenced-task'],
     limit: 1,
     leaseMs: 60_000,
+    namespaces: [DEFAULT_NAMESPACE],
   });
   s.assert(preClaim && preClaim.id === runId2, 'worker B should claim run #2');
   const preToken = preClaim.fencingToken;
@@ -429,6 +438,7 @@ async function main(s: Scenario): Promise<void> {
     resumeAt: new Date(Date.now() + 1_200).toISOString(),
     workerId: workerB,
     fencingToken: preToken,
+    namespace: DEFAULT_NAMESPACE,
   });
   s.assert(!resumed, 'suspend with a future resumeAt must not resume synchronously');
   {
@@ -444,6 +454,7 @@ async function main(s: Scenario): Promise<void> {
     taskIds: ['fenced-task'],
     limit: 1,
     leaseMs: 60_000,
+    namespaces: [DEFAULT_NAMESPACE],
   });
   s.assert(postClaim && postClaim.id === runId2, 'worker A should reclaim run #2 after resume');
   s.assert(
@@ -469,6 +480,7 @@ async function main(s: Scenario): Promise<void> {
       finishedAt: nowIso(),
       workerId: workerB,
       fencingToken: preToken,
+      namespace: DEFAULT_NAMESPACE,
     }),
   );
 
@@ -477,9 +489,10 @@ async function main(s: Scenario): Promise<void> {
     output: 'resumed-done',
     workerId: workerA,
     fencingToken: postClaim.fencingToken,
+  namespace: DEFAULT_NAMESPACE,
   });
   {
-    const run2 = await kernel.getRun(runId2);
+    const run2 = await kernel.getRun(runId2, DEFAULT_NAMESPACE);
     s.assert(
       run2.status === 'completed' && run2.output === 'resumed-done',
       `run #2 should complete under the live token, got status='${run2.status}' output=${JSON.stringify(run2.output)}`,

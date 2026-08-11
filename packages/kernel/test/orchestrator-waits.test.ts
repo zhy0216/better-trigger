@@ -68,7 +68,7 @@ function stubPool(opts: StubOptions = {}) {
       texts.push(text);
 
       // Canonical position 2 — the runs row.
-      if (/FROM runs WHERE id = \$1 FOR UPDATE/.test(text)) {
+      if (/FROM runs WHERE id = \$1/.test(text)) {
         const runId = String(params?.[0]);
         const row = due.find((d) => d.runId === runId);
         if (heldRuns.has(runId)) {
@@ -89,6 +89,7 @@ function stubPool(opts: StubOptions = {}) {
                   max_attempts: 3,
                   parent_run_id: null,
                   payload: null,
+                  project_id: 'default',
                   env: 'dev',
                   concurrency_key: null,
                   code_version: null,
@@ -115,7 +116,8 @@ function stubPool(opts: StubOptions = {}) {
       // The resume's step-row write (upsertStep): record the fingerprint slot
       // (param 11 of the INSERT) so tests can pin the waits→run_steps carry.
       if (/INSERT INTO run_steps/.test(text)) {
-        const fp = params?.[10];
+        // $1 run id, $2/$3 namespace, $4 seq, … fingerprint is param 13.
+        const fp = params?.[12];
         stepFingerprints.push(typeof fp === 'string' ? fp : null);
         return { rows: [], rowCount: 0 };
       }
@@ -138,6 +140,8 @@ function stubPool(opts: StubOptions = {}) {
           rows: due.map((d) => ({
             id: d.id,
             run_id: d.runId,
+            project_id: 'default',
+            env: 'dev',
             step_seq: d.stepSeq,
             // The executor's declared-wait fingerprint (C1), carried like the
             // real phase-1 query does.
@@ -182,9 +186,7 @@ describe('scanWaits lock acquisition', () => {
     }
 
     expect(
-      texts.some((t) =>
-        /FROM runs WHERE id = \$1 FOR UPDATE SKIP LOCKED/.test(t),
-      ),
+      texts.some((t) => /FROM runs WHERE id = \$1.*FOR UPDATE SKIP LOCKED/.test(t)),
     ).toBe(true);
     expect(
       texts.some((t) =>
@@ -196,7 +198,7 @@ describe('scanWaits lock acquisition', () => {
     // closing INSERT ... ON CONFLICT from waiting on queue while runs is held
     // (see the lock-order header in runs.ts).
     expect(
-      texts.some((t) => /FROM queue WHERE run_id = \$1 FOR UPDATE$/.test(t)),
+      texts.some((t) => /FROM queue WHERE run_id = \$1.*FOR UPDATE/.test(t)),
     ).toBe(true);
   }, 10_000);
 

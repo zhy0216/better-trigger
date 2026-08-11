@@ -8,6 +8,7 @@
    and "execute tasks" (the worker daemon).
    ============================================================================= */
 import type {
+  Namespace,
   ReplayMode,
   RetryPolicy,
   TaskRunResult,
@@ -151,6 +152,12 @@ export interface RunExecutor {
     label: string,
     options?: TriggerOptions,
   ): Promise<TaskRunResult<TOutput>>;
+  /**
+   * The namespace the run this executor drives lives in. Handles minted inside
+   * the run (durable trigger / batchTrigger) carry it, so their result()
+   * polling resolves in the same namespace the child run was created in (C2).
+   */
+  readonly namespace: Namespace;
 }
 
 /** The minimal shape of a task definition the executor consumes. */

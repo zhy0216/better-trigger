@@ -39,7 +39,7 @@ function fakeKernel() {
       calls.suspendRun.push(input);
       return { resumed: false };
     },
-    appendLogs: async (_runId: string, logs: LogEntry[]) => {
+    appendLogs: async (_runId: string, _namespace: unknown, logs: LogEntry[]) => {
       calls.logs.push(...logs);
     },
   } as unknown as Kernel;
@@ -53,6 +53,7 @@ const claimed = (): ClaimedRun => ({
   attempt: 1,
   maxAttempts: 3,
   codeVersion: null,
+  projectId: 'default',
   env: 'dev',
   steps: [],
   fencingToken: 7,

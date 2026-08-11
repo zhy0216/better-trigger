@@ -26,6 +26,8 @@
    ============================================================================= */
 import { Hono } from 'hono';
 import type { Pool } from 'pg';
+import type { Namespace } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import {
   createOrchestratorCounters,
   type OrchestratorCounters,
@@ -142,6 +144,9 @@ export function renderMetrics(families: MetricFamily[]): string {
 /* ------------------------------------------------------------- collection */
 
 interface DbGauges {
+  /** The namespace these counts describe (label on the emitted samples). */
+  projectId: string;
+  env: string;
   queueAvailable: number;
   queueScheduled: number;
   queueClaimed: number;
@@ -149,38 +154,80 @@ interface DbGauges {
 }
 
 /**
- * The two SQL-backed quantities, in one round trip.
+ * The two SQL-backed quantities, in one round trip, per namespace.
+ *
+ * Namespace separation is the point (C2): queue depth and in-flight runs are
+ * labelled with the (project_id, env) pair they were counted in, so an alert
+ * on default/prod's queue never sees acme/staging's rows, and two namespaces
+ * sharing a database stay distinguishable in one scrape.
  *
  * Cost: the queue aggregate is a full pass over `queue`, which is bounded by
  * design — rows are deleted on suspend and on every terminal outcome (see
  * kernel queue.ts removeFromQueue), so the table holds pending + claimed work,
  * not history. The running count is the one that would scan history, so it goes
- * through `runs_status_concurrency_idx` (status, concurrency_key): status
- * equality is that index's leading column, so it touches only running rows.
+ * through `runs_status_concurrency_idx` (project_id, env, status,
+ * concurrency_key): the namespace equality is the index's leading columns and
+ * status equality the next, so it touches only running rows.
  */
-async function queryGauges(pool: Pool): Promise<DbGauges> {
+async function queryGauges(
+  pool: Pool,
+  namespaces: readonly Namespace[],
+): Promise<DbGauges[]> {
+  // VALUES pairing, like the kernel's claim scan: the namespaces come as
+  // (project_id, env) pairs, not two parallel arrays that could misalign.
+  const nsParams: unknown[] = [];
+  const pairs = namespaces
+    .map((ns, i) => {
+      nsParams.push(ns.projectId, ns.env);
+      return `($${i * 2 + 1}::text, $${i * 2 + 2}::text)`;
+    })
+    .join(', ');
   const res = await pool.query<{
+    project_id: string;
+    env: string;
     available: string;
     scheduled: string;
     claimed: string;
     running: string;
   }>(
-    `SELECT
+    `SELECT q.project_id, q.env,
         count(*) FILTER (WHERE q.locked_by IS NULL AND q.available_at <= now()) AS available,
         count(*) FILTER (WHERE q.locked_by IS NULL AND q.available_at >  now()) AS scheduled,
         count(*) FILTER (WHERE q.locked_by IS NOT NULL)                         AS claimed,
-        (SELECT count(*) FROM runs WHERE status = 'running')                     AS running
-       FROM queue q`,
+        (SELECT count(*) FROM runs
+          WHERE status = 'running' AND project_id = q.project_id AND env = q.env) AS running
+       FROM queue q
+      WHERE (q.project_id, q.env) IN (VALUES ${pairs})
+      GROUP BY q.project_id, q.env`,
+    nsParams,
   );
-  const row = res.rows[0];
+  // A configured namespace with an empty queue gets no row — emit zeros for it
+  // rather than a missing series (a vanished series breaks rate() and reads as
+  // an outage of the metric, exactly like the counters below).
+  const byNs = new Map(
+    namespaces.map((ns) => [
+      `${ns.projectId}/${ns.env}`,
+      {
+        projectId: ns.projectId,
+        env: ns.env,
+        queueAvailable: 0,
+        queueScheduled: 0,
+        queueClaimed: 0,
+        running: 0,
+      },
+    ]),
+  );
   // count() comes back as bigint, i.e. a string over the wire.
   const n = (v: string | undefined): number => Number(v ?? 0);
-  return {
-    queueAvailable: n(row?.available),
-    queueScheduled: n(row?.scheduled),
-    queueClaimed: n(row?.claimed),
-    running: n(row?.running),
-  };
+  for (const row of res.rows) {
+    const slot = byNs.get(`${row.project_id}/${row.env}`);
+    if (!slot) continue;
+    slot.queueAvailable = n(row.available);
+    slot.queueScheduled = n(row.scheduled);
+    slot.queueClaimed = n(row.claimed);
+    slot.running = n(row.running);
+  }
+  return [...byNs.values()];
 }
 
 /**
@@ -191,8 +238,11 @@ async function queryGauges(pool: Pool): Promise<DbGauges> {
  * subscribes to every input, so a loser rejecting after the deadline is still
  * an *observed* rejection and never becomes an unhandledRejection.
  */
-async function gaugesOrNull(pool: Pool): Promise<DbGauges | null> {
-  const query = queryGauges(pool).then(
+async function gaugesOrNull(
+  pool: Pool,
+  namespaces: readonly Namespace[],
+): Promise<DbGauges[] | null> {
+  const query = queryGauges(pool, namespaces).then(
     (g) => g,
     () => null,
   );
@@ -217,11 +267,12 @@ async function gaugesOrNull(pool: Pool): Promise<DbGauges | null> {
 export async function collectMetrics(
   pool: Pool,
   sources: MetricsSources = {},
+  namespaces: readonly Namespace[] = [DEFAULT_NAMESPACE],
 ): Promise<MetricFamily[]> {
   const worker = sources.worker ?? null;
   const counters = worker?.counters ?? createWorkerCounters();
   const orchestrator = sources.orchestrator ?? createOrchestratorCounters();
-  const gauges = await gaugesOrNull(pool);
+  const gauges = await gaugesOrNull(pool, namespaces);
 
   const families: MetricFamily[] = [
     {
@@ -235,22 +286,27 @@ export async function collectMetrics(
   // Omitted rather than zeroed when the DB is unreachable: "queue depth 0" and
   // "queue depth unknown" must not look the same to an alert.
   if (gauges) {
+    // One sample per configured namespace × state: the (project_id, env) label
+    // pair is what keeps one namespace's backlog out of another's alert.
     families.push(
       {
         name: 'queue_depth',
-        help: 'Rows in the queue table by state: available (due, unclaimed), scheduled (not due yet), claimed (leased to a worker).',
+        help: 'Rows in the queue table by namespace and state: available (due, unclaimed), scheduled (not due yet), claimed (leased to a worker).',
         type: 'gauge',
-        samples: [
-          { labels: { state: 'available' }, value: gauges.queueAvailable },
-          { labels: { state: 'scheduled' }, value: gauges.queueScheduled },
-          { labels: { state: 'claimed' }, value: gauges.queueClaimed },
-        ],
+        samples: gauges.flatMap((g) => [
+          { labels: { project_id: g.projectId, env: g.env, state: 'available' }, value: g.queueAvailable },
+          { labels: { project_id: g.projectId, env: g.env, state: 'scheduled' }, value: g.queueScheduled },
+          { labels: { project_id: g.projectId, env: g.env, state: 'claimed' }, value: g.queueClaimed },
+        ]),
       },
       {
         name: 'inflight_runs',
-        help: 'Runs in status running, across every worker on this database.',
+        help: 'Runs in status running by namespace, across every worker on this database.',
         type: 'gauge',
-        samples: [{ value: gauges.running }],
+        samples: gauges.map((g) => ({
+          labels: { project_id: g.projectId, env: g.env },
+          value: g.running,
+        })),
       },
     );
   }
@@ -369,11 +425,21 @@ export async function collectMetrics(
 
 /* --------------------------------------------------------------- the route */
 
-export function metricsRoutes(deps: { pool: Pool; metrics?: MetricsSources }): Hono {
+export function metricsRoutes(deps: {
+  pool: Pool;
+  metrics?: MetricsSources;
+  /** Namespaces whose queue/in-flight gauges this daemon exports (default
+   *  default/prod — the daemon's own configured scope, passed from main). */
+  namespaces?: readonly Namespace[];
+}): Hono {
   const app = new Hono();
 
   app.get('/metrics', async (c) => {
-    const families = await collectMetrics(deps.pool, deps.metrics ?? {});
+    const families = await collectMetrics(
+      deps.pool,
+      deps.metrics ?? {},
+      deps.namespaces ?? [DEFAULT_NAMESPACE],
+    );
     // Always 200, even with the database down: a scrape that fails tells the
     // operator "no data", while a scrape that succeeds with db_up 0 tells them
     // what is wrong — and still carries the in-process counters, which are

@@ -27,6 +27,7 @@ import type {
 } from '../types';
 import { computeTaskStats } from '../stats';
 import { intQuery, requireBoolean, safeJson } from '../http';
+import { namespaceFromQuery } from '../namespace';
 
 const VERSION = '0.1.0';
 
@@ -120,6 +121,10 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
 
   /* --------------------------------------------------------- tasks */
   app.get('/tasks', async (c) => {
+    // Every read route scopes on one namespace (default default/prod — the
+    // "single namespace by default" visibility boundary). The dashboard never
+    // sees every namespace at once; ?projectId=/?env= moves the window.
+    const ns = namespaceFromQuery(c);
     const taskRows = await pool.query<{
       id: string;
       name: string;
@@ -127,9 +132,11 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
       trigger_source: string;
       cron_pattern: string | null;
     }>(
-      `SELECT id, name, file_path, trigger_source, cron_pattern FROM tasks ORDER BY name ASC`,
+      `SELECT id, name, file_path, trigger_source, cron_pattern
+         FROM tasks WHERE project_id = $1 AND env = $2 ORDER BY name ASC`,
+      [ns.projectId, ns.env],
     );
-    const stats = await computeTaskStats(pool);
+    const stats = await computeTaskStats(pool, ns);
 
     const tasks: TaskSummary[] = taskRows.rows.map((t) => {
       const s = stats.get(t.id);
@@ -153,7 +160,9 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
 
   /* ---------------------------------------------------------- runs */
   app.get('/runs', async (c) => {
-    const env = c.req.query('env');
+    // ?projectId=&env= pick the namespace (default default/prod); taskId and
+    // status filter inside it. A run in another namespace is never visible.
+    const ns = namespaceFromQuery(c);
     const taskId = c.req.query('taskId');
     const status = c.req.query('status');
     // limit goes straight into LIMIT $n, so it must be a positive integer before
@@ -168,7 +177,8 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
       where.push(clause.replace('$?', `$${params.length}`));
     };
 
-    if (env) add('env = $?', env);
+    add('project_id = $?', ns.projectId);
+    add('env = $?', ns.env);
     if (taskId) add('task_id = $?', taskId);
     if (status) add('status = $?', status);
 
@@ -242,12 +252,17 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
   /* ------------------------------------------------------ runs/:id */
   app.get('/runs/:id', async (c) => {
     const id = c.req.param('id');
+    // Scoped like the rest of the dashboard: the run row is predicated on the
+    // namespace so an id from another namespace reads as not_found, and the
+    // projectId it carries is part of the wire shape (RunRecord).
+    const ns = namespaceFromQuery(c);
     const runRes = await pool.query<{
       id: string;
       task_id: string;
       status: string;
       trigger_type: string;
       code_version: string | null;
+      project_id: string;
       env: string;
       attempt: number;
       max_attempts: number;
@@ -261,11 +276,11 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
       started_at: Date | null;
       finished_at: Date | null;
     }>(
-      `SELECT id, task_id, status, trigger_type, code_version, env, attempt, max_attempts,
+      `SELECT id, task_id, status, trigger_type, code_version, project_id, env, attempt, max_attempts,
               payload, output, error, parent_run_id, idempotency_key,
               queued_at, created_at, started_at, finished_at
-         FROM runs WHERE id = $1`,
-      [id],
+         FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
+      [id, ns.projectId, ns.env],
     );
     const r = runRes.rows[0];
     if (!r) return c.json({ error: { code: 'not_found', message: 'run not found' } }, 404);
@@ -276,6 +291,7 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
       status: r.status as RunDetail['status'],
       trigger: r.trigger_type as RunDetail['trigger'],
       codeVersion: r.code_version,
+      projectId: r.project_id,
       env: r.env,
       attempt: r.attempt,
       durationMs: durationMs(r.started_at, r.finished_at),
@@ -303,8 +319,8 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
       finished_at: Date | null;
     }>(
       `SELECT seq, kind, label, status, output, error, attempt, started_at, finished_at
-         FROM run_steps WHERE run_id = $1 ORDER BY seq ASC`,
-      [id],
+         FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY seq ASC`,
+      [id, ns.projectId, ns.env],
     );
     const steps: RunStepRow[] = stepsRes.rows.map((s) => ({
       seq: s.seq,
@@ -327,8 +343,8 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
       status: string;
     }>(
       `SELECT id, step_seq, kind, resume_at, child_run_id, status
-         FROM waits WHERE run_id = $1 ORDER BY id ASC`,
-      [id],
+         FROM waits WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY id ASC`,
+      [id, ns.projectId, ns.env],
     );
     const waitRows: WaitRow[] = waitsRes.rows.map((w) => ({
       id: Number(w.id),
@@ -348,8 +364,8 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
       ts: Date;
     }>(
       `SELECT id, step_seq, level, message, data, ts
-         FROM logs WHERE run_id = $1 ORDER BY id ASC LIMIT 1000`,
-      [id],
+         FROM logs WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY id ASC LIMIT 1000`,
+      [id, ns.projectId, ns.env],
     );
     const logRows: LogRow[] = logsRes.rows.map((l) => ({
       id: Number(l.id),
@@ -366,6 +382,9 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
 
   /* ----------------------------------------------------- schedules */
   app.get('/schedules', async (c) => {
+    // Schedules are namespace-scoped rows: one schedule per task per
+    // (project_id, env), and the dashboard reads the window it is pointed at.
+    const ns = namespaceFromQuery(c);
     const rows = await pool.query<{
       id: string;
       task_id: string;
@@ -380,7 +399,10 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
               s.next_run_at, s.last_run_at, r.status AS last_run_status
          FROM schedules s
          LEFT JOIN runs r ON r.id = s.last_run_id
+                        AND r.project_id = s.project_id AND r.env = s.env
+        WHERE s.project_id = $1 AND s.env = $2
         ORDER BY s.task_id ASC`,
+      [ns.projectId, ns.env],
     );
     const schedules: ScheduleSummary[] = rows.rows.map((s) => ({
       id: s.id,
@@ -398,14 +420,18 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
 
   app.patch('/schedules/:id', async (c) => {
     const id = c.req.param('id');
+    // Scoped like the reads above: an id from another namespace is not found,
+    // never silently edited.
+    const ns = namespaceFromQuery(c);
     const body = await safeJson<Partial<UpdateScheduleRequest>>(c);
     // enabled is NOT NULL in schedules; validate before any query so a bad body
     // costs nothing and cannot reach the UPDATE as NULL.
     const enabled = requireBoolean(body.enabled, 'enabled');
 
     const existing = await pool.query<{ cron_pattern: string; cron_tz: string | null }>(
-      `SELECT cron_pattern, cron_tz FROM schedules WHERE id = $1`,
-      [id],
+      `SELECT cron_pattern, cron_tz FROM schedules
+        WHERE id = $1 AND project_id = $2 AND env = $3`,
+      [id, ns.projectId, ns.env],
     );
     const sched = existing.rows[0];
     if (!sched) return c.json({ error: { code: 'not_found', message: 'schedule not found' } }, 404);
@@ -415,8 +441,9 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
       : null;
 
     await pool.query(
-      `UPDATE schedules SET enabled = $2, next_run_at = $3, updated_at = now() WHERE id = $1`,
-      [id, enabled, nextRunAt],
+      `UPDATE schedules SET enabled = $2, next_run_at = $3, updated_at = now()
+        WHERE id = $1 AND project_id = $4 AND env = $5`,
+      [id, enabled, nextRunAt, ns.projectId, ns.env],
     );
     const res: OkResponse = { ok: true };
     return c.json(res);
@@ -442,14 +469,21 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
       throw new KernelError('bad_request', 'status must be online, offline or all');
     }
     const limit = intQuery(c, 'limit', { min: 1, max: 200, fallback: 50 });
+    // Workers are namespace rows too — a dashboard pointed at default/prod
+    // lists the daemons serving default/prod, not the whole fleet.
+    const ns = namespaceFromQuery(c);
 
     const params: unknown[] = [];
-    let where = '';
+    const clauses: string[] = [];
     if (status !== 'all') {
       params.push(status);
-      where = `WHERE status = $${params.length}`;
+      clauses.push(`status = $${params.length}`);
     }
+    params.push(ns.projectId, ns.env);
+    const nsParam = params.length - 1;
+    clauses.push(`project_id = $${nsParam} AND env = $${nsParam + 1}`);
     params.push(limit);
+    const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
 
     const rows = await pool.query<{
       id: string;
@@ -465,7 +499,7 @@ export function dashboardRoutes(deps: { pool: Pool }): Hono {
       `SELECT id, name, code_version, runtime, tasks, concurrency, status,
               started_at, last_heartbeat_at
          FROM workers
-         ${where}
+         ${whereSql}
         ORDER BY started_at DESC
         LIMIT $${params.length}`,
       params,

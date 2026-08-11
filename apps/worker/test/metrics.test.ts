@@ -124,12 +124,21 @@ function parseExposition(text: string): Map<string, ParsedFamily> {
 
 const kernel = {} as unknown as Kernel;
 
-const GAUGE_ROW = { available: '7', scheduled: '2', claimed: '3', running: '3' };
+const GAUGE_ROW = {
+  project_id: 'default',
+  env: 'prod',
+  available: '7',
+  scheduled: '2',
+  claimed: '3',
+  running: '3',
+};
 
 interface Fixture {
   worker?: { inFlightRunIds(): string[]; counters: WorkerCounters } | null;
   orchestrator?: OrchestratorCounters | null;
   query?: (...args: unknown[]) => Promise<unknown>;
+  /** Namespaces the app is configured for (default → default/prod). */
+  namespaces?: Array<{ projectId: string; env: string }>;
 }
 
 function makeApp(fx: Fixture = {}) {
@@ -140,6 +149,7 @@ function makeApp(fx: Fixture = {}) {
     kernel,
     pool,
     metrics: { worker: fx.worker ?? null, orchestrator: fx.orchestrator ?? null },
+    namespaces: fx.namespaces,
   });
 }
 
@@ -278,16 +288,64 @@ describe('exposition format', () => {
 });
 
 describe('database gauges', () => {
-  it('reports queue depth by state and cluster-wide in-flight in one query', async () => {
+  it('reports queue depth and in-flight by namespace and state in one query', async () => {
     const query = vi.fn(async () => ({ rows: [GAUGE_ROW] }));
     const { families } = await scrape({ query });
 
     expect(query).toHaveBeenCalledTimes(1);
     expect(sampleValue(families, 'better_trigger_db_up')).toBe(1);
-    expect(sampleValue(families, 'better_trigger_queue_depth', { state: 'available' })).toBe(7);
-    expect(sampleValue(families, 'better_trigger_queue_depth', { state: 'scheduled' })).toBe(2);
-    expect(sampleValue(families, 'better_trigger_queue_depth', { state: 'claimed' })).toBe(3);
-    expect(sampleValue(families, 'better_trigger_inflight_runs')).toBe(3);
+    const ns = { project_id: 'default', env: 'prod' };
+    expect(
+      sampleValue(families, 'better_trigger_queue_depth', { ...ns, state: 'available' }),
+    ).toBe(7);
+    expect(
+      sampleValue(families, 'better_trigger_queue_depth', { ...ns, state: 'scheduled' }),
+    ).toBe(2);
+    expect(
+      sampleValue(families, 'better_trigger_queue_depth', { ...ns, state: 'claimed' }),
+    ).toBe(3);
+    expect(sampleValue(families, 'better_trigger_inflight_runs', ns)).toBe(3);
+  });
+
+  it('separates namespaces: each configured (projectId, env) is its own series', async () => {
+    // Two namespaces configured on the daemon: the samples must be
+    // distinguishable by label, never merged — default/prod's backlog is not
+    // acme/staging's.
+    const query = vi.fn(async () => ({
+      rows: [
+        { project_id: 'default', env: 'prod', available: '7', scheduled: '2', claimed: '3', running: '3' },
+        { project_id: 'acme', env: 'staging', available: '1', scheduled: '0', claimed: '9', running: '2' },
+      ],
+    }));
+    const { families } = await scrape({
+      query,
+      namespaces: [
+        { projectId: 'default', env: 'prod' },
+        { projectId: 'acme', env: 'staging' },
+      ],
+    });
+
+    expect(
+      sampleValue(families, 'better_trigger_queue_depth', {
+        project_id: 'default',
+        env: 'prod',
+        state: 'available',
+      }),
+    ).toBe(7);
+    expect(
+      sampleValue(families, 'better_trigger_queue_depth', {
+        project_id: 'acme',
+        env: 'staging',
+        state: 'claimed',
+      }),
+    ).toBe(9);
+    expect(
+      sampleValue(families, 'better_trigger_inflight_runs', { project_id: 'acme', env: 'staging' }),
+    ).toBe(2);
+    // Each state appears once per namespace — no unlabelled fallback sample.
+    const depth = families.get('better_trigger_queue_depth')!;
+    expect(depth.samples).toHaveLength(6);
+    expect(depth.samples.every((s) => s.labels.project_id && s.labels.env)).toBe(true);
   });
 
   it('reads the counts off queue and runs, not off a full history scan', async () => {
@@ -296,7 +354,7 @@ describe('database gauges', () => {
     const sql = String(query.mock.calls[0]?.[0]);
     expect(sql).toMatch(/FROM queue/);
     // The one predicate that keeps the runs count on runs_status_concurrency_idx.
-    expect(sql).toMatch(/FROM runs WHERE status = 'running'/);
+    expect(sql).toMatch(/FROM runs\s+WHERE status = 'running'/);
   });
 
   it('drops the DB gauges and flips db_up when the query fails', async () => {
@@ -441,7 +499,13 @@ describe('in-process counters', () => {
     const pool = { query: async () => ({ rows: [GAUGE_ROW] }) } as unknown as Pool;
     const res = await createApp({ kernel, pool }).fetch(get());
     const families = parseExposition(await res.text());
-    expect(sampleValue(families, 'better_trigger_queue_depth', { state: 'available' })).toBe(7);
+    expect(
+      sampleValue(families, 'better_trigger_queue_depth', {
+        project_id: 'default',
+        env: 'prod',
+        state: 'available',
+      }),
+    ).toBe(7);
     expect(sampleValue(families, 'better_trigger_worker_inflight_runs')).toBe(0);
   });
 });

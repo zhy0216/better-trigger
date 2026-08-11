@@ -48,7 +48,7 @@ beforeEach(() => {
 });
 
 describe('GET /workers', () => {
-  it('is online-only and limited by default', async () => {
+  it('is online-only, namespace-scoped and limited by default', async () => {
     const { app, stmts } = makeApp();
 
     const res = await app.fetch(get());
@@ -57,20 +57,25 @@ describe('GET /workers', () => {
     expect(await res.json()).toEqual({ workers: [] });
     const q = stmts[0]!;
     expect(q.sql).toMatch(/WHERE status = \$1/);
-    expect(q.sql).toMatch(/LIMIT \$2/);
-    expect(q.params).toEqual(['online', 50]);
+    // The default namespace (default/prod) is always predicated on — a
+    // dashboard pointed at nothing still only ever lists one namespace.
+    expect(q.sql).toMatch(/project_id = \$2 AND env = \$3/);
+    expect(q.sql).toMatch(/LIMIT \$4/);
+    expect(q.params).toEqual(['online', 'default', 'prod', 50]);
   });
 
-  it('never issues the query without a LIMIT', async () => {
+  it('keeps the namespace predicate (and the LIMIT) under status=all', async () => {
     const { app, stmts } = makeApp();
 
     await app.fetch(get('?status=all'));
 
     const q = stmts[0]!;
-    // status=all drops the WHERE — the LIMIT stays, and moves to $1.
-    expect(q.sql).not.toMatch(/WHERE/);
-    expect(q.sql).toMatch(/LIMIT \$1/);
-    expect(q.params).toEqual([50]);
+    // status=all drops the status clause — the namespace scope and the LIMIT
+    // stay; the LIMIT moves to $3.
+    expect(q.sql).not.toMatch(/status = \$\d/);
+    expect(q.sql).toMatch(/WHERE project_id = \$1 AND env = \$2/);
+    expect(q.sql).toMatch(/LIMIT \$3/);
+    expect(q.params).toEqual(['default', 'prod', 50]);
   });
 
   it('can be asked for the offline history explicitly', async () => {
@@ -78,7 +83,7 @@ describe('GET /workers', () => {
 
     await app.fetch(get('?status=offline&limit=5'));
 
-    expect(stmts[0]!.params).toEqual(['offline', 5]);
+    expect(stmts[0]!.params).toEqual(['offline', 'default', 'prod', 5]);
   });
 
   it('caps an oversized limit instead of honouring it', async () => {
@@ -86,7 +91,7 @@ describe('GET /workers', () => {
 
     await app.fetch(get('?limit=100000'));
 
-    expect(stmts[0]!.params).toEqual(['online', 200]);
+    expect(stmts[0]!.params).toEqual(['online', 'default', 'prod', 200]);
   });
 
   it('rejects a status it does not know rather than filtering on it', async () => {

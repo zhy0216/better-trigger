@@ -24,6 +24,7 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { CONCURRENCY_LOCK_CLASS, claimRuns } from '../src/queue';
 
 interface Stmt {
@@ -40,6 +41,7 @@ const cappedCandidate = {
   attempt: 0,
   max_attempts: 3,
   code_version: null,
+  project_id: 'default',
   env: 'prod',
   concurrency_key: 'tenant-1',
   concurrency_limit: 1,
@@ -60,7 +62,13 @@ function stubPool(rows: unknown[], running: number) {
   return { pool: { connect: async () => client } as unknown as Pool, stmts };
 }
 
-const ARGS = { workerId: 'w1', taskIds: ['send-email'], limit: 1, leaseMs: 60_000 };
+const ARGS = {
+  workerId: 'w1',
+  namespaces: [DEFAULT_NAMESPACE],
+  taskIds: ['send-email'],
+  limit: 1,
+  leaseMs: 60_000,
+};
 const lockOf = (stmts: Stmt[]) => stmts.find((s) => /pg_advisory_xact_lock/.test(s.sql))!;
 
 describe('concurrency limiter advisory lock', () => {
@@ -75,7 +83,7 @@ describe('concurrency limiter advisory lock', () => {
     // the space application code shares.
     expect(lock.sql).not.toMatch(/pg_advisory_xact_lock\(hashtext/);
     expect(lock.params[0]).toBe(CONCURRENCY_LOCK_CLASS);
-    expect(lock.params[1]).toBe('bt:cc:tenant-1');
+    expect(lock.params[1]).toBe('bt:cc:default:prod:tenant-1');
   });
 
   it('uses a classid distinct from the migration lock’s', () => {

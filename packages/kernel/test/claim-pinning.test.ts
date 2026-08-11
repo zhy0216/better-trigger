@@ -28,7 +28,7 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { KernelError } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
 import { claimRuns } from '../src/queue';
 
 interface Stmt {
@@ -51,7 +51,13 @@ function stubPool(rows: unknown[] = []) {
   return { pool: { connect: async () => client } as unknown as Pool, stmts };
 }
 
-const ARGS = { workerId: 'w1', taskIds: ['send-email', 'sync-crm'], leaseMs: 60_000, limit: 1 };
+const ARGS = {
+  workerId: 'w1',
+  namespaces: [DEFAULT_NAMESPACE],
+  taskIds: ['send-email', 'sync-crm'],
+  leaseMs: 60_000,
+  limit: 1,
+};
 const candidateOf = (stmts: Stmt[]) => stmts.find((s) => /FROM queue q/.test(s.sql))!;
 
 describe('claimRuns without pinning', () => {
@@ -64,9 +70,9 @@ describe('claimRuns without pinning', () => {
     expect(cand.sql).toMatch(/r\.task_id = ANY\(\$1::text\[\]\)/);
     expect(cand.sql).not.toMatch(/code_version =/);
     expect(cand.sql).not.toMatch(/serving/);
-    // Task ids + window, and nothing else: a third parameter here would mean
-    // the default path had started pinning.
-    expect(cand.params).toHaveLength(2);
+    // Task ids + window + the namespace pair, and nothing else: an extra
+    // parameter here would mean the default path had started pinning.
+    expect(cand.params).toHaveLength(4);
   });
 });
 
@@ -117,6 +123,7 @@ describe('claimRuns with pinning', () => {
         attempt: 1,
         max_attempts: 3,
         code_version: 'v_a',
+        project_id: 'default',
         env: 'prod',
         concurrency_key: null,
         concurrency_limit: null,

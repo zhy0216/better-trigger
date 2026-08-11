@@ -13,6 +13,7 @@
    labels distinct.
    ============================================================================= */
 import type { ClaimedRun } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { KernelError, type Kernel } from '@better-trigger/kernel';
 import { task } from 'better-trigger';
 import { describe, expect, it } from 'vitest';
@@ -25,6 +26,7 @@ const RUN: ClaimedRun = {
   attempt: 1,
   maxAttempts: 3,
   codeVersion: null,
+  projectId: 'default',
   env: 'dev',
   steps: [],
   fencingToken: 1,
@@ -90,7 +92,7 @@ describe('runs_total sources', () => {
     const { kernel, calls } = fakeKernel();
     const handle = await startWorkerRuntime(
       { kernel },
-      { tasks: [task('demo', async () => 'done')], concurrency: 1 },
+      { tasks: [task('demo', async () => 'done')], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => calls.completeRun > 0);
     await handle.stop();
@@ -103,7 +105,7 @@ describe('runs_total sources', () => {
     const boom = task('demo', async () => {
       throw new Error('task blew up');
     });
-    const handle = await startWorkerRuntime({ kernel }, { tasks: [boom], concurrency: 1 });
+    const handle = await startWorkerRuntime({ kernel }, { tasks: [boom], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] });
     await waitFor(() => calls.failRun > 0);
     await handle.stop();
 
@@ -120,7 +122,7 @@ describe('runs_total sources', () => {
     });
     const handle = await startWorkerRuntime(
       { kernel },
-      { tasks: [waiting], concurrency: 1 },
+      { tasks: [waiting], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => calls.suspendRun > 0);
     await handle.stop();
@@ -138,7 +140,7 @@ describe('runs_total sources', () => {
     const { kernel, calls } = fakeKernel({ completeRunRejectsWith: 'stale_lease' });
     const handle = await startWorkerRuntime(
       { kernel },
-      { tasks: [task('demo', async () => 'done')], concurrency: 1 },
+      { tasks: [task('demo', async () => 'done')], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => calls.completeRun > 0);
     await waitFor(() => handle.counters.runOutcomes.abandoned > 0);
@@ -159,7 +161,7 @@ describe('runs_total sources', () => {
 
     const handle = await startWorkerRuntime(
       { kernel },
-      { tasks: [task('demo', async () => 'done')], concurrency: 1 },
+      { tasks: [task('demo', async () => 'done')], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await new Promise((r) => setTimeout(r, 200));
     await handle.stop();

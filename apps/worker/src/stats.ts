@@ -5,6 +5,7 @@
    One SQL pass per metric group; joined onto tasks in routes/dashboard.ts.
    ============================================================================= */
 import type { Pool } from 'pg';
+import type { Namespace } from '@better-trigger/core';
 
 export interface TaskStats {
   taskId: string;
@@ -19,8 +20,16 @@ export interface TaskStats {
 
 const EMPTY_TREND = () => new Array<number>(12).fill(0);
 
-/** Aggregate stats for all tasks in one go; returns a map keyed by task id. */
-export async function computeTaskStats(pool: Pool): Promise<Map<string, TaskStats>> {
+/**
+ * Aggregate stats for all tasks in one namespace; returns a map keyed by task
+ * id. Every aggregate predicates on (project_id, env) — a dashboard pointed at
+ * default/prod never sees another namespace's runs, whatever their task ids
+ * (C2).
+ */
+export async function computeTaskStats(
+  pool: Pool,
+  namespace: Namespace,
+): Promise<Map<string, TaskStats>> {
   // Aggregate metrics over the last 24h window per task.
   const agg = await pool.query<{
     task_id: string;
@@ -44,7 +53,9 @@ export async function computeTaskStats(pool: Pool): Promise<Map<string, TaskStat
         count(*) FILTER (WHERE r.status IN ('completed','failed','canceled'))               AS finished_total,
         max(r.created_at)                                                                   AS last_run_at
        FROM runs r
+      WHERE r.project_id = $1 AND r.env = $2
       GROUP BY r.task_id`,
+    [namespace.projectId, namespace.env],
   );
 
   // 12×2h buckets of run counts over the last 24h, per task.
@@ -55,7 +66,9 @@ export async function computeTaskStats(pool: Pool): Promise<Map<string, TaskStat
         count(*)                                                       AS n
        FROM runs r
       WHERE r.created_at >= now() - interval '24 hours'
+        AND r.project_id = $1 AND r.env = $2
       GROUP BY r.task_id, bucket`,
+    [namespace.projectId, namespace.env],
   );
 
   const out = new Map<string, TaskStats>();

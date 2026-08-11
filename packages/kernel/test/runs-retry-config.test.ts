@@ -15,6 +15,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { retryRun } from '../src/runs';
 
 interface Stmt {
@@ -53,6 +54,7 @@ const makePool = (src: SourceRun = {}) => {
               max_recoveries: 10,
               parent_run_id: null,
               payload: { a: 1 },
+              project_id: 'default',
               env: 'staging',
               concurrency_key: src.concurrency_key ?? null,
               priority: src.priority ?? 0,
@@ -132,7 +134,7 @@ describe('retryRun carries the source run config', () => {
       concurrency_key: 'tenant-42',
       taskConcurrencyLimit: 2,
     });
-    await retryRun(pool, 'run_src');
+    await retryRun(pool, 'run_src', DEFAULT_NAMESPACE);
 
     expect(bound(find(stmts, /INSERT INTO runs/), 'concurrency_key')).toBe('tenant-42');
     expect(find(stmts, /INSERT INTO queue/).params).toContain('tenant-42');
@@ -140,7 +142,7 @@ describe('retryRun carries the source run config', () => {
 
   it('reuses the source priority on both the run row and its queue row', async () => {
     const { pool, stmts } = makePool({ priority: 7 });
-    await retryRun(pool, 'run_src');
+    await retryRun(pool, 'run_src', DEFAULT_NAMESPACE);
 
     // The redundant runs column is what made this possible: the source run is
     // terminal, so its queue row (the scheduler's copy) no longer exists.
@@ -152,7 +154,7 @@ describe('retryRun carries the source run config', () => {
 
   it('leaves a run with no key/priority on the task defaults', async () => {
     const { pool, stmts } = makePool({ concurrency_key: null, priority: 0 });
-    await retryRun(pool, 'run_src');
+    await retryRun(pool, 'run_src', DEFAULT_NAMESPACE);
 
     // NULL concurrency_key means "the task has no limit"; createRunIn re-derives
     // that from the task rather than being handed an empty string.
@@ -162,7 +164,7 @@ describe('retryRun carries the source run config', () => {
 
   it('does not carry the idempotency key over', async () => {
     const { pool, stmts } = makePool({ priority: 7 });
-    await retryRun(pool, 'run_src');
+    await retryRun(pool, 'run_src', DEFAULT_NAMESPACE);
 
     // A retry that reuses the key would hit the partial unique index and be
     // answered with the id of the run it was meant to retry.
@@ -173,7 +175,7 @@ describe('retryRun carries the source run config', () => {
 
   it('refuses a non-terminal run before creating anything', async () => {
     const { pool, stmts } = makePool({ status: 'running' });
-    await expect(retryRun(pool, 'run_src')).rejects.toThrow(/not retryable/);
+    await expect(retryRun(pool, 'run_src', DEFAULT_NAMESPACE)).rejects.toThrow(/not retryable/);
     expect(stmts.some((s) => /INSERT/.test(s.sql))).toBe(false);
   });
 });

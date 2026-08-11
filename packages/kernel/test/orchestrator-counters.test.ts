@@ -59,9 +59,16 @@ function stubPool(opts: StubOptions = {}) {
         // the same expired claims and the counts could not be pinned exactly.
         if (scanned) return { rows: [] };
         scanned = true;
-        return { rows: stale.map((s) => ({ id: s.id, run_id: s.runId })) };
+        return {
+          rows: stale.map((s) => ({
+            id: s.id,
+            run_id: s.runId,
+            project_id: 'default',
+            env: 'dev',
+          })),
+        };
       }
-      if (/FROM runs WHERE id = \$1 FOR UPDATE/.test(text)) {
+      if (/FROM runs WHERE id = \$1/.test(text)) {
         const row = stale.find((s) => s.runId === params?.[0]);
         return {
           rows: row
@@ -76,6 +83,7 @@ function stubPool(opts: StubOptions = {}) {
                   max_recoveries: row.maxRecoveries,
                   parent_run_id: null,
                   payload: null,
+                  project_id: 'default',
                   env: 'dev',
                   concurrency_key: null,
                   code_version: null,

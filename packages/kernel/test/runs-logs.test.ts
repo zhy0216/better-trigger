@@ -17,6 +17,7 @@
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
 import type { LogEntry } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { appendLogs } from '../src/runs';
 
 interface Stmt {
@@ -39,10 +40,11 @@ const makePool = (run: { finished?: boolean; missing?: boolean } = {}) => {
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      const rows = (params.length - 1) / PARAMS_PER_ROW;
+      // $1 run id + $2/$3 namespace are shared; row params start at $4.
+      const rows = (params.length - 3) / PARAMS_PER_ROW;
       // The guard is the whole point of the statement: if a future edit drops
       // it, the stub must not keep pretending terminal runs are protected.
-      const guarded = /EXISTS \(SELECT 1 FROM runs WHERE id = \$1 AND finished_at IS NULL\)/.test(
+      const guarded = /EXISTS \(\s*SELECT 1 FROM runs WHERE id = \$1 AND finished_at IS NULL/.test(
         sql,
       );
       const alive = !run.finished && !run.missing;
@@ -66,7 +68,7 @@ const entries = (n: number): LogEntry[] =>
 describe('appendLogs', () => {
   it('costs exactly one round trip — no existence SELECT', async () => {
     const { pool, stmts } = makePool();
-    await appendLogs(pool, 'run_1', entries(3));
+    await appendLogs(pool, 'run_1', DEFAULT_NAMESPACE, entries(3));
 
     expect(stmts).toHaveLength(1);
     expect(stmts[0]!.sql).toMatch(/INSERT INTO logs/);
@@ -79,13 +81,15 @@ describe('appendLogs', () => {
 
   it('binds each line once, run id shared', async () => {
     const { pool, stmts } = makePool();
-    await appendLogs(pool, 'run_1', [
+    await appendLogs(pool, 'run_1', DEFAULT_NAMESPACE, [
       { ts: '2026-07-30T00:00:00.000Z', level: 'warn', message: 'hi', stepSeq: 2, data: { a: 1 } },
     ]);
 
-    // run id once at $1, then the row's five columns in column order.
+    // run id once at $1, namespace at $2/$3, then the row's five columns.
     expect(stmts[0]!.params).toEqual([
       'run_1',
+      'default',
+      'prod',
       2,
       'warn',
       'hi',
@@ -98,7 +102,7 @@ describe('appendLogs', () => {
     const { pool, stmts, inserted } = makePool({ finished: true });
     // Must not throw: this is the flush of an executor that was fenced out, and
     // the executor's flush path treats a rejection as dropped-log diagnostics.
-    await expect(appendLogs(pool, 'run_1', entries(3))).resolves.toBeUndefined();
+    await expect(appendLogs(pool, 'run_1', DEFAULT_NAMESPACE, entries(3))).resolves.toBeUndefined();
 
     expect(stmts).toHaveLength(1);
     expect(inserted).toEqual([]);
@@ -106,17 +110,17 @@ describe('appendLogs', () => {
 
   it('writes nothing, and raises nothing, for a run that no longer exists', async () => {
     const { pool, inserted } = makePool({ missing: true });
-    await expect(appendLogs(pool, 'gone', entries(2))).resolves.toBeUndefined();
+    await expect(appendLogs(pool, 'gone', DEFAULT_NAMESPACE, entries(2))).resolves.toBeUndefined();
     expect(inserted).toEqual([]);
   });
 
   it('still chunks — one flush is not one giant INSERT', async () => {
     const { pool, stmts, inserted } = makePool();
-    await appendLogs(pool, 'run_1', entries(2500));
+    await appendLogs(pool, 'run_1', DEFAULT_NAMESPACE, entries(2500));
 
     expect(stmts).toHaveLength(3);
     for (const s of stmts) {
-      const rows = (s.params.length - 1) / PARAMS_PER_ROW;
+      const rows = (s.params.length - 3) / PARAMS_PER_ROW;
       expect(rows).toBeLessThanOrEqual(1000);
       // Every chunk carries the guard, so a run that goes terminal mid-flush
       // stops absorbing the rest instead of half-writing past its own end.
@@ -131,7 +135,7 @@ describe('appendLogs', () => {
 
   it('issues no statement at all for an empty flush', async () => {
     const { pool, stmts } = makePool();
-    await appendLogs(pool, 'run_1', []);
+    await appendLogs(pool, 'run_1', DEFAULT_NAMESPACE, []);
     expect(stmts).toEqual([]);
   });
 });

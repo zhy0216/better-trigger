@@ -113,6 +113,12 @@ export interface TriggerOptions {
   concurrencyKey?: string;
   /** Environment scope. Defaults to the server-side default ('prod'). */
   env?: string;
+  /**
+   * Project scope (C2 namespace isolation). Together with `env` this decides
+   * which namespace the run is created in; the host boundary resolves the pair
+   * into a Namespace before the kernel sees it. Defaults to 'default'.
+   */
+  projectId?: string;
 }
 
 /** Result of triggerAndWait — never throws for child failure; check `ok`. */
@@ -161,6 +167,8 @@ export interface DequeuedRun {
   attempt: number;
   maxAttempts: number;
   codeVersion: string | null;
+  /** The namespace this run lives in — every fenced write re-scopes on it. */
+  projectId: string;
   env: string;
   /** Memoized completed/failed steps for replay. */
   steps: StepSnapshot[];
@@ -202,6 +210,7 @@ export interface RunRecord {
   status: RunStatus;
   trigger: TriggerType;
   codeVersion: string | null;
+  projectId: string;
   env: string;
   attempt: number;
   maxAttempts: number;

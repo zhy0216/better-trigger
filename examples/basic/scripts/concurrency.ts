@@ -427,7 +427,7 @@ async function main(s: Scenario): Promise<void> {
   holder.release();
 
   for (const handle of gated) {
-    const result = await client.waitForResult(handle.id, { timeoutMs: 60_000 });
+    const result = await client.waitForResult(handle.id, undefined, { timeoutMs: 60_000 });
     s.assert(
       result.status === 'completed',
       `${GATED_GROUP} run ${handle.id} should complete once the lock is released, ` +

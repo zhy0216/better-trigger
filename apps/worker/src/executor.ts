@@ -32,6 +32,7 @@ import {
   type ClaimedRun,
   type ExecutionEndedSignal,
   type LogEntry,
+  type Namespace,
   type RetryPolicy,
   type StepKind,
   type StepSnapshot,
@@ -124,6 +125,12 @@ export class Executor implements RunExecutor {
   private readonly aborter = new AbortController();
   /** Non-null once `aborter` fired; also the discriminator for "our own abort". */
   private abortReason: RunAbortReason | null = null;
+  /**
+   * The namespace this run lives in, from the claim (C2). Every kernel write
+   * below re-scopes on it — the run's projectId/env travel on the ClaimedRun,
+   * so the executor never guesses one.
+   */
+  private readonly ns: Namespace;
 
   readonly ctx: RunCtx;
 
@@ -140,6 +147,7 @@ export class Executor implements RunExecutor {
      *  silence by leaving an optional argument off. */
     private readonly diagnostics: ExecutorDiagnostics | null,
   ) {
+    this.ns = { projectId: run.projectId, env: run.env };
     for (const s of run.steps) this.snapshot.set(s.seq, s);
     const runInfo: RunInfo = {
       id: run.id,
@@ -149,6 +157,15 @@ export class Executor implements RunExecutor {
       env: run.env,
     };
     this.ctx = this.buildCtx(runInfo);
+  }
+
+  /**
+   * The namespace of the run this executor drives. Handles minted inside the
+   * run (durable trigger / batchTrigger) carry it, so their result() polls
+   * resolve in the same namespace the child run was created in.
+   */
+  get namespace(): Namespace {
+    return this.ns;
   }
 
   /** Worker calls this on the heartbeat cancel path; checked at step boundaries. */
@@ -236,6 +253,7 @@ export class Executor implements RunExecutor {
           output,
           workerId: this.workerId,
           fencingToken: this.run.fencingToken,
+          namespace: this.ns,
         });
       } catch (err) {
         if (isAbandonment(err)) return { type: 'abandoned' };
@@ -606,6 +624,7 @@ export class Executor implements RunExecutor {
         fingerprint,
         workerId: this.workerId,
         fencingToken: this.run.fencingToken,
+        namespace: this.ns,
       });
     } catch (e) {
       if (isAbandonment(e)) {
@@ -657,6 +676,7 @@ export class Executor implements RunExecutor {
         fingerprint,
         workerId: this.workerId,
         fencingToken: this.run.fencingToken,
+        namespace: this.ns,
       });
     } catch (err) {
       if (isAbandonment(err)) {
@@ -704,6 +724,7 @@ export class Executor implements RunExecutor {
         fingerprint: fp,
         workerId: this.workerId,
         fencingToken: this.run.fencingToken,
+        namespace: this.ns,
       });
       resumed = res.resumed;
     } catch (err) {
@@ -752,6 +773,7 @@ export class Executor implements RunExecutor {
         fingerprint: fp,
         workerId: this.workerId,
         fencingToken: this.run.fencingToken,
+        namespace: this.ns,
       });
     } catch (err) {
       if (isAbandonment(err)) {
@@ -793,6 +815,7 @@ export class Executor implements RunExecutor {
         items,
         workerId: this.workerId,
         fencingToken: this.run.fencingToken,
+        namespace: this.ns,
       });
       return res.runIds;
     } catch (err) {
@@ -861,6 +884,7 @@ export class Executor implements RunExecutor {
         abort,
         workerId: this.workerId,
         fencingToken: this.run.fencingToken,
+        namespace: this.ns,
       });
     } catch (err) {
       if (isAbandonment(err)) {
@@ -917,7 +941,7 @@ export class Executor implements RunExecutor {
     const logs = this.logBuffer;
     this.logBuffer = [];
     try {
-      await this.kernel.appendLogs(this.run.id, logs);
+      await this.kernel.appendLogs(this.run.id, this.ns, logs);
     } catch (err) {
       // best-effort: logs are not critical, drop on failure — but say how many
       // lines went missing, or a run detail page silently short of its logs

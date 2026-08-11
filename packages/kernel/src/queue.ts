@@ -8,21 +8,58 @@
    by createKernel() — no module-global connection.
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
-import { KernelError, type ClaimedRun, type StepSnapshot } from '@better-trigger/core';
+import {
+  assertNamespace,
+  KernelError,
+  type ClaimedRun,
+  type Namespace,
+  type StepSnapshot,
+} from '@better-trigger/core';
 
 export interface EnqueueArgs {
   runId: string;
   availableAt: Date;
   priority?: number;
   concurrencyKey: string | null;
-  projectId?: string;
-  env?: string;
+  /** The namespace the run lives in — stamped on the queue row so every
+   *  claim/lease/heartbeat statement can re-scope on it (C2). */
+  namespace: Namespace;
 }
 
 /**
- * Insert (or move-back) a run into the queue. Idempotent on run_id.
- * The conflict path clears locked_by/locked_at/lease_until (NULL lease =
- * unoccupied). The fencing token lives on the runs row — queue rows are
+ * Build `(alias.project_id, alias.env) IN (VALUES ($n::text, $n+1::text), …)`
+ * from a namespace list, appending the flattened values to `params`.
+ *
+ * The VALUES pairing is deliberate: two separate `= ANY` arrays would combine
+ * in a cartesian product, so a worker serving (p1, e1) and (p2, e2) could
+ * match a run in (p1, e2) it does not actually serve.
+ */
+export function namespacePredicate(
+  alias: string,
+  namespaces: readonly Namespace[],
+  params: unknown[],
+): string {
+  const start = params.length + 1;
+  const values = namespaces
+    .map((_, i) => `($${start + i * 2}::text, $${start + i * 2 + 1}::text)`)
+    .join(', ');
+  for (const ns of namespaces) params.push(ns.projectId, ns.env);
+  return `(${alias}.project_id, ${alias}.env) IN (VALUES ${values})`;
+}
+
+/** Validate a non-empty namespace list at the worker-facing API boundary. */
+export function assertNamespaces(namespaces: readonly Namespace[]): void {
+  if (!Array.isArray(namespaces) || namespaces.length === 0) {
+    throw new KernelError('bad_request', 'namespaces must be a non-empty array');
+  }
+  for (const ns of namespaces) assertNamespace(ns);
+}
+
+/**
+ * Insert (or move-back) a run into the queue. Idempotent on run_id (runs.id
+ * stays globally unique — the namespace is a scoping predicate, not a key
+ * component). The conflict path clears locked_by/locked_at/lease_until (NULL
+ * lease = unoccupied). The fencing token lives on the runs row — queue rows are
  * deleted and re-inserted across suspend/resume, so the watermark must not
  * (and does not) travel with them.
  */
@@ -42,22 +79,33 @@ export async function enqueue(client: PoolClient, args: EnqueueArgs): Promise<vo
       args.availableAt,
       args.priority ?? 0,
       args.concurrencyKey,
-      args.projectId ?? 'default',
-      args.env ?? 'prod',
+      args.namespace.projectId,
+      args.namespace.env,
     ],
   );
 }
 
-/** Remove a run's queue row (used on suspend / terminal). */
+/** Remove a run's queue row (used on suspend / terminal). Scoped to the run's
+ *  namespace so one namespace can never delete another's queue row. */
 export async function removeFromQueue(
   db: Pool | PoolClient,
   runId: string,
+  namespace: Namespace,
 ): Promise<void> {
-  await db.query(`DELETE FROM queue WHERE run_id = $1`, [runId]);
+  await db.query(
+    `DELETE FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3`,
+    [runId, namespace.projectId, namespace.env],
+  );
 }
 
 export interface ClaimRunsArgs {
   workerId: string;
+  /**
+   * Namespaces this worker serves. The candidate scan filters runs by the
+   * (project_id, env) pairs (VALUES pairing, not separate ANY arrays) — a
+   * staging worker can never claim a prod run (C2).
+   */
+  namespaces: readonly Namespace[];
   /** Task ids this worker can execute (filtered in SQL). */
   taskIds: string[];
   /** Maximum runs to claim in this call. */
@@ -165,6 +213,7 @@ export function claimWindow(limit: number): number {
  */
 export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<ClaimedRun[]> {
   if (args.taskIds.length === 0 || args.limit <= 0) return [];
+  assertNamespaces(args.namespaces);
 
   const pinned = args.codeVersions !== undefined;
   if (pinned && args.codeVersions!.length !== args.taskIds.length) {
@@ -195,6 +244,15 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
     // while claimable runs sat one row further down. Locking is unchanged:
     // `FOR UPDATE OF q` still names the queue row and nothing else, and the CTE
     // is a values list, not a lockable relation.
+    // Params are numbered in ONE array, in SQL order: the task ids / window /
+    // code versions come first (their $n are written literally in the SQL
+    // below), and namespacePredicate() numbers the namespace VALUES pairs from
+    // the next free slot — a fresh array here would restart at $1 and collide
+    // with the literal placeholders above it.
+    const params: unknown[] = pinned
+      ? [args.taskIds, claimWindow(args.limit), args.codeVersions]
+      : [args.taskIds, claimWindow(args.limit)];
+    const nsPredicate = namespacePredicate('r', args.namespaces, params);
     const candidates = await client.query<{
       queue_id: number;
       run_id: string;
@@ -203,6 +261,7 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
       attempt: number;
       max_attempts: number;
       code_version: string | null;
+      project_id: string;
       env: string;
       concurrency_key: string | null;
       concurrency_limit: number | null;
@@ -213,32 +272,36 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
            )
            SELECT q.id AS queue_id, q.run_id,
                   r.task_id, r.payload, r.attempt, r.max_attempts,
-                  r.code_version, r.env, r.concurrency_key,
+                  r.code_version, r.project_id, r.env, r.concurrency_key,
                   t.concurrency_limit
              FROM queue q
              JOIN runs r ON r.id = q.run_id
+                        AND r.project_id = q.project_id AND r.env = q.env
              JOIN serving s ON s.task_id = r.task_id
              LEFT JOIN tasks t ON t.id = r.task_id
+                            AND t.project_id = r.project_id AND t.env = r.env
             WHERE q.available_at <= now() AND q.locked_by IS NULL
+              AND ${nsPredicate}
               AND (r.code_version IS NULL OR r.code_version = s.code_version)
             ORDER BY q.priority DESC, q.id ASC
             LIMIT $2
             FOR UPDATE OF q SKIP LOCKED`
         : `SELECT q.id AS queue_id, q.run_id,
                   r.task_id, r.payload, r.attempt, r.max_attempts,
-                  r.code_version, r.env, r.concurrency_key,
+                  r.code_version, r.project_id, r.env, r.concurrency_key,
                   t.concurrency_limit
              FROM queue q
              JOIN runs r ON r.id = q.run_id
+                        AND r.project_id = q.project_id AND r.env = q.env
              LEFT JOIN tasks t ON t.id = r.task_id
+                            AND t.project_id = r.project_id AND t.env = r.env
             WHERE q.available_at <= now() AND q.locked_by IS NULL
+              AND ${nsPredicate}
               AND r.task_id = ANY($1::text[])
             ORDER BY q.priority DESC, q.id ASC
             LIMIT $2
             FOR UPDATE OF q SKIP LOCKED`,
-      pinned
-        ? [args.taskIds, claimWindow(args.limit), args.codeVersions]
-        : [args.taskIds, claimWindow(args.limit)],
+      params,
     );
 
     const claimed: ClaimedRun[] = [];
@@ -247,7 +310,8 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
 
       // Concurrency limit: the task's limit came back with the candidate; if set,
       // count running runs sharing the same concurrency_key (redundantly stored
-      // on runs).
+      // on runs). The lock key and the count are both namespace-scoped, so
+      // prod and staging throttle independently (C2).
       const limit = cand.concurrency_limit;
       if (limit != null && limit > 0) {
         const key = cand.concurrency_key ?? cand.task_id;
@@ -260,13 +324,14 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
         // CONCURRENCY_LOCK_CLASS above.
         await client.query(
           `SELECT pg_advisory_xact_lock($1::int4, hashtext($2))`,
-          [CONCURRENCY_LOCK_CLASS, `bt:cc:${key}`],
+          [CONCURRENCY_LOCK_CLASS, `bt:cc:${cand.project_id}:${cand.env}:${key}`],
         );
         const countRes = await client.query<{ n: string }>(
           `SELECT count(*)::text AS n
              FROM runs
-            WHERE status = 'running' AND concurrency_key = $1`,
-          [key],
+            WHERE status = 'running' AND concurrency_key = $1
+              AND project_id = $2 AND env = $3`,
+          [key, cand.project_id, cand.env],
         );
         const running = Number(countRes.rows[0]?.n ?? '0');
         if (running >= limit) continue; // leave it in the queue
@@ -282,8 +347,8 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
             SET locked_by = $1,
                 locked_at = now(),
                 lease_until = now() + ($2::text || ' milliseconds')::interval
-          WHERE id = $3`,
-        [args.workerId, String(args.leaseMs), cand.queue_id],
+          WHERE id = $3 AND project_id = $4 AND env = $5`,
+        [args.workerId, String(args.leaseMs), cand.queue_id, cand.project_id, cand.env],
       );
 
       const tokenRes = await client.query<{ fencing_token: string }>(
@@ -292,9 +357,9 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
                 started_at = COALESCE(started_at, now()),
                 updated_at = now(),
                 fencing_token = fencing_token + 1
-          WHERE id = $1
+          WHERE id = $1 AND project_id = $2 AND env = $3
           RETURNING fencing_token`,
-        [cand.run_id],
+        [cand.run_id, cand.project_id, cand.env],
       );
       const fencingToken = Number(tokenRes.rows[0]?.fencing_token ?? 0);
 
@@ -308,8 +373,9 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
         fingerprint: string | null;
       }>(
         `SELECT seq, kind, label, status, output, error, fingerprint
-           FROM run_steps WHERE run_id = $1 ORDER BY seq ASC`,
-        [cand.run_id],
+           FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
+           ORDER BY seq ASC`,
+        [cand.run_id, cand.project_id, cand.env],
       );
       const steps: StepSnapshot[] = stepsRes.rows.map((s) => ({
         seq: s.seq,
@@ -328,6 +394,7 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
         attempt: cand.attempt,
         maxAttempts: cand.max_attempts,
         codeVersion: cand.code_version,
+        projectId: cand.project_id,
         env: cand.env,
         steps,
         fencingToken,
@@ -380,38 +447,48 @@ const STRANDED_GROUP_LIMIT = 20;
  * into a number and a log line.
  *
  * "Served" is read off the online workers' own `tasks` manifests, which carry
- * `{ id, codeVersion }` per task. Rows written by an older build hold bare id
- * strings; those normalize to the worker-level `code_version`, which is exactly
- * what that build stamped its tasks with.
+ * `{ id, codeVersion }` per task, intersected with the worker's `namespaces`
+ * jsonb: a worker only serves a namespace it is configured for (C2). Rows
+ * written by an older build hold bare id strings; those normalize to the
+ * worker-level `code_version`, which is exactly what that build stamped its
+ * tasks with.
  *
  * Meaningless when nothing pins (an unpinned worker claims these runs on its
  * next poll), so the loop that calls it is off unless pinning is on.
  */
-export async function scanStrandedRuns(pool: Pool): Promise<StrandedScan> {
+export async function scanStrandedRuns(
+  pool: Pool,
+  namespaces: readonly Namespace[],
+): Promise<StrandedScan> {
+  assertNamespaces(namespaces);
+  // $1 is the LIMIT, written literally in the SQL; the namespace pairs are
+  // numbered from $2 in the same array (see namespacePredicate).
+  const params: unknown[] = [STRANDED_GROUP_LIMIT + 1];
+  const nsPredicate = namespacePredicate('r', namespaces, params);
   const res = await pool.query<{ task_id: string; code_version: string; n: string }>(
-    `WITH served AS (
-       SELECT DISTINCT COALESCE(e->>'id', e #>> '{}') AS task_id,
-              COALESCE(e->>'codeVersion', w.code_version) AS code_version
-         FROM workers w
-         CROSS JOIN LATERAL jsonb_array_elements(w.tasks) e
-        WHERE w.status = 'online'
-     )
-     SELECT r.task_id, r.code_version, count(*)::text AS n
+    `SELECT r.task_id, r.code_version, count(*)::text AS n
        FROM queue q
        JOIN runs r ON r.id = q.run_id
       WHERE q.locked_by IS NULL
         AND q.available_at <= now()
         AND r.code_version IS NOT NULL
+        AND ${nsPredicate}
         AND NOT EXISTS (
-          SELECT 1 FROM served s
-           WHERE s.task_id = r.task_id AND s.code_version = r.code_version
+          SELECT 1 FROM workers w
+           CROSS JOIN LATERAL jsonb_array_elements(w.tasks) e
+           CROSS JOIN LATERAL jsonb_array_elements(w.namespaces) n
+           WHERE w.status = 'online'
+             AND COALESCE(e->>'id', e #>> '{}') = r.task_id
+             AND COALESCE(e->>'codeVersion', w.code_version) = r.code_version
+             AND n->>'projectId' = r.project_id
+             AND n->>'env' = r.env
         )
       GROUP BY 1, 2
       ORDER BY count(*) DESC, r.task_id ASC
       LIMIT $1`,
     // One row past the cap, so "exactly full" is distinguishable from "there
     // was more" without a second count query.
-    [STRANDED_GROUP_LIMIT + 1],
+    params,
   );
   const rows = res.rows.map((r) => ({
     taskId: r.task_id,
@@ -426,6 +503,10 @@ export async function scanStrandedRuns(pool: Pool): Promise<StrandedScan> {
 
 export interface HeartbeatArgs {
   workerId: string;
+  /** Namespaces this worker serves — the renewal and cancel checks re-scope on
+   *  them (C2; redundant per-run since run ids are globally unique, but the
+   *  isolation predicates are applied everywhere by design). */
+  namespaces: readonly Namespace[];
   /** Runs currently executing on this worker (leases get renewed). */
   runIds: string[];
   /** Lease duration to extend to (lease_until = now() + leaseMs). */
@@ -468,15 +549,20 @@ export async function heartbeat(
   pool: Pool,
   args: HeartbeatArgs,
 ): Promise<HeartbeatResult> {
+  assertNamespaces(args.namespaces);
   // Extend leases for runs still owned by this worker; the rows that come back
   // are exactly the claims we still hold.
   let renewed: string[] = [];
   if (args.runIds.length > 0) {
+    // $1 leaseMs / $2 workerId / $3 runIds are literal in the SQL; the
+    // namespace pairs continue from $4 in the same array.
+    const params: unknown[] = [String(args.leaseMs), args.workerId, args.runIds];
+    const nsPredicate = namespacePredicate('queue', args.namespaces, params);
     const res = await pool.query<{ run_id: string }>(
       `UPDATE queue SET lease_until = now() + ($1::text || ' milliseconds')::interval
-        WHERE locked_by = $2 AND run_id = ANY($3::text[])
+        WHERE locked_by = $2 AND run_id = ANY($3::text[]) AND ${nsPredicate}
         RETURNING run_id`,
-      [String(args.leaseMs), args.workerId, args.runIds],
+      params,
     );
     renewed = res.rows.map((r) => r.run_id);
   }
@@ -487,10 +573,13 @@ export async function heartbeat(
 
   if (args.runIds.length === 0) return { cancelRunIds: [], lostRunIds: [] };
   // Any of the heartbeat's runs that are no longer 'running' → tell worker to drop.
+  // $1 is the run id list; the namespace pairs continue from $2.
+  const params: unknown[] = [args.runIds];
+  const nsPredicate = namespacePredicate('runs', args.namespaces, params);
   const res = await pool.query<{ id: string }>(
     `SELECT id FROM runs
-      WHERE id = ANY($1::text[]) AND status = 'canceled'`,
-    [args.runIds],
+      WHERE id = ANY($1::text[]) AND status = 'canceled' AND ${nsPredicate}`,
+    params,
   );
   const cancelRunIds = res.rows.map((r) => r.id);
 
@@ -503,6 +592,9 @@ export async function heartbeat(
 export interface ReleaseClaimsArgs {
   /** Only this worker's claims are released — never another worker's. */
   workerId: string;
+  /** Namespaces this worker serves; the hand-back statements re-scope on them
+   *  (C2). */
+  namespaces: readonly Namespace[];
 }
 
 export interface ReleaseClaimsResult {
@@ -547,6 +639,7 @@ export async function releaseClaims(
   pool: Pool,
   args: ReleaseClaimsArgs,
 ): Promise<ReleaseClaimsResult> {
+  assertNamespaces(args.namespaces);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -554,13 +647,21 @@ export async function releaseClaims(
     // Canonical lock position 1. Deliberately NOT `SKIP LOCKED`: a row of ours
     // held by another transaction is one being reaped or completed right now,
     // and waiting for it costs a moment on a path that has nothing else to do.
-    // ORDER BY keeps the acquisition order deterministic.
-    const held = await client.query<{ run_id: string }>(
-      `SELECT run_id FROM queue WHERE locked_by = $1 ORDER BY run_id FOR UPDATE`,
-      [args.workerId],
+    // ORDER BY keeps the acquisition order deterministic. Scoped to this
+    // worker's namespaces (C2); each row's project_id/env ride along so the
+    // statements below re-scope per run.
+    // $1 is the worker id, literal in the SQL; the namespace pairs continue
+    // from $2 in the same array (see namespacePredicate).
+    const params: unknown[] = [args.workerId];
+    const nsPredicate = namespacePredicate('queue', args.namespaces, params);
+    const held = await client.query<{ run_id: string; project_id: string; env: string }>(
+      `SELECT run_id, project_id, env FROM queue
+        WHERE locked_by = $1 AND ${nsPredicate}
+        ORDER BY run_id FOR UPDATE`,
+      params,
     );
-    const runIds = held.rows.map((r) => r.run_id);
-    if (runIds.length === 0) {
+    const runs = held.rows;
+    if (runs.length === 0) {
       await client.query('COMMIT');
       return { releasedRunIds: [] };
     }
@@ -568,22 +669,27 @@ export async function releaseClaims(
     // Canonical lock position 2, one run at a time. `status = 'running'` scopes
     // it to runs this worker was actually executing; anything else (a run that
     // reached a terminal state between the two statements) keeps its own state.
-    for (const runId of runIds) {
+    for (const r of runs) {
       await client.query(
         `UPDATE runs SET status = 'queued', updated_at = now()
-          WHERE id = $1 AND status = 'running'`,
-        [runId],
+          WHERE id = $1 AND status = 'running' AND project_id = $2 AND env = $3`,
+        [r.run_id, r.project_id, r.env],
       );
     }
 
     // The release itself. `locked_by = $1` is re-checked so this can only ever
-    // clear this worker's own claims, whatever else raced in between.
+    // clear this worker's own claims, whatever else raced in between; each row
+    // is re-scoped by its (run_id, project_id, env) triple.
+    const start = 2;
+    const triples = runs
+      .map((_, i) => `($${start + i * 3}::text, $${start + i * 3 + 1}::text, $${start + i * 3 + 2}::text)`)
+      .join(', ');
     const released = await client.query<{ run_id: string }>(
       `UPDATE queue
           SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = now()
-        WHERE locked_by = $1 AND run_id = ANY($2::text[])
+        WHERE locked_by = $1 AND (run_id, project_id, env) IN (VALUES ${triples})
         RETURNING run_id`,
-      [args.workerId, runIds],
+      [args.workerId, ...runs.flatMap((r) => [r.run_id, r.project_id, r.env])],
     );
 
     await client.query('COMMIT');

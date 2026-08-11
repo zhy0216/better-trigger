@@ -23,6 +23,7 @@
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
 import { KernelError } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { MIN_RETENTION_MS, prune } from '../src/prune';
 
 interface Stmt {
@@ -82,7 +83,7 @@ describe('prune --dry-run', () => {
   it('issues no DELETE whatsoever', async () => {
     const { pool, stmts } = stubPool(['r1', 'r2']);
 
-    const res = await prune(pool, { olderThanMs: RETENTION, dryRun: true });
+    const res = await prune(pool, { olderThanMs: RETENTION, namespaces: [DEFAULT_NAMESPACE], dryRun: true });
 
     expect(deletes(stmts)).toEqual([]);
     expect(res.dryRun).toBe(true);
@@ -93,7 +94,7 @@ describe('prune --dry-run', () => {
   it('still reports what a real run would remove, per table', async () => {
     const { pool } = stubPool();
 
-    const res = await prune(pool, { olderThanMs: RETENTION, dryRun: true });
+    const res = await prune(pool, { olderThanMs: RETENTION, namespaces: [DEFAULT_NAMESPACE], dryRun: true });
 
     expect(res.runs).toBe(4);
     expect(res.runSteps).toBe(9);
@@ -108,7 +109,7 @@ describe('prune candidate selection', () => {
   it('only considers terminal runs, and binds the status list', async () => {
     const { pool, stmts } = stubPool();
 
-    await prune(pool, { olderThanMs: RETENTION });
+    await prune(pool, { olderThanMs: RETENTION , namespaces: [DEFAULT_NAMESPACE]});
 
     const candidate = find(stmts, /SELECT r\.id FROM runs r/)!;
     expect(candidate.sql).toMatch(/r\.status = ANY\(\$2::text\[\]\)/);
@@ -121,7 +122,7 @@ describe('prune candidate selection', () => {
   it('ages runs by when they finished, never by when they were created', async () => {
     const { pool, stmts } = stubPool();
 
-    await prune(pool, { olderThanMs: RETENTION });
+    await prune(pool, { olderThanMs: RETENTION , namespaces: [DEFAULT_NAMESPACE]});
 
     const candidate = find(stmts, /SELECT r\.id FROM runs r/)!;
     expect(candidate.sql).toMatch(/COALESCE\(r\.finished_at, r\.updated_at\) < \$1/);
@@ -132,7 +133,7 @@ describe('prune candidate selection', () => {
     const { pool, stmts } = stubPool();
     const before = Date.now();
 
-    const res = await prune(pool, { olderThanMs: RETENTION });
+    const res = await prune(pool, { olderThanMs: RETENTION , namespaces: [DEFAULT_NAMESPACE]});
 
     const candidate = find(stmts, /SELECT r\.id FROM runs r/)!;
     const cutoff = candidate.params[0] as Date;
@@ -147,7 +148,7 @@ describe('prune deletion', () => {
   it('deletes in batches and terminates', async () => {
     const { pool, stmts } = stubPool(['a', 'b', 'c', 'd', 'e']);
 
-    const res = await prune(pool, { olderThanMs: RETENTION, batchSize: 2 });
+    const res = await prune(pool, { olderThanMs: RETENTION, namespaces: [DEFAULT_NAMESPACE], batchSize: 2 });
 
     // 2 + 2 + 1 → the short batch ends the loop; a fourth pass would be a bug.
     const runDeletes = stmts.filter((s) => /^DELETE FROM runs/.test(s.sql));
@@ -161,7 +162,7 @@ describe('prune deletion', () => {
   it('leaves steps and logs to the foreign-key cascade', async () => {
     const { pool, stmts } = stubPool(['a']);
 
-    await prune(pool, { olderThanMs: RETENTION });
+    await prune(pool, { olderThanMs: RETENTION , namespaces: [DEFAULT_NAMESPACE]});
 
     // If prune ever grew its own `DELETE FROM logs`, the cascade and the CLI
     // would be two definitions of "delete a run" free to drift apart.
@@ -176,7 +177,7 @@ describe('prune deletion', () => {
   it('runs each batch in its own transaction', async () => {
     const { pool, stmts } = stubPool(['a', 'b']);
 
-    await prune(pool, { olderThanMs: RETENTION, batchSize: 1 });
+    await prune(pool, { olderThanMs: RETENTION, namespaces: [DEFAULT_NAMESPACE], batchSize: 1 });
 
     expect(stmts.filter((s) => s.sql === 'BEGIN')).toHaveLength(3); // 2 + the empty one
     expect(stmts.filter((s) => s.sql === 'COMMIT')).toHaveLength(3);
@@ -185,7 +186,7 @@ describe('prune deletion', () => {
   it('does the run side and the worker side under the same cutoff', async () => {
     const { pool, stmts } = stubPool(['a']);
 
-    await prune(pool, { olderThanMs: RETENTION });
+    await prune(pool, { olderThanMs: RETENTION , namespaces: [DEFAULT_NAMESPACE]});
 
     const workers = find(stmts, /DELETE FROM workers/)!;
     const candidate = find(stmts, /SELECT r\.id FROM runs r/)!;
@@ -197,7 +198,7 @@ describe('prune workers', () => {
   it('deletes offline rows only, past the cutoff', async () => {
     const { pool, stmts } = stubPool();
 
-    await prune(pool, { olderThanMs: RETENTION });
+    await prune(pool, { olderThanMs: RETENTION , namespaces: [DEFAULT_NAMESPACE]});
 
     const workers = find(stmts, /DELETE FROM workers/)!;
     // A merely stale *online* row belongs to the offline-marker loop; deleting
@@ -213,8 +214,8 @@ describe('prune retention floor', () => {
 
     // `--older-than 0` would delete the run whose result a client is still
     // polling for, which is never what anyone means by it.
-    await expect(prune(pool, { olderThanMs: 0 })).rejects.toBeInstanceOf(KernelError);
-    await expect(prune(pool, { olderThanMs: MIN_RETENTION_MS - 1 })).rejects.toThrow(
+    await expect(prune(pool, { olderThanMs: 0 , namespaces: [DEFAULT_NAMESPACE]})).rejects.toBeInstanceOf(KernelError);
+    await expect(prune(pool, { olderThanMs: MIN_RETENTION_MS - 1 , namespaces: [DEFAULT_NAMESPACE]})).rejects.toThrow(
       /at least/,
     );
     expect(stmts).toEqual([]);
@@ -222,6 +223,6 @@ describe('prune retention floor', () => {
 
   it('accepts exactly the floor', async () => {
     const { pool } = stubPool();
-    await expect(prune(pool, { olderThanMs: MIN_RETENTION_MS })).resolves.toBeDefined();
+    await expect(prune(pool, { olderThanMs: MIN_RETENTION_MS , namespaces: [DEFAULT_NAMESPACE]})).resolves.toBeDefined();
   });
 });

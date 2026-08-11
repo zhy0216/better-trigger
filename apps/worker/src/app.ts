@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { Pool } from 'pg';
+import type { Namespace } from '@better-trigger/core';
 import { KernelError, type Kernel, type KernelErrorCode } from '@better-trigger/kernel';
 import type { ApiErrorBody } from './types';
 import { authMiddleware, corsMiddleware } from './middleware';
@@ -25,6 +26,9 @@ export interface AppDeps {
    *  when the caller has neither (an embedded app, a test): the endpoint then
    *  reports the database gauges and zeros. */
   metrics?: MetricsSources;
+  /** Namespaces this daemon serves — /metrics labels its queue/in-flight
+   *  gauges per namespace with these. Absent → default/prod. */
+  namespaces?: readonly Namespace[];
 }
 
 /** HTTP status per kernel error code; anything unknown falls through to 500. */
@@ -92,7 +96,7 @@ export function createApp(deps: AppDeps): Hono {
   v1.route('/', triggerRoutes(deps));
   v1.route('/', runRoutes(deps));
   v1.route('/', dashboardRoutes(deps));
-  v1.route('/', metricsRoutes(deps));
+  v1.route('/', metricsRoutes({ pool: deps.pool, metrics: deps.metrics, namespaces: deps.namespaces }));
 
   app.route('/api/v1', v1);
 

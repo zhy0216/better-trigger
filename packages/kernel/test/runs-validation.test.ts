@@ -9,7 +9,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
-import { KernelError } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
 import { batchTrigger, createRunIn } from '../src/runs';
 
 /** Answers the `SELECT ... FROM tasks` lookup and records every statement. */
@@ -35,6 +35,7 @@ const create = (options: unknown, payload: unknown = null) => {
       payload,
       options: options as never,
       triggerType: 'api',
+      namespace: DEFAULT_NAMESPACE,
     }),
   };
 };
@@ -97,7 +98,9 @@ describe('createRunIn option validation', () => {
     const { run, sqls } = create({ idempotencyKey: 'k', concurrencyKey: 'c', env: 'staging' });
     await run.catch(() => {});
     // The idempotent branch is the one with the conflict target.
-    expect(sqls.some((s) => /ON CONFLICT \(task_id, idempotency_key\)/.test(s))).toBe(true);
+    expect(
+      sqls.some((s) => /ON CONFLICT \(project_id, env, task_id, idempotency_key\)/.test(s)),
+    ).toBe(true);
   });
 
   it('keeps rejecting an out-of-range priority (unchanged)', async () => {
@@ -130,36 +133,36 @@ describe('batchTrigger item cap', () => {
     const items = Array.from({ length: 501 }, () => item);
     // bad_request is what app.ts maps to 400 — the point of the whole check is
     // that 501 items is the caller's mistake, not a dead daemon and a 500.
-    await expect(batchTrigger(refusingPool, items)).rejects.toMatchObject({
+    await expect(batchTrigger(refusingPool, items, DEFAULT_NAMESPACE)).rejects.toMatchObject({
       code: 'bad_request',
       message: 'items must contain at most 500 entries (split larger fan-outs into batches)',
     });
-    await expect(batchTrigger(refusingPool, items)).rejects.toBeInstanceOf(KernelError);
+    await expect(batchTrigger(refusingPool, items, DEFAULT_NAMESPACE)).rejects.toBeInstanceOf(KernelError);
   });
 
   it('lets a batch at the cap through untouched', async () => {
     // Reaching connect() is proof the guard passed; the sentinel stands in for
     // the transaction we do not want to run here.
     await expect(
-      batchTrigger(refusingPool, Array.from({ length: 500 }, () => item)),
+      batchTrigger(refusingPool, Array.from({ length: 500 }, () => item), DEFAULT_NAMESPACE),
     ).rejects.toBe(sentinel);
-    await expect(batchTrigger(refusingPool, [item])).rejects.toBe(sentinel);
-    await expect(batchTrigger(refusingPool, [])).rejects.toBe(sentinel);
+    await expect(batchTrigger(refusingPool, [item], DEFAULT_NAMESPACE)).rejects.toBe(sentinel);
+    await expect(batchTrigger(refusingPool, [], DEFAULT_NAMESPACE)).rejects.toBe(sentinel);
   });
 
   it('honours BETTER_TRIGGER_MAX_BATCH', async () => {
     process.env.BETTER_TRIGGER_MAX_BATCH = '2';
-    await expect(batchTrigger(refusingPool, [item, item, item])).rejects.toMatchObject({
+    await expect(batchTrigger(refusingPool, [item, item, item], DEFAULT_NAMESPACE)).rejects.toMatchObject({
       code: 'bad_request',
       message: 'items must contain at most 2 entries (split larger fan-outs into batches)',
     });
-    await expect(batchTrigger(refusingPool, [item, item])).rejects.toBe(sentinel);
+    await expect(batchTrigger(refusingPool, [item, item], DEFAULT_NAMESPACE)).rejects.toBe(sentinel);
   });
 
   it('falls back to the default when the env value is garbage', async () => {
     for (const raw of ['0', '-5', 'many', '1.5']) {
       process.env.BETTER_TRIGGER_MAX_BATCH = raw;
-      await expect(batchTrigger(refusingPool, [item, item])).rejects.toBe(sentinel);
+      await expect(batchTrigger(refusingPool, [item, item], DEFAULT_NAMESPACE)).rejects.toBe(sentinel);
     }
   });
 });

@@ -66,6 +66,12 @@ export type TriggerResponse = CreatedRun;
 /** POST /api/v1/batch-trigger */
 export interface BatchTriggerRequest {
   items: TriggerItem[];
+  /**
+   * Namespace of the whole batch (projectId/env only — the kernel creates all
+   * items in one scope). Absent → default/prod. Per-item `options` are data;
+   * this is the pair that decides where the runs live (C2).
+   */
+  options?: TriggerOptions;
 }
 export interface BatchTriggerResponse {
   runIds: string[];

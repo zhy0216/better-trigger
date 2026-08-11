@@ -13,6 +13,7 @@
    heartbeat ticks at its 500ms floor.
    ============================================================================= */
 import type { ClaimedRun } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import type { Kernel } from '@better-trigger/kernel';
 import { isRunAborted, task, type RunAbortedError } from 'better-trigger';
 import { describe, expect, it } from 'vitest';
@@ -25,6 +26,7 @@ const RUN: ClaimedRun = {
   attempt: 1,
   maxAttempts: 3,
   codeVersion: null,
+  projectId: 'default',
   env: 'dev',
   steps: [],
   fencingToken: 1,
@@ -97,7 +99,7 @@ describe('heartbeat lease loss', () => {
     // leaseMs/3 < the 500ms heartbeat floor, so the first tick lands at 500ms.
     const handle = await startWorkerRuntime(
       { kernel },
-      { tasks: [slow], concurrency: 1, leaseMs: 1_200 },
+      { tasks: [slow], concurrency: 1, leaseMs: 1_200, namespaces: [DEFAULT_NAMESPACE] },
     );
     const reason = (await aborted) as RunAbortedError;
     await handle.stop();

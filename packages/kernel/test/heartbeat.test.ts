@@ -17,6 +17,7 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { heartbeat } from '../src/queue';
 
 interface Stmt {
@@ -46,7 +47,7 @@ function stubPool(opts: { renewed: string[]; canceled?: string[] }) {
   return { pool, stmts };
 }
 
-const ARGS = { workerId: 'w1', leaseMs: 60_000 };
+const ARGS = { workerId: 'w1', namespaces: [DEFAULT_NAMESPACE], leaseMs: 60_000 };
 
 describe('heartbeat lease loss', () => {
   it('reports nothing lost when every lease renews', async () => {
@@ -122,7 +123,7 @@ describe('heartbeat lease loss', () => {
 
     const renew = stmts.find((s) => /UPDATE queue/.test(s.sql))!;
     expect(renew.sql).toMatch(/SET lease_until = now\(\)/);
-    expect(renew.params).toEqual(['60000', 'w1', ['run_1', 'run_2']]);
+    expect(renew.params).toEqual(['60000', 'w1', ['run_1', 'run_2'], 'default', 'prod']);
     // locked_at keeps its claim-time meaning.
     expect(renew.sql).not.toMatch(/locked_at/);
   });

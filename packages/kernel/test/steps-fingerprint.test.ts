@@ -10,7 +10,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { NonDeterminismError } from '@better-trigger/core';
+import { NonDeterminismError, type Namespace } from '@better-trigger/core';
 import { canonicalStringify, stepFingerprint } from '../src/fingerprint';
 import { reportStep, type ReportStepArgs } from '../src/runs';
 
@@ -32,6 +32,7 @@ const RUNNING_ROW = {
   max_recoveries: 10,
   parent_run_id: null,
   payload: null,
+  project_id: 'default',
   env: 'dev',
   concurrency_key: null,
   priority: 0,
@@ -49,20 +50,21 @@ function makeFake() {
       if (sql.includes('FROM queue')) return { rows: [{ locked_by: 'w1' }], rowCount: 1 };
       if (sql.includes('FROM runs')) return { rows: [RUNNING_ROW], rowCount: 1 };
       if (sql.startsWith('INSERT INTO run_steps')) {
-        const key = `${params[0]}:${params[1]}`;
+        // $1 run id, $2/$3 namespace, $4 seq — the ledger key is run:seq.
+        const key = `${params[0]}:${params[3]}`;
         const existing = table.get(key);
         if (existing && existing.status === 'completed') return { rows: [], rowCount: 0 };
         table.set(key, {
-          status: params[4] as string,
-          kind: params[2] as string,
-          label: (params[3] as string | null) ?? null,
-          output: params[5] ?? null,
-          fingerprint: (params[10] as string | null) ?? null,
+          status: params[6] as string,
+          kind: params[4] as string,
+          label: (params[5] as string | null) ?? null,
+          output: params[7] ?? null,
+          fingerprint: (params[12] as string | null) ?? null,
         });
         return { rows: [], rowCount: 1 };
       }
       if (sql.startsWith('SELECT status, fingerprint')) {
-        const row = table.get(`${params[0]}:${params[1]}`);
+        const row = table.get(`${params[0]}:${params[3]}`);
         return { rows: row ? [{ status: row.status, fingerprint: row.fingerprint }] : [], rowCount: row ? 1 : 0 };
       }
       return { rows: [], rowCount: 0 };
@@ -73,9 +75,12 @@ function makeFake() {
   return { pool, table };
 }
 
+const TEST_NS: Namespace = { projectId: 'default', env: 'dev' };
+
 const report = (fingerprint?: string, status: 'completed' | 'failed' = 'completed') =>
   ({
     runId: 'r1',
+    namespace: TEST_NS,
     seq: 0,
     kind: 'step',
     label: 'work',

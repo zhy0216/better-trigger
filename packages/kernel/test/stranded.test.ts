@@ -21,6 +21,7 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { scanStrandedRuns } from '../src/queue';
 
 function stubPool(rows: Array<{ task_id: string; code_version: string; n: string }>) {
@@ -46,7 +47,7 @@ describe('scanStrandedRuns', () => {
   it('groups by task and version', async () => {
     const { pool } = stubPool([group('send-invoice', 3), group('sync-crm', 1)]);
 
-    const scan = await scanStrandedRuns(pool);
+    const scan = await scanStrandedRuns(pool, [DEFAULT_NAMESPACE]);
 
     expect(scan.groups).toEqual([
       { taskId: 'send-invoice', codeVersion: 'v_gone', count: 3 },
@@ -58,7 +59,7 @@ describe('scanStrandedRuns', () => {
   it('asks only about runs that are due, unclaimed and versioned', async () => {
     const { pool, sqls } = stubPool([]);
 
-    await scanStrandedRuns(pool);
+    await scanStrandedRuns(pool, [DEFAULT_NAMESPACE]);
 
     const sql = sqls[0]!;
     expect(sql).toMatch(/q\.locked_by IS NULL/);
@@ -69,7 +70,7 @@ describe('scanStrandedRuns', () => {
   it('reads the served set off online workers, both manifest shapes', async () => {
     const { pool, sqls } = stubPool([]);
 
-    await scanStrandedRuns(pool);
+    await scanStrandedRuns(pool, [DEFAULT_NAMESPACE]);
 
     const sql = sqls[0]!;
     expect(sql).toMatch(/w\.status = 'online'/);
@@ -86,7 +87,7 @@ describe('scanStrandedRuns', () => {
       Array.from({ length: 21 }, (_, i) => group(`task-${i}`, 21 - i)),
     );
 
-    const scan = await scanStrandedRuns(pool);
+    const scan = await scanStrandedRuns(pool, [DEFAULT_NAMESPACE]);
 
     expect(params[0]![0]).toBe(21);
     expect(scan.groups).toHaveLength(20);
@@ -96,7 +97,7 @@ describe('scanStrandedRuns', () => {
   it('reports nothing when nothing is stranded', async () => {
     const { pool } = stubPool([]);
 
-    const scan = await scanStrandedRuns(pool);
+    const scan = await scanStrandedRuns(pool, [DEFAULT_NAMESPACE]);
 
     expect(scan.groups).toEqual([]);
     expect(scan.truncated).toBe(false);

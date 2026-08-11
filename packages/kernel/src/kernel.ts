@@ -11,6 +11,7 @@ import type {
   ClaimedRun,
   CreatedRun,
   LogEntry,
+  Namespace,
   RunDetailResult,
   RunRecord,
   TriggerItem,
@@ -78,23 +79,35 @@ export interface KernelOptions {
 
 export interface Kernel {
   /* ------------------------------------------------------------- client */
-  /** Create one 'api' run (idempotencyKey honored). */
+  /**
+   * Create one 'api' run (idempotencyKey honored). `args.namespace` is the
+   * run's isolation scope — resolved by the host boundary, never defaulted
+   * here (C2).
+   */
   trigger(args: TriggerArgs): Promise<CreatedRun>;
-  /** Create N 'api' runs in one all-or-nothing transaction. */
-  batchTrigger(items: TriggerItem[]): Promise<{ runIds: string[] }>;
+  /**
+   * Create N 'api' runs in one all-or-nothing transaction, all in the same
+   * namespace.
+   */
+  batchTrigger(items: TriggerItem[], namespace: Namespace): Promise<{ runIds: string[] }>;
   /** Cancel a non-terminal run (terminal → no-op). Wakes a waiting parent. */
-  cancelRun(runId: string): Promise<void>;
+  cancelRun(runId: string, namespace: Namespace): Promise<void>;
   /** Re-run a failed/canceled run as a NEW run (triggerType 'retry'). */
-  retryRun(runId: string): Promise<{ runId: string }>;
+  retryRun(runId: string, namespace: Namespace): Promise<{ runId: string }>;
   /** Full run record. */
-  getRun(runId: string): Promise<RunRecord>;
+  getRun(runId: string, namespace: Namespace): Promise<RunRecord>;
   /** Run + steps + waits + logs (logs capped at 1000). */
-  getRunDetail(runId: string): Promise<RunDetailResult>;
+  getRunDetail(runId: string, namespace: Namespace): Promise<RunDetailResult>;
   /** Poll a run to a terminal state (timeout → latest non-terminal status). */
-  waitForResult(runId: string, opts?: WaitForResultOptions): Promise<WaitResult>;
+  waitForResult(
+    runId: string,
+    namespace: Namespace,
+    opts?: WaitForResultOptions,
+  ): Promise<WaitResult>;
 
   /* ------------------------------------------------------------- worker */
-  /** Register a worker: workers row + task upserts + schedule sync (one tx). */
+  /** Register a worker: workers row + per-namespace task upserts + schedule
+   *  sync (one tx). `namespaces` is the set this worker claims from (C2). */
   registerWorker(args: RegisterWorkerArgs): Promise<{ workerId: string }>;
   /** Mark this worker offline on shutdown (ahead of the offline marker loop). */
   deregisterWorker(args: DeregisterWorkerArgs): Promise<void>;
@@ -104,7 +117,8 @@ export interface Kernel {
   /** Hand this worker's undrained claims back to the queue on shutdown:
    *  claimable at once, attempt untouched (a handover, not a failure). */
   releaseClaims(args: ReleaseClaimsArgs): Promise<ReleaseClaimsResult>;
-  /** Claim up to `limit` due runs (lease + fencing token per claim). */
+  /** Claim up to `limit` due runs (lease + fencing token per claim). Runs are
+   *  filtered to the worker's namespaces (C2). */
   claimRuns(args: ClaimRunsArgs): Promise<ClaimedRun[]>;
   /** Record a memoized step row (fenced). */
   reportStep(args: ReportStepArgs): Promise<void>;
@@ -120,18 +134,21 @@ export interface Kernel {
   failRun(args: FailRunArgs): Promise<FailResult>;
   /** Best-effort log append, any non-terminal run status (no fencing); a run
    *  that is gone or already finished absorbs nothing and raises nothing. */
-  appendLogs(runId: string, entries: LogEntry[]): Promise<void>;
+  appendLogs(runId: string, namespace: Namespace, entries: LogEntry[]): Promise<void>;
 
   /* ------------------------------------------------------ orchestration */
   /** Start the wait/cron/reaper/offline-marker loops (each individually
    *  switchable, all default on), plus the retention GC when
-   *  `retentionMs` is set. Caller must stop(). */
+   *  `retentionMs` is set. Caller must stop(). All loops are scoped to
+   *  `opts.namespaces` (absent ⇒ default namespace). */
   startOrchestrator(opts?: OrchestratorOptions): OrchestratorHandle;
 
   /* --------------------------------------------------------- retention */
   /** Delete terminal runs (steps + logs cascade) and offline worker rows older
-   *  than `olderThanMs`. `dryRun: true` reports and deletes nothing. This is
-   *  what `better-trigger-worker prune` and the GC loop both call. */
+   *  than `olderThanMs`, scoped to `args.namespaces` — a pruner never touches
+   *  another namespace's history (C2). `dryRun: true` reports and deletes
+   *  nothing. This is what `better-trigger-worker prune` and the GC loop both
+   *  call. */
   prune(args: PruneArgs): Promise<PruneResult>;
 }
 
@@ -141,12 +158,12 @@ export function createKernel(opts: KernelOptions): Kernel {
 
   return {
     trigger: (args) => trigger(pool, args),
-    batchTrigger: (items) => batchTrigger(pool, items),
-    cancelRun: (runId) => cancelRun(pool, runId),
-    retryRun: (runId) => retryRun(pool, runId),
-    getRun: (runId) => getRunRecord(pool, runId),
-    getRunDetail: (runId) => getRunDetail(pool, runId),
-    waitForResult: (runId, o) => waitForResult(pool, runId, o),
+    batchTrigger: (items, namespace) => batchTrigger(pool, items, namespace),
+    cancelRun: (runId, namespace) => cancelRun(pool, runId, namespace),
+    retryRun: (runId, namespace) => retryRun(pool, runId, namespace),
+    getRun: (runId, namespace) => getRunRecord(pool, runId, namespace),
+    getRunDetail: (runId, namespace) => getRunDetail(pool, runId, namespace),
+    waitForResult: (runId, namespace, o) => waitForResult(pool, runId, namespace, o),
 
     registerWorker: (args) => registerWorker(pool, args),
     deregisterWorker: (args) => deregisterWorker(pool, args),
@@ -159,7 +176,7 @@ export function createKernel(opts: KernelOptions): Kernel {
     batchTriggerChild: (args) => batchTriggerChild(pool, args),
     completeRun: (args) => completeRun(pool, args),
     failRun: (args) => failRun(pool, args),
-    appendLogs: (runId, entries) => appendLogs(pool, runId, entries),
+    appendLogs: (runId, namespace, entries) => appendLogs(pool, runId, namespace, entries),
 
     startOrchestrator: (o) => startOrchestrator(pool, logger, o),
     prune: (args) => prune(pool, args),

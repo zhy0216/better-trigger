@@ -53,10 +53,12 @@ export {
   TaskNotFoundError,
   isNonDeterminismError,
 } from '@better-trigger/core';
+export { DEFAULT_NAMESPACE } from '@better-trigger/core';
 export type {
   CreatedRun,
   KernelErrorCode,
   LogRecord,
+  Namespace,
   RunDetailResult,
   RunRecord,
   RunStepRecord,

@@ -11,7 +11,7 @@
    module's — every one of its exit paths goes through stop().
    ============================================================================= */
 import { createHash } from 'node:crypto';
-import type { ClaimedRun, RetryPolicy } from '@better-trigger/core';
+import type { ClaimedRun, Namespace, RetryPolicy } from '@better-trigger/core';
 import type {
   Kernel,
   OrchestratorCounters,
@@ -55,6 +55,14 @@ export interface StartOptions {
    * is what makes that visible rather than silent).
    */
   pinCodeVersion?: boolean;
+  /**
+   * Namespaces this worker serves (from `--namespace` /
+   * BETTER_TRIGGER_NAMESPACES, resolved by the CLI to default/prod when
+   * unset). Registration upserts the task definitions in every one of them,
+   * and claim/heartbeat/orchestrator loops are scoped to them — a worker
+   * configured for staging never claims or resumes a prod run (C2).
+   */
+  namespaces: readonly Namespace[];
 }
 
 /** Handle returned by startWorkerRuntime(); lets callers stop it. */
@@ -140,11 +148,17 @@ export async function startWorkerRuntime(
     runtime: 'self-host',
     concurrency,
     tasks: manifests,
+    namespaces: options.namespaces,
   });
 
   // Background loops (wait resumption, cron, lease reaper, offline markers)
-  // run inside the worker process and stop with it.
-  const orchestrator = kernel.startOrchestrator(deps.orchestrator);
+  // run inside the worker process and stop with it. Every loop is scoped to
+  // this worker's namespaces (C2); the CLI-resolved list is authoritative over
+  // any orchestrator-opts default.
+  const orchestrator = kernel.startOrchestrator({
+    ...deps.orchestrator,
+    namespaces: options.namespaces,
+  });
 
   // Runs currently executing, keyed by run id → their Executor (for cancels).
   const inFlight = new Map<string, Executor>();
@@ -162,6 +176,7 @@ export async function startWorkerRuntime(
           workerId,
           runIds: [...inFlight.keys()],
           leaseMs,
+          namespaces: options.namespaces,
         });
         counters.consecutiveHeartbeatErrors = 0;
         for (const runId of res.cancelRunIds) {
@@ -207,6 +222,9 @@ export async function startWorkerRuntime(
           taskIds,
           limit: 1,
           leaseMs,
+          // The claim scan filters runs by this worker's (project_id, env)
+          // pairs — a staging worker can never pick up a prod run (C2).
+          namespaces: options.namespaces,
           // Undefined (not an empty array) when pinning is off: the kernel keys
           // "filter or not" off the field's presence.
           codeVersions: options.pinCodeVersion ? taskVersions : undefined,
@@ -331,7 +349,10 @@ export async function startWorkerRuntime(
    */
   async function handBack(): Promise<void> {
     try {
-      const { releasedRunIds } = await kernel.releaseClaims({ workerId });
+      const { releasedRunIds } = await kernel.releaseClaims({
+        workerId,
+        namespaces: options.namespaces,
+      });
       if (releasedRunIds.length > 0) {
         // Not an error, but it is the record of which runs changed hands
         // mid-flight — the first thing anyone asks after a rough deploy.

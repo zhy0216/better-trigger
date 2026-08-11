@@ -177,7 +177,7 @@ async function main(s: Scenario): Promise<void> {
 
   /* -- reaper terminal-fails the child, parent wakes + completes ------------ */
   proc = spawnExecutor();
-  const result = await client.waitForResult(handle.id, { timeoutMs: 60_000 });
+  const result = await client.waitForResult(handle.id, undefined, { timeoutMs: 60_000 });
 
   s.assert(result.status === 'completed', `parent should complete, got '${result.status}'`);
   s.ok('parent completed after the worker was lost');

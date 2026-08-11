@@ -61,6 +61,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import {
+  assertNamespace,
   computeBackoffMs,
   KernelError,
   NonDeterminismError,
@@ -73,6 +74,7 @@ import {
   type LogEntry,
   type LogLevel,
   type LogRecord,
+  type Namespace,
   type RetryPolicy,
   type RunDetailResult,
   type RunRecord,
@@ -192,6 +194,7 @@ export interface RunRow {
   max_recoveries: number;
   parent_run_id: string | null;
   payload: unknown;
+  project_id: string;
   env: string;
   concurrency_key: string | null;
   /** Copy of the queue row's priority, kept on runs so it survives the queue
@@ -204,15 +207,16 @@ export interface RunRow {
 
 const RUN_ROW_COLS = `id, task_id, status, attempt, max_attempts,
             recoveries, max_recoveries, parent_run_id,
-            payload, env, concurrency_key, priority, code_version, fencing_token`;
+            payload, project_id, env, concurrency_key, priority, code_version, fencing_token`;
 
 export async function getRunRow(
   db: Pool | PoolClient,
   id: string,
+  namespace: Namespace,
 ): Promise<RunRow | null> {
   const res = await db.query<RunRow>(
-    `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1`,
-    [id],
+    `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
+    [id, namespace.projectId, namespace.env],
   );
   return res.rows[0] ?? null;
 }
@@ -224,10 +228,11 @@ export async function getRunRow(
 export async function lockRunRow(
   client: PoolClient,
   id: string,
+  namespace: Namespace,
 ): Promise<RunRow | null> {
   const res = await client.query<RunRow>(
-    `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1 FOR UPDATE`,
-    [id],
+    `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
+    [id, namespace.projectId, namespace.env],
   );
   return res.rows[0] ?? null;
 }
@@ -243,10 +248,11 @@ export async function lockRunRow(
 export async function tryLockRunRow(
   client: PoolClient,
   id: string,
+  namespace: Namespace,
 ): Promise<RunRow | null> {
   const res = await client.query<RunRow>(
-    `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1 FOR UPDATE SKIP LOCKED`,
-    [id],
+    `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE SKIP LOCKED`,
+    [id, namespace.projectId, namespace.env],
   );
   return res.rows[0] ?? null;
 }
@@ -255,10 +261,11 @@ export async function tryLockRunRow(
 async function lockQueueRow(
   client: PoolClient,
   runId: string,
+  namespace: Namespace,
 ): Promise<{ locked_by: string | null } | null> {
   const res = await client.query<{ locked_by: string | null }>(
-    `SELECT locked_by FROM queue WHERE run_id = $1 FOR UPDATE`,
-    [runId],
+    `SELECT locked_by FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
+    [runId, namespace.projectId, namespace.env],
   );
   return res.rows[0] ?? null;
 }
@@ -276,9 +283,10 @@ async function assertOwnedRunning(
   runId: string,
   workerId: string,
   fencingToken: number,
+  namespace: Namespace,
 ): Promise<RunRow> {
-  const owner = await lockQueueRow(client, runId);
-  const run = await lockRunRow(client, runId);
+  const owner = await lockQueueRow(client, runId, namespace);
+  const run = await lockRunRow(client, runId, namespace);
   if (!run) throw new KernelError('not_found', `run ${runId} not found`);
   if (run.status !== 'running') {
     throw new RunNotRunningError(`run ${runId} is ${run.status}`);
@@ -305,7 +313,12 @@ export interface CreateRunArgs {
   parentRunId?: string | null;
   /** Defaults to task.retry policy. */
   retry?: RetryPolicy;
-  env?: string;
+  /**
+   * The namespace the run is created in — resolved once by the host boundary,
+   * never inferred here. Child runs inherit their parent's namespace, retries
+   * inherit the source run's (C2).
+   */
+  namespace: Namespace;
   /** Require the task to exist (trigger API). */
   requireTask?: boolean;
 }
@@ -322,6 +335,7 @@ export async function createRunIn(
   client: PoolClient,
   args: CreateRunArgs,
 ): Promise<CreatedRun> {
+  assertNamespace(args.namespace);
   // A non-object `options` (a JSON string, an array) would otherwise have every
   // key read as undefined — the run silently loses the caller's intent.
   if (args.options != null && (typeof args.options !== 'object' || Array.isArray(args.options))) {
@@ -352,10 +366,11 @@ export async function createRunIn(
   // a second trigger with idempotencyKey '' hits the partial unique index
   // runs_task_idempotency_uniq without a DO NOTHING to absorb it → pg 23505,
   // which is not a KernelError and would surface as a 500. Same class of
-  // mismatch for concurrencyKey (all '' runs silently share one group) and env
-  // (a run parked in an environment no filter names). No key has a meaningful
-  // empty spelling, so reject early rather than let it reach the database.
-  for (const key of ['idempotencyKey', 'concurrencyKey', 'env'] as const) {
+  // mismatch for concurrencyKey (all '' runs silently share one group). No key
+  // has a meaningful empty spelling, so reject early rather than let it reach
+  // the database. (env/projectId are validated by assertNamespace — the run's
+  // namespace comes from args.namespace, never from these options.)
+  for (const key of ['idempotencyKey', 'concurrencyKey', 'env', 'projectId'] as const) {
     if (opts[key] == null) continue;
     if (typeof opts[key] !== 'string') {
       throw new KernelError('bad_request', `${key} must be a string`);
@@ -382,18 +397,23 @@ export async function createRunIn(
 
   // Resolve task config (retry policy, concurrency limit/key default, and the
   // code version currently registered for the task — stamped on the run below).
+  // Scoped to the run's namespace: a staging trigger must never resolve the
+  // prod task's retry/concurrency/version (C2).
   const taskRes = await client.query<{
     id: string;
     retry: RetryPolicy | null;
     concurrency_limit: number | null;
     latest_code_version: string | null;
   }>(
-    `SELECT id, retry, concurrency_limit, latest_code_version FROM tasks WHERE id = $1`,
-    [args.taskId],
+    `SELECT id, retry, concurrency_limit, latest_code_version
+       FROM tasks WHERE project_id = $1 AND env = $2 AND id = $3`,
+    [args.namespace.projectId, args.namespace.env, args.taskId],
   );
   const task = taskRes.rows[0];
   if (!task && args.requireTask) {
-    throw new TaskNotFoundError(`task ${args.taskId} not registered`);
+    throw new TaskNotFoundError(
+      `task ${args.taskId} not registered in ${args.namespace.projectId}/${args.namespace.env}`,
+    );
   }
 
   const policy = resolveRetryPolicy(args.retry ?? task?.retry ?? undefined);
@@ -401,7 +421,8 @@ export async function createRunIn(
   const concurrencyKey = hasLimit
     ? opts.concurrencyKey ?? args.taskId
     : opts.concurrencyKey ?? null;
-  const env = opts.env ?? args.env ?? 'prod';
+  // The namespace is explicit on the args — never defaulted here (C2).
+  const { projectId, env } = args.namespace;
   // Resolved once and written to BOTH the runs row and the queue row: the queue
   // row is what the claim scan orders by, the runs copy is what outlives it
   // (the queue row is deleted at terminal / suspend), so a manual retry can
@@ -429,27 +450,32 @@ export async function createRunIn(
   const id = genRunId();
 
   // Idempotency is enforced atomically by the partial unique index
-  // (task_id, idempotency_key) WHERE idempotency_key IS NOT NULL. INSERT ...
-  // ON CONFLICT DO NOTHING wins the race; a loser gets no row back and reads the
-  // existing run. (Without a key there is no conflict target, so insert plainly.)
+  // (project_id, env, task_id, idempotency_key) WHERE idempotency_key IS NOT
+  // NULL — namespace-scoped, so the same task + key in prod and staging creates
+  // two independent runs (C2). INSERT ... ON CONFLICT DO NOTHING wins the race;
+  // a loser gets no row back and reads the existing run. (Without a key there
+  // is no conflict target, so insert plainly.)
   const insertSql = opts.idempotencyKey
     ? `INSERT INTO runs
-         (id, task_id, status, payload, trigger_type, parent_run_id,
+         (id, project_id, env, task_id, status, payload, trigger_type, parent_run_id,
           idempotency_key, concurrency_key, priority, attempt, max_attempts,
-          recoveries, max_recoveries, env, code_version,
+          recoveries, max_recoveries, code_version,
           queued_at, created_at, updated_at)
-       VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,1,$9,0,$10,$11,$12, now(), now(), now())
-       ON CONFLICT (task_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+       VALUES ($1,$2,$3,$4,'queued',$5,$6,$7,$8,$9,$10,1,$11,0,$12,$13, now(), now(), now())
+       ON CONFLICT (project_id, env, task_id, idempotency_key)
+         WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING id`
     : `INSERT INTO runs
-         (id, task_id, status, payload, trigger_type, parent_run_id,
+         (id, project_id, env, task_id, status, payload, trigger_type, parent_run_id,
           idempotency_key, concurrency_key, priority, attempt, max_attempts,
-          recoveries, max_recoveries, env, code_version,
+          recoveries, max_recoveries, code_version,
           queued_at, created_at, updated_at)
-       VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,1,$9,0,$10,$11,$12, now(), now(), now())
+       VALUES ($1,$2,$3,$4,'queued',$5,$6,$7,$8,$9,$10,1,$11,0,$12,$13, now(), now(), now())
        RETURNING id`;
   const inserted = await client.query<{ id: string }>(insertSql, [
     id,
+    projectId,
+    env,
     args.taskId,
     payloadJson,
     args.triggerType,
@@ -461,7 +487,6 @@ export async function createRunIn(
     // Infrastructure budget, not a retry policy: it is an operator setting
     // (BETTER_TRIGGER_MAX_RECOVERIES), not something a trigger call chooses.
     maxRecoveries(),
-    env,
     // The version registered when the run was created — NOT a pin: claimRuns
     // does not filter on it, so a redeployed worker still picks this run up.
     // It exists so "which code shape was this run's ledger written against?"
@@ -470,11 +495,14 @@ export async function createRunIn(
   ]);
 
   // No row returned ⇒ idempotency conflict: return the pre-existing run and do
-  // NOT enqueue (the original trigger already did).
+  // NOT enqueue (the original trigger already did). The lookup is namespace-
+  // scoped like the unique index that produced the conflict (C2).
   if (inserted.rows.length === 0) {
     const existing = await client.query<{ id: string }>(
-      `SELECT id FROM runs WHERE task_id = $1 AND idempotency_key = $2 LIMIT 1`,
-      [args.taskId, opts.idempotencyKey],
+      `SELECT id FROM runs
+        WHERE project_id = $1 AND env = $2 AND task_id = $3 AND idempotency_key = $4
+        LIMIT 1`,
+      [projectId, env, args.taskId, opts.idempotencyKey],
     );
     if (existing.rows[0]) {
       return { runId: existing.rows[0].id, idempotent: true };
@@ -488,7 +516,7 @@ export async function createRunIn(
     availableAt,
     priority,
     concurrencyKey,
-    env,
+    namespace: args.namespace,
   });
 
   return { runId: id, idempotent: false };
@@ -502,6 +530,8 @@ export interface TriggerArgs {
   taskId: string;
   payload: unknown;
   options?: TriggerOptions;
+  /** The namespace the run is created in (resolved by the host boundary). */
+  namespace: Namespace;
 }
 
 /** Create one 'api' run for a registered task (TaskNotFoundError otherwise). */
@@ -509,23 +539,31 @@ export async function trigger(pool: Pool, args: TriggerArgs): Promise<CreatedRun
   if (typeof args.taskId !== 'string' || args.taskId.length === 0) {
     throw new KernelError('bad_request', 'taskId must be a non-empty string');
   }
+  assertNamespace(args.namespace);
   return createRun(pool, {
     taskId: args.taskId,
     payload: args.payload,
     options: args.options,
     triggerType: 'api',
+    namespace: args.namespace,
     requireTask: true,
   });
 }
 
-/** Create N 'api' runs in one all-or-nothing transaction. */
+/**
+ * Create N 'api' runs in one all-or-nothing transaction. The whole batch shares
+ * one namespace — request env/project are data, and mixing namespaces inside
+ * one atomic batch would make the idempotency semantics ambiguous.
+ */
 export async function batchTrigger(
   pool: Pool,
   items: TriggerItem[],
+  namespace: Namespace,
 ): Promise<{ runIds: string[] }> {
   if (!Array.isArray(items)) {
     throw new KernelError('bad_request', 'items must be an array');
   }
+  assertNamespace(namespace);
   // Before the per-item walk: an array with 100k entries should not be iterated
   // twice just to be refused.
   assertBatchSize(items);
@@ -542,6 +580,7 @@ export async function batchTrigger(
         payload: item.payload,
         options: item.options,
         triggerType: 'api',
+        namespace,
         requireTask: true,
       });
       ids.push(created.runId);
@@ -557,6 +596,8 @@ export async function batchTrigger(
 
 export interface ReportStepArgs {
   runId: string;
+  /** The run's namespace (from the ClaimedRun) — every write re-scopes on it. */
+  namespace: Namespace;
   seq: number;
   kind: StepKind;
   label?: string;
@@ -576,8 +617,15 @@ export interface ReportStepArgs {
 export type StepWriteArgs = Omit<ReportStepArgs, 'workerId' | 'fencingToken'>;
 
 export async function reportStep(pool: Pool, args: ReportStepArgs): Promise<void> {
+  assertNamespace(args.namespace);
   await withTx(pool, async (client) => {
-    await assertOwnedRunning(client, args.runId, args.workerId, args.fencingToken);
+    await assertOwnedRunning(
+      client,
+      args.runId,
+      args.workerId,
+      args.fencingToken,
+      args.namespace,
+    );
     await upsertStep(client, args);
   });
 }
@@ -608,8 +656,8 @@ export async function reportStep(pool: Pool, args: ReportStepArgs): Promise<void
 export async function upsertStep(client: PoolClient, args: StepWriteArgs): Promise<void> {
   const res = await client.query(
     `INSERT INTO run_steps
-       (run_id, seq, kind, label, status, output, error, attempt, started_at, finished_at, fingerprint)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       (run_id, project_id, env, seq, kind, label, status, output, error, attempt, started_at, finished_at, fingerprint)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      ON CONFLICT (run_id, seq) DO UPDATE
        SET kind = EXCLUDED.kind,
            label = EXCLUDED.label,
@@ -623,6 +671,8 @@ export async function upsertStep(client: PoolClient, args: StepWriteArgs): Promi
        WHERE run_steps.status <> 'completed'`,
     [
       args.runId,
+      args.namespace.projectId,
+      args.namespace.env,
       args.seq,
       args.kind,
       args.label ?? null,
@@ -640,8 +690,9 @@ export async function upsertStep(client: PoolClient, args: StepWriteArgs): Promi
   // Conflict on a 'completed' row: the WHERE clause refused the update. Same
   // transaction, so the row below is the row the INSERT conflicted with.
   const existing = await client.query<{ status: string; fingerprint: string | null }>(
-    `SELECT status, fingerprint FROM run_steps WHERE run_id = $1 AND seq = $2`,
-    [args.runId, args.seq],
+    `SELECT status, fingerprint FROM run_steps
+      WHERE run_id = $1 AND project_id = $2 AND env = $3 AND seq = $4`,
+    [args.runId, args.namespace.projectId, args.namespace.env, args.seq],
   );
   const row = existing.rows[0];
   // Defensive: no row or a non-completed row means the write actually applied
@@ -670,6 +721,8 @@ export async function upsertStep(client: PoolClient, args: StepWriteArgs): Promi
 
 export interface SuspendRunArgs {
   runId: string;
+  /** The run's namespace (from the ClaimedRun). */
+  namespace: Namespace;
   seq: number;
   label?: string;
   kind: 'duration' | 'until';
@@ -692,8 +745,15 @@ export async function suspendRun(
   pool: Pool,
   args: SuspendRunArgs,
 ): Promise<{ resumed: boolean }> {
+  assertNamespace(args.namespace);
   return withTx(pool, async (client) => {
-    await assertOwnedRunning(client, args.runId, args.workerId, args.fencingToken);
+    await assertOwnedRunning(
+      client,
+      args.runId,
+      args.workerId,
+      args.fencingToken,
+      args.namespace,
+    );
     const resumeAt = new Date(args.resumeAt);
 
     if (resumeAt.getTime() <= Date.now()) {
@@ -701,6 +761,7 @@ export async function suspendRun(
       // the executor's fingerprint (the waits path below would carry it too).
       await upsertStep(client, {
         runId: args.runId,
+        namespace: args.namespace,
         seq: args.seq,
         kind: 'wait',
         label: args.label,
@@ -715,15 +776,24 @@ export async function suspendRun(
     }
 
     await client.query(
-      `INSERT INTO waits (run_id, step_seq, kind, resume_at, fingerprint, status, created_at)
-       VALUES ($1,$2,$3,$4,$5,'pending', now())`,
-      [args.runId, args.seq, args.kind, resumeAt, args.fingerprint ?? null],
+      `INSERT INTO waits (run_id, project_id, env, step_seq, kind, resume_at, fingerprint, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'pending', now())`,
+      [
+        args.runId,
+        args.namespace.projectId,
+        args.namespace.env,
+        args.seq,
+        args.kind,
+        resumeAt,
+        args.fingerprint ?? null,
+      ],
     );
     await client.query(
-      `UPDATE runs SET status = 'waiting', updated_at = now() WHERE id = $1`,
-      [args.runId],
+      `UPDATE runs SET status = 'waiting', updated_at = now()
+        WHERE id = $1 AND project_id = $2 AND env = $3`,
+      [args.runId, args.namespace.projectId, args.namespace.env],
     );
-    await removeFromQueue(client, args.runId);
+    await removeFromQueue(client, args.runId, args.namespace);
     return { resumed: false };
   });
 }
@@ -734,6 +804,8 @@ export async function suspendRun(
 
 export interface WaitForChildRunArgs {
   runId: string;
+  /** The parent run's namespace — the child is created in the same one (C2). */
+  namespace: Namespace;
   seq: number;
   label?: string;
   taskId: string;
@@ -751,19 +823,22 @@ export async function waitForChildRun(
   pool: Pool,
   args: WaitForChildRunArgs,
 ): Promise<{ childRunId: string }> {
+  assertNamespace(args.namespace);
   return withTx(pool, async (client) => {
     const parent = await assertOwnedRunning(
       client,
       args.runId,
       args.workerId,
       args.fencingToken,
+      args.namespace,
     );
 
     // Idempotent on replay: a completed wait step at this seq means the child
     // already ran; the SDK should normally hit the snapshot, but guard anyway.
     const existingStep = await client.query<{ output: unknown }>(
-      `SELECT output FROM run_steps WHERE run_id = $1 AND seq = $2 AND status = 'completed'`,
-      [args.runId, args.seq],
+      `SELECT output FROM run_steps
+        WHERE run_id = $1 AND project_id = $2 AND env = $3 AND seq = $4 AND status = 'completed'`,
+      [args.runId, args.namespace.projectId, args.namespace.env, args.seq],
     );
     if (existingStep.rows[0]) {
       const out = existingStep.rows[0].output as { id?: string } | null;
@@ -772,8 +847,9 @@ export async function waitForChildRun(
     // Or a pending wait already created the child.
     const existingWait = await client.query<{ child_run_id: string | null }>(
       `SELECT child_run_id FROM waits
-        WHERE run_id = $1 AND step_seq = $2 AND kind = 'run' AND status = 'pending'`,
-      [args.runId, args.seq],
+        WHERE run_id = $1 AND project_id = $2 AND env = $3
+          AND step_seq = $4 AND kind = 'run' AND status = 'pending'`,
+      [args.runId, args.namespace.projectId, args.namespace.env, args.seq],
     );
     if (existingWait.rows[0]?.child_run_id) {
       return { childRunId: existingWait.rows[0].child_run_id };
@@ -785,19 +861,27 @@ export async function waitForChildRun(
       options: args.options,
       triggerType: 'subtask',
       parentRunId: args.runId,
-      env: parent.env,
+      namespace: { projectId: parent.project_id, env: parent.env },
     });
 
     await client.query(
-      `INSERT INTO waits (run_id, step_seq, kind, child_run_id, fingerprint, status, created_at)
-       VALUES ($1,$2,'run',$3,$4,'pending', now())`,
-      [args.runId, args.seq, child.runId, args.fingerprint ?? null],
+      `INSERT INTO waits (run_id, project_id, env, step_seq, kind, child_run_id, fingerprint, status, created_at)
+       VALUES ($1,$2,$3,$4,'run',$5,$6,'pending', now())`,
+      [
+        args.runId,
+        args.namespace.projectId,
+        args.namespace.env,
+        args.seq,
+        child.runId,
+        args.fingerprint ?? null,
+      ],
     );
     await client.query(
-      `UPDATE runs SET status = 'waiting', updated_at = now() WHERE id = $1`,
-      [args.runId],
+      `UPDATE runs SET status = 'waiting', updated_at = now()
+        WHERE id = $1 AND project_id = $2 AND env = $3`,
+      [args.runId, args.namespace.projectId, args.namespace.env],
     );
-    await removeFromQueue(client, args.runId);
+    await removeFromQueue(client, args.runId, args.namespace);
 
     return { childRunId: child.runId };
   });
@@ -809,6 +893,8 @@ export async function waitForChildRun(
 
 export interface BatchTriggerChildArgs {
   runId: string;
+  /** The parent run's namespace — the children are created in the same one. */
+  namespace: Namespace;
   seq: number;
   label?: string;
   items: TriggerItem[];
@@ -823,18 +909,21 @@ export async function batchTriggerChild(
   // Same single-tx exposure as the client-side batchTrigger — a fan-out from
   // inside a task can park exactly the same long write tx on the queue.
   assertBatchSize(args.items);
+  assertNamespace(args.namespace);
   return withTx(pool, async (client) => {
     const parent = await assertOwnedRunning(
       client,
       args.runId,
       args.workerId,
       args.fencingToken,
+      args.namespace,
     );
 
     // Idempotent: if the step row already exists, return its recorded runIds.
     const existing = await client.query<{ output: unknown }>(
-      `SELECT output FROM run_steps WHERE run_id = $1 AND seq = $2`,
-      [args.runId, args.seq],
+      `SELECT output FROM run_steps
+        WHERE run_id = $1 AND project_id = $2 AND env = $3 AND seq = $4`,
+      [args.runId, args.namespace.projectId, args.namespace.env, args.seq],
     );
     if (existing.rows[0]) {
       const out = existing.rows[0].output as { runIds?: string[] } | null;
@@ -849,13 +938,14 @@ export async function batchTriggerChild(
         options: item.options,
         triggerType: 'subtask',
         parentRunId: args.runId,
-        env: parent.env,
+        namespace: { projectId: parent.project_id, env: parent.env },
       });
       runIds.push(child.runId);
     }
 
     await upsertStep(client, {
       runId: args.runId,
+      namespace: args.namespace,
       seq: args.seq,
       kind: 'batch-trigger',
       label: args.label,
@@ -895,32 +985,41 @@ async function wakeParentIfWaiting(
   // only be locked after the parent's queue + runs rows (lock order 1→2→3).
   // fingerprint rides along: the executor computed it (taskId + payload +
   // options, C1) when the wait was created, and the step row must carry that
-  // exact value so the parent's replay matches it.
+  // exact value so the parent's replay matches it. project_id/env ride along
+  // too — the parent's rows are re-acquired scoped to its namespace (C2).
   const waitRes = await client.query<{
     id: number;
     run_id: string;
+    project_id: string;
+    env: string;
     step_seq: number;
     fingerprint: string | null;
   }>(
-    `SELECT id, run_id, step_seq, fingerprint FROM waits
+    `SELECT id, run_id, project_id, env, step_seq, fingerprint FROM waits
       WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'`,
     [childRunId],
   );
   const wait = waitRes.rows[0];
   if (!wait) return;
 
+  const parentNs: Namespace = { projectId: wait.project_id, env: wait.env };
   // Parent rows in canonical order: queue row (absent while the parent is
   // waiting → 0 rows, still ordered), runs row, then the wait row — re-checked
   // under its lock since it was located with a plain read above.
-  await lockQueueRow(client, wait.run_id);
-  const parent = await lockRunRow(client, wait.run_id);
+  await lockQueueRow(client, wait.run_id, parentNs);
+  const parent = await lockRunRow(client, wait.run_id, parentNs);
   const lockedWait = await client.query<{ id: number }>(
-    `SELECT id FROM waits WHERE id = $1 AND status = 'pending' FOR UPDATE`,
-    [wait.id],
+    `SELECT id FROM waits WHERE id = $1 AND status = 'pending' FOR UPDATE
+       AND project_id = $2 AND env = $3`,
+    [wait.id, parentNs.projectId, parentNs.env],
   );
   if (!lockedWait.rows[0]) return; // canceled/completed while ordering locks
 
-  await client.query(`UPDATE waits SET status = 'completed' WHERE id = $1`, [wait.id]);
+  await client.query(
+    `UPDATE waits SET status = 'completed' WHERE id = $1
+       AND project_id = $2 AND env = $3`,
+    [wait.id, parentNs.projectId, parentNs.env],
+  );
 
   const stepOutput: { id: string; ok: boolean; output?: unknown; error?: SerializedError } =
     { id: childRunId, ok: result.ok };
@@ -932,6 +1031,7 @@ async function wakeParentIfWaiting(
   // fingerprint is an idempotent no-op, a differing one rejects the write.
   await upsertStep(client, {
     runId: wait.run_id,
+    namespace: parentNs,
     seq: wait.step_seq,
     kind: 'trigger-and-wait',
     label: undefined, // the ledger row stores NULL (upsertStep binds ?? null)
@@ -946,8 +1046,9 @@ async function wakeParentIfWaiting(
   // Re-enqueue the parent.
   if (parent && parent.status === 'waiting') {
     await client.query(
-      `UPDATE runs SET status = 'queued', updated_at = now() WHERE id = $1`,
-      [wait.run_id],
+      `UPDATE runs SET status = 'queued', updated_at = now()
+        WHERE id = $1 AND project_id = $2 AND env = $3`,
+      [wait.run_id, parentNs.projectId, parentNs.env],
     );
     // Same reason as the timer-wait resume in the orchestrator: waitForChildRun
     // deleted the parent's queue row, and enqueue() defaults an omitted priority
@@ -959,7 +1060,7 @@ async function wakeParentIfWaiting(
       availableAt: new Date(),
       priority: parent.priority,
       concurrencyKey: parent.concurrency_key,
-      env: parent.env,
+      namespace: parentNs,
     });
   }
 }
@@ -975,16 +1076,18 @@ export async function terminalFail(
   run: RunRow,
   error: SerializedError,
 ): Promise<void> {
+  const ns: Namespace = { projectId: run.project_id, env: run.env };
   await client.query(
     `UPDATE runs
         SET status = 'failed', error = $2, finished_at = now(), updated_at = now()
-      WHERE id = $1`,
-    [run.id, JSON.stringify(error)],
+      WHERE id = $1 AND project_id = $3 AND env = $4`,
+    [run.id, JSON.stringify(error), ns.projectId, ns.env],
   );
-  await removeFromQueue(client, run.id);
+  await removeFromQueue(client, run.id, ns);
   await client.query(
-    `UPDATE waits SET status = 'canceled' WHERE run_id = $1 AND status = 'pending'`,
-    [run.id],
+    `UPDATE waits SET status = 'canceled' WHERE run_id = $1 AND status = 'pending'
+       AND project_id = $2 AND env = $3`,
+    [run.id, ns.projectId, ns.env],
   );
   if (run.parent_run_id) {
     await wakeParentIfWaiting(client, run.id, { ok: false, error });
@@ -996,23 +1099,27 @@ export interface CompleteRunArgs {
   output: unknown;
   workerId: string;
   fencingToken: number;
+  /** The run's namespace (from the ClaimedRun). */
+  namespace: Namespace;
 }
 
 export async function completeRun(pool: Pool, args: CompleteRunArgs): Promise<void> {
+  assertNamespace(args.namespace);
   await withTx(pool, async (client) => {
     const run = await assertOwnedRunning(
       client,
       args.runId,
       args.workerId,
       args.fencingToken,
+      args.namespace,
     );
     await client.query(
       `UPDATE runs
           SET status = 'completed', output = $2, finished_at = now(), updated_at = now()
-        WHERE id = $1`,
-      [args.runId, JSON.stringify(args.output ?? null)],
+        WHERE id = $1 AND project_id = $3 AND env = $4`,
+      [args.runId, JSON.stringify(args.output ?? null), args.namespace.projectId, args.namespace.env],
     );
-    await removeFromQueue(client, args.runId);
+    await removeFromQueue(client, args.runId, args.namespace);
     if (run.parent_run_id) {
       await wakeParentIfWaiting(client, args.runId, { ok: true, output: args.output });
     }
@@ -1027,6 +1134,8 @@ export interface FailRunArgs {
   abort?: boolean;
   workerId: string;
   fencingToken: number;
+  /** The run's namespace (from the ClaimedRun). */
+  namespace: Namespace;
 }
 
 export interface FailResult {
@@ -1035,12 +1144,14 @@ export interface FailResult {
 }
 
 export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult> {
+  assertNamespace(args.namespace);
   return withTx(pool, async (client) => {
     const run = await assertOwnedRunning(
       client,
       args.runId,
       args.workerId,
       args.fencingToken,
+      args.namespace,
     );
     const maxAttempts = args.retry?.maxAttempts ?? run.max_attempts;
 
@@ -1056,26 +1167,31 @@ export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult
     await client.query(
       `UPDATE runs
           SET status = 'queued', attempt = attempt + 1, error = $2, updated_at = now()
-        WHERE id = $1`,
-      [args.runId, JSON.stringify(args.error)],
+        WHERE id = $1 AND project_id = $3 AND env = $4`,
+      [args.runId, JSON.stringify(args.error), args.namespace.projectId, args.namespace.env],
     );
     // Keep the queue row but release the claim (owner + lease) and push
     // availability out. runs.fencing_token stays — it only grows via claims.
     await client.query(
       `UPDATE queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = $2
-        WHERE run_id = $1`,
-      [args.runId, nextAt],
+        WHERE run_id = $1 AND project_id = $3 AND env = $4`,
+      [args.runId, nextAt, args.namespace.projectId, args.namespace.env],
     );
     return { willRetry: true, nextAttemptAt: nextAt.toISOString() };
   });
 }
 
-export async function cancelRun(pool: Pool, runId: string): Promise<void> {
+export async function cancelRun(
+  pool: Pool,
+  runId: string,
+  namespace: Namespace,
+): Promise<void> {
+  assertNamespace(namespace);
   await withTx(pool, async (client) => {
     // Canonical lock order: queue row (if any) before the runs row, so cancel
     // can never AB-BA against a fenced op holding the claim (see file header).
-    await lockQueueRow(client, runId);
-    const run = await lockRunRow(client, runId);
+    await lockQueueRow(client, runId, namespace);
+    const run = await lockRunRow(client, runId, namespace);
     if (!run) throw new KernelError('not_found', `run ${runId} not found`);
     if (['completed', 'failed', 'canceled'].includes(run.status)) {
       // Already terminal — treat cancel as a no-op success.
@@ -1083,13 +1199,14 @@ export async function cancelRun(pool: Pool, runId: string): Promise<void> {
     }
     await client.query(
       `UPDATE runs SET status = 'canceled', finished_at = now(), updated_at = now()
-        WHERE id = $1`,
-      [runId],
+        WHERE id = $1 AND project_id = $2 AND env = $3`,
+      [runId, namespace.projectId, namespace.env],
     );
-    await removeFromQueue(client, runId);
+    await removeFromQueue(client, runId, namespace);
     await client.query(
-      `UPDATE waits SET status = 'canceled' WHERE run_id = $1 AND status = 'pending'`,
-      [runId],
+      `UPDATE waits SET status = 'canceled' WHERE run_id = $1 AND status = 'pending'
+         AND project_id = $2 AND env = $3`,
+      [runId, namespace.projectId, namespace.env],
     );
     if (run.parent_run_id) {
       await wakeParentIfWaiting(client, runId, {
@@ -1100,11 +1217,18 @@ export async function cancelRun(pool: Pool, runId: string): Promise<void> {
   });
 }
 
-export async function retryRun(pool: Pool, runId: string): Promise<{ runId: string }> {
+export async function retryRun(
+  pool: Pool,
+  runId: string,
+  namespace: Namespace,
+): Promise<{ runId: string }> {
+  assertNamespace(namespace);
   return withTx(pool, async (client) => {
     // Reads the (terminal) source run without locking and only inserts fresh
     // rows via createRunIn — no existing-row locks, so trivially order-safe.
-    const run = await getRunRow(client, runId);
+    // Scoped to the given namespace: a retry can only ever re-run a run inside
+    // it, and the new run inherits that namespace (C2).
+    const run = await getRunRow(client, runId, namespace);
     if (!run) throw new KernelError('not_found', `run ${runId} not found`);
     if (!['failed', 'canceled'].includes(run.status)) {
       throw new KernelError('conflict', `run ${runId} is ${run.status}, not retryable`);
@@ -1125,7 +1249,7 @@ export async function retryRun(pool: Pool, runId: string): Promise<{ runId: stri
       // NOT carried over: idempotencyKey — reusing it would make the retry
       // collide with the very run it is retrying and hand back its id.
       triggerType: 'retry',
-      env: run.env,
+      namespace,
     });
     return { runId: created.runId };
   });
@@ -1168,9 +1292,11 @@ const LOG_INSERT_CHUNK = 1000;
 export async function appendLogs(
   pool: Pool,
   runId: string,
+  namespace: Namespace,
   entries: LogEntry[],
 ): Promise<void> {
   if (entries.length === 0) return;
+  assertNamespace(namespace);
 
   // Chunk inserts so a single call can never exceed pg's 65535 bind-param
   // limit (5 params/row → cap at LOG_INSERT_CHUNK rows per statement); each
@@ -1179,9 +1305,10 @@ export async function appendLogs(
   for (let start = 0; start < entries.length; start += LOG_INSERT_CHUNK) {
     const chunk = entries.slice(start, start + LOG_INSERT_CHUNK);
     const values: string[] = [];
-    // $1 is the run id, shared by the SELECT list and the EXISTS test.
-    const params: unknown[] = [runId];
-    let i = 2;
+    // $1 is the run id, $2/$3 the namespace (shared by the SELECT list and the
+    // EXISTS test); row params start at $4.
+    const params: unknown[] = [runId, namespace.projectId, namespace.env];
+    let i = 4;
     for (const e of chunk) {
       // Casts are required, not decoration: inside a VALUES sub-select pg has no
       // target column to infer an untyped parameter from, so it would settle on
@@ -1198,10 +1325,13 @@ export async function appendLogs(
       );
     }
     await pool.query(
-      `INSERT INTO logs (run_id, step_seq, level, message, data, ts)
-       SELECT $1::text, v.step_seq, v.level, v.message, v.data, v.ts
+      `INSERT INTO logs (project_id, env, run_id, step_seq, level, message, data, ts)
+       SELECT $2::text, $3::text, $1::text, v.step_seq, v.level, v.message, v.data, v.ts
          FROM (VALUES ${values.join(',')}) AS v(step_seq, level, message, data, ts)
-        WHERE EXISTS (SELECT 1 FROM runs WHERE id = $1 AND finished_at IS NULL)`,
+        WHERE EXISTS (
+          SELECT 1 FROM runs WHERE id = $1 AND finished_at IS NULL
+            AND project_id = $2 AND env = $3
+        )`,
       params,
     );
   }
@@ -1215,13 +1345,19 @@ const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 const durationMs = (started: Date | null, finished: Date | null): number | null =>
   started && finished ? finished.getTime() - started.getTime() : null;
 
-export async function getRunRecord(pool: Pool, runId: string): Promise<RunRecord> {
+export async function getRunRecord(
+  pool: Pool,
+  runId: string,
+  namespace: Namespace,
+): Promise<RunRecord> {
+  assertNamespace(namespace);
   const runRes = await pool.query<{
     id: string;
     task_id: string;
     status: string;
     trigger_type: string;
     code_version: string | null;
+    project_id: string;
     env: string;
     attempt: number;
     max_attempts: number;
@@ -1235,11 +1371,11 @@ export async function getRunRecord(pool: Pool, runId: string): Promise<RunRecord
     started_at: Date | null;
     finished_at: Date | null;
   }>(
-    `SELECT id, task_id, status, trigger_type, code_version, env, attempt, max_attempts,
-            payload, output, error, parent_run_id, idempotency_key,
-            queued_at, created_at, started_at, finished_at
-       FROM runs WHERE id = $1`,
-    [runId],
+    `SELECT id, task_id, status, trigger_type, code_version, project_id, env,
+            attempt, max_attempts, payload, output, error, parent_run_id,
+            idempotency_key, queued_at, created_at, started_at, finished_at
+       FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
+    [runId, namespace.projectId, namespace.env],
   );
   const r = runRes.rows[0];
   if (!r) throw new KernelError('not_found', `run ${runId} not found`);
@@ -1250,6 +1386,7 @@ export async function getRunRecord(pool: Pool, runId: string): Promise<RunRecord
     status: r.status as RunStatus,
     trigger: r.trigger_type as TriggerType,
     codeVersion: r.code_version,
+    projectId: r.project_id,
     env: r.env,
     attempt: r.attempt,
     maxAttempts: r.max_attempts,
@@ -1267,8 +1404,13 @@ export async function getRunRecord(pool: Pool, runId: string): Promise<RunRecord
 }
 
 /** Run + steps + waits + logs (logs capped at 1000 rows, oldest first). */
-export async function getRunDetail(pool: Pool, runId: string): Promise<RunDetailResult> {
-  const run = await getRunRecord(pool, runId);
+export async function getRunDetail(
+  pool: Pool,
+  runId: string,
+  namespace: Namespace,
+): Promise<RunDetailResult> {
+  assertNamespace(namespace);
+  const run = await getRunRecord(pool, runId, namespace);
 
   const stepsRes = await pool.query<{
     seq: number;
@@ -1282,8 +1424,8 @@ export async function getRunDetail(pool: Pool, runId: string): Promise<RunDetail
     finished_at: Date | null;
   }>(
     `SELECT seq, kind, label, status, output, error, attempt, started_at, finished_at
-       FROM run_steps WHERE run_id = $1 ORDER BY seq ASC`,
-    [runId],
+       FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY seq ASC`,
+    [runId, namespace.projectId, namespace.env],
   );
   const steps: RunStepRecord[] = stepsRes.rows.map((s) => ({
     seq: s.seq,
@@ -1306,8 +1448,8 @@ export async function getRunDetail(pool: Pool, runId: string): Promise<RunDetail
     status: string;
   }>(
     `SELECT id, step_seq, kind, resume_at, child_run_id, status
-       FROM waits WHERE run_id = $1 ORDER BY id ASC`,
-    [runId],
+       FROM waits WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY id ASC`,
+    [runId, namespace.projectId, namespace.env],
   );
   const waits: WaitRecord[] = waitsRes.rows.map((w) => ({
     id: Number(w.id),
@@ -1327,8 +1469,8 @@ export async function getRunDetail(pool: Pool, runId: string): Promise<RunDetail
     ts: Date;
   }>(
     `SELECT id, step_seq, level, message, data, ts
-       FROM logs WHERE run_id = $1 ORDER BY id ASC LIMIT 1000`,
-    [runId],
+       FROM logs WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY id ASC LIMIT 1000`,
+    [runId, namespace.projectId, namespace.env],
   );
   const logs: LogRecord[] = logsRes.rows.map((l) => ({
     id: Number(l.id),
@@ -1351,16 +1493,19 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 export async function waitForResult(
   pool: Pool,
   runId: string,
+  namespace: Namespace,
   opts: WaitForResultOptions = {},
 ): Promise<WaitResult> {
+  assertNamespace(namespace);
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const pollMs = opts.pollMs ?? 250;
   const deadline = Date.now() + timeoutMs;
 
   for (;;) {
     const res = await pool.query<{ status: string; output: unknown; error: unknown }>(
-      `SELECT status, output, error FROM runs WHERE id = $1`,
-      [runId],
+      `SELECT status, output, error FROM runs
+        WHERE id = $1 AND project_id = $2 AND env = $3`,
+      [runId, namespace.projectId, namespace.env],
     );
     const row = res.rows[0];
     if (!row) throw new KernelError('not_found', `run ${runId} not found`);
