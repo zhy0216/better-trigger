@@ -1,8 +1,7 @@
 /* =============================================================================
    Better Trigger — Onboarding / get started.
-   The three steps mirror the real flow (see examples/basic): install the SDK
-   (`better-trigger`), declare a task(), then start the embedded runtime
-   (betterTrigger({ database }) → trigger.start) and trigger straight to PG.
+   The four steps mirror the real daemon flow (see README.md and examples/basic):
+   install the SDK, declare a task(), start the worker daemon, then trigger over HTTP.
    ============================================================================= */
 import React from 'react';
 import { Icon, Button, Badge, IconButton } from '../components/primitives';
@@ -11,42 +10,30 @@ import { Page } from '../components/Layout';
 type Token = [string] | [string, string];
 
 const CODE_INSTALL: Token[] = [
-  ['fn', 'npm i'], ['t', ' better-trigger'], ['nl'],
-  ['c', '# Postgres is the only dependency — no server process'], ['nl'],
-  ['fn', 'export'], ['t', ' DATABASE_URL=postgres://localhost:5432/better_trigger'],
+  ['fn', 'npm install'], ['t', ' better-trigger'],
 ];
 
 const CODE_TASK: Token[] = [
   ['kw', 'import'], ['t', ' { task } '], ['kw', 'from'], ['s', ' "better-trigger"'], ['t', ';'], ['nl'],
   ['nl'],
-  ['kw', 'export const'], ['fn', ' processOrder'], ['t', ' = task({'], ['nl'],
-  ['t', '  id: '], ['s', '"process-order"'], ['t', ','], ['nl'],
-  ['kw', '  run'], ['t', ': '], ['kw', 'async'], ['t', ' (payload, ctx) => {'], ['nl'],
-  ['c', '    // durable step — replayed from cache on retry'], ['nl'],
-  ['kw', '    const'], ['t', ' charge = '], ['kw', 'await'], ['t', ' ctx.'], ['fn', 'step'], ['t', '('], ['s', '"charge"'], ['t', ', () =>'], ['nl'],
-  ['fn', '      chargeCard'], ['t', '(payload));'], ['nl'],
-  ['kw', '    await'], ['t', ' ctx.wait.'], ['fn', 'for'], ['t', '('], ['s', '"5s"'], ['t', ');'], ['nl'],
-  ['kw', '    return'], ['t', ' { ok: '], ['kw', 'true'], ['t', ', chargeId: charge.id };'], ['nl'],
-  ['t', '  },'], ['nl'],
+  ['kw', 'export const'], ['fn', ' hello'], ['t', ' = '], ['fn', 'task'], ['t', '({'], ['nl'],
+  ['t', '  id: '], ['s', '"hello-world"'], ['t', ','], ['nl'],
+  ['t', '  run: '], ['kw', 'async'], ['t', ' (payload: { name: string }) => `hello, ${payload.name}`,'], ['nl'],
   ['t', '});'],
 ];
 
-const CODE_WORKER: Token[] = [
-  ['kw', 'import'], ['t', ' { betterTrigger } '], ['kw', 'from'], ['s', ' "better-trigger"'], ['t', ';'], ['nl'],
-  ['kw', 'import'], ['t', ' { processOrder } '], ['kw', 'from'], ['s', ' "./tasks"'], ['t', ';'], ['nl'],
-  ['nl'],
-  ['kw', 'export const'], ['t', ' trigger = '], ['fn', 'betterTrigger'], ['t', '({'], ['nl'],
-  ['t', '  database: { connectionString: process.env.'], ['fn', 'DATABASE_URL'], ['t', ' },'], ['nl'],
-  ['t', '});'], ['nl'],
-  ['nl'],
-  ['c', '// your app process is the worker — claims runs straight from Postgres'], ['nl'],
-  ['kw', 'await'], ['t', ' trigger.'], ['fn', 'start'], ['t', '({ tasks: [processOrder] });'],
+const CODE_DAEMON: Token[] = [
+  ['fn', 'DATABASE_URL=postgres://localhost:5432/better_trigger'], ['t', ' \\'], ['nl'],
+  ['t', '  bunx --bun better-trigger-worker --tasks ./tasks.ts'],
 ];
 
 const CODE_TRIGGER: Token[] = [
-  ['c', '// anywhere in your app — no HTTP, writes straight to Postgres'], ['nl'],
-  ['kw', 'const'], ['t', ' handle = '], ['kw', 'await'], ['t', ' processOrder.'], ['fn', 'trigger'], ['t', '({ orderId: '], ['s', '"o_1"'], ['t', ' });'], ['nl'],
-  ['kw', 'const'], ['t', ' result = '], ['kw', 'await'], ['t', ' handle.'], ['fn', 'result'], ['t', '();'],
+  ['kw', 'import'], ['t', ' { betterTrigger } '], ['kw', 'from'], ['s', ' "better-trigger"'], ['t', ';'], ['nl'],
+  ['kw', 'import'], ['t', ' { hello } '], ['kw', 'from'], ['s', ' "./tasks"'], ['t', ';'], ['nl'],
+  ['nl'],
+  ['fn', 'betterTrigger'], ['t', '({ url: '], ['s', '"http://localhost:4848"'], ['t', ' }).'], ['fn', 'setDefault'], ['t', '();'], ['nl'],
+  ['kw', 'const'], ['t', ' handle = '], ['kw', 'await'], ['t', ' hello.'], ['fn', 'trigger'], ['t', '({ name: '], ['s', '"ada"'], ['t', ' });'], ['nl'],
+  ['kw', 'console.log'], ['t', '('], ['kw', 'await'], ['t', ' handle.'], ['fn', 'result'], ['t', '());'],
 ];
 
 const TOK: Record<string, string> = { kw: 'var(--st-frozen)', s: 'var(--green-primary)', fn: 'var(--accent)', c: 'var(--fg-faint)', t: 'var(--fg)' };
@@ -78,15 +65,16 @@ function CodeBlock({ tokens, title }: { tokens: Token[]; title: string }) {
 export function Onboarding({ setRoute }: { setRoute: (r: string) => void }) {
   const [step, setStep] = React.useState(1);
   const steps = [
-    { n: 1, title: 'Install the SDK', body: 'One package. Postgres is the only dependency.' },
-    { n: 2, title: 'Write a task', body: 'A plain async function with durable, replayable steps.' },
-    { n: 3, title: 'Start & trigger', body: 'Your app process runs tasks straight from Postgres.' },
+    { n: 1, title: 'Install the SDK', body: 'Add the package to the application that triggers tasks.' },
+    { n: 2, title: 'Define a task', body: 'Export task() from a module the daemon can load.' },
+    { n: 3, title: 'Start the daemon', body: 'The worker owns Postgres and serves the HTTP API.' },
+    { n: 4, title: 'Trigger from your app', body: 'Use the SDK client and inspect the handle result.' },
   ];
   return (
     <Page>
       <div style={{ maxWidth: 760, margin: '0 auto', paddingTop: 8 }}>
         <Badge tone="blue" style={{ marginBottom: 14 }}><Icon name="sparkle" size={12} />Get started</Badge>
-        <h2 style={{ margin: '0 0 8px', fontSize: 30, fontWeight: 600, letterSpacing: '-0.02em' }}>Your first task in three steps</h2>
+        <h2 style={{ margin: '0 0 8px', fontSize: 30, fontWeight: 600, letterSpacing: '-0.02em' }}>Your first task in four steps</h2>
         <p style={{ margin: '0 0 28px', fontSize: 15, color: 'var(--fg-muted)', lineHeight: 1.55, maxWidth: 560 }}>
           Write long-running background jobs as plain functions. Better Trigger handles queues, retries, and observability — you keep full control of the code.
         </p>
@@ -123,25 +111,30 @@ export function Onboarding({ setRoute }: { setRoute: (r: string) => void }) {
             {step === 1 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <CodeBlock title="terminal" tokens={CODE_INSTALL} />
-                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>Better Trigger embeds in your process — no server to run. Migrations apply automatically on first use.</p>
+                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>Install the SDK in the app that triggers work. The worker daemon is the only process that needs Postgres access.</p>
               </div>
             )}
             {step === 2 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <CodeBlock title="src/tasks.ts" tokens={CODE_TASK} />
-                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>Each <code className="mono">ctx.step</code> is memoized — on retry, completed steps replay from cache instead of re-executing.</p>
+                <CodeBlock title="tasks.ts" tokens={CODE_TASK} />
+                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>The daemon imports this module and registers each exported task before it starts accepting runs.</p>
               </div>
             )}
             {step === 3 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <CodeBlock title="src/trigger.ts" tokens={CODE_WORKER} />
+                <CodeBlock title="terminal" tokens={CODE_DAEMON} />
+                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>The daemon applies migrations, executes runs, and serves the API on <code className="mono">localhost:4848</code>.</p>
+              </div>
+            )}
+            {step === 4 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <CodeBlock title="src/app.ts" tokens={CODE_TRIGGER} />
-                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>Every run is traced automatically — open Runs to watch it stream live.</p>
+                <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-subtle)' }}>The app talks to the daemon over HTTP. Use <code className="mono">handle.result()</code> to wait for the completed output, then open Runs to inspect the trace.</p>
               </div>
             )}
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 18 }}>
               <Button variant="ghost" disabled={step === 1} onClick={() => setStep((s) => s - 1)} icon="chevronLeft">Back</Button>
-              {step < 3
+              {step < 4
                 ? <Button onClick={() => setStep((s) => s + 1)} iconRight="chevronRight">Next</Button>
                 : <Button onClick={() => setRoute('runs')} iconRight="arrowRight">Go to runs</Button>}
             </div>
