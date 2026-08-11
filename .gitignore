@@ -31,3 +31,4 @@ yarn-error.log*
 
 # Claude Code local overrides
 .claude/settings.local.json
+.omo/
