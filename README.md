@@ -90,6 +90,13 @@ The daemon runs your TypeScript task modules directly under `bun`. Under plain
 cd apps/web && VITE_BT_API_URL=http://localhost:4848 bun run dev   # :5173
 ```
 
+If the daemon uses `BETTER_TRIGGER_API_KEY`, the dashboard prompts for a key
+after a `401` and keeps a manually entered token only in page memory. Refreshing
+the page clears it; it is never stored in browser storage or cookies. For
+local development only, `VITE_BT_API_KEY=...` may supply the initial token, but
+Vite embeds all `VITE_*` values in the bundle. Never use that option with a
+long-lived bearer secret in a public deployment.
+
 ## Writing tasks
 
 ```ts
@@ -140,8 +147,14 @@ add others with `--cors-origin`.
 
 **Limits** (all overridable by env): request body 1 MiB
 (`BETTER_TRIGGER_BODY_LIMIT`, over it `413`), 500 items per `batchTrigger`
-(`BETTER_TRIGGER_MAX_BATCH`), 256 KiB serialized payload per run
-(`BETTER_TRIGGER_MAX_PAYLOAD_BYTES`).
+(`BETTER_TRIGGER_MAX_BATCH`), 1 MiB of serialized payload across one
+`batchTrigger` (`BETTER_TRIGGER_MAX_BATCH_PAYLOAD_BYTES`), 256 KiB serialized
+payload per run (`BETTER_TRIGGER_MAX_PAYLOAD_BYTES`), plus per-value caps for
+step output, run output, error records and log data (`BETTER_TRIGGER_STEP_OUTPUT_MAX_BYTES`,
+`_RUN_OUTPUT_`, `_ERROR_`, `_LOG_DATA_`, `_LOG_BATCH_` — see the
+[worker README](./apps/worker/README.md#request-limits)). A value JSON cannot
+represent (circular structure, BigInt) is refused with `400 serialization_error`
+naming the field — never a raw `TypeError` that would read as a 500.
 
 **Observability.** `GET /api/v1/health` is always open (no key needed) and
 answers `{ ok, version }`; `?deep=1` adds a database probe and pool stats and

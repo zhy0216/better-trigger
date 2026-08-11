@@ -78,10 +78,11 @@ export interface ButtonProps {
   active?: boolean;
   style?: React.CSSProperties;
   title?: string;
+  type?: 'button' | 'submit' | 'reset';
 }
 
 export const Button = ({
-  variant = 'primary', size = 'md', children, icon, iconRight, onClick, disabled, active, style, title,
+  variant = 'primary', size = 'md', children, icon, iconRight, onClick, disabled, active, style, title, type = 'button',
 }: ButtonProps) => {
   const sizes: Record<ButtonSize, React.CSSProperties> = {
     sm: { height: 28, padding: '0 10px', fontSize: 12, borderRadius: 6 },
@@ -97,7 +98,7 @@ export const Button = ({
   };
   const v = variants[variant];
   return (
-    <button onClick={onClick} disabled={disabled} title={title}
+    <button type={type} onClick={onClick} disabled={disabled} title={title}
       style={{
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
         fontFamily: 'var(--font-sans)', fontWeight: 500, border: '1px solid ' + v.borderColor,
@@ -231,12 +232,13 @@ export interface InputProps {
   icon?: string;
   style?: React.CSSProperties;
   mono?: boolean;
+  type?: 'text' | 'password';
 }
 
-export const Input = ({ value, onChange, placeholder, icon, style, mono }: InputProps) => (
+export const Input = ({ value, onChange, placeholder, icon, style, mono, type = 'text' }: InputProps) => (
   <div style={{ position: 'relative', display: 'flex', alignItems: 'center', width: '100%', ...style }}>
     {icon && <Icon name={icon} size={14} style={{ position: 'absolute', left: 10, color: 'var(--fg-subtle)', pointerEvents: 'none' }} />}
-    <input value={value ?? ''} onChange={(e) => onChange?.(e.target.value)} placeholder={placeholder}
+    <input type={type} value={value ?? ''} onChange={(e) => onChange?.(e.target.value)} placeholder={placeholder}
       style={{
         fontFamily: mono ? 'var(--font-mono)' : 'var(--font-sans)', fontSize: 13, height: 32,
         border: '1px solid var(--border-strong)', borderRadius: 8,

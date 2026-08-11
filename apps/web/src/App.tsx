@@ -4,7 +4,7 @@
 import React from 'react';
 import { useTweaks } from './hooks/useTweaks';
 import { Sidebar, TopBar } from './components/Shell';
-import { Button } from './components/primitives';
+import { Button, Input } from './components/primitives';
 import {
   TweaksPanel,
   TweakSection,
@@ -18,7 +18,8 @@ import { Schedules } from './screens/Schedules';
 import { Alerts } from './screens/Alerts';
 import { Deployments } from './screens/Deployments';
 import { Onboarding } from './screens/Onboarding';
-import { useConnection } from './api/hooks';
+import { resetConnection, useConnection } from './api/hooks';
+import { getApiKeySource, setApiKey } from './api/client';
 import type { Route, VizStyle } from './types';
 
 const TWEAK_DEFAULTS = {
@@ -35,6 +36,7 @@ export default function App() {
   const [collapsed, setCollapsed] = React.useState(false);
   const [runId, setRunId] = React.useState<string | null>(null); // selected run for RunView
   const connection = useConnection();
+  const [apiKeySource, setApiKeySource] = React.useState(getApiKeySource);
 
   const openRun = (id?: string) => { setRunId(id ?? null); setRoute('run'); };
 
@@ -70,9 +72,28 @@ export default function App() {
           onToggleSidebar={() => setCollapsed((c) => !c)}
           theme={t.theme} setTheme={(v) => setTweak('theme', v)}>
           <ConnectionDot connection={connection} />
+          {apiKeySource === 'vite-env' && (
+            <span title="VITE_BT_API_KEY is embedded in this bundle; use only for local development" style={{ color: 'var(--orange-text)', fontSize: 11.5, whiteSpace: 'nowrap' }}>
+              Local API key
+            </span>
+          )}
           {route === 'tasks' && <Button variant="outline" size="sm" icon="plus" onClick={() => setRoute('onboarding')}>New task</Button>}
         </TopBar>
-        {screen}
+        {connection === 'unauthorized' ? (
+          <ApiKeyPrompt
+            source={apiKeySource}
+            onSubmit={(token) => {
+              setApiKey(token);
+              setApiKeySource(getApiKeySource());
+              resetConnection();
+            }}
+            onClear={() => {
+              setApiKey(null);
+              setApiKeySource(getApiKeySource());
+              resetConnection();
+            }}
+          />
+        ) : screen}
       </div>
 
       <TweaksPanel>
@@ -95,6 +116,7 @@ const CONNECTION_META = {
   connecting: { label: 'Connecting…', title: 'Waiting for the first server response', color: 'var(--fg-faint)' },
   live: { label: 'Live', title: 'Connected to server', color: 'var(--green-primary)' },
   down: { label: 'Offline', title: 'Server unreachable — retrying', color: 'var(--red-primary)' },
+  unauthorized: { label: 'API key required', title: 'The daemon rejected the API key', color: 'var(--orange-primary)' },
 } as const;
 
 function ConnectionDot({ connection }: { connection: keyof typeof CONNECTION_META }) {
@@ -112,5 +134,51 @@ function ConnectionDot({ connection }: { connection: keyof typeof CONNECTION_MET
       }} />
       {m.label}
     </div>
+  );
+}
+
+export function ApiKeyPrompt({
+  source,
+  onSubmit,
+  onClear,
+}: {
+  source: 'vite-env' | 'memory' | 'none';
+  onSubmit: (token: string) => void;
+  onClear: () => void;
+}) {
+  const [token, setToken] = React.useState('');
+
+  return (
+    <main style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: 'var(--app-bg)' }}>
+      <div style={{ maxWidth: 560, margin: '0 auto', padding: '80px 24px' }}>
+        <div style={{
+          padding: 24, borderRadius: 12, border: '1px solid var(--orange-border)',
+          background: 'color-mix(in srgb, var(--orange-primary) 6%, var(--surface))',
+          boxShadow: 'var(--shadow-panel)',
+        }}>
+          <div style={{ color: 'var(--orange-primary)', fontSize: 12, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+            Authentication required
+          </div>
+          <h2 style={{ margin: '8px 0 8px', fontSize: 22, fontWeight: 600, letterSpacing: '-0.02em' }}>需要 API key</h2>
+          <p style={{ margin: '0 0 20px', color: 'var(--fg-muted)', fontSize: 13.5, lineHeight: 1.6 }}>
+            输入 token，或检查 daemon 的 <code className="mono">BETTER_TRIGGER_API_KEY</code>。token 只保存在当前页面内存中，刷新后需要重新输入。
+          </p>
+          <form onSubmit={(event) => { event.preventDefault(); onSubmit(token); }} style={{ display: 'flex', gap: 8 }}>
+            <Input value={token} onChange={setToken} placeholder="Bearer token" mono type="password" style={{ flex: 1 }} />
+            <Button type="submit" disabled={!token.trim()}>连接</Button>
+          </form>
+          {source !== 'none' && (
+            <button type="button" onClick={onClear} style={{ marginTop: 12, padding: 0, border: 0, background: 'transparent', color: 'var(--fg-subtle)', fontFamily: 'var(--font-sans)', fontSize: 12, cursor: 'pointer' }}>
+              清除当前 key，改用另一个 token
+            </button>
+          )}
+          {source === 'vite-env' && (
+            <p style={{ margin: '16px 0 0', paddingTop: 12, borderTop: '1px solid var(--divider)', color: 'var(--orange-text)', fontSize: 12, lineHeight: 1.5 }}>
+              当前 key 通过 <code className="mono">VITE_BT_API_KEY</code> 提供，仅限本机开发；公开部署请勿将长期 bearer secret 编译进 bundle。
+            </p>
+          )}
+        </div>
+      </div>
+    </main>
   );
 }

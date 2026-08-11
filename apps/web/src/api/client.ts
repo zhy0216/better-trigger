@@ -24,6 +24,36 @@ import type {
   WorkerSummary as WorkerSummaryModel,
 } from '@better-trigger/core';
 
+const viteApiKey = import.meta.env.VITE_BT_API_KEY;
+let apiKey: string | null = viteApiKey?.trim() || null;
+let apiKeySource: 'vite-env' | 'memory' | 'none' = apiKey ? 'vite-env' : 'none';
+let apiKeyVersion = 0;
+const apiKeyListeners = new Set<() => void>();
+
+export function setApiKey(token: string | null): void {
+  apiKey = token?.trim() || null;
+  apiKeySource = apiKey ? 'memory' : 'none';
+  apiKeyVersion += 1;
+  apiKeyListeners.forEach((listener) => listener());
+}
+
+export function getApiKey(): string | null {
+  return apiKey;
+}
+
+export function getApiKeySource(): 'vite-env' | 'memory' | 'none' {
+  return apiKeySource;
+}
+
+export function subscribeApiKey(listener: () => void): () => void {
+  apiKeyListeners.add(listener);
+  return () => apiKeyListeners.delete(listener);
+}
+
+export function getApiKeyVersion(): number {
+  return apiKeyVersion;
+}
+
 export const API_BASE_URL: string =
   (import.meta.env.VITE_BT_API_URL as string | undefined) ?? 'http://localhost:4848';
 
@@ -49,9 +79,12 @@ interface RequestOptions {
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, signal } = opts;
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   const res = await fetch(API_BASE_URL + PREFIX + path, {
     method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
     signal,
   });

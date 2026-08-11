@@ -13,6 +13,25 @@ pnpm typecheck   # tsc --noEmit
 pnpm lint        # eslint
 ```
 
+## API key mode
+
+When the daemon has `BETTER_TRIGGER_API_KEY` set, the dashboard asks for the
+matching token after the first `401` response and sends it as a Bearer token on
+subsequent requests. A manually entered key is memory-only: it is not written
+to `localStorage`, `sessionStorage`, cookies, or any other persistent store,
+and a page refresh clears it.
+
+For local development only, `VITE_BT_API_KEY` can provide the initial key:
+
+```bash
+VITE_BT_API_KEY=local-dev-secret VITE_BT_API_URL=http://localhost:4848 pnpm dev
+```
+
+Vite embeds `VITE_*` values in the browser bundle. Therefore
+`VITE_BT_API_KEY` is **not safe for public deployments** and must never contain
+a long-lived production bearer secret. Use an authenticated same-origin
+deployment/session instead.
+
 ## Source map
 
 ```

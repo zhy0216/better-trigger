@@ -6,7 +6,7 @@
    useConnection() exposes the aggregate state so the UI can show a live dot.
    ============================================================================= */
 import React from 'react';
-import { api, type RunFilters, type RunDetailResponse } from './client';
+import { api, ApiError, getApiKeyVersion, subscribeApiKey, type RunFilters, type RunDetailResponse } from './client';
 import {
   adaptTasks,
   adaptRuns,
@@ -22,7 +22,7 @@ const POLL_MS = 2000;
 
 /* ---- module-level connection state ---------------------------------------- */
 // 'connecting' until the first response, then tracks the latest poll outcome.
-type Connection = 'connecting' | 'live' | 'down';
+export type Connection = 'connecting' | 'live' | 'down' | 'unauthorized';
 let connection: Connection = 'connecting';
 const listeners = new Set<() => void>();
 
@@ -31,6 +31,26 @@ function setConnection(next: Connection) {
     connection = next;
     listeners.forEach((l) => l());
   }
+}
+
+export function resetConnection(): void {
+  setConnection('connecting');
+}
+
+export function getConnection(): Connection {
+  return connection;
+}
+
+export function classifyConnectionError(error: unknown): Connection {
+  return error instanceof ApiError && error.status === 401 ? 'unauthorized' : 'down';
+}
+
+export function recordConnectionError(error: unknown): void {
+  setConnection(classifyConnectionError(error));
+}
+
+function useApiKeyVersion(): number {
+  return React.useSyncExternalStore(subscribeApiKey, getApiKeyVersion, getApiKeyVersion);
 }
 
 /** Subscribe to the aggregate connection state (drives the TopBar dot). */
@@ -68,6 +88,7 @@ function usePoll<T>(
   const [data, setData] = React.useState<T | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
+  const apiKeyVersion = useApiKeyVersion();
   const fetcherRef = React.useRef(fetcher);
   fetcherRef.current = fetcher;
 
@@ -104,10 +125,10 @@ function usePoll<T>(
         setConnection('live');
       } catch (e) {
         if (!mounted) return;
-        if ((e as { name?: string }).name === 'AbortError') return;
-        setError((e as Error).message || 'request failed');
+        if (e instanceof Error && e.name === 'AbortError') return;
+        setError(e instanceof Error ? e.message || 'request failed' : 'request failed');
         setLoading(false);
-        setConnection('down');
+        recordConnectionError(e);
       }
     };
 
@@ -120,7 +141,7 @@ function usePoll<T>(
       clearInterval(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, enabled]);
+  }, [...deps, enabled, apiKeyVersion]);
 
   return { data, loading, error };
 }
