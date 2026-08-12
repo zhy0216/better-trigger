@@ -90,11 +90,20 @@ describe('dashboard API key authentication', () => {
 
   it('renders a token input and submit control for unauthorized access', () => {
     const markup = renderToStaticMarkup(
-      <ApiKeyPrompt source="none" onSubmit={vi.fn()} onClear={vi.fn()} />,
+      <ApiKeyPrompt source="none" token="" keyRejected={false} onChangeToken={vi.fn()} onSubmit={vi.fn()} onClear={vi.fn()} />,
     );
 
-    expect(markup).toContain('需要 API key');
+    expect(markup).toContain('Enter your API key');
     expect(markup).toContain('type="password"');
     expect(markup).toContain('type="submit"');
+  });
+
+  it('renders the rejected variant with the typed token preserved', () => {
+    const markup = renderToStaticMarkup(
+      <ApiKeyPrompt source="memory" token="wrong-token" keyRejected onChangeToken={vi.fn()} onSubmit={vi.fn()} onClear={vi.fn()} />,
+    );
+
+    expect(markup).toContain('That key was rejected');
+    expect(markup).toContain('value="wrong-token"');
   });
 });

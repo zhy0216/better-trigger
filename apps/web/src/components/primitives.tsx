@@ -233,9 +233,11 @@ export interface InputProps {
   style?: React.CSSProperties;
   mono?: boolean;
   type?: 'text' | 'password';
+  /** Select the whole value when the field gains focus (rejected-key retries). */
+  selectOnFocus?: boolean;
 }
 
-export const Input = ({ value, onChange, placeholder, icon, style, mono, type = 'text' }: InputProps) => (
+export const Input = ({ value, onChange, placeholder, icon, style, mono, type = 'text', selectOnFocus }: InputProps) => (
   <div style={{ position: 'relative', display: 'flex', alignItems: 'center', width: '100%', ...style }}>
     {icon && <Icon name={icon} size={14} style={{ position: 'absolute', left: 10, color: 'var(--fg-subtle)', pointerEvents: 'none' }} />}
     <input type={type} value={value ?? ''} onChange={(e) => onChange?.(e.target.value)} placeholder={placeholder}
@@ -246,7 +248,7 @@ export const Input = ({ value, onChange, placeholder, icon, style, mono, type = 
         background: 'var(--surface)', color: 'var(--fg)', outline: 'none',
         transition: 'box-shadow var(--dur-fast), border-color var(--dur-fast)',
       }}
-      onFocus={(e) => { e.target.style.borderColor = 'var(--accent)'; e.target.style.boxShadow = '0 0 0 3px var(--accent-ring)'; }}
+      onFocus={(e) => { e.target.style.borderColor = 'var(--accent)'; e.target.style.boxShadow = '0 0 0 3px var(--accent-ring)'; if (selectOnFocus) e.target.select(); }}
       onBlur={(e) => { e.target.style.borderColor = 'var(--border-strong)'; e.target.style.boxShadow = 'none'; }} />
   </div>
 );

@@ -33,7 +33,7 @@
 | 19 | [p1-17-client-timeout-registry.md](./done/p1-17-client-timeout-registry.md) ✅ | 超时误报"daemon 没起";预中止 signal 失效;registry 无校验 | p1-16 |
 | 20 | [p1-18-dashboard-routing.md](./done/p1-18-dashboard-routing.md) ✅ | dashboard 无 URL 路由,deep-link fallback 无消费者 | — |
 | 21 | [p1-19-security-headers-postmessage.md](./done/p1-19-security-headers-postmessage.md) ✅ | 静态资源零安全头;postMessage 无 origin 校验 | — |
-| 22 | [p1-20-connection-state-key-prompt.md](./p1-20-connection-state-key-prompt.md) | connection 全局竞写频闪;key 被拒无反馈 | — |
+| 22 | [p1-20-connection-state-key-prompt.md](./done/p1-20-connection-state-key-prompt.md) ✅ | connection 全局竞写频闪;key 被拒无反馈 | — |
 | 23 | [p2-23-result-typing-timeout.md](./p2-23-result-typing-timeout.md) | result() 无泛型;30s 超时静默返回非终态 | p0-03 |
 | 24 | [p2-24-retry-policy-undefined.md](./p2-24-retry-policy-undefined.md) | 显式 undefined 覆盖 retry 默认值 → NOT NULL 500 | — |
 | 25 | [p2-25-dead-sdk-surface.md](./p2-25-dead-sdk-surface.md) | pollMs 死参数、core 幽灵 RunHandle、过时注释 | — |
@@ -82,3 +82,4 @@
 - [done/p1-17-client-timeout-registry.md](./done/p1-17-client-timeout-registry.md) ✅(超时 code 'timeout' + idempotencyKey 引导,signal 穿透,registry adopt 校验)
 - [done/p1-18-dashboard-routing.md](./done/p1-18-dashboard-routing.md) ✅(history.pushState/popstate 路由,deep-link /runs/:id 直达 detail)
 - [done/p1-19-security-headers-postmessage.md](./done/p1-19-security-headers-postmessage.md) ✅(X-Frame-Options/CSP frame-ancestors/nosniff/no-referrer,移除无 origin 校验的 postMessage)
+- [done/p1-20-connection-state-key-prompt.md](./done/p1-20-connection-state-key-prompt.md) ✅(connection keyed 聚合,key 被拒变体提示 + token 保留,界面英文统一)

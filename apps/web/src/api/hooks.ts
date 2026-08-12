@@ -21,20 +21,100 @@ import type { WorkerSummary } from './client';
 const POLL_MS = 2000;
 
 /* ---- module-level connection state ---------------------------------------- */
-// 'connecting' until the first response, then tracks the latest poll outcome.
+// Aggregated across every mounted poll. Each usePoll registers a per-instance
+// entry recording {ts, outcome}; the derived state is recomputed from the whole
+// registry so one failing endpoint cannot flip the whole dashboard to 'down'
+// (nor one 401 to the key prompt) while the others are healthy.
 export type Connection = 'connecting' | 'live' | 'down' | 'unauthorized';
-let connection: Connection = 'connecting';
-const listeners = new Set<() => void>();
+type Outcome = 'ok' | 'error' | 'unauthorized';
 
-function setConnection(next: Connection) {
+interface RegistryEntry {
+  ts: number;
+  /** null = mounted but no response yet. */
+  outcome: Outcome | null;
+}
+
+const registry = new Map<string, RegistryEntry>();
+const listeners = new Set<() => void>();
+let nextEntryId = 0;
+// Reserved entry for the imperative recordConnectionError() helper (tests and
+// callers reporting a connection failure outside a mounted poll).
+const MANUAL_ENTRY = 'manual';
+
+let connection: Connection = 'connecting';
+
+function notify(): void {
+  listeners.forEach((l) => l());
+}
+
+/**
+ * Derive the aggregate state from the registry:
+ *  - any 'ok' entry wins → 'live' (one healthy endpoint keeps the UI alive);
+ *  - otherwise the most recent outcome across entries being 'unauthorized'
+ *    → 'unauthorized' (a rejected key 401s every endpoint, so the newest
+ *    outcome wins when nothing is healthy);
+ *  - otherwise → 'down' when every entry has failed, or the newest report is
+ *    older than 2×POLL_MS (the polls stopped reporting);
+ *  - otherwise → 'connecting' (fresh mounts not yet answered).
+ */
+function recompute(): Connection {
+  if (registry.size === 0) {
+    // No polls are mounted. Only an explicit resetConnection() should return
+    // to 'connecting'; otherwise the polls that produced the current state
+    // just unmounted (e.g. the 401 prompt replacing the whole screen), so hold
+    // the state instead of oscillating between the prompt and the screen.
+    return connection;
+  }
+  const entries = [...registry.values()];
+  if (entries.some((e) => e.outcome === 'ok')) return 'live';
+  // The "most recent outcome" is chosen among REPORTED entries only — a
+  // still-in-flight poll (outcome null) is a live probe, not an outcome, and
+  // must not mask an already-reported unauthorized/error as the newest.
+  const reported = entries.filter((e) => e.outcome !== null);
+  let newest: RegistryEntry | null = null;
+  for (const e of reported) if (newest === null || e.ts >= newest.ts) newest = e;
+  if (newest !== null && newest.outcome === 'unauthorized') return 'unauthorized';
+  const stale = newest !== null && Date.now() - newest.ts >= 2 * POLL_MS;
+  const allError = entries.every((e) => e.outcome === 'error');
+  if (allError || stale) return 'down';
+  return 'connecting';
+}
+
+function recomputeAndNotify(): void {
+  const next = recompute();
   if (connection !== next) {
     connection = next;
-    listeners.forEach((l) => l());
+    notify();
   }
 }
 
+function registerConnection(): string {
+  const id = `poll-${nextEntryId++}`;
+  registry.set(id, { ts: Date.now(), outcome: null });
+  recomputeAndNotify();
+  return id;
+}
+
+function unregisterConnection(id: string): void {
+  registry.delete(id);
+  recomputeAndNotify();
+}
+
+function reportOutcome(id: string, outcome: Outcome): void {
+  registry.set(id, { ts: Date.now(), outcome });
+  recomputeAndNotify();
+}
+
+/** Clear every recorded outcome and force 'connecting'; the next poll tick
+ *  re-populates the registry. Unlike a transient registry-empty (polls that
+ *  unmounted with the screen), this is an explicit user action — the prompt
+ *  must actually go away. */
 export function resetConnection(): void {
-  setConnection('connecting');
+  registry.clear();
+  if (connection !== 'connecting') {
+    connection = 'connecting';
+    notify();
+  }
 }
 
 export function getConnection(): Connection {
@@ -45,8 +125,9 @@ export function classifyConnectionError(error: unknown): Connection {
   return error instanceof ApiError && error.status === 401 ? 'unauthorized' : 'down';
 }
 
+/** Imperative 401/network report from outside a poll (tests, misc callers). */
 export function recordConnectionError(error: unknown): void {
-  setConnection(classifyConnectionError(error));
+  reportOutcome(MANUAL_ENTRY, classifyConnectionError(error) === 'unauthorized' ? 'unauthorized' : 'error');
 }
 
 function useApiKeyVersion(): number {
@@ -110,6 +191,7 @@ function usePoll<T>(
     // enabled false→true re-arms this effect, which doubles as the immediate
     // refresh on resume.
     if (!enabled) return;
+    const id = registerConnection();
     let mounted = true;
     let controller: AbortController | null = null;
     let timer: ReturnType<typeof setTimeout>;
@@ -124,7 +206,7 @@ function usePoll<T>(
         setData(out);
         setError(null);
         setLoading(false);
-        setConnection('live');
+        reportOutcome(id, 'ok');
       } catch (e) {
         if (!mounted) return;
         // Only the effect cleanup aborts (unmount / deps change / enabled
@@ -133,7 +215,7 @@ function usePoll<T>(
         if (e instanceof Error && e.name === 'AbortError') return;
         setError(e instanceof Error ? e.message || 'request failed' : 'request failed');
         setLoading(false);
-        recordConnectionError(e);
+        reportOutcome(id, classifyConnectionError(e) === 'unauthorized' ? 'unauthorized' : 'error');
       } finally {
         if (mounted) timer = setTimeout(run, POLL_MS);
       }
@@ -145,6 +227,7 @@ function usePoll<T>(
       mounted = false;
       controller?.abort();
       clearTimeout(timer);
+      unregisterConnection(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, enabled, apiKeyVersion]);

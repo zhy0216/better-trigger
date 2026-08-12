@@ -131,9 +131,29 @@ describe('dashboard smoke — the states that used to need a live daemon', () =>
     );
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText('需要 API key')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Enter your API key')).toBeTruthy());
     expect(screen.getByPlaceholderText('Bearer token')).toBeTruthy();
     expect(screen.getByText('API key required')).toBeTruthy(); // connection dot
+    // First visit (nothing submitted yet): no "key was rejected" variant.
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('2b. a REJECTED key re-shows the prompt with the token kept and a rejection message', async () => {
+    fetchMock.mockImplementation(() => 
+      new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'invalid key' } }), { status: 401 }),
+    );
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText('Enter your API key')).toBeTruthy());
+    const input = screen.getByPlaceholderText('Bearer token');
+    fireEvent.change(input, { target: { value: 'wrong-token' } });
+    fireEvent.submit(input.closest('form') as HTMLFormElement);
+
+    // The daemon keeps rejecting: the prompt returns as a rejection variant,
+    // with the typed token still in the field (not a blank first-visit prompt).
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+    expect(screen.getByText(/That key was rejected/i)).toBeTruthy();
+    expect((screen.getByPlaceholderText('Bearer token') as HTMLInputElement).value).toBe('wrong-token');
   });
 
   it('3. empty data: the runs list renders its empty state', async () => {

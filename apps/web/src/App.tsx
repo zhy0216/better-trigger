@@ -64,6 +64,20 @@ export default function App() {
   const [runId, setRunId] = React.useState<string | null>(initial.runId); // selected run for RunView
   const connection = useConnection();
   const [apiKeySource, setApiKeySource] = React.useState(getApiKeySource);
+  // Key-prompt state lives in App so it survives the prompt's unmount: the
+  // token is kept for the user to edit on a rejection, and keyRejected
+  // distinguishes a REJECTED key from a first visit.
+  const [pendingKey, setPendingKey] = React.useState('');
+  const [keyRejected, setKeyRejected] = React.useState(false);
+  const submittedRef = React.useRef(false);
+
+  // A second 'unauthorized' after a submit means the daemon rejected the key:
+  // surface that as a distinct variant instead of a blank first-visit prompt.
+  React.useEffect(() => {
+    if (connection === 'unauthorized' && submittedRef.current) {
+      setKeyRejected(true);
+    }
+  }, [connection]);
 
   const navigate = (nextRoute: Route, nextRunId: string | null = null) => {
     history.pushState(null, '', pathFor(nextRoute, nextRunId));
@@ -128,14 +142,23 @@ export default function App() {
         {connection === 'unauthorized' ? (
           <ApiKeyPrompt
             source={apiKeySource}
+            token={pendingKey}
+            keyRejected={keyRejected}
+            onChangeToken={setPendingKey}
             onSubmit={(token) => {
               setApiKey(token);
               setApiKeySource(getApiKeySource());
+              setPendingKey(token);
+              setKeyRejected(false);
+              submittedRef.current = true;
               resetConnection();
             }}
             onClear={() => {
               setApiKey(null);
               setApiKeySource(getApiKeySource());
+              setPendingKey('');
+              setKeyRejected(false);
+              submittedRef.current = false;
               resetConnection();
             }}
           />
@@ -185,15 +208,19 @@ function ConnectionDot({ connection }: { connection: keyof typeof CONNECTION_MET
 
 export function ApiKeyPrompt({
   source,
+  token,
+  keyRejected,
+  onChangeToken,
   onSubmit,
   onClear,
 }: {
   source: 'vite-env' | 'memory' | 'none';
+  token: string;
+  keyRejected: boolean;
+  onChangeToken: (token: string) => void;
   onSubmit: (token: string) => void;
   onClear: () => void;
 }) {
-  const [token, setToken] = React.useState('');
-
   return (
     <main style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: 'var(--app-bg)' }}>
       <div style={{ maxWidth: 560, margin: '0 auto', padding: '80px 24px' }}>
@@ -205,22 +232,35 @@ export function ApiKeyPrompt({
           <div style={{ color: 'var(--orange-primary)', fontSize: 12, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
             Authentication required
           </div>
-          <h2 style={{ margin: '8px 0 8px', fontSize: 22, fontWeight: 600, letterSpacing: '-0.02em' }}>需要 API key</h2>
-          <p style={{ margin: '0 0 20px', color: 'var(--fg-muted)', fontSize: 13.5, lineHeight: 1.6 }}>
-            输入 token，或检查 daemon 的 <code className="mono">BETTER_TRIGGER_API_KEY</code>。token 只保存在当前页面内存中，刷新后需要重新输入。
-          </p>
+          <h2 style={{ margin: '8px 0 8px', fontSize: 22, fontWeight: 600, letterSpacing: '-0.02em' }}>Enter your API key</h2>
+          {keyRejected ? (
+            <p role="alert" style={{
+              margin: '0 0 16px', padding: '10px 12px', borderRadius: 8,
+              background: 'color-mix(in srgb, var(--red-primary) 10%, var(--surface))',
+              border: '1px solid var(--red-border)', color: 'var(--red-text)',
+              fontSize: 13, lineHeight: 1.6,
+            }}>
+              That key was rejected — the daemon said it is invalid. Try a different token.
+            </p>
+          ) : (
+            <p style={{ margin: '0 0 20px', color: 'var(--fg-muted)', fontSize: 13.5, lineHeight: 1.6 }}>
+              Paste the token the daemon expects (check its <code className="mono">BETTER_TRIGGER_API_KEY</code>).
+              Tokens are kept in memory for this page only and you will be asked again after a refresh.
+            </p>
+          )}
           <form onSubmit={(event) => { event.preventDefault(); onSubmit(token); }} style={{ display: 'flex', gap: 8 }}>
-            <Input value={token} onChange={setToken} placeholder="Bearer token" mono type="password" style={{ flex: 1 }} />
-            <Button type="submit" disabled={!token.trim()}>连接</Button>
+            <Input value={token} onChange={onChangeToken} placeholder="Bearer token" mono type="password" selectOnFocus={keyRejected} style={{ flex: 1 }} />
+            <Button type="submit" disabled={!token.trim()}>Connect</Button>
           </form>
           {source !== 'none' && (
             <button type="button" onClick={onClear} style={{ marginTop: 12, padding: 0, border: 0, background: 'transparent', color: 'var(--fg-subtle)', fontFamily: 'var(--font-sans)', fontSize: 12, cursor: 'pointer' }}>
-              清除当前 key，改用另一个 token
+              Clear the current key and use a different token
             </button>
           )}
           {source === 'vite-env' && (
             <p style={{ margin: '16px 0 0', paddingTop: 12, borderTop: '1px solid var(--divider)', color: 'var(--orange-text)', fontSize: 12, lineHeight: 1.5 }}>
-              当前 key 通过 <code className="mono">VITE_BT_API_KEY</code> 提供，仅限本机开发；公开部署请勿将长期 bearer secret 编译进 bundle。
+              This key is provided by <code className="mono">VITE_BT_API_KEY</code> and embedded in this bundle — local development only;
+              don't compile a long-lived bearer secret into a public build.
             </p>
           )}
         </div>

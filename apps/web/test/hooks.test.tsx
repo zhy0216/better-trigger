@@ -12,10 +12,10 @@
    2s interval deterministically.
    ============================================================================= */
 // @vitest-environment jsdom
-import { act, cleanup, renderHook } from '@testing-library/react';
+import { act, cleanup, render, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setApiKey } from '../src/api/client';
-import { getConnection, resetConnection, useRun, useRuns } from '../src/api/hooks';
+import { getConnection, resetConnection, useRun, useRuns, useSchedules, useTasks } from '../src/api/hooks';
 import type { RunDetailResponse, RunLog, RunsResponse, RunSummary } from '../src/api/client';
 
 const run = (id: string): RunSummary => ({
@@ -222,6 +222,83 @@ describe('useRuns pagination (loadMore)', () => {
     // New query: head only for staging (the stub answers the same page).
     expect(result.current.data?.map((r) => r.id)).toEqual(['a1', 'a0']);
     expect(result.current.hasMore).toBe(true); // paging re-armed
+  });
+});
+
+describe('connection aggregation — one flaky poll must not flip the dot', () => {
+  function Harness() {
+    useRuns('prod');
+    useTasks();
+    useSchedules();
+    return null;
+  }
+
+  it('stays live while one of three polls fails, and only goes down when ALL fail', async () => {
+    const schedule = {
+      id: 's', taskId: 't', cronPattern: '*/5 * * * *', cronTz: null, enabled: true,
+      nextRunAt: null, lastRunAt: null, lastRunStatus: null,
+    };
+    const ok = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200 });
+    const boom = (): Response =>
+      new Response(JSON.stringify({ error: { code: 'internal_error', message: 'boom' } }), { status: 500 });
+    // The /tasks poll keeps failing while runs+schedules stay healthy; when
+    // allFail flips, every endpoint fails.
+    let allFail = false;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const u = String(input);
+      // Fresh Response per call: a Response body can only be consumed once.
+      if (allFail) return Promise.resolve(boom());
+      if (u.includes('/tasks')) return Promise.resolve(boom());
+      if (u.includes('/schedules')) return Promise.resolve(ok({ schedules: [schedule] }));
+      return Promise.resolve(ok({ runs: [run('a0')], nextCursor: null }));
+    });
+
+    render(<Harness />);
+    await flush();
+    // The tasks endpoint 500s but runs+schedules are healthy → still live, no
+    // flicker to 'down'.
+    expect(getConnection()).toBe('live');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    // The bad poll keeps failing; the healthy ones keep winning.
+    expect(getConnection()).toBe('live');
+
+    allFail = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    // Every poll now fails → the aggregate genuinely goes down.
+    expect(getConnection()).toBe('down');
+
+    allFail = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    // One healthy endpoint is enough to bring it back up.
+    expect(getConnection()).toBe('live');
+  });
+
+  it('an unauthorized outcome wins over still-in-flight polls (p1-20)', async () => {
+    const auth = (): Response =>
+      new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'bad key' } }), {
+        status: 401,
+      });
+    // The runs poll (registered FIRST) 401s immediately; tasks+schedules
+    // mount AFTER it and stay in flight (never resolve). Without the fix, the
+    // later-registered in-flight entries (outcome null) would be the "newest"
+    // and mask the unauthorized outcome → 'connecting'. The aggregate must
+    // surface 'unauthorized' (the key prompt).
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const u = String(input);
+      if (u.includes('/runs')) return Promise.resolve(auth());
+      return new Promise(() => {}); // tasks + schedules: in-flight forever
+    });
+
+    render(<Harness />);
+    await flush();
+    expect(getConnection()).toBe('unauthorized');
   });
 });
 
