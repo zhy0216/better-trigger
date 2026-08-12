@@ -160,9 +160,6 @@ export type WorkerSummary = WorkerSummaryModel;
 export type WorkersResponse = WorkersResponseModel;
 
 export interface RunFilters {
-  /** Project scope of the runs list (default 'default' — the server-side
-   *  namespace default). */
-  projectId?: string;
   env?: string;
   taskId?: string;
   status?: string;

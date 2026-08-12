@@ -14,6 +14,8 @@ const FILTER_TO_SERVER: Record<string, string | undefined> = {
   success: 'completed',
   failed: 'failed',
   queued: 'queued',
+  waiting: 'waiting',
+  canceled: 'canceled',
 };
 
 const FILTERS = [
@@ -22,21 +24,25 @@ const FILTERS = [
   { id: 'success', label: 'Completed' },
   { id: 'failed', label: 'Failed' },
   { id: 'queued', label: 'Queued' },
+  { id: 'waiting', label: 'Waiting' },
+  { id: 'canceled', label: 'Canceled' },
 ];
 
 export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; env: string }) {
   const [filter, setFilter] = React.useState('all');
   const [q, setQ] = React.useState('');
   const [live, setLive] = React.useState(true);
-  // env + status filtering happen server-side. `live` gates polling — Paused
-  // stops requests and holds current data, resuming refreshes immediately.
+  // env + status + taskId filtering all happen server-side (a task not on the
+  // first loaded page would otherwise show a false "no matches" empty state).
+  // `live` gates polling — Paused stops requests and holds current data,
+  // resuming refreshes immediately.
   // PF3: loadMore consumes the server's nextCursor (older pages append).
   const { data: source, error, loadMore, loadingMore, hasMore } = useRuns(
     env,
-    { status: FILTER_TO_SERVER[filter] },
+    { status: FILTER_TO_SERVER[filter], taskId: q || undefined },
     live,
   );
-  const runs = (source ?? []).filter((r) => !q || r.task.includes(q) || r.id.includes(q));
+  const runs = source ?? [];
 
   const colT = '112px 150px minmax(0,1fr) 96px 130px 96px 92px';
   const Th = ({ children, style }: { children?: React.ReactNode; style?: React.CSSProperties }) => (
@@ -56,11 +62,11 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
                 background: filter === f.id ? 'var(--surface)' : 'transparent', color: filter === f.id ? 'var(--fg)' : 'var(--fg-muted)',
                 boxShadow: filter === f.id ? 'var(--shadow-sm)' : 'none',
               }}>
-              {f.id !== 'all' && <StatusDot status={f.id} size={6} />}{f.label}
+              {f.id !== 'all' && <StatusDot status={f.id === 'waiting' ? 'frozen' : f.id} size={6} />}{f.label}
             </button>
           ))}
         </div>
-        <div style={{ width: 220 }}><Input icon="search" placeholder="Filter by task or run id" value={q} onChange={setQ} mono /></div>
+        <div style={{ width: 220 }}><Input icon="search" placeholder="Filter by task id…" value={q} onChange={setQ} mono /></div>
         <div style={{ flex: 1 }} />
         <button onClick={() => setLive((v) => !v)}
           style={{

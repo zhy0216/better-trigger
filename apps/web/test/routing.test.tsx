@@ -105,7 +105,7 @@ describe('App URL routing', () => {
     expect(screenLabel()).toBe('Run');
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/runs/run_xyz'))).toBe(true);
     // The runs list is not mounted.
-    expect(screen.queryByPlaceholderText('Filter by task or run id')).toBeNull();
+    expect(screen.queryByPlaceholderText('Filter by task id…')).toBeNull();
     expect(window.location.pathname).toBe('/runs/run_xyz');
   });
 
@@ -122,7 +122,7 @@ describe('App URL routing', () => {
     window.history.back();
     await waitFor(() => expect(screenLabel()).toBe('Runs'));
     expect(window.location.pathname).toBe('/runs');
-    await waitFor(() => expect(screen.getByPlaceholderText('Filter by task or run id')).toBeTruthy());
+    await waitFor(() => expect(screen.getByPlaceholderText('Filter by task id…')).toBeTruthy());
   });
 
   it('round-trips a deep link through back/forward without losing the run', async () => {
@@ -147,7 +147,7 @@ describe('App URL routing', () => {
     render(<App />);
 
     await waitFor(() => expect(screenLabel()).toBe('Runs'));
-    await waitFor(() => expect(screen.getByPlaceholderText('Filter by task or run id')).toBeTruthy());
+    await waitFor(() => expect(screen.getByPlaceholderText('Filter by task id…')).toBeTruthy());
     // The mount seed replaces the URL with the canonical /runs path.
     expect(window.location.pathname).toBe('/runs');
   });

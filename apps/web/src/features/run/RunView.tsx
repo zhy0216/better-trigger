@@ -4,9 +4,9 @@
    rendered from live run detail. vizStyle: "waterfall" | "tree".
    ============================================================================= */
 import React from 'react';
-import { Icon, Badge, StatusBadge, StatusDot, STATUS_META } from '../../components/primitives';
+import { Icon, Badge, Button, StatusBadge, StatusDot, STATUS_META } from '../../components/primitives';
 import { ErrorState, LoadingState } from '../../components/Layout';
-import { useRun } from '../../api/hooks';
+import { useRun, api } from '../../api/hooks';
 import { relativeFuture, type AdaptedRunDetail } from '../../api/adapter';
 import type { Span, Trace, LogLine, VizStyle } from '../../types';
 
@@ -19,7 +19,7 @@ function fmtMs(ms: number): string {
 }
 
 // ---- the trace header ----
-function RunHeader({ trace, runStatus }: { trace: Trace; runStatus: string }) {
+function RunHeader({ trace, runStatus, onRetried }: { trace: Trace; runStatus: string; onRetried?: (newRunId: string) => void }) {
   const Meta = ({ icon, label, value, mono }: { icon: string; label: string; value: React.ReactNode; mono?: boolean }) => (
     <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
       <Icon name={icon} size={14} style={{ color: 'var(--fg-subtle)' }} />
@@ -27,6 +27,34 @@ function RunHeader({ trace, runStatus }: { trace: Trace; runStatus: string }) {
       <span className={mono ? 'mono' : ''} style={{ fontSize: 12.5, color: 'var(--fg)', fontWeight: 500, whiteSpace: 'nowrap' }}>{value}</span>
     </div>
   );
+  // UI status vocabulary: waiting maps to 'frozen', so cancel covers the
+  // server's queued/running/waiting; retry covers the terminal dead ends.
+  const canRetry = runStatus === 'failed' || runStatus === 'canceled';
+  const canCancel = runStatus === 'queued' || runStatus === 'running' || runStatus === 'frozen';
+  // Disabled/"pending" overlay for the gap between click and the next polled
+  // frame; on failure it rolls back (buttons re-enable) and surfaces the error.
+  const [pending, setPending] = React.useState<'retry' | 'cancel' | null>(null);
+  const [actionError, setActionError] = React.useState<string | null>(null);
+  const runAction = async (kind: 'retry' | 'cancel') => {
+    setActionError(null);
+    setPending(kind);
+    try {
+      if (kind === 'retry') {
+        // retryRun mints a NEW run (id changes) — navigate to it, or the
+        // poll would keep watching the old failed run forever and repeat
+        // clicks would silently spawn N runs.
+        const { runId: newRunId } = await api.retryRun(trace.runId);
+        onRetried?.(newRunId);
+      } else {
+        // Cancel keeps the same run: the 2s useRun poll picks up 'canceled'.
+        await api.cancelRun(trace.runId);
+      }
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'request failed');
+    } finally {
+      setPending(null);
+    }
+  };
   return (
     <div style={{ padding: '16px 20px 0', borderBottom: '1px solid var(--border)', background: 'var(--panel-bg)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
@@ -34,6 +62,20 @@ function RunHeader({ trace, runStatus }: { trace: Trace; runStatus: string }) {
         <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600, letterSpacing: '-0.01em' }}>{trace.task}</h3>
         <span className="mono" style={{ fontSize: 12, color: 'var(--fg-subtle)', padding: '2px 8px', borderRadius: 6, background: 'var(--fill)' }}>{trace.runId}</span>
         <div style={{ flex: 1 }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {canRetry && (
+            <Button size="sm" variant="outline" icon="retry" disabled={pending !== null}
+              onClick={() => void runAction('retry')}>
+              {pending === 'retry' ? 'Retrying…' : 'Retry'}
+            </Button>
+          )}
+          {canCancel && (
+            <Button size="sm" variant="danger" icon="close" disabled={pending !== null}
+              onClick={() => void runAction('cancel')}>
+              {pending === 'cancel' ? 'Canceling…' : 'Cancel'}
+            </Button>
+          )}
+        </div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', padding: '13px 0 14px' }}>
         <Meta icon="bolt" label="trigger" value={trace.trigger} mono />
@@ -42,6 +84,12 @@ function RunHeader({ trace, runStatus }: { trace: Trace; runStatus: string }) {
         <Meta icon="clock" label="queued" value={trace.queuedFor} />
         <Meta icon="activity" label="elapsed" value={fmtMs(trace.totalMs)} />
       </div>
+      {actionError && (
+        <div role="alert" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 10px', marginBottom: 12, borderRadius: 8, fontSize: 12.5, color: 'var(--red-text)', background: 'color-mix(in srgb, var(--red-primary) 7%, transparent)', border: '1px solid color-mix(in srgb, var(--red-primary) 25%, transparent)' }}>
+          <Icon name="close" size={13} />
+          <span>{actionError}</span>
+        </div>
+      )}
       <div style={{ height: 3, background: 'var(--fill)', borderRadius: 9999, overflow: 'hidden', marginBottom: -1.5 }}>
         <div style={{
           width: '100%', height: '100%', borderRadius: 9999,
@@ -303,7 +351,7 @@ interface WakeInfo {
   waits: Array<{ kind: string; resumeAt: string | null; childRunId: string | null }>;
 }
 
-export function RunView({ vizStyle = 'waterfall', runId = null, onBack }: { vizStyle?: VizStyle; runId?: string | null; onBack?: () => void }) {
+export function RunView({ vizStyle = 'waterfall', runId = null, onBack, onRetried }: { vizStyle?: VizStyle; runId?: string | null; onBack?: () => void; onRetried?: (newRunId: string) => void }) {
   const { data: detail, error, loadOlderLogs, loadingOlderLogs, hasOlderLogs } = useRun(runId);
 
   let body: React.ReactNode;
@@ -321,7 +369,7 @@ export function RunView({ vizStyle = 'waterfall', runId = null, onBack }: { vizS
     body = <div style={{ flex: 1, overflowY: 'auto' }}>{error ? <ErrorState message={error} /> : <LoadingState />}</div>;
   } else {
     body = (
-      <RunDetail key={runId} detail={detail} vizStyle={vizStyle}
+      <RunDetail key={runId} detail={detail} vizStyle={vizStyle} onRetried={onRetried}
         onLoadOlderLogs={loadOlderLogs} loadingOlderLogs={loadingOlderLogs} hasOlderLogs={hasOlderLogs} />
     );
   }
@@ -343,9 +391,10 @@ export function RunView({ vizStyle = 'waterfall', runId = null, onBack }: { vizS
   );
 }
 
-function RunDetail({ detail, vizStyle, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs }: {
+function RunDetail({ detail, vizStyle, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs, onRetried }: {
   detail: AdaptedRunDetail; vizStyle: VizStyle;
   onLoadOlderLogs: () => Promise<boolean>; loadingOlderLogs: boolean; hasOlderLogs: boolean;
+  onRetried?: (newRunId: string) => void;
 }) {
   const trace = detail.trace;
   const logs: Record<string, LogLine[]> = detail.spanLogs;
@@ -360,7 +409,7 @@ function RunDetail({ detail, vizStyle, onLoadOlderLogs, loadingOlderLogs, hasOld
 
   return (
     <>
-      <RunHeader trace={trace} runStatus={detail.status} />
+      <RunHeader trace={trace} runStatus={detail.status} onRetried={onRetried} />
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, position: 'relative', background: 'var(--surface)' }}>
           <div style={{ flex: 1, overflowY: 'auto', position: 'relative' }}>

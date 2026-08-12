@@ -42,7 +42,7 @@
 | 28 | [p2-30-unify-reenqueue.md](./done/p2-30-unify-reenqueue.md) ✅ | scanWaits 开码 re-enqueue 与 enqueue() 语义分叉 | — |
 | 29 | [p2-31-keyless-rate-limit-bucket.md](./done/p2-31-keyless-rate-limit-bucket.md) ✅ | 无 key 时 per-key 限流坍缩成单一 anon 桶 | p1-14 |
 | 30 | [p2-32-route-validation-consistency.md](./done/p2-32-route-validation-consistency.md) ✅ | intQuery/clampQuery 两套校验;/runs?status=垃圾 返回空页 | — |
-| 31 | [p2-33-runs-list-filters-actions.md](./p2-33-runs-list-filters-actions.md) | 搜索假空态;cancel/retry 已实现无 UI | p1-18 |
+| 31 | [p2-33-runs-list-filters-actions.md](./done/p2-33-runs-list-filters-actions.md) ✅ | 搜索假空态;cancel/retry 已实现无 UI | p1-18 |
 | 32 | [p2-34-web-test-infra.md](./p2-34-web-test-infra.md) | web 的 vitest 未声明依赖、无配置、jsdom 靠 docblock | — |
 | 33 | [p2-35-acceptance-ports-timeouts.md](./p2-35-acceptance-ports-timeouts.md) | 验收场景端口冲突;无 per-harness 超时 | — |
 | 34 | [p2-36-sdk-instance-tests.md](./p2-36-sdk-instance-tests.md) | instance.ts 324 行零单测;registry 跨副本无测试 | p0-03, p1-17 |
@@ -91,3 +91,4 @@
 - [done/p2-30-unify-reenqueue.md](./done/p2-30-unify-reenqueue.md) ✅(scanWaits 改走 enqueue(preserveSurvivor),kernel 只剩一处 INSERT INTO queue)
 - [done/p2-31-keyless-rate-limit-bucket.md](./done/p2-31-keyless-rate-limit-bucket.md) ✅(无 key 按来源地址分桶,桶表基数上限,global 桶永不被驱逐)
 - [done/p2-32-route-validation-consistency.md](./done/p2-32-route-validation-consistency.md) ✅(clampQuery 删除,query 校验统一到 intQuery,/runs?status 非法 → 400)
+- [done/p2-33-runs-list-filters-actions.md](./done/p2-33-runs-list-filters-actions.md) ✅(搜索服务端 taskId,补 waiting/canceled chips,RunHeader retry/cancel + 新 run 导航)

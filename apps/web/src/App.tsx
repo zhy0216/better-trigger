@@ -116,7 +116,7 @@ export default function App() {
   };
 
   let screen: React.ReactNode;
-  if (route === 'run') screen = <RunView vizStyle={t.vizStyle as VizStyle} runId={runId} onBack={() => navigate('runs')} />;
+  if (route === 'run') screen = <RunView vizStyle={t.vizStyle as VizStyle} runId={runId} onBack={() => navigate('runs')} onRetried={(newRunId) => openRun(newRunId)} />;
   else if (route === 'runs') screen = <RunsList env={env} onOpenRun={(r) => openRun(r.id)} />;
   else if (route === 'tasks') screen = <TasksDashboard setRoute={goTo} onOpenRun={openRun} />;
   else if (route === 'schedules') screen = <Schedules />;
