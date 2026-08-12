@@ -42,6 +42,12 @@ services:
         GIT_SHA: ${GIT_SHA:-}
     container_name: better-trigger-worker
     restart: unless-stopped
+    # p1-21: Docker's default stop grace is 10s, but the daemon drains for
+    # SHUTDOWN_DRAIN_MS (30s) before handing claims back — a shorter grace
+    # SIGKILLs the drain mid-way and costs runs a recovery. 40s = drain + the
+    # handoff/backstop slack. If you change SHUTDOWN_DRAIN_MS in
+    # apps/worker/src/runtime.ts, keep this above it.
+    stop_grace_period: 40s
     depends_on:
       postgres:
         condition: service_healthy

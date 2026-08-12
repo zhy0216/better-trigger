@@ -25,7 +25,7 @@
 | 11 | [p1-10-concurrency-work-notify.md](./done/p1-10-concurrency-work-notify.md) ✅ | 并发受限任务完成不发 work 通知,下一个 run 白等退避 | — |
 | 12 | [p1-11-pool-sizing-loop-stall.md](./done/p1-11-pool-sizing-loop-stall.md) ✅ | 连接池无 sizing/超时;orchestrator 循环可永久停摆且零指标 | — |
 | 13 | [p1-12-shutdown-races-deadline.md](./done/p1-12-shutdown-races-deadline.md) ✅ | drain 期间领新 run;shutdown 无兜底;信号 handler 装太晚 | — |
-| 14 | [p1-21-compose-stop-grace.md](./p1-21-compose-stop-grace.md) | compose 缺 stop_grace_period,10s SIGKILL 对 30s drain | p1-12 |
+| 14 | [p1-21-compose-stop-grace.md](./done/p1-21-compose-stop-grace.md) ✅ | compose 缺 stop_grace_period,10s SIGKILL 对 30s drain | p1-12 |
 | 15 | [p1-13-unhandled-rejection-policy.md](./p1-13-unhandled-rejection-policy.md) | 用户 task 的 unhandledRejection 直接杀 daemon | — |
 | 16 | [p1-14-read-endpoints-limits.md](./p1-14-read-endpoints-limits.md) | 读端点零限流;长轮询不感知断连 | — |
 | 17 | [p1-15-batchtrigger-namespace-options.md](./p1-15-batchtrigger-namespace-options.md) | batchTrigger 的 per-item env/projectId 静默丢弃 | — |
@@ -74,3 +74,4 @@
 - [done/p1-10-concurrency-work-notify.md](./done/p1-10-concurrency-work-notify.md) ✅(complete/failTerminal/cancel 带 concurrency_key 时发 work 通知)
 - [done/p1-11-pool-sizing-loop-stall.md](./done/p1-11-pool-sizing-loop-stall.md) ✅(业务池 sizing/超时,checkout 计数,loopLastSuccess 健康 gauge,loop-hang 自愈)
 - [done/p1-12-shutdown-races-deadline.md](./done/p1-12-shutdown-races-deadline.md) ✅(drain 不领新 run,shutdown 兜底 + 二次信号,handler 提前到模块加载)
+- [done/p1-21-compose-stop-grace.md](./done/p1-21-compose-stop-grace.md) ✅(worker stop_grace_period 40s > drain 30s)

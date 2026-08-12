@@ -127,6 +127,9 @@ const MIN_HEARTBEAT_MS = 500;
 const IDLE_POLL_BASE_MS = 300;
 const IDLE_POLL_MAX_MS = 2_000;
 const SHUTDOWN_DRAIN_MS = 30_000;
+// Keep docker-compose.yml's worker `stop_grace_period` (40s) ABOVE this value
+// (drain + handoff/backstop slack): a shorter grace SIGKILLs the drain and
+// costs the in-flight runs a recovery. Change the two together (p1-21).
 
 export async function startWorkerRuntime(
   deps: WorkerDeps,
