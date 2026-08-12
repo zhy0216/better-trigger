@@ -29,7 +29,7 @@
 | 15 | [p1-13-unhandled-rejection-policy.md](./done/p1-13-unhandled-rejection-policy.md) ✅ | 用户 task 的 unhandledRejection 直接杀 daemon | — |
 | 16 | [p1-14-read-endpoints-limits.md](./done/p1-14-read-endpoints-limits.md) ✅ | 读端点零限流;长轮询不感知断连 | — |
 | 17 | [p1-15-batchtrigger-namespace-options.md](./done/p1-15-batchtrigger-namespace-options.md) ✅ | batchTrigger 的 per-item env/projectId 静默丢弃 | — |
-| 18 | [p1-16-lazy-async-hooks.md](./p1-16-lazy-async-hooks.md) | eager import node:async_hooks,edge/浏览器加载即炸 | — |
+| 18 | [p1-16-lazy-async-hooks.md](./done/p1-16-lazy-async-hooks.md) ✅ | eager import node:async_hooks,edge/浏览器加载即炸 | — |
 | 19 | [p1-17-client-timeout-registry.md](./p1-17-client-timeout-registry.md) | 超时误报"daemon 没起";预中止 signal 失效;registry 无校验 | p1-16 |
 | 20 | [p1-18-dashboard-routing.md](./p1-18-dashboard-routing.md) | dashboard 无 URL 路由,deep-link fallback 无消费者 | — |
 | 21 | [p1-19-security-headers-postmessage.md](./p1-19-security-headers-postmessage.md) | 静态资源零安全头;postMessage 无 origin 校验 | — |
@@ -78,3 +78,4 @@
 - [done/p1-13-unhandled-rejection-policy.md](./done/p1-13-unhandled-rejection-policy.md) ✅(unhandledRejection 非致命,日志 + 计数,BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION 门控)
 - [done/p1-14-read-endpoints-limits.md](./done/p1-14-read-endpoints-limits.md) ✅(读桶限流,长轮询断连即释放 waiter + 499)
 - [done/p1-15-batchtrigger-namespace-options.md](./done/p1-15-batchtrigger-namespace-options.md) ✅(batchTrigger 批级 options 带 namespace,per-item env/projectId 收窄为类型错误)
+- [done/p1-16-lazy-async-hooks.md](./done/p1-16-lazy-async-hooks.md) ✅(AsyncLocalStorage 惰性加载,edge/browser 可 import,Node ESM 异步兜底)

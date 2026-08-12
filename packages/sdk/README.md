@@ -101,6 +101,12 @@ const trigger = betterTrigger({
 
 - `apiKey` is required when the daemon runs with `BETTER_TRIGGER_API_KEY` set;
   it is sent as `Authorization: Bearer <key>`.
+- **Runs in any JS environment** — this package has no runtime dependencies
+  and never opens a database connection. `node:async_hooks` (used only to
+  detect "am I inside a running task?") is loaded lazily, so importing it in an
+  edge function or a browser bundle is safe; task-ctx detection (`currentExecutor`)
+  simply reads undefined there. Only a **daemon** needs to execute tasks, and
+  the daemon runs under Node/bun where the storage is always present (p1-16).
 - The **first** `betterTrigger()` call becomes the module-level default
   instance; `TaskHandle.trigger` / `batchTrigger` called outside a run use it
   (calling them with no instance created throws). A later instance can take

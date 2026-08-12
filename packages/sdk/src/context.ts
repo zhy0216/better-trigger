@@ -15,6 +15,7 @@ import type {
   TriggerItem,
   TriggerOptions,
 } from '@better-trigger/core';
+import type { AsyncLocalStorage } from 'node:async_hooks';
 import { registry } from './registry';
 
 /** Per-step options. */
@@ -183,11 +184,17 @@ export interface ExecutorTask {
   validate?: (payload: unknown) => Promise<unknown> | unknown;
 }
 
-/** AsyncLocalStorage holding the executor for the currently running task fn.
- *  Process-wide (see ./registry) so it survives duplicate package copies. */
-export const executorStorage = registry.executorStorage;
+/** The AsyncLocalStorage holding the executor for the currently running task
+ *  fn. Process-wide (see ./registry) so it survives duplicate package copies.
+ *  Read at access time (a function, not a snapshot) so a daemon that populates
+ *  it late (p1-16: async node:async_hooks load on plain Node ESM < 22.3) is
+ *  visible to currentExecutor(). May be undefined on platforms without
+ *  node:async_hooks — there is no in-flight task there. */
+export function executorStorage(): AsyncLocalStorage<RunExecutor> | undefined {
+  return registry.executorStorage;
+}
 
 /** Returns the active executor if called inside a running task, else undefined. */
 export function currentExecutor(): RunExecutor | undefined {
-  return executorStorage.getStore();
+  return executorStorage()?.getStore();
 }

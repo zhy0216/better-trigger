@@ -268,7 +268,19 @@ export class Executor implements RunExecutor {
 
       let output: unknown;
       try {
-        output = await executorStorage.run(this, () => this.task.run(payload, this.ctx));
+        // The daemon always runs where AsyncLocalStorage exists (p1-16's lazy
+        // loader resolves it under bun/Node); a missing storage here means the
+        // executor is being run on a platform without node:async_hooks, where
+        // executing tasks is impossible — say so clearly instead of a cryptic
+        // TypeError on `undefined.run`.
+        const storage = executorStorage();
+        if (storage === undefined) {
+          throw new Error(
+            'better-trigger worker: AsyncLocalStorage is unavailable in this runtime — ' +
+              'the executor cannot run tasks without node:async_hooks. Run the daemon under Node/bun.',
+          );
+        }
+        output = await storage.run(this, () => this.task.run(payload, this.ctx));
       } catch (err) {
         return this.handleThrown(err);
       }

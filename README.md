@@ -12,6 +12,10 @@ is the only infrastructure.
 - **The SDK is an HTTP client** — `better-trigger` ships `task()` and
   `betterTrigger({ url })`, has zero runtime dependencies and never opens a
   database connection, so it is safe to import into a web server or a CLI.
+  Edge / browser imports work too: `node:async_hooks` (used only to detect
+  "am I inside a running task?") is loaded lazily, so triggering from an edge
+  function or a browser bundle is fine — task-ctx detection just reads
+  undefined there (p1-16).
 - **Replay, not snapshots** — completed steps are memoized in Postgres; after a
   crash or a long `wait`, the task function re-runs and cached steps return
   instantly. Persistent leases plus a monotonic **fencing token** per claim

@@ -18,6 +18,9 @@
 export { executorStorage, currentExecutor } from './context';
 export type { ExecutorTask, RunExecutor } from './context';
 
+export { getExecutorStorage, loadExecutorStorageAsync } from './als';
+export { setExecutorStorage } from './registry';
+
 export { toExecutorTask, toManifest, normalizeCron } from './task';
 export type { ResolvedTaskDefinition } from './task';
 

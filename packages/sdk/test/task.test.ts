@@ -254,7 +254,7 @@ describe('durable in-run trigger — namespace warning (p1-15)', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     let warned: unknown[] = [];
     try {
-      await executorStorage.run(executor, async () => {
+      await executorStorage()!.run(executor, async () => {
         await handle.trigger({ n: 1 }, { env: 'staging', projectId: 'acme' });
       });
       warned = warnSpy.mock.calls.map((c) => c[0]);
@@ -287,7 +287,7 @@ describe('durable in-run trigger — namespace warning (p1-15)', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     let warned: unknown[] = [];
     try {
-      await executorStorage.run(executor, async () => {
+      await executorStorage()!.run(executor, async () => {
         const result = await handle.triggerAndWait({ n: 1 }, { env: 'staging' });
         expect(result.ok).toBe(true);
       });

@@ -32,7 +32,7 @@ import {
 import { createHealthPool, createPool, DEFAULT_DATABASE_URL, migrate } from '@better-trigger/db';
 import { createKernel, MIN_RETENTION_MS, type OrchestratorCounters } from '@better-trigger/kernel';
 import { derivePoolConfig } from './pool-config';
-import { setResultResolver } from 'better-trigger/internal';
+import { setResultResolver, loadExecutorStorageAsync, setExecutorStorage } from 'better-trigger/internal';
 import { createApp } from './app';
 import { startHttpServer } from './listen';
 import { configuredApiKeys, parseOriginList, setCorsOrigins } from './middleware';
@@ -1078,6 +1078,14 @@ async function main(): Promise<void> {
   // to the default namespace rather than being refused. The waiter registry
   // serves it like the HTTP route, so in-process waiters share the same sweep
   // and notifications.
+  // p1-16: make sure the AsyncLocalStorage the executor runs tasks under is
+  // present. The lazy sync loader resolves it on bun / Node >= 22.3; plain
+  // Node ESM < 22.3 needs the async fallback — do it once, up front, so every
+  // run has ctx detection. (An edge runtime without node:async_hooks leaves it
+  // undefined and the executor's own guard fails any run with a clear message.)
+  const storageCtor = await loadExecutorStorageAsync();
+  setExecutorStorage(storageCtor ? new storageCtor() : undefined);
+
   setResultResolver({
     waitForResult: (runId, namespace, o) =>
       waiters.register(runId, namespace ?? DEFAULT_NAMESPACE, o),
