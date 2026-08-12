@@ -5,7 +5,7 @@
    ============================================================================= */
 import { describe, expect, it } from 'vitest';
 import { computeBackoffMs, resolveRetryPolicy } from '../src/backoff';
-import { DEFAULT_RETRY } from '../src/types';
+import { DEFAULT_RETRY, type RetryPolicy } from '../src/types';
 
 describe('resolveRetryPolicy', () => {
   it('returns the defaults when no policy is given', () => {
@@ -25,6 +25,21 @@ describe('resolveRetryPolicy', () => {
   it('does not mutate DEFAULT_RETRY', () => {
     resolveRetryPolicy({ baseMs: 1 });
     expect(DEFAULT_RETRY.baseMs).toBe(1_000);
+  });
+
+  it('treats an explicit undefined field as absent (p2-24), not as an override', () => {
+    // `{ maxAttempts: maybe ? n : undefined }` is a common config shape; the
+    // old spread merge produced `maxAttempts: undefined` which overwrote the
+    // default and blew up a NOT NULL column. Each field must fall back.
+    const merged = resolveRetryPolicy({
+      maxAttempts: undefined,
+      baseMs: undefined,
+      factor: undefined,
+      maxMs: undefined,
+    } as RetryPolicy);
+    expect(merged).toEqual(DEFAULT_RETRY);
+    // A genuinely-set field still wins.
+    expect(resolveRetryPolicy({ maxAttempts: 7, factor: undefined }).maxAttempts).toBe(7);
   });
 });
 

@@ -3,9 +3,21 @@
    ============================================================================= */
 import { DEFAULT_RETRY, type RetryPolicy } from './types';
 
-/** Merge a partial policy over the defaults. */
+/**
+ * Merge a partial policy over the defaults. Deliberately per-field `??`, NOT
+ * `{ ...DEFAULT_RETRY, ...policy }`: with `exactOptionalPropertyTypes` off, a
+ * spread can carry an explicit `undefined` (e.g. `retry: { maxAttempts:
+ * maybe ? n : undefined }`) that OVERRIDES the default and lands in a NOT
+ * NULL column as an opaque 500. Explicit undefined and absent are the same
+ * here (p2-24).
+ */
 export function resolveRetryPolicy(policy?: RetryPolicy): Required<RetryPolicy> {
-  return { ...DEFAULT_RETRY, ...(policy ?? {}) };
+  return {
+    maxAttempts: policy?.maxAttempts ?? DEFAULT_RETRY.maxAttempts,
+    baseMs: policy?.baseMs ?? DEFAULT_RETRY.baseMs,
+    factor: policy?.factor ?? DEFAULT_RETRY.factor,
+    maxMs: policy?.maxMs ?? DEFAULT_RETRY.maxMs,
+  };
 }
 
 /**
