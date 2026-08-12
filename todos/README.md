@@ -39,7 +39,7 @@
 | 25 | [p2-25-dead-sdk-surface.md](./done/p2-25-dead-sdk-surface.md) ✅ | pollMs 死参数、core 幽灵 RunHandle、过时注释 | — |
 | 26 | [p2-28-namespace-sweep-marker.md](./done/p2-28-namespace-sweep-marker.md) ✅ | namespace sweep 的 marker 可被 SELECT 列表满足 | p1-06 |
 | 27 | [p2-29-drop-unused-queue-index.md](./done/p2-29-drop-unused-queue-index.md) ✅ | 删除无查询使用的 queue_available_priority_idx | — |
-| 28 | [p2-30-unify-reenqueue.md](./p2-30-unify-reenqueue.md) | scanWaits 开码 re-enqueue 与 enqueue() 语义分叉 | — |
+| 28 | [p2-30-unify-reenqueue.md](./done/p2-30-unify-reenqueue.md) ✅ | scanWaits 开码 re-enqueue 与 enqueue() 语义分叉 | — |
 | 29 | [p2-31-keyless-rate-limit-bucket.md](./p2-31-keyless-rate-limit-bucket.md) | 无 key 时 per-key 限流坍缩成单一 anon 桶 | p1-14 |
 | 30 | [p2-32-route-validation-consistency.md](./p2-32-route-validation-consistency.md) | intQuery/clampQuery 两套校验;/runs?status=垃圾 返回空页 | — |
 | 31 | [p2-33-runs-list-filters-actions.md](./p2-33-runs-list-filters-actions.md) | 搜索假空态;cancel/retry 已实现无 UI | p1-18 |
@@ -88,3 +88,4 @@
 - [done/p2-25-dead-sdk-surface.md](./done/p2-25-dead-sdk-surface.md) ✅(pollMs deprecated,删 core 幽灵 RunHandle,修注释)
 - [done/p2-28-namespace-sweep-marker.md](./done/p2-28-namespace-sweep-marker.md) ✅(marker 只看谓词区,SELECT 列表不再满足;p1-06 语句已合规)
 - [done/p2-29-drop-unused-queue-index.md](./done/p2-29-drop-unused-queue-index.md) ✅(0013 DROP queue_available_priority_idx,queue_concurrency_idx 保留并注理由)
+- [done/p2-30-unify-reenqueue.md](./done/p2-30-unify-reenqueue.md) ✅(scanWaits 改走 enqueue(preserveSurvivor),kernel 只剩一处 INSERT INTO queue)

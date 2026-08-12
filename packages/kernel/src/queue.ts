@@ -25,6 +25,15 @@ export interface EnqueueArgs {
   /** The namespace the run lives in — stamped on the queue row so every
    *  claim/lease/heartbeat statement can re-scope on it (C2). */
   namespace: Namespace;
+  /**
+   * Preserve a SURVIVING queue row's priority/concurrency_key on the conflict
+   * branch instead of overwriting them with the new values. Default false.
+   * `enqueue()`'s default overwrite is right for a fresh trigger (the new
+   * values ARE the truth); the wait-resume path passes true because reaching
+   * the conflict branch there means a queue row survived the suspend, and that
+   * row's own priority is the more trustworthy value (p2-30).
+   */
+  preserveSurvivor?: boolean;
 }
 
 /**
@@ -109,16 +118,25 @@ export async function enqueueMany(client: PoolClient, args: EnqueueArgs[]): Prom
         `$${start + i * 6 + 3}, $${start + i * 6 + 4}, $${start + i * 6 + 5}, NULL, NULL)`,
     )
     .join(', ');
+  // Two conflict semantics (p2-30): the default overwrites priority /
+  // concurrency_key with the new values (a fresh trigger's values ARE the
+  // truth); `preserveSurvivor` only reschedules the survivor and keeps ITS
+  // priority/concurrency_key (the wait-resume case — a queue row that survived
+  // the suspend knows better than the resume).
+  const allPreserve = args.every((a) => a.preserveSurvivor);
+  const conflict = allPreserve
+    ? `ON CONFLICT (run_id) DO UPDATE
+         SET available_at = EXCLUDED.available_at,
+             locked_by = NULL, locked_at = NULL, lease_until = NULL`
+    : `ON CONFLICT (run_id) DO UPDATE
+         SET available_at = EXCLUDED.available_at,
+             priority = EXCLUDED.priority,
+             concurrency_key = EXCLUDED.concurrency_key,
+             locked_by = NULL, locked_at = NULL, lease_until = NULL`;
   await client.query(
     `INSERT INTO queue (run_id, available_at, priority, concurrency_key, project_id, env, locked_by, locked_at)
      VALUES ${values}
-     ON CONFLICT (run_id) DO UPDATE
-       SET available_at = EXCLUDED.available_at,
-           priority     = EXCLUDED.priority,
-           concurrency_key = EXCLUDED.concurrency_key,
-           locked_by    = NULL,
-           locked_at    = NULL,
-           lease_until  = NULL`,
+     ${conflict}`,
     args.flatMap((a) => [
       a.runId,
       a.availableAt,

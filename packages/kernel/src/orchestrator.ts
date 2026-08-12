@@ -49,6 +49,7 @@ import {
 import type { KernelLogger } from './kernel';
 import { prune } from './prune';
 import {
+  enqueue,
   nsPredicateFor,
   scanStrandedRuns,
   type StrandedScan,
@@ -486,20 +487,24 @@ export function startOrchestrator(
             WHERE id = $1 AND project_id = $2 AND env = $3`,
           [w.run_id, wNs.projectId, wNs.env],
         );
+        // Re-enqueue through the shared enqueue() (p2-30), NOT a hand-rolled
+        // INSERT: "put a run back in the queue" is one concept, one SQL shape.
         // Priority comes off the runs row, not a literal: suspendRun deleted the
-        // queue row that held it, so this is always the INSERT branch, and a
+        // queue row that held it, so this is usually the INSERT branch, and a
         // hard-coded 0 would silently demote every timer wait — a priority-10
         // run that slept an hour would come back at the tail of the queue
-        // (todos/01-correctness.md C7). The conflict branch deliberately leaves
-        // priority alone: reaching it means a queue row survived the suspend,
-        // and that row's own value is then the more trustworthy of the two.
-        await client.query(
-          `INSERT INTO queue (run_id, project_id, env, available_at, priority, concurrency_key)
-           VALUES ($1, $2, $3, now(), $4, $5)
-           ON CONFLICT (run_id) DO UPDATE
-             SET available_at = now(), locked_by = NULL, locked_at = NULL, lease_until = NULL`,
-          [w.run_id, wNs.projectId, wNs.env, run.priority, run.concurrency_key],
-        );
+        // (todos/01-correctness.md C7). `preserveSurvivor: true` keeps a
+        // surviving queue row's OWN priority/concurrency_key: reaching the
+        // conflict branch means a row survived the suspend, and that row's
+        // value is then the more trustworthy of the two.
+        await enqueue(client, {
+          runId: w.run_id,
+          availableAt: new Date(),
+          priority: run.priority,
+          concurrencyKey: run.concurrency_key,
+          namespace: wNs,
+          preserveSurvivor: true,
+        });
         // The resumed run is claimable again — wake the claim loops. This is
         // the "resume → work" notification PF2 asks for; a resume that rolled
         // back (or an early no-op return above) sends nothing.
