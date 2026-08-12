@@ -82,8 +82,15 @@ import { hello } from "./tasks";
 betterTrigger({ url: "http://localhost:4848" }).setDefault();
 
 const handle = await hello.trigger({ name: "ada" });
-console.log(await handle.result());   // { status: "completed", output: "hello, ada" }
+const result = await handle.result();   // { status: "completed", output: "hello, ada" }
+console.log(result.output);             // "hello, ada" — typed as the task's return value
 ```
+
+`handle.result()` waits for a terminal state. A run that takes longer than the
+wait budget (30s by default) returns its **latest non-terminal status** instead
+of the output — always check `result.status` if the run may run long, or pass
+`{ throwOnTimeout: true }` to make the timeout throw `ResultTimeoutError`
+(with the latest status) instead.
 
 The daemon runs your TypeScript task modules directly under `bun`. Under plain
 `node`, point `--tasks` at compiled JavaScript (or use a loader such as `tsx`).

@@ -387,11 +387,20 @@ export interface WaitForResultOptions {
   pollMs?: number;
   /** Caller cancellation; aborts the long-poll in-flight. */
   signal?: AbortSignal;
+  /**
+   * Throw a ResultTimeoutError instead of returning the latest non-terminal
+   * status when the budget runs out.
+   */
+  throwOnTimeout?: boolean;
 }
 
-/** Terminal outcome of a run — or its latest non-terminal status on timeout. */
-export interface WaitResult {
+/**
+ * Terminal outcome of a run — or its latest non-terminal status on timeout.
+ * Generic over the run's output type so a typed TaskHandle's `result()` can
+ * deliver its `TOutput` instead of `unknown` (p2-23).
+ */
+export interface WaitResult<T = unknown> {
   status: RunStatus;
-  output?: unknown;
+  output?: T;
   error?: SerializedError;
 }

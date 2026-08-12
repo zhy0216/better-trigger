@@ -13,6 +13,9 @@ export { betterTrigger } from './instance';
 /* ---- transport ---------------------------------------------------------- */
 export { HttpError } from './client';
 
+/* ---- waitForResult timeout (p2-23) -------------------------------------- */
+export { ResultTimeoutError } from './instance';
+
 /* ---- run-abort signalling (ctx.signal) ---------------------------------- */
 export { RunAbortedError, isRunAborted } from './context';
 

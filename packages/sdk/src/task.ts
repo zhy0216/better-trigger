@@ -83,9 +83,9 @@ export interface TaskHandle<TPayload, TOutput> {
   /**
    * Trigger one run. Outside a task → the default betterTrigger() instance.
    * Inside a task → durable batch-trigger step (a 1-item batch). Returns a
-   * handle with the run id.
+   * handle with the run id; its result() resolves with the task's TOutput.
    */
-  trigger(payload: TPayload, options?: TriggerOptions): Promise<RunHandle>;
+  trigger(payload: TPayload, options?: TriggerOptions): Promise<RunHandle<TOutput>>;
 
   /**
    * Trigger many runs. Outside a task → the default betterTrigger() instance,
@@ -94,7 +94,10 @@ export interface TaskHandle<TPayload, TOutput> {
    * the parent's namespace, so `options` carries no namespace there (a set
    * env/projectId is warned and ignored). Returns one handle per item, in order.
    */
-  batchTrigger(items: Array<BatchItem<TPayload>>, options?: TriggerOptions): Promise<RunHandle[]>;
+  batchTrigger(
+    items: Array<BatchItem<TPayload>>,
+    options?: TriggerOptions,
+  ): Promise<RunHandle<TOutput>[]>;
 
   /**
    * Trigger a child run and durably wait for it. MUST be called inside a task.
@@ -272,10 +275,13 @@ function makeHandle<TPayload, TOutput>(
           `trigger:${def.id}`,
         );
         // The child lives in the parent's namespace — carry it on the handle so
-        // result() polls the same scope it was created in.
-        return makeRunHandle(runIds[0], undefined, undefined, executor.namespace);
+        // result() polls the same scope it was created in. TOutput flows
+        // through the typed handle (p2-23).
+        return makeRunHandle<TOutput>(runIds[0], undefined, undefined, executor.namespace);
       }
-      return requireDefaultInstance().trigger(def.id, payload, opts);
+      // The instance can't know TOutput from a raw id — this handle passes its
+      // own, so the TaskHandle stays typed end to end.
+      return requireDefaultInstance().trigger<TPayload, TOutput>(def.id, payload, opts);
     },
 
     async batchTrigger(items, options) {
@@ -294,9 +300,14 @@ function makeHandle<TPayload, TOutput>(
           triggerItems,
           `batchTrigger:${def.id}`,
         );
-        return runIds.map((id) => makeRunHandle(id, undefined, undefined, executor.namespace));
+        return runIds.map((id) => makeRunHandle<TOutput>(id, undefined, undefined, executor.namespace));
       }
-      return requireDefaultInstance().batchTrigger(triggerItems, options);
+      // The instance batch is untyped (items can be different tasks, so the
+      // batch endpoint returns RunHandle<unknown>[]) — this handle knows all
+      // items share its TOutput (p2-23).
+      return requireDefaultInstance().batchTrigger(triggerItems, options) as Promise<
+        RunHandle<TOutput>[]
+      >;
     },
 
     async triggerAndWait(payload, options) {

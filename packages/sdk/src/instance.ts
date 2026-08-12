@@ -25,8 +25,26 @@ import { HttpClient, HttpError, type HttpClientOptions } from './client';
 import { registry } from './registry';
 import type { TaskHandle } from './task';
 
+/**
+ * Thrown by waitForResult / RunHandle.result() when `throwOnTimeout` is set and
+ * the wait budget runs out before the run reaches a terminal state. `status` is
+ * the latest status observed — undefined only when no poll ever succeeded (e.g.
+ * every attempt hit a retriable 5xx / transport failure before the deadline).
+ */
+export class ResultTimeoutError extends Error {
+  readonly status: RunStatus | undefined;
+  constructor(runId: string, timeoutMs: number, status: RunStatus | undefined) {
+    super(
+      `run ${runId} did not reach a terminal state within ${timeoutMs}ms` +
+        (status !== undefined ? ` (status ${status})` : ''),
+    );
+    this.name = 'ResultTimeoutError';
+    this.status = status;
+  }
+}
+
 /** Returned by trigger / batchTrigger: the run id plus a result() poller. */
-export interface RunHandle {
+export interface RunHandle<TOutput = unknown> {
   /** Run id. */
   id: string;
   /**
@@ -35,8 +53,12 @@ export interface RunHandle {
    * handles minted anywhere else.
    */
   idempotent?: boolean;
-  /** Wait for the run to reach a terminal state (timeout → latest status). */
-  result(opts?: WaitForResultOptions): Promise<WaitResult>;
+  /**
+   * Wait for the run to reach a terminal state. On timeout (default 30s) the
+   * latest non-terminal status is returned — check `status`; pass
+   * `{ throwOnTimeout: true }` to throw ResultTimeoutError instead (p2-23).
+   */
+  result(opts?: WaitForResultOptions): Promise<WaitResult<TOutput>>;
 }
 
 export interface BetterTriggerOptions {
@@ -58,12 +80,17 @@ export interface BetterTrigger {
   /** Base URL this instance talks to. */
   readonly url: string;
 
-  /** Trigger one run of a task (by handle or id). */
-  trigger<TPayload = unknown>(
-    taskOrId: TaskHandle<TPayload, any> | string,
+  /**
+   * Trigger one run of a task (by handle or id). The output type flows when a
+   * TaskHandle is passed (it knows its TOutput); triggering by a raw task id
+   * yields a `RunHandle<unknown>` — the instance cannot know a string id's
+   * output type.
+   */
+  trigger<TPayload, TOutput = unknown>(
+    taskOrId: TaskHandle<TPayload, TOutput> | string,
     payload: TPayload,
     options?: TriggerOptions,
-  ): Promise<RunHandle>;
+  ): Promise<RunHandle<TOutput>>;
   /**
    * Trigger many runs in one all-or-nothing transaction. `options` (projectId
    * / env only) names the namespace the whole batch runs in; absent →
@@ -99,16 +126,18 @@ export interface BetterTrigger {
     opts?: { logsBefore?: number },
   ): Promise<RunDetailResult>;
   /**
-   * Wait for a run to reach a terminal state (timeout → latest status).
-   * `namespace` scopes the poll; absent → default/prod. RunHandle.result()
-   * passes the namespace its handle was minted with, so callers only need this
-   * when polling a run id they got out of band.
+   * Wait for a run to reach a terminal state. On timeout (default 30s) the
+   * latest non-terminal status is returned — pass `{ throwOnTimeout: true }`
+   * to throw ResultTimeoutError instead. `namespace` scopes the poll; absent
+   * → default/prod. RunHandle.result() passes the namespace its handle was
+   * minted with, so callers only need this when polling a run id they got out
+   * of band.
    */
-  waitForResult(
+  waitForResult<T = unknown>(
     runId: string,
     namespace: Namespace | undefined,
     opts?: WaitForResultOptions,
-  ): Promise<WaitResult>;
+  ): Promise<WaitResult<T>>;
   /** Daemon liveness probe. */
   health(): Promise<{ ok: boolean; version: string }>;
 
@@ -138,7 +167,9 @@ export interface RunResultResolver {
 /**
  * Overrides where RunHandle.result() reads from. The worker daemon installs a
  * kernel-backed resolver at startup, so handles minted inside a run resolve
- * against the database directly instead of looping back over HTTP.
+ * against the database directly instead of looping back over HTTP. The
+ * resolver's waitForResult is non-generic on purpose: a kernel-backed resolver
+ * cannot know a handle's TOutput — RunHandle.result() casts to it.
  */
 export function setResultResolver(resolver: RunResultResolver | null): void {
   registry.resultResolver = resolver;
@@ -159,13 +190,17 @@ export function requireDefaultInstance(): BetterTrigger {
  * handles minted inside a run resolve the installed resolver (worker) or the
  * default instance lazily, at result() call time. `namespace` — the scope the
  * run was created in — rides along so result() polls that exact scope.
+ *
+ * Generic over the run's output type so a TaskHandle (which knows its TOutput)
+ * can mint typed handles; an instance mints `RunHandle<unknown>` because a raw
+ * task id carries no output type (p2-23).
  */
-export function makeRunHandle(
+export function makeRunHandle<TOutput = unknown>(
   id: string,
   instance?: BetterTrigger,
   idempotent?: boolean,
   namespace?: Namespace,
-): RunHandle {
+): RunHandle<TOutput> {
   return {
     id,
     idempotent,
@@ -178,7 +213,7 @@ export function makeRunHandle(
           new Error(`run ${id}: cannot await a result — no betterTrigger instance registered`),
         );
       }
-      return target.waitForResult(id, namespace, opts);
+      return target.waitForResult(id, namespace, opts) as Promise<WaitResult<TOutput>>;
     },
   };
 }
@@ -318,13 +353,23 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
      * the SDK hops to another daemon). When the budget is exhausted the LAST
      * error is thrown, never a fabricated terminal status. 4xx and
      * KernelErrors (e.g. not_found) fail immediately: retrying cannot change
-     * them.
+     * them. With `throwOnTimeout: true`, budget exhaustion throws
+     * ResultTimeoutError (with the latest observed status) instead of
+     * returning the latest non-terminal status / the last error (p2-23).
      */
-    async waitForResult(runId, namespace, opts) {
-      const deadline = Date.now() + (opts?.timeoutMs ?? 30_000);
+    async waitForResult<T = unknown>(
+      runId: string,
+      namespace: Namespace | undefined,
+      opts?: WaitForResultOptions,
+    ) {
+      const timeoutMs = opts?.timeoutMs ?? 30_000;
+      const deadline = Date.now() + timeoutMs;
       const pollMs = opts?.pollMs;
       // Backoff base: 200ms, ×2 per retry, capped at 2s, ±20% jitter.
       let backoffMs = 200;
+      // Latest status a successful poll observed — what a ResultTimeoutError
+      // reports when the budget runs out.
+      let lastStatus: RunStatus | undefined;
       for (;;) {
         // Each hop long-polls server-side for at most MAX_LONGPOLL_MS; the
         // remaining budget can be 0, which asks for a single immediate read.
@@ -337,16 +382,22 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
           query.set('projectId', namespace.projectId);
           query.set('env', namespace.env);
         }
-        let res: WaitResult;
+        let res: WaitResult<T>;
         try {
-          res = await http.request<WaitResult>(
+          res = await http.request<WaitResult<T>>(
             `/runs/${encodeURIComponent(runId)}/result?${query}`,
             // Give the request headroom over the server-side wait it asked for.
             { timeoutMs: slice + 10_000, signal: opts?.signal },
           );
         } catch (err) {
-          // Terminal for us: budget spent, or an error retrying cannot fix.
-          if (!isRetriable(err) || Date.now() >= deadline) throw err;
+          // Non-retriable (4xx / KernelError) fail immediately no matter what.
+          if (!isRetriable(err)) throw err;
+          // Budget spent on retriable errors: throwOnTimeout turns the last
+          // error into ResultTimeoutError; the default throws the last error.
+          if (Date.now() >= deadline) {
+            if (opts?.throwOnTimeout) throw new ResultTimeoutError(runId, timeoutMs, lastStatus);
+            throw err;
+          }
           // Clamp the backoff to the remaining budget — never overshoot the
           // caller's deadline, and skip the sleep entirely when nothing is
           // left.
@@ -357,7 +408,15 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
         }
         // A poll that got a response (terminal or not) resets the backoff.
         backoffMs = 200;
-        if (TERMINAL.includes(res.status) || Date.now() >= deadline) return res;
+        lastStatus = res.status;
+        if (TERMINAL.includes(res.status)) return res;
+        if (Date.now() >= deadline) {
+          // The server returned a live (non-terminal) answer at/after the
+          // deadline: that IS the timeout outcome. throwOnTimeout throws with
+          // the latest status; the default returns it (p2-23).
+          if (opts?.throwOnTimeout) throw new ResultTimeoutError(runId, timeoutMs, lastStatus);
+          return res;
+        }
       }
     },
 

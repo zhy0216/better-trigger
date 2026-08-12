@@ -6,14 +6,23 @@
    stores) and the executor task (what runs). Everything here is pure — no
    executor in the AsyncLocalStorage, so trigger paths are not exercised.
    ============================================================================= */
-import type { TriggerItem } from '@better-trigger/core';
-import { describe, expect, it, vi } from 'vitest';
+import type { TriggerItem, WaitResult } from '@better-trigger/core';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { executorStorage, type RunExecutor } from '../src/context';
 import type { RunCtx } from '../src/context';
 import type { AnySchema } from '../src/schema';
+import type { RunHandle } from '../src/instance';
 import { normalizeCron, task, toExecutorTask, toManifest, unwrapResult } from '../src/task';
 
 const noop = async (_payload: unknown, _ctx: RunCtx) => undefined;
+
+/* p2-23: type-level fixtures for the trigger().result() output-type test.
+   Everything here is compile-only (expectTypeOf with a type argument is a
+   runtime no-op; the @ts-expect-error below is enforced by tsc --noEmit) —
+   no instance is registered, so trigger()/result() are never invoked. */
+const _typedResultTask = task('typed-result', async (_payload: { name: string }) => 'hello');
+type TypedResultHandle = Awaited<ReturnType<typeof _typedResultTask.trigger>>;
+type TypedResult = Awaited<ReturnType<TypedResultHandle['result']>>;
 
 describe('normalizeCron', () => {
   it('passes undefined through', () => {
@@ -199,6 +208,27 @@ describe('unwrapResult', () => {
 
   it('falls back to a message naming the run id', () => {
     expect(() => unwrapResult({ ok: false, id: 'run_3' })).toThrow('child run run_3 failed');
+  });
+});
+
+describe('trigger().result() output typing (p2-23)', () => {
+  it('flows the task output type through trigger().result()', () => {
+    // The handle's result() resolves with WaitResult<string> — the task's
+    // TOutput — not WaitResult<unknown> (p2-23).
+    expectTypeOf<TypedResultHandle>().toEqualTypeOf<RunHandle<string>>();
+    expectTypeOf<TypedResult>().toEqualTypeOf<WaitResult<string>>();
+
+    // Positive: a completed result whose output IS a string typechecks.
+    const good: TypedResult = { status: 'completed', output: 'greeting' };
+    expect(good.output).toBe('greeting');
+  });
+
+  it('rejects an output type that is not the task output', () => {
+    // Compile-only: a non-string output must fail (unused @ts-expect-error
+    // would itself error under tsc --noEmit).
+    // @ts-expect-error — output must be the task's TOutput (string)
+    const bad: TypedResult = { status: 'completed', output: 42 };
+    expect(bad).toBeDefined();
   });
 });
 

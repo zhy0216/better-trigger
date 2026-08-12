@@ -13,7 +13,7 @@
 import { KernelError } from '@better-trigger/core';
 import { describe, expect, it, vi } from 'vitest';
 import { HttpError } from '../src/client';
-import { betterTrigger } from '../src/instance';
+import { betterTrigger, ResultTimeoutError } from '../src/instance';
 
 /** A fetch stub answering calls from a scripted list; the last entry repeats. */
 function scriptedFetch(responses: Array<Response | (() => Response | Promise<Response>)>) {
@@ -26,6 +26,30 @@ function scriptedFetch(responses: Array<Response | (() => Response | Promise<Res
     return typeof res === 'function' ? res() : res;
   };
   return { fetch: fn as unknown as typeof globalThis.fetch, calls };
+}
+
+/**
+ * A fetch stub that emulates the server's long-poll: each request is held open
+ * `delayMs` of (fake) time, then answered with the given non-terminal status.
+ * This mirrors the real route (hold until terminal or the request's slice) so
+ * the client's retry loop parks on a real timer instead of spinning microtasks.
+ */
+function longPollingNonTerminal(
+  status: 'queued' | 'running' | 'waiting',
+  delayMs: number,
+): typeof globalThis.fetch {
+  return ((_input: any, init: any) =>
+    new Promise<Response>((resolve) => {
+      const timer = setTimeout(() => {
+        resolve(
+          new Response(JSON.stringify({ status }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        );
+      }, delayMs);
+      init.signal?.addEventListener('abort', () => clearTimeout(timer), { once: true });
+    })) as unknown as typeof globalThis.fetch;
 }
 
 /** JSON error envelope, exactly what apps/worker's onError emits. */
@@ -144,6 +168,78 @@ describe('waitForResult — budget discipline', () => {
       expect(Date.now() - start).toBeLessThanOrEqual(400);
       expect(calls.length).toBeGreaterThan(1); // it retried inside the budget
       expect(vi.getTimerCount()).toBe(0); // nothing left scheduled
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('waitForResult — throwOnTimeout (p2-23)', () => {
+  it('throws ResultTimeoutError with the latest non-terminal status when the budget runs out', async () => {
+    vi.useFakeTimers();
+    try {
+      const trigger = betterTrigger({
+        url: 'http://daemon.test:4848',
+        fetch: longPollingNonTerminal('running', 50),
+      });
+
+      const result = trigger.waitForResult('run_1', undefined, {
+        timeoutMs: 300,
+        throwOnTimeout: true,
+      });
+      // Attach the handler up front: the rejection lands during the advance.
+      const errPromise = result.catch((e: unknown) => e);
+      await flush();
+      await vi.advanceTimersByTimeAsync(400); // exhaust the 300ms budget
+      const err = await errPromise;
+
+      expect(err).toBeInstanceOf(ResultTimeoutError);
+      const rte = err as ResultTimeoutError;
+      expect(rte.status).toBe('running'); // the latest non-terminal status
+      expect(rte.message).toMatch(/run run_1 did not reach a terminal state within 300ms/);
+      expect(rte.message).toMatch(/\(status running\)/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('without throwOnTimeout resolves with the latest non-terminal status (existing behavior)', async () => {
+    vi.useFakeTimers();
+    try {
+      const trigger = betterTrigger({
+        url: 'http://daemon.test:4848',
+        fetch: longPollingNonTerminal('running', 50),
+      });
+
+      const result = trigger.waitForResult('run_1', undefined, { timeoutMs: 300 });
+      await flush();
+      await vi.advanceTimersByTimeAsync(400);
+      await expect(result).resolves.toEqual({ status: 'running' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('throws ResultTimeoutError on the retry-loop error path when throwOnTimeout is set', async () => {
+    vi.useFakeTimers();
+    try {
+      const { fetch } = scriptedFetch([
+        errorResponse(503, 'internal_error', 'unhandled error'),
+      ]);
+      const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+
+      const result = trigger.waitForResult('run_1', undefined, {
+        timeoutMs: 300,
+        throwOnTimeout: true,
+      });
+      const errPromise = result.catch((e: unknown) => e);
+      await flush(); // first 503 lands, retry sleep armed
+      await vi.advanceTimersByTimeAsync(1_000); // exhaust the 300ms budget
+      const err = await errPromise;
+
+      expect(err).toBeInstanceOf(ResultTimeoutError);
+      // No poll ever succeeded, so no status was observed.
+      expect((err as ResultTimeoutError).status).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }

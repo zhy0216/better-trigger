@@ -23,6 +23,7 @@
    ============================================================================= */
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
+import { ResultTimeoutError } from 'better-trigger';
 import type { Kernel } from '@better-trigger/kernel';
 import { createApp } from '../src/app';
 import { createNotifyCounters } from '../src/observability';
@@ -150,6 +151,18 @@ describe('waiter registry', () => {
     runs.set('run_t', { id: 'run_t', status: 'running' });
     const res = await reg.register('run_t', NS, { timeoutMs: 40 });
     expect(res).toEqual({ status: 'running' });
+    reg.stop();
+  });
+
+  it('throwOnTimeout: true rejects with ResultTimeoutError instead of resolving the status', async () => {
+    const { reg, runs } = registry();
+    runs.set('run_to', { id: 'run_to', status: 'running' });
+    const err = await reg
+      .register('run_to', NS, { timeoutMs: 40, throwOnTimeout: true })
+      .then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(ResultTimeoutError);
+    expect((err as ResultTimeoutError).status).toBe('running');
+    expect((err as Error).message).toContain('run_to');
     reg.stop();
   });
 

@@ -34,6 +34,7 @@ import {
   type WaitForResultOptions,
   type WaitResult,
 } from '@better-trigger/core';
+import { ResultTimeoutError } from 'better-trigger';
 import type { NotifyCounters } from './observability';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -52,6 +53,11 @@ interface PendingWaiter {
   reject: (err: unknown) => void;
   deadline: number;
   lastStatus: RunStatus;
+  /** The caller's timeout budget, for the ResultTimeoutError message (p2-23). */
+  timeoutMs: number;
+  /** throwOnTimeout (p2-23): a timeout rejects with ResultTimeoutError instead
+   *  of resolving the latest non-terminal status. */
+  throwOnTimeout: boolean;
 }
 
 interface RunRead {
@@ -163,6 +169,13 @@ export function createWaiterRegistry(deps: {
     remove(entry);
     counters.waiterTimeouts += 1;
     // Latest non-terminal status — the exact waitForResult timeout semantics.
+    // Unless the caller asked for the timeout to throw (p2-23): then reject
+    // with ResultTimeoutError so an in-run handle.result({throwOnTimeout})
+    // behaves the same as the HTTP long-poll path.
+    if (entry.throwOnTimeout) {
+      entry.reject(new ResultTimeoutError(entry.runId, entry.timeoutMs, entry.lastStatus));
+      return;
+    }
     entry.resolve({ status: entry.lastStatus });
   }
 
@@ -196,6 +209,8 @@ export function createWaiterRegistry(deps: {
         reject,
         deadline: Date.now() + timeoutMs,
         lastStatus: row.status,
+        timeoutMs,
+        throwOnTimeout: opts.throwOnTimeout ?? false,
       };
       const onAbort = () => {
         // Only an entry that is still pending may be settled here; a waiter
