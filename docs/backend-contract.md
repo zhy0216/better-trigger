@@ -183,8 +183,8 @@ queue 是规范锁序的 1 号位(见 §3.2),先拿它再拿 runs,才能避免�
 - 每次执行 task 函数,SDK 维护一个**单调递增 seq 计数器**(从 0 开始),`ctx.step/wait/triggerAndWait/batchTrigger/now/random/uuid` **每调用一次消耗一个 seq**。
 - claim 返回该 run 已完成 steps 快照(`claimRuns` 在同一事务里读 `run_steps`,见 §3.5);执行到 seq 时若快照中存在 `status='completed'` 的行 → **直接返回缓存 output,不执行 fn**。
 - 快照中 `status='failed'` 的行视为未完成(重试时重新执行,结果 upsert 覆盖)。
-- **漂移检查**:命中缓存前比对该行与调用点。`kind` 不一致(如 wait 行落到 `ctx.step()` 上)是硬信号——它由原语推导,不来自用户文本;`label` 不一致是软信号(改名无害,插入有害)。
-  - `replay:'lenient'`(默认):`logger.warn` 一条 `replay drift at seq N: ...`,仍使用该缓存行。
+- **漂移检查**:命中缓存前比对该行与调用点。`kind` 不一致(如 wait 行落到 `ctx.step()` 上)在**两种 replay 模式**下都是硬失败——它由原语推导,不来自用户文本,错位即不可重放。`label` 不一致(改名无害,插入有害)按**记录的旧 label 的指纹**仲裁:仅改名(旧 label 指纹一致)是唯一软豁免,走下方 strict/lenient 分支;改名且代码/输入变更(旧 label 指纹不一致)是硬失败——旧输出属于旧 label 的代码,不能重放给新代码。
+  - `replay:'lenient'`(默认):`logger.warn` 一条 `replay drift at seq N: ...`,仍使用该缓存行。**仅适用「纯改名」的 label 漂移**;kind 漂移、改名且代码/输入变更的 label 漂移,无论哪种模式都抛 `AbortError` 终态失败。
   - `replay:'strict'`(task 级声明):抛 `AbortError` 终态失败,不重试(重试只会重放同一份错位账本)。含长 `ctx.wait` 的 task 建议开启——其账本可能跨越多次发版。
 
 ### 3.2 挂起(Suspend)

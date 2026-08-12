@@ -12,7 +12,7 @@
 
 | # | 文件 | 一句话 | 依赖 |
 |---|------|--------|------|
-| 1 | [p0-01-fingerprint-drift-bypass.md](./p0-01-fingerprint-drift-bypass.md) | fingerprint 校验被 kind/label 漂移绕过,lenient 下旧输出喂给新代码 | — |
+| 1 | [p0-01-fingerprint-drift-bypass.md](./done/p0-01-fingerprint-drift-bypass.md) ✅ | fingerprint 校验被 kind/label 漂移绕过,lenient 下旧输出喂给新代码 | — |
 | 2 | [p0-02-dashboard-poll-self-abort.md](./p0-02-dashboard-poll-self-abort.md) | dashboard 轮询每 2s abort 上一请求,慢响应永远完成不了 | — |
 | 3 | [p0-03-sdk-result-retry.md](./p0-03-sdk-result-retry.md) | `handle.result()` 无重试,daemon 滚动重启拒绝所有等待者 | — |
 | 4 | [p1-22-kernel-pg-correctness-suite.md](./p1-22-kernel-pg-correctness-suite.md) | 真 PG correctness suite(先立测试床,后续 kernel 修复直接落用例) | — |
@@ -61,3 +61,4 @@
 - [done/01-correctness.md](./done/01-correctness.md) ✅(C1–C5)
 - [done/02-performance.md](./done/02-performance.md) ✅(PF1–PF5)
 - [done/03-operability.md](./done/03-operability.md) ✅(O1–O6)
+- [done/p0-01-fingerprint-drift-bypass.md](./done/p0-01-fingerprint-drift-bypass.md) ✅(kind/label 漂移一律硬失败)

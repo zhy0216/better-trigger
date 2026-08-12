@@ -13,11 +13,12 @@
        2 | (never reached)      | wait
        3 | (never reached)      | step "finish"
 
-   At seq 1 the v2 code asks for a step and finds a wait row:
+   At seq 1 the v2 code asks for a step and finds a wait row — a kind drift
+   that is refused in BOTH replay modes:
      - drift-strict  (replay:'strict')  → AbortError, run fails, nothing lies.
-     - drift-lenient (default)          → warn, and the wait row's null output is
-       handed to `audit` as if the step had run. The step body NEVER executes
-       (no marker line), yet the run completes and reports success.
+     - drift-lenient (default)          → ALSO a non-retryable AbortError,
+       attempt stays 1. The step body NEVER executes (no marker line) and the
+       run fails instead of reporting success.
 
    Env (set by replay-drift.ts): BT_MARKER_FILE, BT_DRIFT_WAIT.
    ============================================================================= */

@@ -306,6 +306,153 @@ describe('replay fingerprints (C1)', () => {
     expect(calls.waitForChildRun).toEqual([]);
   });
 
+  it('kind drift: a wait row landing on a ctx.step() call site fails non-retryably even under default (lenient) replay', async () => {
+    const { kernel, calls } = fakeKernel();
+    const waitFp = stepFingerprint({
+      kind: 'wait',
+      label: null,
+      input: { duration: '2h' },
+      codeVersion: null,
+    });
+    const task: ExecutorTask = {
+      id: 'demo',
+      run: (_payload, ctx) => ctx.step('audit', () => 'audited'),
+    };
+    const snapshot: StepSnapshot[] = [
+      { seq: 0, kind: 'wait', label: null, status: 'completed', output: null, fingerprint: waitFp },
+    ];
+    const ex = new Executor(kernel, task, claimed(snapshot), 'w1', null);
+
+    expect(await ex.execute()).toEqual({ type: 'failed' });
+    expect(calls.failRun).toHaveLength(1);
+    expect(calls.failRun[0].abort).toBe(true);
+    expect(calls.failRun[0].error.message).toContain("replay drift at seq 0: kind 'wait' → 'step'");
+    expect(calls.reportStep).toEqual([]); // the step fn never ran
+  });
+
+  it('kind drift fails the same way under replay:strict', async () => {
+    const { kernel, calls } = fakeKernel();
+    const waitFp = stepFingerprint({
+      kind: 'wait',
+      label: null,
+      input: { duration: '2h' },
+      codeVersion: null,
+    });
+    const task: ExecutorTask = {
+      id: 'demo',
+      replay: 'strict',
+      run: (_payload, ctx) => ctx.step('audit', () => 'audited'),
+    };
+    const snapshot: StepSnapshot[] = [
+      { seq: 0, kind: 'wait', label: null, status: 'completed', output: null, fingerprint: waitFp },
+    ];
+    const ex = new Executor(kernel, task, claimed(snapshot), 'w1', null);
+
+    expect(await ex.execute()).toEqual({ type: 'failed' });
+    expect(calls.failRun).toHaveLength(1);
+    expect(calls.failRun[0].abort).toBe(true);
+    expect(calls.failRun[0].error.message).toContain("replay drift at seq 0: kind 'wait' → 'step'");
+    expect(calls.reportStep).toEqual([]);
+  });
+
+  it('label drift + implementation change fails non-retryably even under default (lenient) replay', async () => {
+    const { kernel, calls } = fakeKernel();
+    const task: ExecutorTask = {
+      id: 'demo',
+      run: (_payload, ctx) => ctx.step('charge-v2', edited),
+    };
+    const snapshot: StepSnapshot[] = [
+      { seq: 0, kind: 'step', label: 'charge', status: 'completed', output: 'old', fingerprint: stepFp('charge', original) },
+    ];
+    const ex = new Executor(kernel, task, claimed(snapshot), 'w1', null);
+
+    // The old label's fingerprint, recomputed with this call site's inputs, no
+    // longer matches: only the label did not move — the code changed too.
+    expect(await ex.execute()).toEqual({ type: 'failed' });
+    expectFingerprintFail(calls, 'replay fingerprint mismatch');
+    expect(calls.reportStep).toEqual([]);
+  });
+
+  it('label drift + implementation change fails the same way under replay:strict', async () => {
+    const { kernel, calls } = fakeKernel();
+    const task: ExecutorTask = {
+      id: 'demo',
+      replay: 'strict',
+      run: (_payload, ctx) => ctx.step('charge-v2', edited),
+    };
+    const snapshot: StepSnapshot[] = [
+      { seq: 0, kind: 'step', label: 'charge', status: 'completed', output: 'old', fingerprint: stepFp('charge', original) },
+    ];
+    const ex = new Executor(kernel, task, claimed(snapshot), 'w1', null);
+
+    expect(await ex.execute()).toEqual({ type: 'failed' });
+    expectFingerprintFail(calls, 'replay fingerprint mismatch');
+    expect(calls.reportStep).toEqual([]);
+  });
+
+  it('pure label rename replays the old output with a warning under default (lenient) replay', async () => {
+    const { kernel, calls } = fakeKernel();
+    const task: ExecutorTask = {
+      id: 'demo',
+      run: (_payload, ctx) => ctx.step('charge-v2', original),
+    };
+    const snapshot: StepSnapshot[] = [
+      { seq: 0, kind: 'step', label: 'charge', status: 'completed', output: 'old', fingerprint: stepFp('charge', original) },
+    ];
+    const ex = new Executor(kernel, task, claimed(snapshot), 'w1', null);
+
+    // The old label's fingerprint recomputes identically under this call site:
+    // only the label moved, so the recorded output still belongs to this code.
+    expect(await ex.execute()).toEqual({ type: 'completed', output: 'old' });
+    const warns = warnLogs(calls.logs);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('replay drift at seq 0');
+    expect(warns[0]).toContain('label "charge" → "charge-v2"');
+    expect(calls.reportStep).toEqual([]); // output reused, fn never ran
+  });
+
+  it('pure label rename fails via onReplayDrift under replay:strict', async () => {
+    const { kernel, calls } = fakeKernel();
+    const task: ExecutorTask = {
+      id: 'demo',
+      replay: 'strict',
+      run: (_payload, ctx) => ctx.step('charge-v2', original),
+    };
+    const snapshot: StepSnapshot[] = [
+      { seq: 0, kind: 'step', label: 'charge', status: 'completed', output: 'old', fingerprint: stepFp('charge', original) },
+    ];
+    const ex = new Executor(kernel, task, claimed(snapshot), 'w1', null);
+
+    expect(await ex.execute()).toEqual({ type: 'failed' });
+    expectFingerprintFail(calls, 'replay drift at seq 0');
+    expect(calls.reportStep).toEqual([]);
+  });
+
+  it('kind drift never surfaces the wait row output even when the task would return', async () => {
+    const { kernel, calls } = fakeKernel();
+    const waitFp = stepFingerprint({
+      kind: 'wait',
+      label: null,
+      input: { duration: '2h' },
+      codeVersion: null,
+    });
+    const task: ExecutorTask = {
+      id: 'demo',
+      run: async (_payload, ctx) => {
+        await ctx.step('audit', edited);
+        return 'done';
+      },
+    };
+    const snapshot: StepSnapshot[] = [
+      { seq: 0, kind: 'wait', label: null, status: 'completed', output: null, fingerprint: waitFp },
+    ];
+    const ex = new Executor(kernel, task, claimed(snapshot), 'w1', null);
+
+    expect(await ex.execute()).toEqual({ type: 'failed' });
+    expect(calls.completeRun).toEqual([]); // the misaligned row is never replayed as output
+    expect(calls.reportStep).toEqual([]);
+  });
+
   it('turns a kernel NonDeterminismError into a non-retryable failure', async () => {
     const calls = { failRun: [] as any[] };
     const kernel = {

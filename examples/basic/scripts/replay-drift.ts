@@ -1,17 +1,22 @@
 /* =============================================================================
    @better-trigger/example-basic — replay-drift acceptance scenario.
 
-   Proves the three guardrails against a mid-flight redeploy — the scenario a
-   long ctx.wait makes routine, because a suspended run's ledger can outlive
-   several deploys:
+   Proves the guardrails against a mid-flight redeploy — the scenario a long
+   ctx.wait makes routine, because a suspended run's ledger can outlive several
+   deploys:
 
      ① runs.code_version is stamped at trigger time, so "which code shape was
         this run's ledger written against?" is answerable after the fact.
      ② the worker's code version fingerprints each run() body, so editing a task
         changes the version even though ids and cron are untouched. (Under the
         old id+cron-only signature both deploys below hash identically.)
-     ③ replay:'strict' fails a run whose ledger no longer matches its call
-        sites, instead of feeding it a foreign step row.
+     ③ kind drift — a wait row landing at a ctx.step() call site — is refused
+        with an unconditional AbortError in BOTH replay modes, instead of
+        feeding the wait row's empty output to a step whose body never ran.
+     ④ label drift is arbitrated by the recorded label's fingerprint: a PURE
+        rename keeps the strict/lenient split, but a rename PLUS an
+        implementation change fails both modes with a "replay fingerprint
+        mismatch" AbortError.
 
    Runs on @better-trigger/testing (runScenario provisions + migrates the
    database, createMarker owns the "did this body run?" probe, spawnDaemon swaps
@@ -31,10 +36,17 @@
    stay off. With no executor alive the runs stay suspended, which is what lets
    the scenario swap deploys deterministically.)
 
-   Then the two strictness modes are contrasted on identical ledgers:
+   Then the two strictness modes are contrasted on identical ledgers — and BOTH
+   refuse the kind drift:
      drift-strict  → fails with AbortError, attempt stays 1 (no retry storm)
-     drift-lenient → COMPLETES, reporting success for a step whose body never
-                     ran. That silent corruption is the thing 'strict' buys out.
+     drift-lenient → fails with AbortError too — kind drift is unconditional,
+                     so lenient no longer reports success for a step whose body
+                     never ran.
+
+   A second swap (replay-drift-rename-tasks-v1/v2.ts) proves ④: renaming step
+   "charge" → "charge-v2" AND rewriting its body fails rename-strict AND
+   rename-lenient with the same non-retryable "replay fingerprint mismatch"
+   AbortError.
 
    Env:
      DATABASE_URL   base connection derived from it; default
@@ -61,6 +73,8 @@ import { betterTrigger, type RunStatus } from 'better-trigger';
 const PORT = portFromEnv('BT_DRIFT_PORT', 4903);
 const V1_MODULE = fileURLToPath(new URL('./replay-drift-tasks-v1.ts', import.meta.url));
 const V2_MODULE = fileURLToPath(new URL('./replay-drift-tasks-v2.ts', import.meta.url));
+const RENAME_V1_MODULE = fileURLToPath(new URL('./replay-drift-rename-tasks-v1.ts', import.meta.url));
+const RENAME_V2_MODULE = fileURLToPath(new URL('./replay-drift-rename-tasks-v2.ts', import.meta.url));
 
 /** Long enough to observe 'waiting' and kill deploy #1 before it resumes. */
 const WAIT_FOR = '6s';
@@ -203,36 +217,42 @@ async function main(s: Scenario): Promise<void> {
     s.ok(`   the v1 ledger is untouched: still [step, wait], frozen and terminal`);
   }
 
-  /* -- lenient: the same ledger silently corrupts -------------------------- */
+  /* -- lenient: kind drift is refused here too ----------------------------- */
   {
     const result = await client.waitForResult(lenientRun.id, undefined, { timeoutMs: 60_000 });
     s.assert(
-      result.status === 'completed',
-      `lenient run is expected to COMPLETE (that is the hazard), got '${result.status}'`,
+      result.status === 'failed',
+      `lenient run should ALSO fail on kind drift, got '${result.status}'`,
     );
-    s.ok('lenient replay completed the run — reporting success, as before');
+    s.ok(`lenient replay refused the same drift — both modes fail on kind drift`);
 
-    const audits = marker.count('audit:lenient');
     s.assert(
-      audits === 0,
-      `the inserted step's body must never have run under lenient replay, got ${audits} marker lines`,
+      result.error?.name === 'AbortError',
+      `lenient drift failure should be an AbortError (non-retryable), got '${result.error?.name}'`,
     );
-    // The wait row stores SQL NULL, which the snapshot maps back to `undefined`
-    // (StepSnapshot.output = s.output ?? undefined) — so the caller does not even
-    // get a null it could null-check; the key vanishes from the output entirely.
-    const output = result.output as Record<string, unknown> | null;
+    const message = result.error?.message ?? '';
     s.assert(
-      output !== null && !('audit' in output),
-      `the inserted step should have returned the wait row's empty output, got ${JSON.stringify(output?.audit)}`,
+      message.includes('replay drift at seq 1'),
+      `error should name the drifting seq, got: ${message}`,
     );
-    s.ok(`   …but step "audit" never executed and yielded the wait row's undefined`);
+    s.assert(
+      message.includes(`kind 'wait' → 'step'`),
+      `error should name the kind mismatch, got: ${message}`,
+    );
+    s.ok(`   error pinpoints the position: "replay drift at seq 1: kind 'wait' → 'step'"`);
 
     const detail = await client.getRunDetail(lenientRun.id);
-    const warned = detail.logs.some(
-      (l) => l.level === 'warn' && l.message.includes('replay drift at seq 1'),
+    s.assert(
+      detail.run.attempt === 1,
+      `an aborted drift must not retry; attempt should be 1, got ${detail.run.attempt}`,
     );
-    s.assert(warned, 'lenient replay should at least warn about the drift');
-    s.ok('   the only trace is a warn log — exactly what strict mode upgrades');
+    s.ok('   no retry storm — attempt stayed 1 (AbortError is terminal)');
+
+    s.assert(
+      marker.count('audit:lenient') === 0,
+      `the inserted step's body must never have run, got ${marker.count('audit:lenient')} marker lines`,
+    );
+    s.ok('   the inserted step "audit" never executed (its marker is absent)');
 
     s.assert(
       marker.count('load:lenient') === 1,
@@ -240,12 +260,149 @@ async function main(s: Scenario): Promise<void> {
     );
     s.ok('   the agreeing prefix (seq 0) still replayed from cache exactly once');
 
-    // Even the corrupted-but-completed run must satisfy the structural
-    // invariants — the drift is a semantic hazard, not a broken ledger.
-    await s.inv.assertSeqContiguous(lenientRun.id);
+    // Even the failed run must satisfy the structural invariants — the drift is
+    // a semantic hazard, not a broken ledger.
+    await s.inv.assertSeqContiguous(lenientRun.id, { kinds: ['step', 'wait'] });
     await s.inv.assertNoStepRewrites(lenientRun.id);
     await s.inv.assertTerminalImmutable(lenientRun.id);
     s.ok('   the lenient ledger is still gap-free, append-only and frozen');
+  }
+
+  /* -- ④ rename + implementation edit: refused in BOTH modes --------------- */
+  {
+    // The fixture: v1 writes step "charge" at seq 1; v2 renames it "charge-v2"
+    // AND rewrites the body. Same kind, so no kind drift — but the OLD label's
+    // fingerprint (recomputed with today's call site) no longer matches what
+    // v1 recorded, so the recorded output belongs to different code and BOTH
+    // modes refuse it unconditionally (unlike a pure rename).
+    let renameExecutor = spawnExecutor(RENAME_V1_MODULE, 'rename-v1');
+    s.cleanup(() => renameExecutor.stop());
+
+    await waitForTasks(s.pool, ['rename-strict', 'rename-lenient']);
+    const RENAME_V1 = await readLatestCodeVersion(s.pool, 'rename-strict');
+    s.assert(RENAME_V1 !== null, 'rename deploy #1 should have registered a code version');
+    s.ok(`rename deploy #1 up — rename-strict ${RENAME_V1}`);
+
+    const renameStrictRun = await client.trigger('rename-strict', { user: 'u_42' });
+    const renameLenientRun = await client.trigger('rename-lenient', { user: 'u_42' });
+    s.log(`rename-strict run:  ${renameStrictRun.id}`);
+    s.log(`rename-lenient run: ${renameLenientRun.id}`);
+
+    await waitFor(
+      `both rename runs 'waiting' on the wait`,
+      30_000,
+      async () =>
+        (await runStatus(renameStrictRun.id)) === 'waiting' &&
+        (await runStatus(renameLenientRun.id)) === 'waiting',
+    );
+    s.ok(`both rename runs suspended on ctx.wait.for("${WAIT_FOR}")`);
+
+    // A deploy is a graceful stop — same reasoning as the kind-drift swap above.
+    await renameExecutor.stop();
+    s.ok('rename deploy #1 stopped gracefully while both runs were waiting');
+
+    // With no executor alive the runs stay suspended past resume_at; rename
+    // deploy #2 is what both wakes and replays them.
+    await sleep(9_000);
+    renameExecutor = spawnExecutor(RENAME_V2_MODULE, 'rename-v2');
+
+    await waitFor('rename deploy #2 to register a new code version', 30_000, async () => {
+      const v = await readLatestCodeVersion(s.pool, 'rename-strict');
+      return v !== null && v !== RENAME_V1;
+    });
+    const RENAME_V2 = await readLatestCodeVersion(s.pool, 'rename-strict');
+    s.ok(`④ rename + implementation edit changed the version: ${RENAME_V1} → ${RENAME_V2}`);
+
+    /* -- ④ rename-strict: the drift is refused --------------------------- */
+    {
+      const result = await client.waitForResult(renameStrictRun.id, undefined, {
+        timeoutMs: 60_000,
+      });
+      s.assert(
+        result.status === 'failed',
+        `rename-strict should fail on label+code drift, got '${result.status}'`,
+      );
+      s.ok(`④ replay:'strict' failed the run instead of replaying a stale output`);
+
+      s.assert(
+        result.error?.name === 'AbortError',
+        `rename-strict drift failure should be an AbortError (non-retryable), got '${result.error?.name}'`,
+      );
+      const message = result.error?.message ?? '';
+      s.assert(
+        message.includes('replay fingerprint mismatch at seq 1'),
+        `error should name the seq and the mismatch, got: ${message}`,
+      );
+      s.assert(
+        message.includes('"charge" → "charge-v2"'),
+        `error should name the label drift, got: ${message}`,
+      );
+      s.ok(`   error pinpoints the position: "replay fingerprint mismatch at seq 1 (step "charge" → "charge-v2")"`);
+
+      const detail = await client.getRunDetail(renameStrictRun.id);
+      s.assert(
+        detail.run.attempt === 1,
+        `an aborted drift must not retry; attempt should be 1, got ${detail.run.attempt}`,
+      );
+      s.ok('   no retry storm — attempt stayed 1 (AbortError is terminal)');
+
+      // The refusal must leave the v1 ledger exactly as v1 wrote it.
+      await s.inv.assertSeqContiguous(renameStrictRun.id, { kinds: ['step', 'step', 'wait'] });
+      await s.inv.assertNoStepRewrites(renameStrictRun.id);
+      await s.inv.assertTerminalImmutable(renameStrictRun.id);
+      s.ok('   the v1 ledger is untouched: still [step, step, wait], frozen and terminal');
+    }
+
+    /* -- ④ rename-lenient: the drift is refused here too ------------------ */
+    {
+      const result = await client.waitForResult(renameLenientRun.id, undefined, {
+        timeoutMs: 60_000,
+      });
+      s.assert(
+        result.status === 'failed',
+        `rename-lenient should ALSO fail on label+code drift, got '${result.status}'`,
+      );
+      s.ok(`④ rename-lenient refused the same drift — both modes fail on a rename+rewrite`);
+
+      s.assert(
+        result.error?.name === 'AbortError',
+        `rename-lenient drift failure should be an AbortError (non-retryable), got '${result.error?.name}'`,
+      );
+      const message = result.error?.message ?? '';
+      s.assert(
+        message.includes('replay fingerprint mismatch at seq 1'),
+        `error should name the seq and the mismatch, got: ${message}`,
+      );
+      s.ok('   error pinpoints the position: "replay fingerprint mismatch at seq 1 (step "charge" → "charge-v2")"');
+
+      const detail = await client.getRunDetail(renameLenientRun.id);
+      s.assert(
+        detail.run.attempt === 1,
+        `an aborted drift must not retry; attempt should be 1, got ${detail.run.attempt}`,
+      );
+      s.ok('   no retry storm — attempt stayed 1 (AbortError is terminal)');
+    }
+
+    // The agreeing prefix replayed from cache exactly once, the v1 "charge"
+    // body ran once per mode, and neither the renamed+rewritten "charge-v2"
+    // body nor the never-reached "finish" ever ran.
+    s.assert(
+      marker.count('rename-load:strict') === 1 && marker.count('rename-load:lenient') === 1,
+      'the agreeing prefix (seq 0) should still replay from cache exactly once',
+    );
+    s.assert(
+      marker.count('charge:strict') === 1 && marker.count('charge:lenient') === 1,
+      'the v1 "charge" body should have run exactly once per mode',
+    );
+    s.assert(
+      marker.count('charge2:strict') === 0 && marker.count('charge2:lenient') === 0,
+      'the renamed+rewritten "charge-v2" body must never run',
+    );
+    s.assert(
+      marker.count('rename-finish:strict') === 0 && marker.count('rename-finish:lenient') === 0,
+      'both runs aborted before "finish" — its body never ran',
+    );
+    s.ok('   marker probe: charge ran once per mode, charge-v2 never ran');
   }
 }
 

@@ -372,38 +372,76 @@ export class Executor implements RunExecutor {
    * Before handing the row back, check that it actually belongs to this call
    * site. Replay keys steps by position alone, so a run() edited while runs are
    * in flight (the long-wait case: a ledger can outlive several deploys) will
-   * happily feed seq N's row to whatever primitive now sits at seq N. `kind` is
-   * the reliable signal — it is derived from the primitive, not from user text,
-   * so a wait row arriving at a ctx.step() call is unambiguous corruption.
-   * `label` is the softer one (renames are innocent, inserts are not).
+   * happily feed seq N's row to whatever primitive now sits at seq N.
    *
-   * The C1 replay fingerprint is the semantic check on top: when kind + label
-   * agree, the row still only belongs to this call site if the code/inputs
-   * that recorded it produce the same signature today.
-   *
-   *   - NULL fingerprint (a ledger written before fingerprints existed, or a
-   *     wait created before this deploy) → cannot be drift-checked: replay
-   *     leniently with one compatibility notice, whatever the replay mode.
-   *   - non-NULL mismatch → the recorded output belongs to different code or
-   *     inputs: fail the run with a non-retryable AbortError REGARDLESS of
-   *     replay:'strict'. Retrying would only replay the same mismatch, and
-   *     feeding the old output to the new code is the exact failure C1 exists
-   *     to prevent — so there is no lenient reading of it. Kind/label drifts
-   *     below keep their existing strict/lenient split.
+   *   - kind drift → an unconditional non-retryable AbortError in BOTH replay
+   *     modes: `kind` is derived from the primitive, not from user text, so a
+   *     wait row arriving at a ctx.step() call is unambiguous corruption that
+   *     a lenient replay must not paper over.
+   *   - label drift (renames are innocent, inserts are not) → arbitrated by the
+   *     RECORDED label's fingerprint, recomputed here with this call site's
+   *     inputs: if it still matches, only the label changed (a pure rename) and
+   *     the strict/lenient split applies; if it does not, the code or inputs
+   *     changed too and the recorded output belongs to different code →
+   *     unconditional AbortError. A NULL recorded fingerprint cannot be
+   *     arbitrated → the lenient-with-notice legacy path.
+   *   - kind + label agree → the C1 replay fingerprint is the semantic check:
+   *     a NULL fingerprint (a ledger written before fingerprints existed, or a
+   *     wait created before this deploy) cannot be drift-checked and replays
+   *     leniently with one compatibility notice; a non-NULL mismatch fails the
+   *     run with a non-retryable AbortError REGARDLESS of replay:'strict' —
+   *     retrying would only replay the same mismatch, and feeding the old
+   *     output to the new code is the exact failure C1 exists to prevent.
    */
   private cached(
     seq: number,
     expectedKind: StepKind,
     expectedLabel: string | null,
     expectedFingerprint: string,
+    input: unknown,
   ): StepSnapshot | undefined {
     const snap = this.snapshot.get(seq);
     if (!snap || snap.status !== 'completed') return undefined;
 
     if (snap.kind !== expectedKind) {
-      this.onReplayDrift(seq, `kind '${snap.kind}' → '${expectedKind}'`);
-    } else if (expectedLabel != null && snap.label != null && snap.label !== expectedLabel) {
-      this.onReplayDrift(seq, `label "${snap.label}" → "${expectedLabel}"`);
+      // A wait row landing at a step call site (or any cross-primitive drift) is
+      // unambiguous corruption: the recorded row is a different primitive shape
+      // and must never be replayed as this call site. Unconditional in both
+      // modes — retrying would only replay the same misaligned ledger.
+      throw new AbortError(
+        `replay drift at seq ${seq}: kind '${snap.kind}' → '${expectedKind}' — the ` +
+          `recorded row is a different primitive shape and must never be replayed ` +
+          `as this call site. task "${this.task.id}"'s run ${this.run.id} is failed ` +
+          `non-retryably: retrying would only replay the same misaligned ledger. ` +
+          `Retry it under a fresh run, or cancel it if the work is obsolete.`,
+      );
+    }
+
+    if (expectedLabel != null && snap.label != null && snap.label !== expectedLabel) {
+      if (snap.fingerprint != null) {
+        // Arbitrate with the OLD label's fingerprint: recomputing the signature
+        // under snap.label with this call site's inputs tells us whether only the
+        // label moved. Match → pure rename, keep the strict/lenient split.
+        // Mismatch → the code or inputs changed too, so the recorded output
+        // belongs to different code and must not be replayed.
+        const oldLabelFp = this.fingerprint(expectedKind, snap.label, input);
+        if (oldLabelFp === snap.fingerprint) {
+          this.onReplayDrift(seq, `label "${snap.label}" → "${expectedLabel}"`);
+        } else {
+          const what = `${expectedKind} "${snap.label}" → "${expectedLabel}"`;
+          throw new AbortError(
+            `replay fingerprint mismatch at seq ${seq} (${what}): the recorded output ` +
+              `belongs to the old label "${snap.label}", and its code or inputs changed ` +
+              `after it was recorded — recorded "${snap.fingerprint}", that label ` +
+              `computes "${oldLabelFp}" today — so the recorded output is no longer ` +
+              `this code's result. task "${this.task.id}"'s run ${this.run.id} is failed ` +
+              `instead of replaying a stale step row. Retry it under a fresh run, or ` +
+              `cancel it if the work is obsolete.`,
+          );
+        }
+      } else {
+        this.onLegacyFingerprint(seq, expectedKind, expectedLabel);
+      }
     } else {
       const stored = snap.fingerprint ?? null;
       if (stored === null) {
@@ -595,12 +633,13 @@ export class Executor implements RunExecutor {
     const seq = this.nextSeq();
     // fn source hash is the persistable stand-in for the fn itself (its output
     // semantics): an edited step body must not replay its old result.
-    const fp = this.fingerprint('step', label, {
+    const input = {
       fn: fnSourceHash(fn),
       ...(opts !== undefined ? { opts } : {}),
-    });
+    };
+    const fp = this.fingerprint('step', label, input);
 
-    const hit = this.cached(seq, 'step', label, fp);
+    const hit = this.cached(seq, 'step', label, fp, input);
     if (hit) return hit.output as T;
 
     this.checkCanceled();
@@ -752,7 +791,7 @@ export class Executor implements RunExecutor {
     // Fingerprint of the DECLARED wait — passed to suspendRun so the waits row
     // and the completed step row carry it, and recomputed identically on replay.
     const fp = this.fingerprint('wait', null, declared);
-    if (this.cached(seq, 'wait', null, fp)) return; // already resumed on a prior replay
+    if (this.cached(seq, 'wait', null, fp, declared)) return; // already resumed on a prior replay
     this.checkCanceled();
 
     let resumed: boolean;
@@ -798,8 +837,9 @@ export class Executor implements RunExecutor {
     // never stores it); kind + taskId + payload + options + code version is
     // the full signature, persisted on the waits row by waitForChildRun so
     // wakeParentIfWaiting stamps the completed step with this exact value.
-    const fp = this.fingerprint('trigger-and-wait', null, { taskId, payload, options });
-    const hit = this.cached(seq, 'trigger-and-wait', label, fp);
+    const input = { taskId, payload, options };
+    const fp = this.fingerprint('trigger-and-wait', null, input);
+    const hit = this.cached(seq, 'trigger-and-wait', label, fp, input);
     if (hit) return hit.output as TaskRunResult<TOutput>;
     this.checkCanceled();
 
@@ -843,8 +883,9 @@ export class Executor implements RunExecutor {
 
     // Same items + label the kernel's batchTriggerChild fingerprints the row
     // with — a changed fan-out must not replay the old run ids.
-    const fp = this.fingerprint('batch-trigger', label, { items });
-    const hit = this.cached(seq, 'batch-trigger', label, fp);
+    const input = { items };
+    const fp = this.fingerprint('batch-trigger', label, input);
+    const hit = this.cached(seq, 'batch-trigger', label, fp, input);
     if (hit) {
       const out = hit.output as { runIds?: string[] } | string[];
       return Array.isArray(out) ? out : (out.runIds ?? []);
@@ -888,7 +929,7 @@ export class Executor implements RunExecutor {
     const seq = this.nextSeq();
 
     const fp = this.fingerprint(kind, null, {});
-    const hit = this.cached(seq, kind, null, fp);
+    const hit = this.cached(seq, kind, null, fp, {});
     if (hit) {
       if (kind === 'now') return new Date(hit.output as string);
       return hit.output as number | string;
