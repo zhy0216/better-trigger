@@ -46,6 +46,7 @@ import {
 import { startWorkerRuntime, type WorkerHandle } from './runtime';
 import { createWaiterRegistry } from './waiters';
 import { BUILD_SHA, BUILD_VERSION } from './generated/build-info';
+import { ENV_CATEGORY_TITLES, ENV_KNOBS } from './env-registry';
 
 const USAGE = `better-trigger-worker — durable task daemon
 
@@ -107,94 +108,61 @@ Options:
                            this flag.
   -h, --help               Show this help
 
-Env:
-  DATABASE_URL             postgres://localhost:5432/better_trigger
-  BETTER_TRIGGER_API_KEY   When set, the API requires \`Authorization: Bearer <key>\`.
-                           May carry a \`@YYYY-MM-DD\` expiry suffix
-                           (e.g. sk-...@2027-01-01): past it, the key answers
-                           401 with code \`key_expired\`.
-  BETTER_TRIGGER_API_KEYS  Additional bearer keys, comma-separated (each may
-                           carry the same \`@YYYY-MM-DD\` expiry suffix). Any
-                           configured key authenticates — that is how key
-                           rotation works: add the new key here, wait for old
-                           requests to drain, then remove the old one.
-  BETTER_TRIGGER_RATE_LIMIT_RPS
-                           Per-key per-endpoint rate cap on trigger /
-                           batch-trigger / retry / cancel (default 50/s; 0
-                           disables the per-key bucket)
-  BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS
-                           Per-endpoint overall cap (default 200/s; 0 disables
-                           the global bucket). In-memory per process — put an
-                           exact fleet-wide cap at the reverse proxy
-  BETTER_TRIGGER_RATE_LIMIT_READ_RPS
-                           Per-key rate cap on the read surface (/api/v1 reads:
-                           /runs/:id/record, /runs/:id/result, /runs, /tasks,
-                           /schedules, /workers, /metrics). Default 200/s;
-                           loose on purpose — it bounds an attack, not a
-                           dashboard. 0 disables the per-key read bucket
-  BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS
-                           Overall read cap over all keys (default 1000/s;
-                           0 disables the global read bucket)
-  BETTER_TRIGGER_RATE_LIMIT_BURST
-                           Token-bucket burst capacity (default: the larger of
-                           the two rates above)
-  BETTER_TRIGGER_HOST      Same as --host
-  BETTER_TRIGGER_ALLOW_UNAUTHENTICATED
-                           Same as --allow-unauthenticated (set to 1/true)
-  BETTER_TRIGGER_CORS_ORIGIN
-                           Same as --cors-origin (comma-separated)
-  BETTER_TRIGGER_NAMESPACES
-                           Same as --namespace (comma-separated, e.g.
-                           acme/prod,acme/staging)
-  BETTER_TRIGGER_PIN_CODE_VERSION
-                           Same as --pin-code-version (set to 1/true)
-  BETTER_TRIGGER_VERSION   Code version reported on registration, overriding
-                           the default build identity (0.1.0+<git sha>, the
-                           same value /health reports). Set it to a git sha or
-                           image tag to name deploys as your pipeline does —
-                           and note it applies to every task at once, so under
-                           --pin-code-version one task's edit moves them all.
-  BETTER_TRIGGER_BODY_LIMIT
-                           Max request body in bytes (default 1048576 = 1 MiB).
-                           Over it: 413 \`payload_too_large\`
-  BETTER_TRIGGER_MAX_BATCH Max items in one batchTrigger (default 500). Over it:
-                           400 \`bad_request\` — split the fan-out into batches
-  BETTER_TRIGGER_MAX_PAYLOAD_BYTES
-                           Max serialized payload per run (default 262144 =
-                           256 KiB). Over it: 400 \`bad_request\` — keep large
-                           objects elsewhere and pass a reference
-  BETTER_TRIGGER_MAX_STEPS  Cap on a run's replayed step ledger (default 10000;
-                           0 = unlimited). A run past the cap fails with a
-                           non-retryable AbortError telling you to split it
-                           with continueAsNew.
-  BETTER_TRIGGER_POOL_MAX
-                           Override for the business-pool connection max. By
-                           default the pool is sized to the daemon's own work:
-                           max = --concurrency + 8, the 8 being headroom for
-                           the orchestrator loops (waits / cron / reaper /
-                           worker-offline), the heartbeat, the waiter sweep and
-                           HTTP slack. Raise it when
-                           better_trigger_pool_checkout_timeouts_total climbs.
-  BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS
-                           Pool checkout / connect timeout in ms (default
-                           10000; 0 = a checkout waits forever, pg's default).
-                           A saturated pool answers a checkout with an error
-                           after this instead of queueing the request forever;
-                           each timeout is counted on
-                           better_trigger_pool_checkout_timeouts_total.
-  BETTER_TRIGGER_POOL_STATEMENT_TIMEOUT_MS
-                           Server-side statement timeout in ms (default 30000;
-                           0 = off). Sent as statement_timeout in the
-                           connection startup packet, so PostgreSQL itself
-                            cancels a query that runs longer and returns the
-                            connection to the pool.
-   BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION
-                            Default off: a stray unhandledRejection (almost
-                            always a non-awaited promise in task code) is logged
-                            and counted on better_trigger_unhandled_rejections_total
-                            while the daemon keeps serving. Set to 1 to make it
-                            fatal (exit 1) like an uncaughtException.
+${renderEnvBlock()}
 `;
+
+/** Wrap a `name  help...` line so a terminal keeps the description aligned:
+ *  the first line starts at `prefix`, continuation lines re-indent to the same
+ *  column. Break at word boundaries, never mid-word. */
+function wrapEnvLine(prefix: string, text: string): string[] {
+  const width = 80;
+  const indent = prefix.length;
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let line = prefix;
+  for (const word of words) {
+    if (line === prefix) {
+      line = `${prefix} ${word}`;
+    } else if (line.length + 1 + word.length <= width) {
+      line += ` ${word}`;
+    } else {
+      lines.push(line);
+      line = `${' '.repeat(indent)}${word}`;
+    }
+  }
+  lines.push(line);
+  return lines;
+}
+
+/**
+ * The `Env:` block of --help, rendered from ENV_KNOBS (env-registry.ts) — the
+ * single source of truth for every `BETTER_TRIGGER_*` knob the worker and the
+ * kernel read. Grouped by category, so --help cannot silently drift from the
+ * registry; test/env-registry.test.ts guards the registry against the source.
+ * DATABASE_URL / PORT stay hand-written here (they are not BETTER_TRIGGER_*).
+ */
+function renderEnvBlock(): string {
+  const nameWidth = Math.max(...ENV_KNOBS.map((k) => k.name.length)) + 2;
+  const body: string[] = [];
+  let current: string | undefined;
+  for (const knob of ENV_KNOBS) {
+    if (knob.category !== current) {
+      current = knob.category;
+      body.push('');
+      body.push(`  ${ENV_CATEGORY_TITLES[current] ?? current}:`);
+    }
+    const prefix = `    ${knob.name.padEnd(nameWidth)}`;
+    const text = `${knob.help} (default: ${knob.default})`;
+    body.push(...wrapEnvLine(prefix, text));
+  }
+  return [
+    'Env:',
+    '  DATABASE_URL             postgres://localhost:5432/better_trigger',
+    '  PORT                     HTTP listen port (default 4848)',
+    ...body,
+    '',
+  ].join('\n');
+}
 
 const PRUNE_USAGE = `better-trigger-worker prune — delete history past a retention window
 

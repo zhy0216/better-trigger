@@ -128,6 +128,12 @@ across modules are an error unless they are literally the same handle.
 
 ## Environment variables
 
+> The single source of truth for the `BETTER_TRIGGER_*` knobs below is
+> `apps/worker/src/env-registry.ts`: `--help` is rendered from it, and
+> `test/env-registry.test.ts` greps the source and fails if any knob is read
+> without a registry entry (or a registry entry has no read). This table is
+> kept in sync by hand; the test is what stops new knobs from drifting.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | `postgres://localhost:5432/better_trigger` | Postgres connection string |
@@ -135,12 +141,14 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_HOST` | `127.0.0.1` | Bind address (same as `--host`). Loopback by default |
 | `BETTER_TRIGGER_ALLOW_UNAUTHENTICATED` | _(unset)_ | `1`/`true` = same as `--allow-unauthenticated` |
 | `BETTER_TRIGGER_CORS_ORIGIN` | _(unset)_ | Extra browser origins allowed to call the API, comma-separated (same as `--cors-origin`) |
+| `BETTER_TRIGGER_NAMESPACES` | `default/prod` | Namespaces this worker serves, comma-separated `<projectId>/<env>` pairs (same as `--namespace`). A worker registers its tasks in, claims from, and resumes/crons only the listed namespaces |
 | `BETTER_TRIGGER_CONCURRENCY` | `5` | Concurrent execution slots |
 | `BETTER_TRIGGER_BODY_LIMIT` | `1048576` (1 MiB) | Max request body in bytes; over it the API answers `413 payload_too_large` |
 | `BETTER_TRIGGER_MAX_BATCH` | `500` | Max items in one `batchTrigger`; over it `400 bad_request` — split the fan-out |
 | `BETTER_TRIGGER_MAX_BATCH_PAYLOAD_BYTES` | `1048576` (1 MiB) | Max TOTAL serialized payload across one `batchTrigger`; over it `400 bad_request` — split the fan-out (500 items at the per-item cap would be 128 MiB in one write tx) |
 | `BETTER_TRIGGER_MAX_PAYLOAD_BYTES` | `262144` (256 KiB) | Max serialized payload per run; over it `413 payload_too_large` |
 | `BETTER_TRIGGER_MAX_STEPS` | `10000` | Cap on a run's replayed step ledger. A run past the cap is claimed but marked truncated and fails with a **non-retryable** AbortError — replaying a truncated ledger would silently skip steps, so split the task with `continueAsNew` before it grows this large. `0` = unlimited |
+| `BETTER_TRIGGER_MAX_RECOVERIES` | `10` | Reaper recovery budget stamped on new runs (kernel). A run recovered more than this is failed rather than requeued — the recovery budget is infrastructure retry, not a trigger-call choice. `0` = never recover a lost run (fail it the moment its lease expires) |
 | `BETTER_TRIGGER_POOL_MAX` | _derived_ | Business-pool connection max. Defaults to `BETTER_TRIGGER_CONCURRENCY + 8` (headroom for the orchestrator loops, heartbeat, waiter sweep and HTTP slack). Raise it when `better_trigger_pool_checkout_timeouts_total` climbs |
 | `BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS` | `10000` | Business-pool checkout / connect timeout in ms. A saturated pool answers a checkout with an error after this instead of queueing it forever; each one is counted on `better_trigger_pool_checkout_timeouts_total`. `0` = a checkout waits forever (pg's default) |
 | `BETTER_TRIGGER_POOL_STATEMENT_TIMEOUT_MS` | `30000` | Server-side statement timeout in ms, sent as `statement_timeout` in the connection startup packet — PostgreSQL itself cancels a query that runs longer and returns the connection to the pool. `0` = off |
@@ -149,6 +157,7 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_RUN_OUTPUT_MAX_BYTES` | `262144` (256 KiB) | Max serialized run output; over it the run fails `413 payload_too_large` |
 | `BETTER_TRIGGER_ERROR_MAX_BYTES` | `65536` (64 KiB) | Max serialized error record (message/name/stack); a larger one is stored as a `SerializationError` stub so the failure itself still lands |
 | `BETTER_TRIGGER_LOG_DATA_MAX_BYTES` | `16384` (16 KiB) | Max serialized `data` on one log line; an over-limit line keeps its message and stores `{ omitted: true, reason }` in `data` |
+| `BETTER_TRIGGER_LOG_MESSAGE_MAX_BYTES` | `65536` (64 KiB) | Max serialized message on one log line (kernel); a longer one is stored as a `SerializationError` stub so the line still lands |
 | `BETTER_TRIGGER_LOG_BATCH_MAX_BYTES` | `262144` (256 KiB) | Max serialized payload of one log INSERT; a flush over it is split into more statements |
 | `BETTER_TRIGGER_STATS_TTL_MS` | `10000` | Cache TTL for `/tasks` stats (per namespace); `0` disables the cache |
 | `BETTER_TRIGGER_API_KEY` | _(unset)_ | When set, every `/api/v1/*` call (except `/health`) requires `Authorization: Bearer <key>`. Unset = local mode, no auth. The value may carry a `@<date>` expiry suffix (e.g. `sk-prod-abc@2027-01-01`): past the date the key answers `401 key_expired` |

@@ -46,7 +46,7 @@
 | 32 | [p2-34-web-test-infra.md](./done/p2-34-web-test-infra.md) ✅ | web 的 vitest 未声明依赖、无配置、jsdom 靠 docblock | — |
 | 33 | [p2-35-acceptance-ports-timeouts.md](./done/p2-35-acceptance-ports-timeouts.md) ✅ | 验收场景端口冲突;无 per-harness 超时 | — |
 | 34 | [p2-36-sdk-instance-tests.md](./done/p2-36-sdk-instance-tests.md) ✅ | instance.ts 324 行零单测;registry 跨副本无测试 | p0-03, p1-17 |
-| 35 | [p2-26-env-single-source.md](./p2-26-env-single-source.md) | env 旋钮单一来源表(收口本轮新增的全部 env) | p1-07, p1-11, p1-13, p1-14 |
+| 35 | [p2-26-env-single-source.md](./done/p2-26-env-single-source.md) ✅ | env 旋钮单一来源表(收口本轮新增的全部 env) | p1-07, p1-11, p1-13, p1-14 |
 | 36 | [p2-27-docs-drift-sweep.md](./p2-27-docs-drift-sweep.md) | 文档漂移清扫(数量、僵尸变量、web README、ctx 承诺) | 建议收尾做 |
 
 依赖说明:「p1-22」依赖指该文件的真 PG 验收用例落进 correctness suite(先做 p1-22 则直接加用例;若顺序颠倒,按 finish-todo 的 blocked-on 规则回填)。p2-26 与 p2-27 是收口清扫,放在最后避免被中途改动再次漂移。
@@ -95,3 +95,4 @@
 - [done/p2-34-web-test-infra.md](./done/p2-34-web-test-infra.md) ✅(vitest 显式依赖,vite.config test 环境 jsdom,删 docblock)
 - [done/p2-35-acceptance-ports-timeouts.md](./done/p2-35-acceptance-ports-timeouts.md) ✅(4 场景走 freePort,per-harness 超时 + 点名,补 3 个 script)
 - [done/p2-36-sdk-instance-tests.md](./done/p2-36-sdk-instance-tests.md) ✅(instance/registry 跨副本/client invalid_json/duration 上界 + 重复单位/schema 测试)
+- [done/p2-26-env-single-source.md](./done/p2-26-env-single-source.md) ✅(env-registry 单一来源,--help 按类渲染,防漂移测试,.env.example 网络姿态补齐)
