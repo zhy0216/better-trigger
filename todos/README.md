@@ -36,7 +36,7 @@
 | 22 | [p1-20-connection-state-key-prompt.md](./done/p1-20-connection-state-key-prompt.md) ✅ | connection 全局竞写频闪;key 被拒无反馈 | — |
 | 23 | [p2-23-result-typing-timeout.md](./done/p2-23-result-typing-timeout.md) ✅ | result() 无泛型;30s 超时静默返回非终态 | p0-03 |
 | 24 | [p2-24-retry-policy-undefined.md](./done/p2-24-retry-policy-undefined.md) ✅ | 显式 undefined 覆盖 retry 默认值 → NOT NULL 500 | — |
-| 25 | [p2-25-dead-sdk-surface.md](./p2-25-dead-sdk-surface.md) | pollMs 死参数、core 幽灵 RunHandle、过时注释 | — |
+| 25 | [p2-25-dead-sdk-surface.md](./done/p2-25-dead-sdk-surface.md) ✅ | pollMs 死参数、core 幽灵 RunHandle、过时注释 | — |
 | 26 | [p2-28-namespace-sweep-marker.md](./p2-28-namespace-sweep-marker.md) | namespace sweep 的 marker 可被 SELECT 列表满足 | p1-06 |
 | 27 | [p2-29-drop-unused-queue-index.md](./p2-29-drop-unused-queue-index.md) | 删除无查询使用的 queue_available_priority_idx | — |
 | 28 | [p2-30-unify-reenqueue.md](./p2-30-unify-reenqueue.md) | scanWaits 开码 re-enqueue 与 enqueue() 语义分叉 | — |
@@ -85,3 +85,4 @@
 - [done/p1-20-connection-state-key-prompt.md](./done/p1-20-connection-state-key-prompt.md) ✅(connection keyed 聚合,key 被拒变体提示 + token 保留,界面英文统一)
 - [done/p2-23-result-typing-timeout.md](./done/p2-23-result-typing-timeout.md) ✅(WaitResult/RunHandle 泛型,throwOnTimeout → ResultTimeoutError,in-run waiter 同步)
 - [done/p2-24-retry-policy-undefined.md](./done/p2-24-retry-policy-undefined.md) ✅(resolveRetryPolicy 逐字段 ?? 合并,显式 undefined 不再覆盖默认)
+- [done/p2-25-dead-sdk-surface.md](./done/p2-25-dead-sdk-surface.md) ✅(pollMs deprecated,删 core 幽灵 RunHandle,修注释)

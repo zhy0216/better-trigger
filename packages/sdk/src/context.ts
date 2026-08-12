@@ -93,8 +93,8 @@ export interface RunWait {
 }
 
 /**
- * The context object passed to a task's run() function.
- * `TOutput` is unused here but kept for symmetry with handles.
+ * The context object passed to a task's run() function: durable primitives,
+ * the wait helpers, logger, signal and run metadata.
  */
 export interface RunCtx {
   /**

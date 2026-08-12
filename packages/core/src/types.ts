@@ -147,11 +147,6 @@ export interface StepSnapshot {
   fingerprint?: string | null;
 }
 
-/** Returned by trigger / batchTrigger. */
-export interface RunHandle {
-  id: string;
-}
-
 /** One trigger request item (trigger / batchTrigger / durable batch step). */
 export interface TriggerItem {
   taskId: string;
@@ -383,7 +378,12 @@ export interface WorkersResponse {
 export interface WaitForResultOptions {
   /** Give up after this long (default 30s). */
   timeoutMs?: number;
-  /** Poll interval (default 250ms). */
+  /**
+   * @deprecated Inert on the daemon path (PF2): the in-process waiter registry
+   * is notification-driven with a shared 1s sweep, so this knob changes
+   * nothing there. It only tunes the embedded `kernel.waitForResult` fallback
+   * a host without a waiter registry would use.
+   */
   pollMs?: number;
   /** Caller cancellation; aborts the long-poll in-flight. */
   signal?: AbortSignal;
