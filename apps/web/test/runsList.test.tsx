@@ -7,7 +7,6 @@
    status chips must cover the full server status vocabulary including the
    waiting/canceled pair the adapter already maps.
    ============================================================================= */
-// @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunsList } from '../src/screens/RunsList';

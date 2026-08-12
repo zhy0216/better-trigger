@@ -11,7 +11,6 @@
    Rendered with @testing-library/react under jsdom; fake timers drive the
    2s interval deterministically.
    ============================================================================= */
-// @vitest-environment jsdom
 import { act, cleanup, render, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setApiKey } from '../src/api/client';

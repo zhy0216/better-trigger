@@ -14,4 +14,9 @@ export default defineConfig({
     port: 5173,
     open: true,
   },
+  test: {
+    // The dashboard tests render React components; jsdom is the default test
+    // environment so a test file cannot silently fall into node (p2-34).
+    environment: 'jsdom',
+  },
 });

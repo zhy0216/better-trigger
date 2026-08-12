@@ -16,7 +16,6 @@
    stubbed fetch — the interactions the acceptance criteria name, guarded
    from regression on every `bun run test`.
    ============================================================================= */
-// @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../src/App';

@@ -10,7 +10,6 @@
    In jsdom `window.parent === window`, so a spy on `window.parent.postMessage`
    also covers any stray `window.postMessage(...)` call.
    ============================================================================= */
-// @vitest-environment jsdom
 import { cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TweaksPanel } from '../src/components/TweaksPanel';

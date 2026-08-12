@@ -8,7 +8,6 @@
    call and an inline error on failure (the optimistic overlay rolls back and
    the useRun poll drives the real status).
    ============================================================================= */
-// @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunView } from '../src/features/run/RunView';
