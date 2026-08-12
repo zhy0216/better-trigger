@@ -31,7 +31,7 @@
 | 17 | [p1-15-batchtrigger-namespace-options.md](./done/p1-15-batchtrigger-namespace-options.md) ✅ | batchTrigger 的 per-item env/projectId 静默丢弃 | — |
 | 18 | [p1-16-lazy-async-hooks.md](./done/p1-16-lazy-async-hooks.md) ✅ | eager import node:async_hooks,edge/浏览器加载即炸 | — |
 | 19 | [p1-17-client-timeout-registry.md](./done/p1-17-client-timeout-registry.md) ✅ | 超时误报"daemon 没起";预中止 signal 失效;registry 无校验 | p1-16 |
-| 20 | [p1-18-dashboard-routing.md](./p1-18-dashboard-routing.md) | dashboard 无 URL 路由,deep-link fallback 无消费者 | — |
+| 20 | [p1-18-dashboard-routing.md](./done/p1-18-dashboard-routing.md) ✅ | dashboard 无 URL 路由,deep-link fallback 无消费者 | — |
 | 21 | [p1-19-security-headers-postmessage.md](./p1-19-security-headers-postmessage.md) | 静态资源零安全头;postMessage 无 origin 校验 | — |
 | 22 | [p1-20-connection-state-key-prompt.md](./p1-20-connection-state-key-prompt.md) | connection 全局竞写频闪;key 被拒无反馈 | — |
 | 23 | [p2-23-result-typing-timeout.md](./p2-23-result-typing-timeout.md) | result() 无泛型;30s 超时静默返回非终态 | p0-03 |
@@ -80,3 +80,4 @@
 - [done/p1-15-batchtrigger-namespace-options.md](./done/p1-15-batchtrigger-namespace-options.md) ✅(batchTrigger 批级 options 带 namespace,per-item env/projectId 收窄为类型错误)
 - [done/p1-16-lazy-async-hooks.md](./done/p1-16-lazy-async-hooks.md) ✅(AsyncLocalStorage 惰性加载,edge/browser 可 import,Node ESM 异步兜底)
 - [done/p1-17-client-timeout-registry.md](./done/p1-17-client-timeout-registry.md) ✅(超时 code 'timeout' + idempotencyKey 引导,signal 穿透,registry adopt 校验)
+- [done/p1-18-dashboard-routing.md](./done/p1-18-dashboard-routing.md) ✅(history.pushState/popstate 路由,deep-link /runs/:id 直达 detail)

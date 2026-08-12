@@ -29,16 +29,62 @@ const TWEAK_DEFAULTS = {
   vizStyle: 'waterfall',
 };
 
+/* URL routing — the daemon's SPA fallback (apps/worker/src/static.ts) serves
+   index.html for deep links, so paths mirror the sidebar + run detail. There is
+   no 'workers' route (worker stats live on the tasks dashboard) and no path for
+   'alerts'/'deployments', so those fall back to the runs list when unknown. */
+const STATIC_ROUTES: Array<[string, Route]> = [
+  ['/tasks', 'tasks'],
+  ['/schedules', 'schedules'],
+  ['/alerts', 'alerts'],
+  ['/deployments', 'deployments'],
+  ['/onboarding', 'onboarding'],
+];
+
+function parsePath(path: string): { route: Route; runId: string | null } {
+  const runMatch = /^\/runs\/([^/]+)$/.exec(path);
+  if (runMatch) return { route: 'run', runId: runMatch[1] };
+  if (path === '/' || path === '/runs') return { route: 'runs', runId: null };
+  const hit = STATIC_ROUTES.find(([p]) => path === p);
+  return hit ? { route: hit[1], runId: null } : { route: 'runs', runId: null };
+}
+
+function pathFor(route: Route, runId?: string | null): string {
+  if (route === 'run') return `/runs/${runId ?? ''}`;
+  if (route === 'runs') return '/runs';
+  return STATIC_ROUTES.find(([, r]) => r === route)?.[0] ?? '/runs';
+}
+
 export default function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
-  const [route, setRoute] = React.useState<Route>('runs');
+  const initial = React.useMemo(() => parsePath(window.location.pathname), []);
+  const [route, setRoute] = React.useState<Route>(initial.route);
   const [env, setEnv] = React.useState('prod');
   const [collapsed, setCollapsed] = React.useState(false);
-  const [runId, setRunId] = React.useState<string | null>(null); // selected run for RunView
+  const [runId, setRunId] = React.useState<string | null>(initial.runId); // selected run for RunView
   const connection = useConnection();
   const [apiKeySource, setApiKeySource] = React.useState(getApiKeySource);
 
-  const openRun = (id?: string) => { setRunId(id ?? null); setRoute('run'); };
+  const navigate = (nextRoute: Route, nextRunId: string | null = null) => {
+    history.pushState(null, '', pathFor(nextRoute, nextRunId));
+    setRunId(nextRoute === 'run' ? nextRunId : null);
+    setRoute(nextRoute);
+  };
+  const openRun = (id?: string) => navigate('run', id ?? null);
+
+  // Seed state from the mount URL (replaceState: the first load is the current
+  // history entry, not a new one) and keep route/runId in sync with back/forward.
+  React.useEffect(() => {
+    const seeded = parsePath(window.location.pathname);
+    history.replaceState(null, '', pathFor(seeded.route, seeded.runId));
+    const onPop = () => {
+      const next = parsePath(window.location.pathname);
+      setRunId(next.runId);
+      setRoute(next.route);
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
 
   // apply theme + density + accent to <html>
   React.useEffect(() => {
@@ -48,7 +94,7 @@ export default function App() {
     el.style.setProperty('--accent', t.accent);
   }, [t.theme, t.density, t.accent]);
 
-  const goTo = (r: string) => setRoute(r as Route);
+  const goTo = (r: string) => navigate(r as Route);
   const activeNav = route === 'run' ? 'runs' : route;
   const titles: Record<string, string> = {
     run: 'Run', runs: 'Runs', tasks: 'Tasks', schedules: 'Schedules',
@@ -56,7 +102,7 @@ export default function App() {
   };
 
   let screen: React.ReactNode;
-  if (route === 'run') screen = <RunView vizStyle={t.vizStyle as VizStyle} runId={runId} onBack={() => setRoute('runs')} />;
+  if (route === 'run') screen = <RunView vizStyle={t.vizStyle as VizStyle} runId={runId} onBack={() => navigate('runs')} />;
   else if (route === 'runs') screen = <RunsList env={env} onOpenRun={(r) => openRun(r.id)} />;
   else if (route === 'tasks') screen = <TasksDashboard setRoute={goTo} onOpenRun={openRun} />;
   else if (route === 'schedules') screen = <Schedules />;
@@ -66,7 +112,7 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }} data-screen-label={titles[route]}>
-      <Sidebar route={activeNav} setRoute={(r) => setRoute((r === 'runs' ? 'runs' : r) as Route)} collapsed={collapsed} />
+      <Sidebar route={activeNav} setRoute={(r) => navigate(r as Route)} collapsed={collapsed} />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <TopBar title={titles[route]} env={env} setEnv={setEnv}
           onToggleSidebar={() => setCollapsed((c) => !c)}
@@ -77,7 +123,7 @@ export default function App() {
               Local API key
             </span>
           )}
-          {route === 'tasks' && <Button variant="outline" size="sm" icon="plus" onClick={() => setRoute('onboarding')}>New task</Button>}
+          {route === 'tasks' && <Button variant="outline" size="sm" icon="plus" onClick={() => navigate('onboarding')}>New task</Button>}
         </TopBar>
         {connection === 'unauthorized' ? (
           <ApiKeyPrompt
