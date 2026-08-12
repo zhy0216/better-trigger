@@ -12,7 +12,7 @@
    against recording fake kernels; no Postgres.
    ============================================================================= */
 import type { ClaimedRun, LogEntry, RetryPolicy } from '@better-trigger/core';
-import { AbortError, KernelError } from '@better-trigger/core';
+import { AbortError, isAbortError, KernelError } from '@better-trigger/core';
 import type { Kernel } from '@better-trigger/kernel';
 import type { ExecutorTask } from 'better-trigger/internal';
 import { describe, expect, it } from 'vitest';
@@ -129,5 +129,33 @@ describe('executor serialization (C3)', () => {
       AbortError,
     );
     expect(calls.waitForChildRun).toHaveLength(1); // BigInt fingerprints fine; the kernel refused it
+  });
+
+  it('an unregistered child task id fails the parent as AbortError (non-retryable)', async () => {
+    const calls = { waitForChildRun: [] as unknown[] };
+    const kernel = {
+      waitForChildRun: async (input: unknown) => {
+        calls.waitForChildRun.push(input);
+        throw new KernelError(
+          'task_not_found',
+          'task typo-task not registered in default/prod',
+        );
+      },
+      reportStep: async () => {},
+      appendLogs: async () => {},
+    } as unknown as Kernel;
+    const ex = new Executor(kernel, plainTask, claimed(), 'w1', null);
+
+    let caught: unknown;
+    try {
+      await ex.triggerAndWait('typo-task', { n: 1 }, 'wait-child');
+    } catch (err) {
+      caught = err;
+    }
+    expect(isAbortError(caught)).toBe(true);
+    expect(caught).not.toBeInstanceOf(KernelError);
+    expect((caught as AbortError).message).toContain('typo-task');
+    expect((caught as AbortError).message).toContain('not registered');
+    expect(calls.waitForChildRun).toHaveLength(1); // task_not_found fingerprints fine; the kernel refused it
   });
 });

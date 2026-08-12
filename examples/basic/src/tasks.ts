@@ -190,6 +190,21 @@ export const alwaysAborts = task({
 });
 
 /* ---------------------------------------------------------------------------
+ * typo-wait — the "typo'd child task id" acceptance case (todos/p1-04).
+ * Calls ctx.triggerAndWait against a raw STRING id that no task registered
+ * ('no-such-task-xyz') — the typo path. waitForChildRun rejects it with
+ * TaskNotFoundError (code task_not_found), which the executor converts to a
+ * non-retryable AbortError, so the parent run FAILS with attempt staying 1.
+ * The error is deliberately NOT caught: this task's job is to fail the run.
+ * ------------------------------------------------------------------------- */
+export const typoWait = task({
+  id: 'typo-wait',
+  run: async (_payload: Record<string, never>, ctx) => {
+    return await ctx.triggerAndWait('no-such-task-xyz', {});
+  },
+});
+
+/* ---------------------------------------------------------------------------
  * parallel-steps — two durable steps run concurrently via Promise.all.
  * Demonstrates that parallel (non-nested) siblings are supported: seq is
  * allocated synchronously before each step awaits its fn, so positions stay
@@ -250,6 +265,7 @@ export const allTasks = [
   fanOut,
   flakyTask,
   alwaysAborts,
+  typoWait,
   parallelSteps,
   everyMinute,
   everyTwoSeconds,

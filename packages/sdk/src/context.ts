@@ -102,6 +102,18 @@ export interface RunCtx {
    * per the effective retry policy (step opts ?? task ?? default).
    */
   step<T>(label: string, fn: () => T | Promise<T>, opts?: StepOptions): Promise<T>;
+  /**
+   * Trigger a child run by RAW task id and durably wait for it to finish — the
+   * string-id form, distinct from `handle.triggerAndWait(payload)` which always
+   * triggers the handle's own task. The escape hatch for dynamic child ids: an
+   * unregistered id (a typo) fails the call with AbortError instead of creating
+   * a child run nobody claims and stranding the parent waiting forever.
+   */
+  triggerAndWait<TOutput>(
+    taskId: string,
+    payload: unknown,
+    options?: TriggerOptions,
+  ): Promise<TaskRunResult<TOutput>>;
   /** Wait primitives (wait.for / wait.until). */
   wait: RunWait;
   /** Structured logger; entries are buffered and shipped to the server. */

@@ -1305,6 +1305,9 @@ export async function waitForChildRun(
       return { childRunId: existingWait.rows[0].child_run_id };
     }
 
+    // requireTask: a typo'd taskId must fail HERE with TaskNotFoundError — the
+    // parent run is suspended to 'waiting' right below, so an unregistered task
+    // would otherwise strand it forever with a child run nobody claims.
     const child = await createRunIn(client, {
       taskId: args.taskId,
       payload: args.payload,
@@ -1312,6 +1315,7 @@ export async function waitForChildRun(
       triggerType: 'subtask',
       parentRunId: args.runId,
       namespace: { projectId: parent.project_id, env: parent.env },
+      requireTask: true,
     });
 
     await client.query(
@@ -1767,8 +1771,11 @@ export async function retryRun(
       },
       // NOT carried over: idempotencyKey — reusing it would make the retry
       // collide with the very run it is retrying and hand back its id.
+      // requireTask: a task that is no longer registered must 404 here, not
+      // enqueue a dead run nobody can ever claim.
       triggerType: 'retry',
       namespace,
+      requireTask: true,
     });
     await notifyWork(client);
     return { runId: created.runId };

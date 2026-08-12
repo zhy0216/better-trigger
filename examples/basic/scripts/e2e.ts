@@ -164,6 +164,7 @@ async function checkTasksRegistered(c: E2E): Promise<void> {
       'fan-out',
       'flaky-task',
       'always-aborts',
+      'typo-wait',
       'parallel-steps',
       'every-minute',
       'every-2s',
@@ -276,6 +277,32 @@ async function checkVideoPipeline(c: E2E): Promise<void> {
     const child = await trigger.getRun(out.childRunId);
     s.assertEqual(child.status, 'completed', 'extract-audio child status');
     s.assertEqual(child.parentRunId, detail.run.id, 'child.parentRunId');
+  });
+}
+
+async function checkTypoWait(c: E2E, settled: Settled[]): Promise<void> {
+  const s: Scenario = c.s;
+  const { triggerAndPoll } = c;
+  await s.check('typo-wait (unregistered child task) fails the parent without retrying', async () => {
+    const { detail } = await triggerAndPoll(
+      'typo-wait',
+      {},
+      { expectStatus: 'failed', timeoutMs: DEFAULT_TIMEOUT_MS },
+    );
+    settled.push({ label: 'typo-wait', runId: detail.run.id });
+
+    // A typo'd child task id is deterministic — retrying can never fix it — so
+    // the executor fails the parent as a non-retryable AbortError (attempt 1).
+    s.assert(detail.run.attempt === 1, `expected attempt 1 (no retry), got ${detail.run.attempt}`);
+    s.assert(
+      !!detail.run.error && detail.run.error.name === 'AbortError',
+      `run error should be an AbortError, got '${detail.run.error?.name ?? 'none'}'`,
+    );
+    s.assert(
+      typeof detail.run.error?.message === 'string' &&
+        detail.run.error.message.includes('no-such-task-xyz'),
+      'run error message should name the typo\'d task id',
+    );
   });
 }
 
@@ -531,6 +558,7 @@ async function main(s: Scenario): Promise<void> {
   await checkOrderPipeline(c, settled);
   await checkOnboardingWait(c, settled);
   await checkVideoPipeline(c);
+  await checkTypoWait(c, settled);
   await checkFanOut(c);
   await checkIdempotency(c);
   await checkAlwaysAborts(c, settled);

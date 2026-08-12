@@ -87,12 +87,15 @@ function isAbandonment(err: unknown): boolean {
  * step output or a run output) is deterministic, so a replay reproduces the
  * same failure — same reasoning as NonDeterminismError. Fail the run
  * non-retryably instead of burning attempts on a value that can never be
- * stored.
+ * stored. This also covers `task_not_found`: a typo'd child task id resolves
+ * to the same missing task on every retry, so retrying can never fix it.
  */
 function isUnfixableKernelError(err: unknown): err is KernelError {
   return (
     err instanceof KernelError &&
-    (err.code === 'serialization_error' || err.code === 'payload_too_large')
+    (err.code === 'serialization_error' ||
+      err.code === 'payload_too_large' ||
+      err.code === 'task_not_found')
   );
 }
 
@@ -337,6 +340,15 @@ export class Executor implements RunExecutor {
     return {
       run: runInfo,
       step: (label, fn, opts) => this.doStep(label, fn, opts),
+      // Raw task-id triggerAndWait (the typo path, todos/p1-04): same durable
+      // step as a TaskHandle, but the id is caller-supplied — an unregistered
+      // id fails the parent run as a non-retryable AbortError instead of
+      // stranding it waiting on a child run nobody can claim.
+      triggerAndWait: <TOutput>(
+        taskId: string,
+        payload: unknown,
+        options?: TriggerOptions,
+      ) => this.triggerAndWait<TOutput>(taskId, payload, `triggerAndWait:${taskId}`, options),
       wait: {
         // The fingerprint hashes the DECLARED wait, not the computed instant:
         // ctx.wait.for('24h') must fingerprint as '24h' on every replay, while
