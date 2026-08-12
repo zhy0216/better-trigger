@@ -455,8 +455,18 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
       ? nextCronAt(sched.cron_pattern, sched.cron_tz ?? undefined)
       : null;
 
+    // p1-09: next_run_at is judged by the DB clock, so the re-enabled schedule
+    // is clamped to at least 1s after now() — a skewed daemon clock computing
+    // nextCronAt here must not seed a value the DB reads as already due (a
+    // single spurious fire on enable). The NULL guard keeps an impossible
+    // pattern silent instead of firing every tick.
     await pool.query(
-      `UPDATE schedules SET enabled = $2, next_run_at = $3, updated_at = now()
+      `UPDATE schedules SET enabled = $2,
+         next_run_at = CASE
+           WHEN $3::timestamptz IS NULL THEN NULL
+           ELSE GREATEST($3::timestamptz, now() + interval '1 second')
+         END,
+         updated_at = now()
         WHERE id = $1 AND project_id = $4 AND env = $5`,
       [id, enabled, nextRunAt, ns.projectId, ns.env],
     );

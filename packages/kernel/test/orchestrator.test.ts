@@ -46,6 +46,24 @@ describe('nextCronAt', () => {
     );
   });
 
+  it('returns a next fire strictly after `from` for every pattern and timezone', () => {
+    // A schedule the cron scan judges due is computed from that SAME db_now
+    // (p1-09); the result must always land strictly after `from`, or the
+    // written next_run_at would look due again on the very next tick.
+    for (const pattern of ['*/1 * * * *', '0 9 * * *']) {
+      for (const tz of ['UTC', 'Asia/Shanghai']) {
+        const next = nextCronAt(pattern, tz, FROM);
+        expect(next).toBeInstanceOf(Date);
+        expect(next!.getTime()).toBeGreaterThan(FROM.getTime());
+      }
+    }
+    // A schedule that has been due for a while still steps forward from the
+    // instant that judged it due, never back before it.
+    const past = new Date('2026-07-30T07:58:30.000Z');
+    const next = nextCronAt('*/1 * * * *', 'UTC', past);
+    expect(next!.getTime()).toBeGreaterThan(past.getTime());
+  });
+
   it('defaults `from` to now and returns a future date', () => {
     const next = nextCronAt('*/1 * * * *', 'UTC');
     expect(next).toBeInstanceOf(Date);

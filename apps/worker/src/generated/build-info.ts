@@ -11,4 +11,4 @@
    version, build and running artifact cannot drift.
    ============================================================================= */
 export const BUILD_VERSION = "0.1.0";
-export const BUILD_SHA: string | undefined = "f5ace03-dirty";
+export const BUILD_SHA: string | undefined = "98cb284-dirty";

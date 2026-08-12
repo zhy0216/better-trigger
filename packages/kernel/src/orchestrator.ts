@@ -508,13 +508,14 @@ export function startOrchestrator(
         cron_tz: string | null;
         project_id: string;
         env: string;
+        db_now: Date;
       };
       const due = { rows: [] as ScheduleRow[] };
       for (const ns of namespaces) {
         const params: unknown[] = [];
         const predicate = nsPredicateFor('schedules', ns, params);
         const res = await client.query<ScheduleRow>(
-          `SELECT id, task_id, cron_pattern, cron_tz, project_id, env
+          `SELECT id, task_id, cron_pattern, cron_tz, project_id, env, now() AS db_now
              FROM schedules
             WHERE enabled = true AND next_run_at IS NOT NULL AND next_run_at <= now()
               AND ${predicate}
@@ -536,11 +537,28 @@ export function startOrchestrator(
           namespace: { projectId: s.project_id, env: s.env },
         });
 
-        // Next fire computed from now → missed windows are skipped (no catch-up).
-        const next = nextCronAt(s.cron_pattern, s.cron_tz ?? undefined);
+        // Next fire computed from the DATABASE clock (p1-09) — computing the
+        // next fire from the daemon clock could write a next_run_at the DB
+        // still sees as due, re-firing the same schedule every tick under
+        // clock skew. Computing from db_now (the clock that judged it due)
+        // keeps the two decisions on one clock, and missed windows are skipped
+        // (no catch-up).
+        const next = nextCronAt(s.cron_pattern, s.cron_tz ?? undefined, s.db_now);
+        // Second defense: whatever the computation above did, a schedule can
+        // never be immediately re-due right after firing — the clamp keeps a
+        // skewed daemon clock from writing a next_run_at the DB reads as
+        // already past. The NULL guard matters: nextCronAt returns null for an
+        // impossible pattern (e.g. "0 0 30 2 *"), and GREATEST would otherwise
+        // turn that into now()+1s and fire an impossible schedule every tick
+        // forever instead of leaving it silent.
         await client.query(
           `UPDATE schedules
-              SET last_run_at = now(), last_run_id = $2, next_run_at = $3, updated_at = now()
+              SET last_run_at = now(), last_run_id = $2,
+                  next_run_at = CASE
+                    WHEN $3::timestamptz IS NULL THEN NULL
+                    ELSE GREATEST($3::timestamptz, now() + interval '1 second')
+                  END,
+                  updated_at = now()
             WHERE id = $1 AND project_id = $4 AND env = $5`,
           [s.id, created.runId, next, s.project_id, s.env],
         );

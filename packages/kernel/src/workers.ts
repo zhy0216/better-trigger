@@ -285,6 +285,14 @@ async function syncSchedules(
   for (const t of tasks) {
     if (!t.cron) continue;
     cronTaskIds.push(t.id);
+    // p1-09: `next` is computed from the daemon clock, so both write paths
+    // clamp it to at least 1s after the DB clock (`GREATEST(..., now() + 1s)`)
+    // — a skewed daemon clock cannot seed a next_run_at the DB already sees as
+    // due. The NULL guard keeps nextCronAt's null (an impossible pattern, e.g.
+    // "0 0 30 2 *") as NULL: GREATEST would turn it into now()+1s and fire an
+    // impossible schedule on every tick. The ON CONFLICT branch keeps the
+    // existing next_run_at when pattern/tz are unchanged, so a due schedule
+    // stays due across a re-registration.
     const next = nextCronAt(t.cron.pattern, t.cron.timezone);
     // Upsert by (project_id, env, task_id) (unique), preserving existing
     // enabled flag — the namespace is part of the key, so one namespace's sync
@@ -292,14 +300,18 @@ async function syncSchedules(
     await client.query(
       `INSERT INTO schedules
          (id, project_id, env, task_id, cron_pattern, cron_tz, enabled, next_run_at, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6, true, $7, now(), now())
+       VALUES ($1,$2,$3,$4,$5,$6, true,
+               CASE WHEN $7::timestamptz IS NULL THEN NULL
+                    ELSE GREATEST($7::timestamptz, now() + interval '1 second') END,
+               now(), now())
        ON CONFLICT (project_id, env, task_id) DO UPDATE
          SET cron_pattern = EXCLUDED.cron_pattern,
              cron_tz = EXCLUDED.cron_tz,
              next_run_at = CASE
                WHEN schedules.cron_pattern IS DISTINCT FROM EXCLUDED.cron_pattern
                  OR schedules.cron_tz IS DISTINCT FROM EXCLUDED.cron_tz
-               THEN EXCLUDED.next_run_at
+               THEN CASE WHEN EXCLUDED.next_run_at IS NULL THEN NULL
+                         ELSE GREATEST(EXCLUDED.next_run_at, now() + interval '1 second') END
                ELSE schedules.next_run_at
              END,
              updated_at = now()`,

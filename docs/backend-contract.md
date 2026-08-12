@@ -268,6 +268,7 @@ SELECT q.id AS queue_id, q.run_id,
 - worker register 时,manifest 带 cron 的 task → upsert `schedules`(保留已有 `enabled` 状态),用 **croner** 按 timezone 算 `next_run_at`。manifest 不再含 cron 的已有 schedule → 删除。
 - 编排器每 1s:`schedules WHERE enabled AND next_run_at <= now() FOR UPDATE SKIP LOCKED` → 创建 run(trigger_type='schedule')+ 入队,更新 `last_run_at/last_run_id/next_run_at`(croner 算下一次)。
 - 错过的窗口(server 宕机)不补跑,只从当前时间算下一次。
+- cron fires 的判定与下次重排都基于 DATABASE 时钟(`now()`);daemon 的墙上时钟不影响正确性(p1-09)——写回的 `next_run_at` 至少被钳到 1s 之后,偏斜的 daemon 时钟不可能让同一个 schedule 连续两次触发。
 
 ### 3.7 取消 / 手动重试
 - `POST /api/v1/runs/:id/cancel`:queued/waiting/running → status='canceled', finished_at=now(),删 queue 行,waits 置 canceled;若它是某父的子 run → 父的 wait 以 `{ok:false, error:{message:'child canceled'}}` 回填并恢复父。running 状态下 worker 通过心跳响应 / 409 感知后放弃。

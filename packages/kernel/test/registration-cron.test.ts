@@ -275,7 +275,13 @@ describe('registerWorker — schedule sync (C4)', () => {
     await register(pool, 'v1', logger);
 
     const upsert = stmts.find((s) => /INSERT INTO schedules/.test(s.sql))!;
-    expect(upsert.sql).toMatch(/VALUES \(\$1,\$2,\$3,\$4,\$5,\$6, true, \$7, now\(\), now\(\)\)/);
+    // p1-09: the daemon-clock `next` is clamped to at least 1s after the DB
+    // clock on the fresh-INSERT branch (the ON CONFLICT branch keeps the
+    // existing next_run_at unchanged — a due schedule stays due). The NULL
+    // guard keeps an impossible pattern silent instead of firing every tick.
+    expect(upsert.sql).toMatch(
+      /VALUES \(\$1,\$2,\$3,\$4,\$5,\$6, true,\s+CASE WHEN \$7::timestamptz IS NULL THEN NULL\s+ELSE GREATEST\(\$7::timestamptz, now\(\) \+ interval '1 second'\) END,\s+now\(\), now\(\)\)/,
+    );
     expect(upsert.params.slice(0, 6)).toEqual([
       expect.any(String), // schedule id
       'default',
@@ -298,10 +304,13 @@ describe('registerWorker — schedule sync (C4)', () => {
     const upsert = stmts.filter((s) => /INSERT INTO schedules/.test(s.sql)).at(-1)!;
     // Recompute only on a real change (pattern or timezone); otherwise keep
     // schedules.next_run_at verbatim — a due schedule stays due across a
-    // restart, and a disabled schedule's NULL stays NULL.
+    // restart, and a disabled schedule's NULL stays NULL. The recompute branch
+    // is also clamped (p1-09) so a changed pattern can't seed a value the DB
+    // reads as already due, with the NULL guard keeping impossible patterns
+    // silent.
     expect(upsert.sql).toMatch(/next_run_at = CASE/);
     expect(upsert.sql).toMatch(
-      /WHEN schedules\.cron_pattern IS DISTINCT FROM EXCLUDED\.cron_pattern\s+OR schedules\.cron_tz IS DISTINCT FROM EXCLUDED\.cron_tz\s+THEN EXCLUDED\.next_run_at\s+ELSE schedules\.next_run_at\s+END/,
+      /WHEN schedules\.cron_pattern IS DISTINCT FROM EXCLUDED\.cron_pattern\s+OR schedules\.cron_tz IS DISTINCT FROM EXCLUDED\.cron_tz\s+THEN CASE WHEN EXCLUDED\.next_run_at IS NULL THEN NULL\s+ELSE GREATEST\(EXCLUDED\.next_run_at, now\(\) \+ interval '1 second'\) END\s+ELSE schedules\.next_run_at\s+END/,
     );
     // The old unconditional form is gone, and so is the enabled-branch that
     // refilled a disabled row's NULL next_run_at on every registration.
