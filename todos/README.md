@@ -41,7 +41,7 @@
 | 27 | [p2-29-drop-unused-queue-index.md](./done/p2-29-drop-unused-queue-index.md) ✅ | 删除无查询使用的 queue_available_priority_idx | — |
 | 28 | [p2-30-unify-reenqueue.md](./done/p2-30-unify-reenqueue.md) ✅ | scanWaits 开码 re-enqueue 与 enqueue() 语义分叉 | — |
 | 29 | [p2-31-keyless-rate-limit-bucket.md](./done/p2-31-keyless-rate-limit-bucket.md) ✅ | 无 key 时 per-key 限流坍缩成单一 anon 桶 | p1-14 |
-| 30 | [p2-32-route-validation-consistency.md](./p2-32-route-validation-consistency.md) | intQuery/clampQuery 两套校验;/runs?status=垃圾 返回空页 | — |
+| 30 | [p2-32-route-validation-consistency.md](./done/p2-32-route-validation-consistency.md) ✅ | intQuery/clampQuery 两套校验;/runs?status=垃圾 返回空页 | — |
 | 31 | [p2-33-runs-list-filters-actions.md](./p2-33-runs-list-filters-actions.md) | 搜索假空态;cancel/retry 已实现无 UI | p1-18 |
 | 32 | [p2-34-web-test-infra.md](./p2-34-web-test-infra.md) | web 的 vitest 未声明依赖、无配置、jsdom 靠 docblock | — |
 | 33 | [p2-35-acceptance-ports-timeouts.md](./p2-35-acceptance-ports-timeouts.md) | 验收场景端口冲突;无 per-harness 超时 | — |
@@ -90,3 +90,4 @@
 - [done/p2-29-drop-unused-queue-index.md](./done/p2-29-drop-unused-queue-index.md) ✅(0013 DROP queue_available_priority_idx,queue_concurrency_idx 保留并注理由)
 - [done/p2-30-unify-reenqueue.md](./done/p2-30-unify-reenqueue.md) ✅(scanWaits 改走 enqueue(preserveSurvivor),kernel 只剩一处 INSERT INTO queue)
 - [done/p2-31-keyless-rate-limit-bucket.md](./done/p2-31-keyless-rate-limit-bucket.md) ✅(无 key 按来源地址分桶,桶表基数上限,global 桶永不被驱逐)
+- [done/p2-32-route-validation-consistency.md](./done/p2-32-route-validation-consistency.md) ✅(clampQuery 删除,query 校验统一到 intQuery,/runs?status 非法 → 400)

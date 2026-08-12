@@ -5,7 +5,7 @@
    ============================================================================= */
 import { Hono } from 'hono';
 import type { Pool, PoolClient } from 'pg';
-import type { Namespace } from '@better-trigger/core';
+import type { Namespace, RunStatus } from '@better-trigger/core';
 import { getRunDetail, KernelError, nextCronAt } from '@better-trigger/kernel';
 import type {
   HealthPoolStats,
@@ -23,6 +23,11 @@ import type {
   WorkersResponse,
 } from '../types';
 import { computeTaskStats } from '../stats';
+
+/** The run status values GET /runs accepts — the /workers route's status
+ *  check made into a shared contract (p2-32): a typo 400s instead of silently
+ *  returning an empty page. */
+const RUN_STATUSES: ReadonlySet<string> = new Set<RunStatus>(['queued', 'running', 'waiting', 'completed', 'failed', 'canceled']);
 import { intQuery, requireBoolean, safeJson } from '../http';
 import { namespaceFromQuery } from '../namespace';
 // O4: the build metadata injected at build time (package version + git sha,
@@ -284,7 +289,15 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
     // status filter inside it. A run in another namespace is never visible.
     const ns = namespaceFromQuery(c);
     const taskId = c.req.query('taskId');
+    // Same enum contract as GET /workers (p2-32): a typo'd status must be a
+    // 400 naming the legal values, NOT a silent empty page.
     const status = c.req.query('status');
+    if (status !== undefined && !RUN_STATUSES.has(status)) {
+      throw new KernelError(
+        'bad_request',
+        `status must be one of ${[...RUN_STATUSES].join(', ')}`,
+      );
+    }
     // limit goes straight into LIMIT $n, so it must be a positive integer before
     // pg sees it ("LIMIT must not be negative" / bigint syntax error → 500).
     const limit = intQuery(c, 'limit', { min: 1, max: 200, fallback: 50 });

@@ -71,19 +71,26 @@ export function requireBoolean(value: unknown, field: string): boolean {
 
 /**
  * Read a numeric query param destined for SQL. Absent / empty → `fallback`;
- * anything that is not an integer >= `min` → bad_request (pg rejects a negative
- * or fractional LIMIT outright). Above `max` is capped rather than refused —
- * the cap is our protection, not part of the caller's contract.
+ * anything that is not an integer >= `min` is either refused (bad_request, the
+ * default — pg rejects a negative or fractional LIMIT outright) or, with
+ * `onInvalid: 'clamp'`, silently clamped to the bounds. Above `max` is capped
+ * rather than refused either way — the cap is our protection, not part of the
+ * caller's contract. Two callers are allowed to differ on GARBAGE INPUT
+ * handling (`?timeoutMs=abc` is a tolerance thing, `?limit=abc` is a caller
+ * bug) — but every numeric query param in the API resolves through this one
+ * function so the choice is explicit at the call site (p2-32).
  */
 export function intQuery(
   c: Context,
   name: string,
   bounds: { min: number; max: number; fallback: number },
+  opts: { onInvalid?: 'throw' | 'clamp' } = {},
 ): number {
   const raw = c.req.query(name);
   if (raw === undefined || raw === '') return bounds.fallback;
   const n = Number(raw);
   if (!Number.isSafeInteger(n) || n < bounds.min) {
+    if (opts.onInvalid === 'clamp') return Math.max(bounds.min, Math.min(bounds.max, bounds.fallback));
     throw new KernelError('bad_request', `${name} must be an integer >= ${bounds.min}`);
   }
   return Math.min(n, bounds.max);

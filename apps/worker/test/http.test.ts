@@ -21,10 +21,11 @@ interface Calls {
   trigger: unknown[];
   batchTrigger: unknown[];
   query: { sql: string; params: unknown[] }[];
+  waitForResult: unknown[];
 }
 
 const makeApp = () => {
-  const calls: Calls = { trigger: [], batchTrigger: [], query: [] };
+  const calls: Calls = { trigger: [], batchTrigger: [], query: [], waitForResult: [] };
   const kernel = {
     trigger: async (input: unknown) => {
       calls.trigger.push(input);
@@ -33,6 +34,10 @@ const makeApp = () => {
     batchTrigger: async (items: unknown) => {
       calls.batchTrigger.push(items);
       return { runIds: ['run_1'] };
+    },
+    waitForResult: async (...args: unknown[]) => {
+      calls.waitForResult.push(args);
+      return { status: 'completed', output: 'ok' };
     },
   } as unknown as Kernel;
   const pool = {
@@ -216,5 +221,33 @@ describe('GET /runs query params', () => {
     expect(res.status).toBe(200);
     expect(calls.query[0]?.params).toEqual(['default', 'prod', '2026-07-30T08:00:00.000Z', 'run_9', 51]);
     expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a bogus status instead of returning an empty page (p2-32)', async () => {
+    const { app, calls } = makeApp();
+    const res = await app.fetch(get('/runs?status=bogus'));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('bad_request');
+    // Names the legal set so the caller can fix the typo.
+    expect(body.error.message).toContain('running');
+    expect(calls.query).toHaveLength(0);
+  });
+
+  it('passes a valid status through', async () => {
+    const { app, calls } = makeApp();
+    expect((await app.fetch(get('/runs?status=running'))).status).toBe(200);
+    expect(calls.query[0]?.params).toContain('running');
+  });
+
+  it('clamps garbage on the tolerance params of /runs/:id/result (p2-32)', async () => {
+    const { app, calls } = makeApp();
+    // `?timeoutMs=abc` is a tolerance param: it falls back, not a 400.
+    const res = await app.fetch(get('/runs/run_1/result?timeoutMs=abc&pollMs=xyz'));
+    expect(res.status).toBe(200);
+    const args = calls.waitForResult[0] as unknown[];
+    const opts = args[2] as { timeoutMs: number; pollMs: number };
+    expect(opts.timeoutMs).toBe(5_000);
+    expect(opts.pollMs).toBe(250);
   });
 });
