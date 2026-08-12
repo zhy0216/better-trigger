@@ -154,7 +154,7 @@ core 拆分(kernel 独立成包、core 归零依赖);`packages/server` → `apps
 **验收(已跑通,9 个 harness;`bun run test:acceptance` 一键重跑,CI 每个 PR 都跑)**:e2e 18 项(hello / 多 step / wait 挂起恢复 / triggerAndWait / batchTrigger / 幂等键 / 重试与 AbortError / cron)· fencing 24 项 · replay-drift 17 项 · code-version-pinning 11 项(同一次改动,钉死开与关的两面)· concurrency 9 项 · crash 14 项(3× SIGKILL,step 恰好一次)· worker-lost 10 项 · graceful-restart 10 项 · retention 5 项。场景全部跑在 `packages/testing` 的 harness 上,不变量断言(seq 连续只追加、终态冻结)由 harness 统一提供。
 
 ### P2 — 正确性硬化(1 周)
-fingerprint + `NonDeterminismError`;vitest + 真 PG 的 correctness suite;crash / fault-injection harness(在每个持久化边界注入 throw / abort / 连接中断 / 重复投递);不变量断言(seq 连续只追加、终态不再接受写、每个外部事件至多一个 outcome、旧 fencing 全路径无效);LISTEN/NOTIFY 唤醒。
+fingerprint + `NonDeterminismError`;vitest + 真 PG 的 correctness suite(已交付:`packages/kernel/test/pg/`,DATABASE_URL 门控,随 `bun run test` 跑,CI 的 postgres service 直接覆盖——见 p1-22);crash / fault-injection harness(**未交付**,仍在 P2:在每个持久化边界注入 throw / abort / 连接中断 / 重复投递);不变量断言(seq 连续只追加、终态不再接受写、每个外部事件至多一个 outcome、旧 fencing 全路径无效);LISTEN/NOTIFY 唤醒(**未交付**,仍在 P2)。
 
 #### 轮询代价(LISTEN/NOTIFY 落地前的当前值)
 

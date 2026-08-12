@@ -15,6 +15,7 @@ export { assert, assertEqual, AssertionFailure, describeError } from './assert';
 export {
   baseUrl,
   databaseUrlFor,
+  freePort,
   portFromEnv,
   resetDb,
   DEFAULT_DATABASE_URL,

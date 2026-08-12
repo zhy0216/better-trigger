@@ -24,7 +24,13 @@
       "dependsOn": ["^build"]
     },
     "test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      // The kernel's true-Postgres suites (test/pg) gate on DATABASE_URL and
+      // skip when unset; CI provisions a postgres service and needs the var to
+      // reach the task. `env` (not passThroughEnv) so the presence of
+      // DATABASE_URL is part of the task hash — a no-Postgres run must never
+      // be served from cache to a run that should exercise the pg suites.
+      "env": ["DATABASE_URL"]
     },
     "test:acceptance": {
       "dependsOn": ["^build"],

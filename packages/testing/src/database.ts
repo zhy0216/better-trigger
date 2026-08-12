@@ -11,6 +11,8 @@
    ============================================================================= */
 import { createPool, migrate } from '@better-trigger/db';
 import type { Pool } from 'pg';
+import { createServer } from 'node:net';
+import type { AddressInfo } from 'node:net';
 
 export const DEFAULT_DATABASE_URL = 'postgres://localhost:5432/better_trigger';
 
@@ -30,6 +32,21 @@ export function databaseUrlFor(name: string): string {
 export function portFromEnv(envVar: string, fallback: number): number {
   const raw = process.env[envVar];
   return raw ? Number(raw) : fallback;
+}
+
+/** An OS-assigned free port, released before the caller binds it. There is a
+ *  small race (another process could grab it in between), which is exactly why
+ *  the acceptance harnesses also honour explicit per-scenario port overrides —
+ *  this is a convenient default, not a guarantee. */
+export function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const port = (server.address() as AddressInfo).port;
+      server.close(() => resolve(port));
+    });
+  });
 }
 
 export interface TestDatabase {

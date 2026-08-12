@@ -33,6 +33,7 @@
     "pg": "^8.13.1"
   },
   "devDependencies": {
+    "@better-trigger/testing": "workspace:*",
     "@types/node": "^22.7.4",
     "@types/pg": "^8.11.10",
     "tsup": "^8.3.0",

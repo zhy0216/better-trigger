@@ -251,7 +251,10 @@ bun run dev            # turbo run dev
 bun run build          # build all packages (tsup) + web (tsc + vite)
 bun run typecheck      # tsc --noEmit everywhere
 bun run lint
-bun run test           # vitest unit tests (stubbed clients — no Postgres needed)
+bun run test           # vitest unit tests. DB-free by default; the kernel's
+                       # true-Postgres suite (packages/kernel/test/pg) runs
+                       # automatically when DATABASE_URL is set, skips cleanly
+                       # when it isn't.
 bun run test:acceptance   # the 8 acceptance scenarios — REQUIRES a live Postgres
 
 bun run check:deps     # core stays zero-dep; the SDK depends on core and nothing else
