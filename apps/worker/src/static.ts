@@ -40,7 +40,12 @@
    smuggle a `..` or a backslash past the checks), rejected when they contain
    `..` segments or resolve outside public, and every served file is
    realpath-checked so a symlink inside public cannot point at a file outside
-   it.
+   it. Every response also carries hardening headers: the dashboard refuses to
+   be framed (X-Frame-Options: DENY + CSP frame-ancestors 'none'), MIME types
+   cannot be sniffed (X-Content-Type-Options: nosniff — mimeFor below must
+   cover every type Vite emits), and the referrer is never leaked to other
+   origins (Referrer-Policy: no-referrer). These sit on the shared `headers`
+   object so the 304 and 200 paths answer identically.
    ============================================================================= */
 import { realpathSync, statSync } from 'node:fs';
 import { realpath, stat, readFile } from 'node:fs/promises';
@@ -197,6 +202,15 @@ async function serveFile(
     ETag: etag,
     'Cache-Control': cacheControl,
     'Content-Length': String(st.size),
+    // The dashboard is never meant to be embedded elsewhere — block framing
+    // outright. X-Frame-Options alone is the fallback; the CSP directive is
+    // the modern form. ONLY frame-ancestors: a fuller CSP would break Vite's
+    // inline styles/scripts, so keep it minimal until there is a real policy.
+    'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': "frame-ancestors 'none'",
+    // mimeFor must map every type Vite emits, or nosniff would break it.
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
   };
   if (ifNoneMatch === etag) {
     return new Response(null, { status: 304, headers });

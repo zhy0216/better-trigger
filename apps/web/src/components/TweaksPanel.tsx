@@ -1,9 +1,12 @@
 /* =============================================================================
    Better Trigger — Tweaks panel shell + form-control helpers.
 
-   A floating, draggable control panel. It announces itself to a host frame via
-   postMessage and opens on `__activate_edit_mode`. Standalone (no host), the
-   panel stays hidden — see README for how to wire a manual toggle.
+   A floating, draggable control panel. The host postMessage protocol
+   (`__activate_edit_mode` / `__edit_mode_available` / …) it was built for was
+   removed — it was documented as dead in apps/web/README.md and, unorigin-
+   checked, would have let any framing page open/close the panel. Standalone
+   (no host), the panel starts hidden; a manual toggle needs an `open` state
+   wired in the caller (see README).
    ============================================================================= */
 import React from 'react';
 
@@ -151,20 +154,8 @@ export function TweaksPanel({ title = 'Tweaks', children }: { title?: string; ch
     return () => ro.disconnect();
   }, [open, clampToViewport]);
 
-  React.useEffect(() => {
-    const onMsg = (e: MessageEvent) => {
-      const t = e?.data?.type;
-      if (t === '__activate_edit_mode') setOpen(true);
-      else if (t === '__deactivate_edit_mode') setOpen(false);
-    };
-    window.addEventListener('message', onMsg);
-    window.parent.postMessage({ type: '__edit_mode_available' }, '*');
-    return () => window.removeEventListener('message', onMsg);
-  }, []);
-
   const dismiss = () => {
     setOpen(false);
-    window.parent.postMessage({ type: '__edit_mode_dismissed' }, '*');
   };
 
   const onDragStart = (e: React.MouseEvent) => {

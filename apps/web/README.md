@@ -48,7 +48,7 @@ src/
 ├── data/
 │   └── mock.ts          # typed mock data (was window.BT_DATA)
 ├── hooks/
-│   └── useTweaks.ts     # tweak state + host-protocol persistence
+│   └── useTweaks.ts     # tweak state (host-protocol persistence removed)
 ├── components/
 │   ├── primitives.tsx   # Icon, Button, Badge, StatusBadge, Input, Sparkline…
 │   ├── Layout.tsx       # Page, Card, Metric, SectionHead
@@ -85,16 +85,23 @@ system wins on shared element rules.
 ## The Tweaks panel
 
 `TweaksPanel` is a floating control panel (theme / accent / density / trace
-style). It was built for an external editing host: it opens when it receives an
-`__activate_edit_mode` postMessage. **Standalone, it stays hidden by default.**
-To make it user-toggleable, hold an `open` boolean in `App.tsx` and either pass
-it into the panel or dispatch the activate/deactivate messages to `window`:
+style) with a full set of form controls (`TweakSlider`, `TweakToggle`,
+`TweakRadio`, `TweakSelect`, `TweakNumber`, `TweakColor`, `TweakButton`).
+
+It was originally built for an external editing host and wired to a
+postMessage protocol (`__activate_edit_mode` / `__deactivate_edit_mode` in,
+`__edit_mode_available` / `__edit_mode_dismissed` / `__edit_mode_set_keys`
+out). **That host protocol was removed** — it was documented as dead, and the
+unorigin-checked `window` listener plus the `'*'` posts were a security hole.
+No message listener or postMessage call remains.
+
+The panel starts hidden and there is no built-in toggle. To make it
+user-toggleable, hold an `open` boolean in `App.tsx` and drive it with
+`setOpen` — either pass it into the panel or wrap it:
 
 ```ts
-// open the panel
-window.postMessage({ type: '__activate_edit_mode' }, '*');
-// close it
-window.postMessage({ type: '__deactivate_edit_mode' }, '*');
+// App.tsx — the panel only renders while `open` is true
+{open && <TweaksPanel title="Tweaks">…</TweaksPanel>}
 ```
 
 ## Notes from the conversion

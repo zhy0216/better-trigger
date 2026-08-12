@@ -39,6 +39,14 @@ const expect404 = (res: Response) => {
   expect(res.headers.get('content-type')).toContain('application/json');
 };
 
+/** Every dashboard response — 200 and 304 — carries the hardening headers. */
+const expectSecurityHeaders = (res: Response) => {
+  expect(res.headers.get('x-frame-options')).toBe('DENY');
+  expect(res.headers.get('content-security-policy')).toBe("frame-ancestors 'none'");
+  expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+  expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+};
+
 /** A real http server + raw-path client: no URL normalization anywhere. */
 describe('raw-path security (real http server)', () => {
   let server: ServerType;
@@ -105,6 +113,7 @@ describe('dashboard hosting with a built dashboard', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/html');
     expect(res.headers.get('cache-control')).toBe('no-cache');
+    expectSecurityHeaders(res);
     expect(await res.text()).toContain('dashboard fixture');
   });
 
@@ -149,6 +158,7 @@ describe('dashboard hosting with a built dashboard', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('text/javascript; charset=utf-8');
     expect(res.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    expectSecurityHeaders(res);
     expect(await res.text()).toContain('fixture dashboard bundle');
   });
 
@@ -174,6 +184,8 @@ describe('dashboard hosting with a built dashboard', () => {
     const res = await get(withDashboard(), '/assets/app-abc123.js', { 'If-None-Match': etag! });
     expect(res.status).toBe(304);
     expect(await res.text()).toBe('');
+    // The 304 reuses the same headers object as the 200: hardening applies.
+    expectSecurityHeaders(res);
   });
 
   it('keeps /api/v1/* pure API — health still answers', async () => {
