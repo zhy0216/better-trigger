@@ -117,6 +117,32 @@ describe('releaseClaims', () => {
     expect(update.params).toEqual(['w1', 'run_1', 'default', 'prod']);
   });
 
+  it('with runIds filters the lock to the named runs, scoped to this worker (p1-12)', async () => {
+    // p1-12: the runtime hands back a single freshly-claimed run when stop()
+    // lands between the claim and the executor; the filter must restrict the
+    // release to ONLY that run (the SQL does the filtering — this stub answers
+    // every FROM queue with all rows, so the SELECT-level filter is what we
+    // pin here).
+    const { pool, stmts } = stubPool(['run_1', 'run_2']);
+
+    await releaseClaims(pool, {
+      workerId: 'w1',
+      namespaces: [DEFAULT_NAMESPACE],
+      runIds: ['run_1'],
+    });
+
+    // The lock SELECT restricts to the named runs on top of this worker's
+    // namespace scoping: $1 = worker, $2/$3 = the namespace pair, $4 = the
+    // run-id array (the namespace predicate sits between them).
+    const lock = stmts.find((s) => /FROM queue/.test(s.sql))!;
+    expect(lock.sql).toMatch(/WHERE locked_by = \$1 AND .*AND run_id = ANY\(\$4::text\[\]\)/);
+    expect(lock.sql).toMatch(/FOR UPDATE/);
+    expect(lock.params).toEqual(['w1', 'default', 'prod', ['run_1']]);
+    // Without the filter this is the whole-claims release — assert the array
+    // is really there (a regression that drops the filter would omit $4).
+    expect(lock.params).not.toEqual(['w1', 'default', 'prod']);
+  });
+
   it('puts the run back to queued so the next claim can count it correctly', async () => {
     const { pool, stmts } = stubPool(['run_1']);
 

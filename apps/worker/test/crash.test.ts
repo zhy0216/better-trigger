@@ -28,6 +28,11 @@
    step throws. The step swallows (the exit must go through), so the line it
    prints is the entire record — it belongs here because it needs the same
    spawned daemon to prove the line survives the exit.
+
+   Neither is the second-signal case (p1-12): a SIGTERM whose drain is wedged
+   and a SIGINT on top of it. The second signal exits immediately instead of
+   riding out the 45s backstop — also the sort of thing only a real process
+   can prove.
    ============================================================================= */
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
@@ -83,6 +88,59 @@ async function crashDaemon(
     });
     // If the handlers are missing or wedge, the process outlives this and the
     // test fails on the exit code rather than hanging the suite.
+    const timer = setTimeout(() => child.kill('SIGKILL'), 25_000);
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+/**
+ * Boots the daemon (whose handoff is wedged forever), SIGTERMs it once it is
+ * up, and SIGINTs it again the moment the drain is provably running — the
+ * p1-12 shape: an operator who wants out NOW while the first drain is stuck.
+ */
+async function secondSignalDaemon(): Promise<Run> {
+  const port = await freePort();
+  return await new Promise<Run>((resolve, reject) => {
+    const clean = { ...process.env };
+    delete clean.BETTER_TRIGGER_API_KEY;
+    delete clean.BETTER_TRIGGER_HOST;
+    const child = spawn('bun', [ENTRY, '--port', String(port), '--no-migrate'], {
+      env: {
+        ...clean,
+        DATABASE_URL: 'postgres://127.0.0.1:1/better_trigger_absent',
+        BT_CRASH: 'second-signal',
+        BT_CRASH_PORT: String(port),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let signalled = false;
+    let interrupted = false;
+    child.stdout.on('data', (d: Buffer) => {
+      const chunk = d.toString();
+      stdout += chunk;
+      if (!signalled && stdout.includes('listening on')) {
+        signalled = true;
+        child.kill('SIGTERM');
+      } else if (signalled && !interrupted && stdout.includes('SIGTERM received, draining...')) {
+        // Only once the drain is actually running: a second signal before the
+        // first handler ran would be indistinguishable from the first.
+        interrupted = true;
+        child.kill('SIGINT');
+      }
+    });
+    child.stderr.on('data', (d: Buffer) => {
+      stderr += d.toString();
+    });
+    // The wedged handoff would otherwise outlive the suite.
     const timer = setTimeout(() => child.kill('SIGKILL'), 25_000);
     child.on('error', (err) => {
       clearTimeout(timer);
@@ -179,6 +237,28 @@ describe('crash handling', () => {
       expect(code).toBe(1);
       // One handoff, not two racing ones (the second pool.end() would throw).
       expect(stdout.match(/handoff complete:/g)).toHaveLength(1);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'exits immediately on a second signal instead of waiting out the drain',
+    async () => {
+      // The first SIGTERM's handoff is wedged (pool.end() never returns), so
+      // the drain is still running when the second signal lands. Without p1-12
+      // the process would sit there until the 45s backstop; with it, the second
+      // signal means the operator wants out NOW and cuts the drain short.
+      const started = Date.now();
+      const { code, stdout } = await secondSignalDaemon();
+      const elapsed = Date.now() - started;
+
+      expect(code).toBe(1);
+      expect(stdout).toContain('SIGTERM received, draining...');
+      expect(stdout).toContain('shutdown was already in progress, exiting immediately');
+      // The backstop never fired — this exit came from the second signal.
+      expect(stdout).not.toContain('shutdown exceeded');
+      // Immediate, not SHUTDOWN_BACKSTOP_MS (45s).
+      expect(elapsed).toBeLessThan(15_000);
     },
     TIMEOUT,
   );

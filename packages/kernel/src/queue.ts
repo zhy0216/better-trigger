@@ -755,6 +755,10 @@ export interface ReleaseClaimsArgs {
   /** Namespaces this worker serves; the hand-back statements re-scope on them
    *  (C2). */
   namespaces: readonly Namespace[];
+  /** Optional filter: release ONLY these run ids (e.g. one freshly-claimed run
+   *  that must not execute because the worker is stopping). Absent → release all
+   *  of this worker's claims. */
+  runIds?: string[];
 }
 
 export interface ReleaseClaimsResult {
@@ -794,6 +798,13 @@ export interface ReleaseClaimsResult {
  * Idempotent: a second call matches no rows (concurrent shutdown paths, a
  * signal landing during a crash drain). Lock order is canonical — the queue
  * rows are locked first, each run's row second (see runs.ts header).
+ *
+ * With `runIds`, only those runs are released — the worker's other claims stay
+ * untouched. Used to hand back a single run that was claimed but must never
+ * execute (a claim that resolved after the worker started stopping): it is
+ * claimable at once, costs neither an attempt nor a recovery, and the claim's
+ * fencing-token bump is left alone — the next claim's token++ invalidates any
+ * late write just as it does on the all-claims path.
  */
 export async function releaseClaims(
   pool: Pool,
@@ -811,12 +822,17 @@ export async function releaseClaims(
     // worker's namespaces (C2); each row's project_id/env ride along so the
     // statements below re-scope per run.
     // $1 is the worker id, literal in the SQL; the namespace pairs continue
-    // from $2 in the same array (see namespacePredicate).
+    // from $2 in the same array (see namespacePredicate). A runIds filter (when
+    // present) is the last parameter — a single run claimed but never to be
+    // executed is released by id while this worker's other claims stay put.
     const params: unknown[] = [args.workerId];
     const nsPredicate = namespacePredicate('queue', args.namespaces, params);
+    const runIdPredicate =
+      args.runIds !== undefined ? ` AND run_id = ANY($${params.length + 1}::text[])` : '';
+    if (args.runIds !== undefined) params.push(args.runIds);
     const held = await client.query<{ run_id: string; project_id: string; env: string }>(
       `SELECT run_id, project_id, env FROM queue
-        WHERE locked_by = $1 AND ${nsPredicate}
+        WHERE locked_by = $1 AND ${nsPredicate}${runIdPredicate}
         ORDER BY run_id FOR UPDATE`,
       params,
     );

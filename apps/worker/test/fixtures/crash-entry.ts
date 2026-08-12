@@ -12,6 +12,8 @@
    BT_CRASH=wedge      a rejection, on a daemon whose handoff can never finish
    BT_CRASH=drain-race SIGTERM first, then a rejection while the drain runs
    BT_CRASH=handoff-fail  a clean SIGTERM whose `pool.end()` rejects
+   BT_CRASH=second-signal  a clean SIGTERM whose drain can never finish — the
+                      test drives a second signal on top of it (p1-12)
 
    The last three are built by patching `pool.end()` — the last step of the
    handoff, so a pool that ends slowly (or never) is a handoff still running
@@ -27,6 +29,12 @@ const mode = process.env.BT_CRASH ?? 'rejection';
 
 /** Never resolves: the handoff can only end on the crash backstop. */
 if (mode === 'wedge') {
+  pg.Pool.prototype.end = () => new Promise<void>(() => {});
+}
+/** Same wedge, but no fault of its own: the p1-12 test SIGTERMs this daemon
+ *  (whose drain then hangs on the never-ending pool.end) and SIGINTs it again,
+ *  so the second signal has a real drain to cut short. */
+if (mode === 'second-signal') {
   pg.Pool.prototype.end = () => new Promise<void>(() => {});
 }
 /** Slow enough that the rejection below lands mid-drain, fast enough that the
@@ -58,6 +66,10 @@ async function waitUntilUp(): Promise<void> {
 }
 
 void waitUntilUp().then(() => {
+  if (mode === 'second-signal') {
+    // The test drives the signals; this daemon only exists to be shut down.
+    return;
+  }
   if (mode === 'handoff-fail') {
     // No fault at all — just a shutdown in which one step cannot do its job.
     process.kill(process.pid, 'SIGTERM');

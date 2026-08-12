@@ -42,6 +42,12 @@ interface FakeOptions {
    * tick is provably in flight at stop() without timing the sleep against it.
    */
   gateHeartbeat?: boolean;
+  /**
+   * p1-12: the first claim poll comes back empty (the slot goes idle), then the
+   * next one parks on the returned `pendingClaim` until `releaseClaim()` is
+   * called — so a claim can be made to resolve only once stop() has begun.
+   */
+  deferClaim?: boolean;
 }
 
 function fakeKernel(opts: FakeOptions = {}) {
@@ -63,10 +69,33 @@ function fakeKernel(opts: FakeOptions = {}) {
     announceStart = r;
   });
   let handedOut = false;
+  // p1-12: the deferred a late claim parks on until the test releases it, plus
+  // the signal that the slot is actually parked — so "the claim resolves after
+  // stop()" is a fact here, not a race won against the idle backoff.
+  let releaseClaim!: () => void;
+  const pendingClaim = new Promise<void>((r) => {
+    releaseClaim = r;
+  });
+  let announceClaimPending!: () => void;
+  const claimPending = new Promise<void>((r) => {
+    announceClaimPending = r;
+  });
+  let firstClaim = true;
   const kernel = {
     registerWorker: async () => ({ workerId: 'w1' }),
     startOrchestrator: () => ({ stop: () => {} }),
     claimRuns: async () => {
+      if (opts.deferClaim) {
+        // First poll: nothing due, the slot backs off. Second poll: parked on
+        // the deferred, so the claim can only resolve once the test lets go.
+        if (firstClaim) {
+          firstClaim = false;
+          return [];
+        }
+        announceClaimPending();
+        await pendingClaim;
+        return [RUN];
+      }
       if (handedOut) return [];
       handedOut = true;
       return [RUN];
@@ -102,7 +131,7 @@ function fakeKernel(opts: FakeOptions = {}) {
     },
     appendLogs: async () => {},
   } as unknown as Kernel;
-  return { kernel, calls, order, firstHeartbeatStarted, releaseHeartbeat: openTheGate };
+  return { kernel, calls, order, firstHeartbeatStarted, releaseHeartbeat: openTheGate, claimPending, releaseClaim };
 }
 
 /** A task that starts a step and then blocks until ctx.signal aborts. */
@@ -287,5 +316,53 @@ describe('startWorkerRuntime().stop() hand-back (C3)', () => {
     expect(calls.deregisterWorker).toHaveLength(1);
     // Both failures are reported rather than swallowed into silence.
     expect(warnings).toHaveLength(2);
+  });
+});
+
+describe('a claim that resolves after stop() began (p1-12)', () => {
+  it('hands the run back instead of executing it, and does not hold the drain open', async () => {
+    // p1-12: the run's claim was already bumped (fencing token++) by the claim
+    // itself, but the slot had not started executing when stop() flipped
+    // `stopping`. The slot must hand the run back by id — claimable at once,
+    // no executor, no attempt spent — and break out so the drain is not parked
+    // behind a run this process will never touch.
+    const { kernel, calls, claimPending, releaseClaim } = fakeKernel({ deferClaim: true });
+    const executed: string[] = [];
+    const neverExecuted = task('slow', async () => {
+      executed.push('executed');
+      return 'done';
+    });
+
+    const handle = await startWorkerRuntime(
+      { kernel },
+      { tasks: [neverExecuted], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
+    );
+    // The slot's first poll came back empty (it is mid-backoff); the second
+    // poll is now parked on the deferred — the claim that must resolve only
+    // after stop() has begun.
+    await claimPending;
+
+    const t0 = Date.now();
+    const stopped = handle.stop();
+    releaseClaim();
+    await stopped;
+    const elapsed = Date.now() - t0;
+
+    // The late claim is released by run id, alongside the hand-back's
+    // worker-wide release that runs after the drain.
+    expect(calls.releaseClaims[0]).toEqual({
+      workerId: handle.workerId,
+      namespaces: [DEFAULT_NAMESPACE],
+      runIds: [RUN.id],
+    });
+    // Never executed: not a byte of the run's body ran, and no executor existed
+    // to report anything — there is no trace of output of any kind.
+    expect(executed).toEqual([]);
+    expect(calls.reportStep).toEqual([]);
+    expect(calls.failRun).toEqual([]);
+    expect(calls.completeRun).toEqual([]);
+    // stop() resolves immediately: the never-executed run cannot hold the drain
+    // open (SHUTDOWN_DRAIN_MS is 30s).
+    expect(elapsed).toBeLessThan(2_000);
   });
 });

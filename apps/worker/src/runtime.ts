@@ -288,6 +288,20 @@ export async function startWorkerRuntime(
       }
       idleBackoff = IDLE_POLL_BASE_MS; // got work — claim again immediately after
 
+      if (stopping) {
+        // p1-12: this claim resolved after stop() started — never execute it.
+        // Hand it back (claimable at once, no recovery spent) and exit the slot.
+        // The run's fencing token was already bumped by the claim; releaseClaims
+        // does not touch it, and the next claim's token++ invalidates any late
+        // write.
+        await kernel.releaseClaims({
+          workerId,
+          namespaces: options.namespaces,
+          runIds: [run.id],
+        }).catch(() => {});
+        break;
+      }
+
       const def = taskById.get(run.taskId);
       if (!def) {
         // Should not happen (the claim filters by this worker's task ids);

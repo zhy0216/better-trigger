@@ -654,6 +654,15 @@ let fatal = false;
 const CRASH_HANDOFF_MS = 10_000;
 
 /**
+ * How long the signal path waits for the whole shutdown before giving up on
+ * it. The runtime's drain is bounded (SHUTDOWN_DRAIN_MS = 30s), so this is the
+ * 30s drain plus ~15s of slack for the handoff steps after it (heartbeat stop,
+ * releaseClaims, pool.end) — a wedged database must not leave the operator
+ * holding SIGKILL.
+ */
+const SHUTDOWN_BACKSTOP_MS = 45_000;
+
+/**
  * The handoff runs exactly once, and everyone who asks for it awaits the same
  * attempt. Signals, crashes and a failed boot can all reach it, sometimes at
  * the same time (a crash while a SIGTERM drain is in flight, or main().catch()
@@ -752,10 +761,29 @@ async function runHandoff(): Promise<void> {
 }
 
 async function shutdown(signal: string): Promise<void> {
-  if (exiting) return;
+  if (exiting) {
+    // A second signal while the first drain is still running means the
+    // operator wants out NOW — the first signal may be wedged on a half-dead
+    // Postgres. Exit immediately instead of ignoring it. (`exiting` may also
+    // be set by the crash / boot-failure path, in which case this is the
+    // FIRST signal of a shutdown already in progress — same call to arms.)
+    console.log(
+      `[better-trigger] ${signal} received while a shutdown was already in progress, exiting immediately`,
+    );
+    process.exit(1);
+  }
   exiting = true;
   console.log(`[better-trigger] ${signal} received, draining...`);
+  // p1-12 backstop: the drain itself is bounded but the handoff steps after it
+  // (heartbeat stop, releaseClaims, pool.end) are not. A wedged database must
+  // not leave the operator holding SIGKILL. Kept referenced like the crash
+  // backstop.
+  const backstop = setTimeout(() => {
+    console.error(`[better-trigger] shutdown exceeded ${SHUTDOWN_BACKSTOP_MS}ms, exiting now`);
+    process.exit(1);
+  }, SHUTDOWN_BACKSTOP_MS);
   await handoff();
+  clearTimeout(backstop);
   // A crash can land mid-drain: crash() reports it and steps aside so this
   // drain finishes, which leaves this the only exit left to carry the code.
   process.exit(fatal ? 1 : 0);
@@ -805,6 +833,11 @@ function crash(kind: string, err: unknown): void {
 
 process.on('unhandledRejection', (reason) => crash('unhandledRejection', reason));
 process.on('uncaughtException', (err) => crash('uncaughtException', err));
+// Signals registered at load time so a SIGTERM during boot (loadTasks /
+// migrate / registerWorker) also runs the graceful handoff instead of Node's
+// default immediate kill.
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
 /**
  * `better-trigger-worker prune --older-than 30d [--dry-run]`
@@ -1169,9 +1202,6 @@ async function main(): Promise<void> {
         'anyone who can reach it can trigger tasks and read run payloads',
     );
   }
-
-  process.on('SIGINT', () => void shutdown('SIGINT'));
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
 main().catch(async (err) => {
