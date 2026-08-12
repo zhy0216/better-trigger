@@ -176,3 +176,64 @@ describe('batchTrigger — namespace options in the request body (p1-15)', () =>
     });
   });
 });
+
+describe('waitForResult — caller signal (p1-17)', () => {
+  it('aborts the in-flight long-poll when the caller signal fires', async () => {
+    vi.useFakeTimers();
+    try {
+      // The stub never settles on its own — only the caller's abort can end
+      // the long-poll (a real fetch rejects with the signal's reason).
+      const fetchImpl = ((_input: any, init: any) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+        })) as unknown as typeof globalThis.fetch;
+      const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch: fetchImpl });
+      const controller = new AbortController();
+
+      const result = trigger.waitForResult('run_1', undefined, {
+        timeoutMs: 30_000,
+        signal: controller.signal,
+      });
+      const errPromise = result.catch((e: unknown) => e);
+      await flush(); // the long-poll is in flight
+      controller.abort();
+      const err = await errPromise;
+
+      // Abort errors are not retriable, so the poll fails immediately instead
+      // of looping until the timeout budget — and no retry/backoff timer lingers.
+      expect((err as Error)?.name).toBe('AbortError');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('RunHandle.result() — no instance registered (p1-17)', () => {
+  const REGISTRY_KEY = Symbol.for('better-trigger.registry.v1');
+
+  it('returns a REJECTED promise (not a sync throw) with no resolver', async () => {
+    // betterTrigger() calls above have stamped a defaultInstance on the shared
+    // registry; wipe the slot and re-import so this handle sees NO resolver
+    // (no instance, no installed resultResolver, no default).
+    const original = (globalThis as unknown as Record<symbol, unknown>)[REGISTRY_KEY];
+    try {
+      delete (globalThis as unknown as Record<symbol, unknown>)[REGISTRY_KEY];
+      vi.resetModules();
+      const { makeRunHandle } = await import('../src/instance');
+      const handle = makeRunHandle('run_1', undefined);
+
+      // Async-consistent: calling result() returns a promise, never throws in
+      // place — so `await handle.result().catch(...)` always works.
+      const result = handle.result();
+      expect(result).toBeInstanceOf(Promise);
+
+      const err = await result.catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain('no betterTrigger instance registered');
+    } finally {
+      (globalThis as unknown as Record<symbol, unknown>)[REGISTRY_KEY] = original;
+      vi.resetModules();
+    }
+  });
+});

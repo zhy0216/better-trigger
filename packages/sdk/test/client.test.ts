@@ -194,18 +194,21 @@ describe('HttpClient — error mapping', () => {
     expect((err as HttpError).message).toContain('is the worker daemon running?');
   });
 
-  it("surfaces the caller's own abort instead of wrapping it", async () => {
+  it("short-circuits a pre-aborted caller signal without ever calling fetch", async () => {
+    // A signal that fired before the call never dispatches again, so a plain
+    // addEventListener would let the request go out on a dead signal. The
+    // pre-check must reject up front: no network, and the caller's abort
+    // reason surfaces untouched.
     const controller = new AbortController();
     controller.abort();
-    const abortError = new Error('aborted by caller');
-    const { fetch } = stubFetch(() => {
-      throw abortError;
-    });
+    const { fetch, calls } = stubFetch(new Response('{"ok":true}', { status: 200 }));
 
     const err = await client(fetch)
       .request('/runs', { signal: controller.signal })
       .catch((e: unknown) => e);
-    expect(err).toBe(abortError);
+
+    expect(err).toBe(controller.signal.reason);
+    expect(calls).toHaveLength(0); // never hit the network
   });
 
   it('reports a locally unserializable body as KernelError(serialization_error), not a transport failure', async () => {
@@ -259,5 +262,41 @@ describe('HttpClient — error mapping', () => {
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(HttpError);
     expect((err as HttpError).status).toBe(0);
+    // A timeout is distinguishable from "daemon down": code 'timeout' (not
+    // null) and a message carrying the budget and the idempotent-retry hint.
+    expect((err as HttpError).code).toBe('timeout');
+    expect((err as HttpError).message).toContain('timed out after 5ms');
+    expect((err as HttpError).message).toContain('idempotencyKey');
+  });
+
+  it('aborts a mid-flight request when the caller signal fires, leaving no timer behind', async () => {
+    // The stub never settles on its own — only the caller's abort can end it.
+    // It mirrors a real fetch, which rejects with the signal's reason (a
+    // DOMException AbortError) the moment its signal fires.
+    const fetchImpl = ((_input: any, init: any) =>
+      new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+      })) as unknown as typeof globalThis.fetch;
+    const controller = new AbortController();
+
+    vi.useFakeTimers();
+    try {
+      const errPromise = client(fetchImpl)
+        .request('/runs', { signal: controller.signal, timeoutMs: 30_000 })
+        .catch((e: unknown) => e);
+
+      controller.abort(); // mid-flight
+      const err = await errPromise;
+
+      // The caller's abort wins over the per-request timeout: the rejection is
+      // the signal's AbortError, NOT an HttpError(0, 'timeout').
+      expect(err).toBeInstanceOf(DOMException);
+      expect((err as DOMException).name).toBe('AbortError');
+      // The per-request timeout timer is cleared on the way out — nothing is
+      // left to fire into a settled request.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

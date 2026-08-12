@@ -172,8 +172,10 @@ export function makeRunHandle(
     result: (opts) => {
       const target = instance ?? registry.resultResolver ?? registry.defaultInstance;
       if (!target) {
-        throw new Error(
-          `run ${id}: cannot await a result — no betterTrigger instance registered`,
+        // Reject (not throw): result() is async-consistent, so await/catch
+        // works whether the handle resolved its target or not.
+        return Promise.reject(
+          new Error(`run ${id}: cannot await a result — no betterTrigger instance registered`),
         );
       }
       return target.waitForResult(id, namespace, opts);
@@ -340,7 +342,7 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
           res = await http.request<WaitResult>(
             `/runs/${encodeURIComponent(runId)}/result?${query}`,
             // Give the request headroom over the server-side wait it asked for.
-            { timeoutMs: slice + 10_000 },
+            { timeoutMs: slice + 10_000, signal: opts?.signal },
           );
         } catch (err) {
           // Terminal for us: budget spent, or an error retrying cannot fix.

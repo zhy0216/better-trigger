@@ -385,6 +385,8 @@ export interface WaitForResultOptions {
   timeoutMs?: number;
   /** Poll interval (default 250ms). */
   pollMs?: number;
+  /** Caller cancellation; aborts the long-poll in-flight. */
+  signal?: AbortSignal;
 }
 
 /** Terminal outcome of a run — or its latest non-terminal status on timeout. */

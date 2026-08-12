@@ -121,9 +121,21 @@ export class HttpClient {
       bodyStr = serialized.json;
     }
 
+    // A signal that already fired never dispatches again, so a plain
+    // addEventListener below would let the request go out on a dead signal.
+    // Check it up front — a pre-aborted caller must never hit the network.
+    if (signal?.aborted) throw signal.reason ?? new Error('aborted');
+
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const onAbort = () => controller.abort();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    // Propagate the caller's reason onto the internal controller so a
+    // mid-flight abort surfaces THEIR reason (e.g. a run's ctx.signal reason),
+    // matching the pre-abort path below.
+    const onAbort = () => controller.abort(signal?.reason);
     signal?.addEventListener('abort', onAbort, { once: true });
 
     const headers: Record<string, string> = {};
@@ -139,9 +151,17 @@ export class HttpClient {
         signal: controller.signal,
       });
     } catch (err) {
-      // Caller aborted → surface their reason; otherwise it was our timeout or
-      // a genuine transport failure (daemon down, DNS, TLS).
+      // Caller aborted → surface their reason; our internal timeout → a
+      // distinguishable HttpError (code 'timeout'); otherwise a genuine
+      // transport failure (daemon down, DNS, TLS).
       if (signal?.aborted) throw err;
+      if (timedOut) {
+        throw new HttpError(
+          0,
+          'timeout',
+          `better-trigger: request to ${this.base}${PREFIX}${path} timed out after ${timeoutMs}ms — the operation may or may not have been applied; for a trigger, retry with an idempotencyKey`,
+        );
+      }
       const detail = err instanceof Error ? err.message : String(err);
       throw new HttpError(
         0,

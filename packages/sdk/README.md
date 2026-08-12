@@ -137,6 +137,16 @@ with a generic message and a correlation id instead of the internal error text;
 that id shows up as `HttpError.requestId` (and inside `err.message`) — grep the
 daemon's log for it to get the real error.
 
+**A timeout is not "the daemon is down"**: a request that hits its own
+per-request timeout throws `HttpError(0, 'timeout', …)`, distinct from a
+connection failure (also `status 0` but `code: null`, message naming the
+daemon). After a `trigger()` times out the run **may or may not have been
+created** — to retry safely, pass an `idempotencyKey` (a retried trigger with
+the same key returns the existing run instead of creating a duplicate).
+Caller cancellation: pass `signal: AbortSignal` to `result()` /
+`waitForResult` to abort the long-poll mid-flight; the promise rejects with
+the signal's reason.
+
 ---
 
 ## Tasks
