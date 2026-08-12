@@ -140,7 +140,9 @@ Failures the daemon reports with a kernel error code (`task_not_found`,
 `status` and `code`. A daemon running with `NODE_ENV=production` answers a 500
 with a generic message and a correlation id instead of the internal error text;
 that id shows up as `HttpError.requestId` (and inside `err.message`) — grep the
-daemon's log for it to get the real error.
+daemon's log for it to get the real error. A 2xx whose body is not JSON (a
+misconfigured proxy) arrives as `HttpError(status, 'invalid_json', …)` rather
+than a raw `SyntaxError`.
 
 **A timeout is not "the daemon is down"**: a request that hits its own
 per-request timeout throws `HttpError(0, 'timeout', …)`, distinct from a

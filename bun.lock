@@ -140,6 +140,7 @@
         "tsup": "^8.3.0",
         "typescript": "^5.6.2",
         "vitest": "^2.1.8",
+        "zod": "^3.23",
       },
     },
     "packages/testing": {

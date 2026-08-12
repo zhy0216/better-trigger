@@ -78,6 +78,24 @@ describe('HttpClient — request shape', () => {
     const empty = stubFetch(new Response(null, { status: 204 }));
     await expect(client(empty.fetch).request('/runs/run_1/cancel')).resolves.toBeUndefined();
   });
+
+  it('wraps a 2xx with a non-JSON body as HttpError(status, invalid_json), not a raw SyntaxError', async () => {
+    // A misconfigured proxy can answer a 200 with an HTML page. res.json() used
+    // to throw a bare SyntaxError OUTSIDE the request guard — neither HttpError
+    // nor KernelError — so callers could not recognize it. Now it degrades to a
+    // distinguishable HttpError carrying the status and code 'invalid_json'.
+    const { fetch } = stubFetch(
+      new Response('<html>upstream error</html>', { status: 200, statusText: 'OK' }),
+    );
+    const err = await client(fetch).request('/runs').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HttpError);
+    expect(err).not.toBeInstanceOf(KernelError);
+    expect((err as HttpError).status).toBe(200);
+    expect((err as HttpError).code).toBe('invalid_json');
+    expect((err as HttpError).message).toContain('http://daemon.test:4848/api/v1/runs');
+    expect((err as HttpError).message).toContain('not JSON');
+  });
 });
 
 describe('HttpClient — error mapping', () => {
@@ -267,6 +285,24 @@ describe('HttpClient — error mapping', () => {
     expect((err as HttpError).code).toBe('timeout');
     expect((err as HttpError).message).toContain('timed out after 5ms');
     expect((err as HttpError).message).toContain('idempotencyKey');
+  });
+
+  it('lets a per-request timeoutMs override the (larger) client-level timeout', async () => {
+    // Client-level timeout is 60s, the per-request one is 10ms. The override
+    // must win: the request times out after ~10ms with code 'timeout', never
+    // waiting out the client default.
+    const fetchImpl = ((_input: any, init: any) =>
+      new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(new Error('aborted by timeout')));
+      })) as unknown as typeof globalThis.fetch;
+    const c = new HttpClient({ url: 'http://daemon.test:4848', fetch: fetchImpl, timeoutMs: 60_000 });
+
+    const err = await c.request('/runs', { timeoutMs: 10 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(0);
+    expect((err as HttpError).code).toBe('timeout');
+    // The budget in the message is the per-request one, proving it won.
+    expect((err as HttpError).message).toContain('timed out after 10ms');
   });
 
   it('aborts a mid-flight request when the caller signal fires, leaving no timer behind', async () => {

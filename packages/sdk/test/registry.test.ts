@@ -14,6 +14,7 @@
    dynamic import) — that is exactly what a second copy sees at import time.
    ============================================================================= */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { WaitResult } from '@better-trigger/core';
 
 /** The exact key registry.ts stamps (Symbol.for, so copies share it). */
 const REGISTRY_KEY = Symbol.for('better-trigger.registry.v1');
@@ -96,5 +97,57 @@ describe('registry adoption across SDK copies', () => {
     setSlot({ v: 2, sdkVersion: SDK_VERSION, executorStorage: {}, defaultInstance: null, resultResolver: null });
     vi.resetModules();
     await expect(import('../src/registry')).rejects.toThrow(/version mismatch/);
+  });
+});
+
+describe('registry — cross-copy sharing (its reason for existing)', () => {
+  it('shares a setResultResolver installed on copy A with copy B', async () => {
+    // Two module copies (two node_modules trees) share ONE Symbol.for slot.
+    // Copy A installs a resolver; copy B's handle must resolve through it.
+    deleteSlot();
+    vi.resetModules();
+    const copyA = await import('../src/instance');
+    const resolver = {
+      waitForResult: vi.fn(async (): Promise<WaitResult> => ({ status: 'completed' })),
+    };
+    copyA.setResultResolver(resolver);
+
+    // A second import after resetModules re-adopts the SAME slot (no fresh
+    // registry object) — exactly what a duplicated package copy sees.
+    vi.resetModules();
+    const copyB = await import('../src/instance');
+
+    const handle = copyB.makeRunHandle('run_x');
+    await handle.result();
+    expect(resolver.waitForResult).toHaveBeenCalledWith('run_x', undefined, undefined);
+  });
+
+  it('shares setDefault across copies: an instance made default on copy A is the default on copy B', async () => {
+    deleteSlot();
+    vi.resetModules();
+    const copyA = await import('../src/instance');
+    const fetchA = ((_input: any) =>
+      Promise.resolve(
+        new Response(JSON.stringify({ status: 'completed' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )) as unknown as typeof globalThis.fetch;
+    const instA = copyA.betterTrigger({ url: 'http://a.test', fetch: fetchA });
+    // First-wins: instA is already the default; a second instance must not
+    // steal it until setDefault() is called on copy B's instance...
+    const instB = copyA.betterTrigger({ url: 'http://b.test', fetch: fetchA });
+    expect(copyA.requireDefaultInstance()).toBe(instA);
+
+    vi.resetModules();
+    const copyB = await import('../src/instance');
+    // Copy B sees the same default copy A settled on.
+    expect(copyB.requireDefaultInstance()).toBe(instA);
+
+    // setDefault() on copy B's own instance overrides the shared slot, and
+    // copy A sees it through its already-loaded registry object.
+    instB.setDefault();
+    expect(copyB.requireDefaultInstance()).toBe(instB);
+    expect(copyA.requireDefaultInstance()).toBe(instB);
   });
 });

@@ -1,6 +1,7 @@
 /* =============================================================================
    @better-trigger/core — duration parsing ("24h", "10m", 5000).
    ============================================================================= */
+import { KernelError } from './kernel-errors';
 
 const UNIT_MS: Record<string, number> = {
   ms: 1,
@@ -10,6 +11,11 @@ const UNIT_MS: Record<string, number> = {
   d: 86_400_000,
   w: 604_800_000,
 };
+
+/** Date's representable range: ±8.64e15 ms from the epoch (the year 275760).
+ *  Anything beyond it makes `new Date(...)` an Invalid Date that only blows up
+ *  later, at toISOString(). Reject it where the Date is built. */
+const DATE_MAX_MS = 8.64e15;
 
 /**
  * Parse a duration into milliseconds.
@@ -27,8 +33,17 @@ export function parseDuration(input: string | number): number {
   const re = /(\d+(?:\.\d+)?)\s*(ms|s|m|h|d|w)/g;
   let total = 0;
   let matches = 0;
+  const seen = new Set<string>();
   for (const m of str.matchAll(re)) {
-    total += parseFloat(m[1]) * UNIT_MS[m[2]];
+    const unit = m[2];
+    // "1m1m" was silently accepted as 120000 — a typo (or a pasted compound)
+    // that doubles a unit reads as a very different wait. Reject it, naming
+    // the duplicate.
+    if (seen.has(unit)) {
+      throw new Error(`invalid duration: "${input}" — repeated unit "${unit}"`);
+    }
+    seen.add(unit);
+    total += parseFloat(m[1]) * UNIT_MS[unit];
     matches += 1;
   }
   const leftover = str.replace(re, '').replace(/\s+/g, '');
@@ -40,5 +55,16 @@ export function parseDuration(input: string | number): number {
 
 /** Resolve a duration (relative to `from`, default now) to an absolute Date. */
 export function durationToDate(input: string | number, from: Date = new Date()): Date {
-  return new Date(from.getTime() + parseDuration(input));
+  const ms = parseDuration(input);
+  const time = from.getTime() + ms;
+  if (time > DATE_MAX_MS || time < -DATE_MAX_MS) {
+    // Not a plain "invalid duration" Error: this one is well-formed but too big
+    // for a Date, so it used to silently produce an Invalid Date and only
+    // explode at toISOString(). Naming the input keeps it debuggable.
+    throw new KernelError(
+      'bad_request',
+      `duration "${String(input)}" is out of range — it cannot be added to a Date`,
+    );
+  }
+  return new Date(time);
 }

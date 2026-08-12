@@ -10,10 +10,11 @@
    immediately. No daemon, no Postgres — `fetch` is injected and the clock is
    faked.
    ============================================================================= */
-import { KernelError } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError, type WaitResult } from '@better-trigger/core';
 import { describe, expect, it, vi } from 'vitest';
 import { HttpError } from '../src/client';
 import { betterTrigger, ResultTimeoutError } from '../src/instance';
+import { task } from '../src/task';
 
 /** A fetch stub answering calls from a scripted list; the last entry repeats. */
 function scriptedFetch(responses: Array<Response | (() => Response | Promise<Response>)>) {
@@ -68,6 +69,70 @@ function terminalResponse(
     status: 200,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+/**
+ * A fetch stub that holds each request open for EXACTLY its requested
+ * `timeoutMs` slice, then answers non-terminal — the same hold-then-answer
+ * contract the real route keeps, so a long wait consumes its whole slice of the
+ * (fake) clock and the SDK's slicing math is observable hop by hop.
+ */
+function slicePollingNonTerminal(
+  status: 'queued' | 'running' | 'waiting',
+): typeof globalThis.fetch {
+  return ((input: any, init: any) => {
+    const timeoutMs = Number(new URL(String(input)).searchParams.get('timeoutMs'));
+    return new Promise<Response>((resolve) => {
+      const timer = setTimeout(() => {
+        resolve(
+          new Response(JSON.stringify({ status }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        );
+      }, timeoutMs);
+      init.signal?.addEventListener('abort', () => clearTimeout(timer), { once: true });
+    });
+  }) as unknown as typeof globalThis.fetch;
+}
+
+/**
+ * Dispatch each fetch call to the handler at that index (the last repeats) and
+ * record the calls. Unlike scriptedFetch, the handler receives the real
+ * (url, init) args — needed when the handler reads the URL (slice polling).
+ */
+function handledFetch(
+  handlers: Array<(input: any, init: any) => Response | Promise<Response>>,
+) {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  let i = 0;
+  const fn = async (input: any, init: any) => {
+    calls.push({ url: String(input), init: init ?? {} });
+    const h = handlers[Math.min(i, handlers.length - 1)];
+    i++;
+    return h(input, init);
+  };
+  return { fetch: fn as unknown as typeof globalThis.fetch, calls };
+}
+
+/** The Symbol.for key instance.ts/registry.ts share (registry.ts's slot). */
+const REGISTRY_KEY = Symbol.for('better-trigger.registry.v1');
+
+function registrySlot(): unknown {
+  return (globalThis as unknown as Record<symbol, unknown>)[REGISTRY_KEY];
+}
+
+/** Wipe the registry slot and re-import a fresh module copy — what a second
+ *  copy of the package would see. Used by the registry-precedence tests. */
+async function freshInstanceModule(): Promise<typeof import('../src/instance')> {
+  delete (globalThis as unknown as Record<symbol, unknown>)[REGISTRY_KEY];
+  vi.resetModules();
+  return await import('../src/instance');
+}
+
+function restoreRegistrySlot(original: unknown): void {
+  (globalThis as unknown as Record<symbol, unknown>)[REGISTRY_KEY] = original;
+  vi.resetModules();
 }
 
 /** Pump the microtask queue so an in-flight request settles (and, on a 5xx,
@@ -330,6 +395,331 @@ describe('RunHandle.result() — no instance registered (p1-17)', () => {
     } finally {
       (globalThis as unknown as Record<symbol, unknown>)[REGISTRY_KEY] = original;
       vi.resetModules();
+    }
+  });
+});
+
+describe('waitForResult — long-poll slicing (p2-36)', () => {
+  it('slices a long wait into hops capped at MAX_LONGPOLL_MS with the remainder on the last hop', async () => {
+    vi.useFakeTimers();
+    try {
+      // 60s budget, 25s cap → 25s / 25s / 10s. Each hop consumes its whole
+      // slice of the fake clock before answering 'running'.
+      const { fetch, calls } = handledFetch([slicePollingNonTerminal('running')]);
+      const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+
+      const result = trigger.waitForResult('run_1', undefined, { timeoutMs: 60_000 });
+      await flush();
+      await vi.advanceTimersByTimeAsync(25_000); // hop 1 answers at t=25s
+      await flush();
+      await vi.advanceTimersByTimeAsync(25_000); // hop 2 answers at t=50s
+      await flush();
+      await vi.advanceTimersByTimeAsync(10_000); // hop 3 answers at t=60s → budget spent
+      await expect(result).resolves.toEqual({ status: 'running' });
+
+      const slices = calls.map(
+        (c) => Number(new URL(c.url).searchParams.get('timeoutMs')),
+      );
+      expect(slices).toEqual([25_000, 25_000, 10_000]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns a terminal result as soon as a hop sees it, without polling out the budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const { fetch, calls } = handledFetch([
+        slicePollingNonTerminal('running'), // hop 1: a full 25s of 'running'
+        (_input: any, _init: any) => terminalResponse('completed', { done: true }), // hop 2: immediate terminal
+      ]);
+      const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+
+      const result = trigger.waitForResult('run_1', undefined, { timeoutMs: 120_000 });
+      await flush();
+      await vi.advanceTimersByTimeAsync(25_000); // hop 1 answers 'running'
+      await flush();
+      // Hop 2's terminal answer settles in microtasks — no more clock to advance.
+      await expect(result).resolves.toEqual({ status: 'completed', output: { done: true } });
+      expect(calls).toHaveLength(2); // stopped as soon as terminal
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('spends the budget on a retriable error, then takes one last timeoutMs=0 immediate read', async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: string[] = [];
+      let first = true;
+      // Hop 1: held open 300ms of fake time, then a 503 (the backoff sleep then
+      // clamps to the remaining 100ms, landing exactly on the deadline). Hop 2:
+      // slice===0, answered terminal — the "budget is spent" read can still win.
+      const fetchImpl = ((input: any, init: any) => {
+        calls.push(String(input));
+        if (first) {
+          first = false;
+          return new Promise<Response>((resolve) => {
+            const timer = setTimeout(
+              () => resolve(errorResponse(503, 'waiter_abandoned', 'daemon shutting down')),
+              300,
+            );
+            init.signal?.addEventListener('abort', () => clearTimeout(timer), { once: true });
+          });
+        }
+        return terminalResponse('completed', { recovered: true });
+      }) as unknown as typeof globalThis.fetch;
+      const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch: fetchImpl });
+
+      const result = trigger.waitForResult('run_1', undefined, { timeoutMs: 400 });
+      await flush();
+      await vi.advanceTimersByTimeAsync(300); // the 503 lands at t=300ms
+      await flush();
+      await vi.advanceTimersByTimeAsync(100); // backoff sleep runs out → t=400ms
+      await flush();
+      await expect(result).resolves.toEqual({ status: 'completed', output: { recovered: true } });
+
+      expect(calls).toHaveLength(2);
+      // The final read asked for slice 0 — an immediate server-side check.
+      expect(new URL(calls[1]!).searchParams.get('timeoutMs')).toBe('0');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('waitForResult — namespace + pollMs propagation (p2-36)', () => {
+  it('sends no query when polling with an undefined namespace', async () => {
+    const { fetch, calls } = scriptedFetch([terminalResponse('completed', { ok: 1 })]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    await trigger.waitForResult('run_1', undefined, { timeoutMs: 30_000 });
+
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.has('projectId')).toBe(false);
+    expect(url.searchParams.has('env')).toBe(false);
+  });
+
+  it('sends the namespace and pollMs on every long-poll query', async () => {
+    const { fetch, calls } = scriptedFetch([terminalResponse('completed', { ok: 1 })]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    await trigger.waitForResult(
+      'run_1',
+      { projectId: 'acme', env: 'staging' },
+      { timeoutMs: 30_000, pollMs: 500 },
+    );
+
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.get('projectId')).toBe('acme');
+    expect(url.searchParams.get('env')).toBe('staging');
+    expect(url.searchParams.get('pollMs')).toBe('500');
+    // The slice is still capped at MAX_LONGPOLL_MS even with a namespace.
+    expect(url.searchParams.get('timeoutMs')).toBe('25000');
+  });
+
+  it('scopes the run-id routes with nsQuery and omits it when absent', async () => {
+    const { fetch, calls } = scriptedFetch([
+      new Response(JSON.stringify({ id: 'run_1', status: 'running' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+      new Response(null, { status: 204 }),
+      new Response(JSON.stringify({ runId: 'run_3' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+      new Response(JSON.stringify({ run: { id: 'run_4' }, steps: [], waits: [], logs: [], logsNextCursor: null }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+
+    await trigger.getRun('run_1', { projectId: 'acme', env: 'staging' });
+    await trigger.cancelRun('run_2'); // no namespace → no query
+    await trigger.retryRun('run_3', { projectId: 'p', env: 'dev' });
+    await trigger.getRunDetail('run_4', undefined, { logsBefore: 100 });
+
+    expect(calls[0].url).toBe('http://daemon.test:4848/api/v1/runs/run_1/record?projectId=acme&env=staging');
+    expect(calls[1].url).toBe('http://daemon.test:4848/api/v1/runs/run_2/cancel');
+    expect(calls[2].url).toBe('http://daemon.test:4848/api/v1/runs/run_3/retry?projectId=p&env=dev');
+    expect(calls[3].url).toBe('http://daemon.test:4848/api/v1/runs/run_4?logsBefore=100');
+  });
+
+  it('derives the handle namespace from nsFromOptions, so result() polls the created scope', async () => {
+    const { fetch, calls } = scriptedFetch([
+      new Response(JSON.stringify({ runId: 'run_9', idempotent: false }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+      terminalResponse('completed', { done: true }),
+    ]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+
+    const handle = await trigger.trigger('hello', { n: 1 }, { projectId: 'acme', env: 'staging' });
+    await handle.result();
+
+    expect(new URL(calls[0].url).pathname).toBe('/api/v1/trigger');
+    const pollUrl = new URL(calls[1].url);
+    expect(pollUrl.searchParams.get('projectId')).toBe('acme');
+    expect(pollUrl.searchParams.get('env')).toBe('staging');
+  });
+
+  it('defaults the handle namespace to default/prod when none was given', async () => {
+    const { fetch, calls } = scriptedFetch([
+      new Response(JSON.stringify({ runId: 'run_9', idempotent: false }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+      terminalResponse('completed', { done: true }),
+    ]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+
+    const handle = await trigger.trigger('hello', { n: 1 });
+    await handle.result();
+
+    const pollUrl = new URL(calls[1].url);
+    expect(pollUrl.searchParams.get('projectId')).toBe(DEFAULT_NAMESPACE.projectId);
+    expect(pollUrl.searchParams.get('env')).toBe(DEFAULT_NAMESPACE.env);
+  });
+});
+
+describe('trigger() — concurrency-key derivation (p2-36)', () => {
+  const created = () =>
+    new Response(JSON.stringify({ runId: 'run_1', idempotent: false }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  it('derives the key from taskOrId.__definition.concurrency.key(payload)', async () => {
+    const { fetch, calls } = scriptedFetch([created()]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    const handle = task({
+      id: 'orders',
+      concurrency: { key: (p: { userId: string }) => p.userId },
+      run: (p: { userId: string }) => p,
+    });
+
+    await trigger.trigger(handle, { userId: 'u-1' });
+
+    const body = JSON.parse(calls[0].init.body as string);
+    expect(body.taskId).toBe('orders');
+    expect(body.payload).toEqual({ userId: 'u-1' });
+    expect(body.options).toEqual({ concurrencyKey: 'u-1' });
+  });
+
+  it('lets an explicit concurrencyKey option win over the derived key', async () => {
+    const { fetch, calls } = scriptedFetch([created()]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    const handle = task({
+      id: 'orders',
+      concurrency: { key: (p: { userId: string }) => p.userId },
+      run: (p: { userId: string }) => p,
+    });
+
+    await trigger.trigger(handle, { userId: 'u-1' }, { concurrencyKey: 'explicit' });
+
+    const body = JSON.parse(calls[0].init.body as string);
+    expect(body.options).toEqual({ concurrencyKey: 'explicit' });
+  });
+
+  it('does not derive a key for a string task id (no __definition)', async () => {
+    const { fetch, calls } = scriptedFetch([created()]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+
+    await trigger.trigger('orders', { n: 1 });
+
+    const body = JSON.parse(calls[0].init.body as string);
+    expect(body.taskId).toBe('orders');
+    expect(body.options).toBeUndefined();
+  });
+});
+
+describe('makeRunHandle — resolver precedence (p2-36)', () => {
+  it('prefers the handle instance over an installed resolver and the default instance', async () => {
+    const original = registrySlot();
+    try {
+      const { makeRunHandle, setResultResolver, betterTrigger } = await freshInstanceModule();
+      const resolver = { waitForResult: vi.fn() };
+      setResultResolver(resolver);
+      const fetchA = scriptedFetch([terminalResponse('completed', { a: 1 })]);
+      const fetchB = scriptedFetch([terminalResponse('completed', { b: 2 })]);
+      betterTrigger({ url: 'http://a.test', fetch: fetchA.fetch }); // becomes default
+      const instB = betterTrigger({ url: 'http://b.test', fetch: fetchB.fetch });
+
+      const handle = makeRunHandle('run_1', instB);
+      await handle.result();
+
+      expect(resolver.waitForResult).not.toHaveBeenCalled();
+      expect(fetchB.calls).toHaveLength(1);
+      expect(fetchA.calls).toHaveLength(0); // default instance not consulted
+    } finally {
+      restoreRegistrySlot(original);
+    }
+  });
+
+  it('prefers the installed resultResolver over the default instance', async () => {
+    const original = registrySlot();
+    try {
+      const { makeRunHandle, setResultResolver, betterTrigger } = await freshInstanceModule();
+      const resolver = {
+        waitForResult: vi.fn(async (): Promise<WaitResult> => ({ status: 'completed' })),
+      };
+      setResultResolver(resolver);
+      const fetchA = scriptedFetch([terminalResponse('completed', { a: 1 })]);
+      betterTrigger({ url: 'http://a.test', fetch: fetchA.fetch }); // default
+
+      const handle = makeRunHandle('run_1'); // no instance arg
+      await handle.result();
+
+      expect(resolver.waitForResult).toHaveBeenCalledWith('run_1', undefined, undefined);
+      expect(fetchA.calls).toHaveLength(0);
+    } finally {
+      restoreRegistrySlot(original);
+    }
+  });
+
+  it('falls back to the default instance when neither an instance nor a resolver is set', async () => {
+    const original = registrySlot();
+    try {
+      const { makeRunHandle, betterTrigger } = await freshInstanceModule();
+      const fetchA = scriptedFetch([terminalResponse('completed', { a: 1 })]);
+      betterTrigger({ url: 'http://a.test', fetch: fetchA.fetch }); // default
+
+      const handle = makeRunHandle('run_1'); // no instance, no resolver
+      await handle.result();
+
+      expect(fetchA.calls).toHaveLength(1);
+    } finally {
+      restoreRegistrySlot(original);
+    }
+  });
+});
+
+describe('registry.defaultInstance — first-wins, setDefault override, requireDefaultInstance (p2-36)', () => {
+  it('keeps the FIRST instance as the default until setDefault overrides it', async () => {
+    const original = registrySlot();
+    try {
+      const { requireDefaultInstance, betterTrigger } = await freshInstanceModule();
+      const fetch1 = scriptedFetch([terminalResponse('completed', { i: 1 })]);
+      const fetch2 = scriptedFetch([terminalResponse('completed', { i: 2 })]);
+      const inst1 = betterTrigger({ url: 'http://one.test', fetch: fetch1.fetch });
+      const inst2 = betterTrigger({ url: 'http://two.test', fetch: fetch2.fetch });
+
+      expect(requireDefaultInstance()).toBe(inst1); // ??= first-wins
+      inst2.setDefault();
+      expect(requireDefaultInstance()).toBe(inst2); // explicit override wins
+    } finally {
+      restoreRegistrySlot(original);
+    }
+  });
+
+  it('requireDefaultInstance() throws a clear error when no instance was ever created', async () => {
+    const original = registrySlot();
+    try {
+      const { requireDefaultInstance } = await freshInstanceModule();
+      expect(() => requireDefaultInstance()).toThrow(/betterTrigger instance registered/);
+    } finally {
+      restoreRegistrySlot(original);
     }
   });
 });

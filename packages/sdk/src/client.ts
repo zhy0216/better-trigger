@@ -175,7 +175,19 @@ export class HttpClient {
 
     if (!res.ok) throw await toError(res);
     if (res.status === 204) return undefined as T;
-    return (await res.json()) as T;
+    // A 2xx with a non-JSON body (a misconfigured proxy, an HTML error page
+    // behind a 200) used to throw a bare SyntaxError from res.json() OUTSIDE
+    // this guard — not an HttpError, not a KernelError — so callers could not
+    // recognize it. Wrap it as a distinguishable HttpError(status, invalid_json).
+    try {
+      return (await res.json()) as T;
+    } catch {
+      throw new HttpError(
+        res.status,
+        'invalid_json',
+        `better-trigger: request to ${this.base}${PREFIX}${path} answered ${res.status} with a body that is not JSON`,
+      );
+    }
   }
 }
 

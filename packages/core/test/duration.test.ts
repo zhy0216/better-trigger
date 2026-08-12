@@ -6,6 +6,17 @@
    ============================================================================= */
 import { describe, expect, it } from 'vitest';
 import { durationToDate, parseDuration } from '../src/duration';
+import { KernelError } from '../src/kernel-errors';
+
+/** Run `fn` and return whatever it throws; fails the test if it does not. */
+function captureThrow(fn: () => unknown): unknown {
+  try {
+    fn();
+  } catch (e) {
+    return e;
+  }
+  throw new Error('expected fn to throw');
+}
 
 describe('parseDuration — numbers', () => {
   it('passes finite non-negative numbers through as ms', () => {
@@ -53,8 +64,11 @@ describe('parseDuration — strings', () => {
   });
 
   it('floors the total, not each term', () => {
-    // 0.5ms + 0.5ms = 1ms, whereas flooring per term would give 0.
-    expect(parseDuration('0.5ms0.5ms')).toBe(1);
+    // The floor applies to the summed ms, not per term: 0.9s + 500ms is 1400,
+    // never 900 + 500 truncated differently. (Repeated units like "0.5ms0.5ms"
+    // used to prove this and are now rejected — see the duplicate-unit test.)
+    expect(parseDuration('0.9s500ms')).toBe(1_400);
+    expect(parseDuration('2.5s')).toBe(2_500);
   });
 
   it('rejects anything with no unit or with leftover text', () => {
@@ -69,6 +83,16 @@ describe('parseDuration — strings', () => {
     expect(() => parseDuration('10x')).toThrow(
       'invalid duration: "10x" (expected e.g. "30s", "10m", "24h")',
     );
+  });
+
+  it('rejects repeated units, naming the duplicate', () => {
+    // "1m1m" used to be silently accepted as 120000 — a pasted/typo'd compound
+    // doubling a unit reads as a very different wait. Now it is a hard error.
+    expect(() => parseDuration('1m1m')).toThrow(/repeated unit "m"/);
+    expect(() => parseDuration('1m1m')).toThrow(/"1m1m"/);
+    expect(() => parseDuration('0.5ms0.5ms')).toThrow(/repeated unit "ms"/);
+    // Different units are still fine (no duplicate).
+    expect(parseDuration('1m1s')).toBe(61_000);
   });
 });
 
@@ -87,5 +111,28 @@ describe('durationToDate', () => {
 
   it('propagates invalid durations instead of producing an Invalid Date', () => {
     expect(() => durationToDate('soon')).toThrow(/invalid duration/);
+  });
+
+  it('rejects an out-of-range duration as a KernelError naming the input, not an Invalid Date', () => {
+    // 20000000w ≈ 1.2e16 ms — past Date's ±8.64e15 ms range, so this used to
+    // build an Invalid Date that only exploded at toISOString().
+    expect(() => durationToDate('20000000w')).toThrow(KernelError);
+    expect(() => durationToDate('20000000w')).toThrow(/"20000000w"/);
+    expect(() => durationToDate('20000000w')).toThrow(/out of range/);
+    // Same for a numeric duration that overflows when added to a date.
+    expect(() => durationToDate(1e16)).toThrow(KernelError);
+    expect(() => durationToDate(1e16)).toThrow(/out of range/);
+
+    const err = captureThrow(() => durationToDate('20000000w')) as KernelError;
+    expect(err.code).toBe('bad_request');
+  });
+
+  it('keeps durations inside Date range working', () => {
+    const from = new Date('2026-07-30T12:00:00.000Z');
+    // Large but representable (~3800 years) — must still produce a real Date.
+    expect(durationToDate('200000w', from).toISOString()).toBeTruthy();
+    expect(Number.isNaN(durationToDate('200000w', from).getTime())).toBe(false);
+    // Exactly at Date's max instant (the year 275760), measured from the epoch.
+    expect(new Date(8.64e15).toISOString()).toBeTruthy();
   });
 });
