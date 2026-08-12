@@ -28,24 +28,48 @@ export interface EnqueueArgs {
 }
 
 /**
- * Build `(alias.project_id, alias.env) IN (VALUES ($n::text, $n+1::text), …)`
- * from a namespace list, appending the flattened values to `params`.
+ * Build a namespace filter, appending the flattened values to `params`.
  *
- * The VALUES pairing is deliberate: two separate `= ANY` arrays would combine
- * in a cartesian product, so a worker serving (p1, e1) and (p2, e2) could
- * match a run in (p1, e2) it does not actually serve.
+ * - ONE namespace → two constant equalities
+ *   (`alias.project_id = $n::text AND alias.env = $n+1::text`). Postgres only
+ *   flattens a single-row VALUES into constant equalities when it feels like
+ *   it; writing them outright guarantees the (project_id, env) prefix of the
+ *   scoped indexes (queue_claimable_idx etc.) binds as constants instead of
+ *   depending on the planner's VALUES handling.
+ * - TWO+ namespaces → the VALUES pairing form
+ *   (`(alias.project_id, alias.env) IN (VALUES ($n::text, $n+1::text), …)`).
+ *   The pairing is deliberate: two separate `= ANY` arrays would combine in a
+ *   cartesian product, so a worker serving (p1, e1) and (p2, e2) could match a
+ *   run in (p1, e2) it does not actually serve. This is what the cold paths
+ *   (waits/cron/reaper/prune/stranded scans) use — a semi-join over a couple
+ *   of pairs is fine there, it is the claim hot loop that must not.
  */
 export function namespacePredicate(
   alias: string,
   namespaces: readonly Namespace[],
   params: unknown[],
 ): string {
+  if (namespaces.length === 1) return nsPredicateFor(alias, namespaces[0]!, params);
   const start = params.length + 1;
   const values = namespaces
     .map((_, i) => `($${start + i * 2}::text, $${start + i * 2 + 1}::text)`)
     .join(', ');
   for (const ns of namespaces) params.push(ns.projectId, ns.env);
   return `(${alias}.project_id, ${alias}.env) IN (VALUES ${values})`;
+}
+
+/**
+ * Build the single-namespace equality form
+ * (`alias.project_id = $n::text AND alias.env = $n+1::text`), appending the
+ * pair to `params`. For per-namespace hot loops (claimRuns scans one namespace
+ * at a time): constant equalities make the leading (project_id, env) columns of
+ * the scoped indexes bind directly, with no reliance on the planner flattening
+ * a VALUES list (p1-08).
+ */
+export function nsPredicateFor(alias: string, ns: Namespace, params: unknown[]): string {
+  const start = params.length + 1;
+  params.push(ns.projectId, ns.env);
+  return `${alias}.project_id = $${start}::text AND ${alias}.env = $${start + 1}::text`;
 }
 
 /** Validate a non-empty namespace list at the worker-facing API boundary. */
@@ -213,13 +237,30 @@ export function claimWindow(limit: number): number {
  * Claim up to `limit` runs for the given worker, in two phases:
  *
  * Phase 1 — the claim transaction:
- *   SELECT a claimWindow(limit)-wide candidate set FOR UPDATE SKIP LOCKED
+ *   SELECT a claimWindow(remaining)-wide candidate set FOR UPDATE SKIP LOCKED
  *   (available + unclaimed, by priority, task set filtered in SQL), for each
  *   candidate skip if the concurrency limit is hit, otherwise claim it: take
  *   the lease on the queue row (locked_by/locked_at + lease_until = now() +
  *   leaseMs), then flip the run to running and bump runs.fencing_token —
  *   queue row locked before the runs row, the canonical kernel lock order
  *   (see runs.ts header). COMMIT.
+ *
+ * The candidate scan runs ONCE PER NAMESPACE (p1-08). One scan over the whole
+ * `namespaces` list used to compile to `(project_id, env) IN (VALUES …)`: with
+ * a single namespace Postgres flattened that to constant equalities and the
+ * index's leading columns bound, but with two+ namespaces the VALUES became a
+ * semi-join, the (project_id, env) prefix lost its equality constraints, and
+ * the claim hot path fell back to sorting the whole backlog — a documented
+ * config causing an order-of-magnitude plan regression with no warning. A
+ * worker serving N namespaces now issues N candidate scans, each a pair of
+ * constant equalities on `q` (`queue_claimable_idx` binds directly) with the
+ * matching `r`-side equality made explicit. The `limit` is shared round-robin
+ * sequentially: each scan's window is `claimWindow(remaining)` for the runs
+ * earlier namespaces have not claimed yet, and scanning stops once the budget
+ * is met. Semantics are unchanged — the same (project_id, env) pairs are
+ * served, the pairing can never leak a run across namespaces (each scan
+ * constrains both columns to one exact pair), and every candidate still goes
+ * through the same concurrency-limit + claim statements.
  *
  * Phase 2 — the ledger read, AFTER the transaction (p1-07):
  *   for each claimed run, read its run_steps snapshot OUTSIDE any transaction.
@@ -282,79 +323,6 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
   try {
     await client.query('BEGIN');
 
-    // `JOIN runs` is an inner join, so a queue row whose run vanished is simply
-    // not a candidate (it was skipped by the old per-row read too). `LEFT JOIN
-    // tasks` because a run may reference a task row that was never registered —
-    // that means "no concurrency limit", not "not claimable".
-    //
-    // Pinned, the task filter becomes a join against the (id, version) pairs
-    // this worker serves rather than an id-only `= ANY`, so the predicate is
-    // per task: task A can be at v2 here while task B is still at v1. Filtering
-    // in SQL and not in the loop is what keeps the window honest — a window
-    // full of other-version rows would otherwise report "nothing to claim"
-    // while claimable runs sat one row further down. Locking is unchanged:
-    // `FOR UPDATE OF q` still names the queue row and nothing else, and the CTE
-    // is a values list, not a lockable relation.
-    // Params are numbered in ONE array, in SQL order: the task ids / window /
-    // code versions come first (their $n are written literally in the SQL
-    // below), and namespacePredicate() numbers the namespace VALUES pairs from
-    // the next free slot — a fresh array here would restart at $1 and collide
-    // with the literal placeholders above it.
-    const params: unknown[] = pinned
-      ? [args.taskIds, claimWindow(args.limit), args.codeVersions]
-      : [args.taskIds, claimWindow(args.limit)];
-    const nsPredicate = namespacePredicate('r', args.namespaces, params);
-    const candidates = await client.query<{
-      queue_id: number;
-      run_id: string;
-      task_id: string;
-      payload: unknown;
-      attempt: number;
-      max_attempts: number;
-      code_version: string | null;
-      project_id: string;
-      env: string;
-      concurrency_key: string | null;
-      concurrency_limit: number | null;
-    }>(
-      pinned
-        ? `WITH serving(task_id, code_version) AS (
-             SELECT DISTINCT * FROM unnest($1::text[], $3::text[])
-           )
-           SELECT q.id AS queue_id, q.run_id,
-                  r.task_id, r.payload, r.attempt, r.max_attempts,
-                  r.code_version, r.project_id, r.env, r.concurrency_key,
-                  t.concurrency_limit
-             FROM queue q
-             JOIN runs r ON r.id = q.run_id
-                        AND r.project_id = q.project_id AND r.env = q.env
-             JOIN serving s ON s.task_id = r.task_id
-             LEFT JOIN tasks t ON t.id = r.task_id
-                            AND t.project_id = r.project_id AND t.env = r.env
-            WHERE q.available_at <= now() AND q.locked_by IS NULL
-              AND ${nsPredicate}
-              AND (r.code_version IS NULL OR r.code_version = s.code_version)
-            ORDER BY q.priority DESC, q.id ASC
-            LIMIT $2
-            FOR UPDATE OF q SKIP LOCKED`
-        : `SELECT q.id AS queue_id, q.run_id,
-                  r.task_id, r.payload, r.attempt, r.max_attempts,
-                  r.code_version, r.project_id, r.env, r.concurrency_key,
-                  t.concurrency_limit
-             FROM queue q
-             JOIN runs r ON r.id = q.run_id
-                        AND r.project_id = q.project_id AND r.env = q.env
-             LEFT JOIN tasks t ON t.id = r.task_id
-                            AND t.project_id = r.project_id AND t.env = r.env
-            WHERE q.available_at <= now() AND q.locked_by IS NULL
-              AND ${nsPredicate}
-              AND r.task_id = ANY($1::text[])
-            ORDER BY q.priority DESC, q.id ASC
-            LIMIT $2
-            FOR UPDATE OF q SKIP LOCKED`,
-      params,
-    );
-
     interface PendingClaim {
       runId: string;
       taskId: string;
@@ -367,75 +335,166 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
       fencingToken: number;
     }
     const pending: PendingClaim[] = [];
-    for (const cand of candidates.rows) {
-      if (pending.length >= args.limit) break;
 
-      // Concurrency limit: the task's limit came back with the candidate; if set,
-      // count running runs sharing the same concurrency_key (redundantly stored
-      // on runs). The lock key and the count are both namespace-scoped, so
-      // prod and staging throttle independently (C2).
-      const limit = cand.concurrency_limit;
-      if (limit != null && limit > 0) {
-        const key = cand.concurrency_key ?? cand.task_id;
-        // Serialize concurrent claims sharing this key: SKIP LOCKED does not
-        // serialize two workers picking different queue rows of the same key, so
-        // the count-then-flip below could race and overshoot the limit. Take a
-        // tx-level advisory lock on the key first; it releases at COMMIT/ROLLBACK
-        // and must be held while we count (same transaction). Two-argument form
-        // so the key sits in better-trigger's own lock space — see
-        // CONCURRENCY_LOCK_CLASS above.
+    // The candidate scan runs once per namespace (p1-08). `JOIN runs` is an
+    // inner join, so a queue row whose run vanished is simply not a candidate
+    // (it was skipped by the old per-row read too). `LEFT JOIN tasks` because a
+    // run may reference a task row that was never registered — that means "no
+    // concurrency limit", not "not claimable".
+    //
+    // Pinned, the task filter becomes a join against the (id, version) pairs
+    // this worker serves rather than an id-only `= ANY`, so the predicate is
+    // per task: task A can be at v2 here while task B is still at v1. Filtering
+    // in SQL and not in the loop is what keeps the window honest — a window
+    // full of other-version rows would otherwise report "nothing to claim"
+    // while claimable runs sat one row further down. Locking is unchanged:
+    // `FOR UPDATE OF q` still names the queue row and nothing else, and the CTE
+    // is a values list, not a lockable relation.
+    //
+    // Each namespace's scan puts its predicate on `q` (constant equalities —
+    // `queue_claimable_idx` binds on its (project_id, env) leading columns) and
+    // repeats the equality against `r` so the semantics are explicit, not
+    // smuggled through the join's `r.project_id = q.project_id AND r.env =
+    // q.env`. Params are numbered in ONE array, in SQL order: the task ids /
+    // window / code versions come first (their $n are written literally in the
+    // SQL below), and nsPredicateFor() numbers the namespace pair from the next
+    // free slot — a fresh array here would restart at $1 and collide with the
+    // literal placeholders above it. The `r`-side equality references the SAME
+    // pair. The limit is shared round-robin: once a namespace's claims fill it,
+    // scanning stops and later namespaces never get a scan.
+    for (const ns of args.namespaces) {
+      const remaining = args.limit - pending.length;
+      if (remaining <= 0) break;
+
+      const params: unknown[] = pinned
+        ? [args.taskIds, claimWindow(remaining), args.codeVersions]
+        : [args.taskIds, claimWindow(remaining)];
+      const qPredicate = nsPredicateFor('q', ns, params);
+      const rStart = params.length - 1;
+      const rPredicate = `r.project_id = $${rStart}::text AND r.env = $${rStart + 1}::text`;
+      const candidates = await client.query<{
+        queue_id: number;
+        run_id: string;
+        task_id: string;
+        payload: unknown;
+        attempt: number;
+        max_attempts: number;
+        code_version: string | null;
+        project_id: string;
+        env: string;
+        concurrency_key: string | null;
+        concurrency_limit: number | null;
+      }>(
+        pinned
+          ? `WITH serving(task_id, code_version) AS (
+               SELECT DISTINCT * FROM unnest($1::text[], $3::text[])
+             )
+             SELECT q.id AS queue_id, q.run_id,
+                    r.task_id, r.payload, r.attempt, r.max_attempts,
+                    r.code_version, r.project_id, r.env, r.concurrency_key,
+                    t.concurrency_limit
+               FROM queue q
+               JOIN runs r ON r.id = q.run_id
+                          AND r.project_id = q.project_id AND r.env = q.env
+               JOIN serving s ON s.task_id = r.task_id
+               LEFT JOIN tasks t ON t.id = r.task_id
+                              AND t.project_id = r.project_id AND t.env = r.env
+              WHERE q.available_at <= now() AND q.locked_by IS NULL
+                AND ${qPredicate}
+                AND ${rPredicate}
+                AND (r.code_version IS NULL OR r.code_version = s.code_version)
+              ORDER BY q.priority DESC, q.id ASC
+              LIMIT $2
+              FOR UPDATE OF q SKIP LOCKED`
+          : `SELECT q.id AS queue_id, q.run_id,
+                    r.task_id, r.payload, r.attempt, r.max_attempts,
+                    r.code_version, r.project_id, r.env, r.concurrency_key,
+                    t.concurrency_limit
+               FROM queue q
+               JOIN runs r ON r.id = q.run_id
+                          AND r.project_id = q.project_id AND r.env = q.env
+               LEFT JOIN tasks t ON t.id = r.task_id
+                              AND t.project_id = r.project_id AND t.env = r.env
+              WHERE q.available_at <= now() AND q.locked_by IS NULL
+                AND ${qPredicate}
+                AND ${rPredicate}
+                AND r.task_id = ANY($1::text[])
+              ORDER BY q.priority DESC, q.id ASC
+              LIMIT $2
+              FOR UPDATE OF q SKIP LOCKED`,
+        params,
+      );
+
+      for (const cand of candidates.rows) {
+        if (pending.length >= args.limit) break;
+
+        // Concurrency limit: the task's limit came back with the candidate; if set,
+        // count running runs sharing the same concurrency_key (redundantly stored
+        // on runs). The lock key and the count are both namespace-scoped, so
+        // prod and staging throttle independently (C2).
+        const limit = cand.concurrency_limit;
+        if (limit != null && limit > 0) {
+          const key = cand.concurrency_key ?? cand.task_id;
+          // Serialize concurrent claims sharing this key: SKIP LOCKED does not
+          // serialize two workers picking different queue rows of the same key, so
+          // the count-then-flip below could race and overshoot the limit. Take a
+          // tx-level advisory lock on the key first; it releases at COMMIT/ROLLBACK
+          // and must be held while we count (same transaction). Two-argument form
+          // so the key sits in better-trigger's own lock space — see
+          // CONCURRENCY_LOCK_CLASS above.
+          await client.query(
+            `SELECT pg_advisory_xact_lock($1::int4, hashtext($2))`,
+            [CONCURRENCY_LOCK_CLASS, `bt:cc:${cand.project_id}:${cand.env}:${key}`],
+          );
+          const countRes = await client.query<{ n: string }>(
+            `SELECT count(*)::text AS n
+               FROM runs
+              WHERE status = 'running' AND concurrency_key = $1
+                AND project_id = $2 AND env = $3`,
+            [key, cand.project_id, cand.env],
+          );
+          const running = Number(countRes.rows[0]?.n ?? '0');
+          if (running >= limit) continue; // leave it in the queue
+        }
+
+        // Claim it: take the lease on the (already SKIP LOCKED-held) queue row,
+        // then bump the run's fencing token while flipping it to running. The
+        // returned token is the claim's write credential — any later claim
+        // invalidates it, and it survives suspend/resume because it lives on
+        // runs, not on the delete-and-reinserted queue row.
         await client.query(
-          `SELECT pg_advisory_xact_lock($1::int4, hashtext($2))`,
-          [CONCURRENCY_LOCK_CLASS, `bt:cc:${cand.project_id}:${cand.env}:${key}`],
+          `UPDATE queue
+              SET locked_by = $1,
+                  locked_at = now(),
+                  lease_until = now() + ($2::text || ' milliseconds')::interval
+            WHERE id = $3 AND project_id = $4 AND env = $5`,
+          [args.workerId, String(args.leaseMs), cand.queue_id, cand.project_id, cand.env],
         );
-        const countRes = await client.query<{ n: string }>(
-          `SELECT count(*)::text AS n
-             FROM runs
-            WHERE status = 'running' AND concurrency_key = $1
-              AND project_id = $2 AND env = $3`,
-          [key, cand.project_id, cand.env],
+
+        const tokenRes = await client.query<{ fencing_token: string }>(
+          `UPDATE runs
+              SET status = 'running',
+                  started_at = COALESCE(started_at, now()),
+                  updated_at = now(),
+                  fencing_token = fencing_token + 1
+            WHERE id = $1 AND project_id = $2 AND env = $3
+            RETURNING fencing_token`,
+          [cand.run_id, cand.project_id, cand.env],
         );
-        const running = Number(countRes.rows[0]?.n ?? '0');
-        if (running >= limit) continue; // leave it in the queue
+        const fencingToken = Number(tokenRes.rows[0]?.fencing_token ?? 0);
+
+        pending.push({
+          runId: cand.run_id,
+          taskId: cand.task_id,
+          payload: cand.payload,
+          attempt: cand.attempt,
+          maxAttempts: cand.max_attempts,
+          codeVersion: cand.code_version,
+          projectId: cand.project_id,
+          env: cand.env,
+          fencingToken,
+        });
       }
-
-      // Claim it: take the lease on the (already SKIP LOCKED-held) queue row,
-      // then bump the run's fencing token while flipping it to running. The
-      // returned token is the claim's write credential — any later claim
-      // invalidates it, and it survives suspend/resume because it lives on
-      // runs, not on the delete-and-reinserted queue row.
-      await client.query(
-        `UPDATE queue
-            SET locked_by = $1,
-                locked_at = now(),
-                lease_until = now() + ($2::text || ' milliseconds')::interval
-          WHERE id = $3 AND project_id = $4 AND env = $5`,
-        [args.workerId, String(args.leaseMs), cand.queue_id, cand.project_id, cand.env],
-      );
-
-      const tokenRes = await client.query<{ fencing_token: string }>(
-        `UPDATE runs
-            SET status = 'running',
-                started_at = COALESCE(started_at, now()),
-                updated_at = now(),
-                fencing_token = fencing_token + 1
-          WHERE id = $1 AND project_id = $2 AND env = $3
-          RETURNING fencing_token`,
-        [cand.run_id, cand.project_id, cand.env],
-      );
-      const fencingToken = Number(tokenRes.rows[0]?.fencing_token ?? 0);
-
-      pending.push({
-        runId: cand.run_id,
-        taskId: cand.task_id,
-        payload: cand.payload,
-        attempt: cand.attempt,
-        maxAttempts: cand.max_attempts,
-        codeVersion: cand.code_version,
-        projectId: cand.project_id,
-        env: cand.env,
-        fencingToken,
-      });
     }
 
     await client.query('COMMIT');

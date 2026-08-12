@@ -106,13 +106,14 @@ const P3_MARGIN_MS = 250;
 
 /**
  * VERBATIM copy of the unpinned claim candidate SELECT in
- * packages/kernel/src/queue.ts (claimRuns), including the namespace predicate
- * in its VALUES form (namespacePredicate('r', ...) — the leading-column
- * equality constraint is what lets queue_claimable_idx satisfy the ORDER BY)
- * and the join conditions on (project_id, env). If the kernel query changes
- * shape, change it here too — a bench measuring a query nobody runs proves
- * nothing, and this one fails loudly on a 60k backlog if the predicate ever
- * drops out of the kernel query.
+ * packages/kernel/src/queue.ts (claimRuns), including the per-namespace
+ * constant-equalities predicate (p1-08 — claimRuns scans one namespace at a
+ * time via nsPredicateFor, so the (project_id, env) leading-column equality is
+ * literal, not a VALUES semi-join: the equality is what lets queue_claimable_idx
+ * satisfy the ORDER BY) and the join conditions on (project_id, env). If the
+ * kernel query changes shape, change it here too — a bench measuring a query
+ * nobody runs proves nothing, and this one fails loudly on a 60k backlog if the
+ * predicate ever drops out of the kernel query.
  */
 const CANDIDATE_SQL = `SELECT q.id AS queue_id, q.run_id,
           r.task_id, r.payload, r.attempt, r.max_attempts,
@@ -124,7 +125,8 @@ const CANDIDATE_SQL = `SELECT q.id AS queue_id, q.run_id,
      LEFT JOIN tasks t ON t.id = r.task_id
                 AND t.project_id = r.project_id AND t.env = r.env
     WHERE q.available_at <= now() AND q.locked_by IS NULL
-      AND (r.project_id, r.env) IN (VALUES ($3::text, $4::text))
+      AND q.project_id = $3::text AND q.env = $4::text
+      AND r.project_id = $3::text AND r.env = $4::text
       AND r.task_id = ANY($1::text[])
     ORDER BY q.priority DESC, q.id ASC
     LIMIT $2

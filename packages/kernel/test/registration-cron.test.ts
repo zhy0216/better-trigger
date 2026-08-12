@@ -466,7 +466,9 @@ describe('scanCron — due-scan locking structure (C4)', () => {
     expect(scan.sql).toMatch(/enabled = true AND next_run_at IS NOT NULL AND next_run_at <= now\(\)/);
     expect(scan.sql).toMatch(/ORDER BY next_run_at ASC/);
     expect(scan.sql).toMatch(/LIMIT 50/);
-    expect(scan.sql).toMatch(/\(schedules\.project_id, schedules\.env\) IN \(VALUES/);
+    // Single namespace (the default here) → the predicate is a pair of
+    // constant equalities (p1-08), not the ≥2-pair VALUES form.
+    expect(scan.sql).toMatch(/schedules\.project_id = \$1::text AND schedules\.env = \$2::text/);
     expect(scan.params).toEqual(['default', 'prod']);
   });
 });

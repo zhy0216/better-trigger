@@ -49,7 +49,7 @@ import {
 import type { KernelLogger } from './kernel';
 import { prune } from './prune';
 import {
-  namespacePredicate,
+  nsPredicateFor,
   scanStrandedRuns,
   type StrandedScan,
 } from './queue';
@@ -235,18 +235,21 @@ export function startOrchestrator(
   // The one boundary default in the kernel: absent config means the legacy
   // single-namespace world ('default'/'prod'). Every loop below filters on
   // these pairs and never defaults again.
+  //
+  // The hot scans (waits/cron/reaper) do NOT build one predicate over all
+  // namespaces here anymore: with ≥2 namespaces the `IN (VALUES …)` form is a
+  // semi-join that loses the equality constraints on the (project_id, env)
+  // index prefix and every scan degrades to sorting the whole backlog
+  // (todos/02-performance.md p1-08). Each loop scans PER NAMESPACE instead —
+  // one query per namespace, each a single-namespace equality the index can
+  // bind, results concatenated — via nsPredicateFor() with a fresh params
+  // array per namespace (each query renumbers $1..$2).
   const namespaces: readonly Namespace[] = (opts.namespaces ?? [DEFAULT_NAMESPACE]).map(
     (ns) => {
       assertNamespace(ns);
       return ns;
     },
   );
-  const nsParams: unknown[] = [];
-  const nsPredicate = namespacePredicate('waits', namespaces, nsParams);
-  const cronNsParams: unknown[] = [];
-  const cronNsPredicate = namespacePredicate('schedules', namespaces, cronNsParams);
-  const reapNsParams: unknown[] = [];
-  const reapNsPredicate = namespacePredicate('q', namespaces, reapNsParams);
 
   const timers: NodeJS.Timeout[] = [];
   const running = {
@@ -306,6 +309,15 @@ export function startOrchestrator(
     // and C5 recovery would starve. Each scan gets its own LIMIT instead: the
     // timer scan keeps the resume_at order, the orphan scan orders by id (it
     // has no resume_at to order by). Phase 2 below iterates the combined rows.
+    //
+    // Both candidate queries run PER NAMESPACE (todos/02-performance.md
+    // p1-08): one scan per namespace with its own fresh params array (each
+    // predicate renumbers $1..$2), and the rows are concatenated before phase
+    // 2. A single VALUES-based query over all namespaces becomes a semi-join
+    // whose (project_id, env) pairs lose their equality constraints on the
+    // index prefix, so ≥2 namespaces degrade the scan to sorting the whole
+    // backlog; per-namespace equalities bind the index directly. With one
+    // namespace the SQL is identical to the pre-split form.
     type WaitRow = {
       id: number;
       run_id: string;
@@ -316,33 +328,36 @@ export function startOrchestrator(
       kind: string;
       child_run_id: string | null;
     };
-    const timerRows = await pool.query<WaitRow>(
-      `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
-         FROM waits
-        WHERE status = 'pending'
-          AND kind IN ('duration','until')
-          AND resume_at <= now()
-          AND ${nsPredicate}
-        ORDER BY resume_at ASC
-        LIMIT 50`,
-      nsParams,
-    );
-    // namespacePredicate pushes into nsParams, so the orphan scan cannot reuse
-    // it as a live buffer — copy the already-flattened values into a fresh
-    // array so $1..$2n still line up with the shared nsPredicate string.
-    const orphanNsParams = [...nsParams];
-    const orphanRows = await pool.query<WaitRow>(
-      `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
-         FROM waits
-        WHERE status = 'pending'
-          AND kind = 'run'
-          AND child_run_id IS NULL
-          AND ${nsPredicate}
-        ORDER BY id ASC
-        LIMIT 10`,
-      orphanNsParams,
-    );
-    const due = { rows: [...timerRows.rows, ...orphanRows.rows] };
+    const due = { rows: [] as WaitRow[] };
+    for (const ns of namespaces) {
+      const timerParams: unknown[] = [];
+      const timerPredicate = nsPredicateFor('waits', ns, timerParams);
+      const timerRows = await pool.query<WaitRow>(
+        `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
+           FROM waits
+          WHERE status = 'pending'
+            AND kind IN ('duration','until')
+            AND resume_at <= now()
+            AND ${timerPredicate}
+          ORDER BY resume_at ASC
+          LIMIT 50`,
+        timerParams,
+      );
+      const orphanParams: unknown[] = [];
+      const orphanPredicate = nsPredicateFor('waits', ns, orphanParams);
+      const orphanRows = await pool.query<WaitRow>(
+        `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
+           FROM waits
+          WHERE status = 'pending'
+            AND kind = 'run'
+            AND child_run_id IS NULL
+            AND ${orphanPredicate}
+          ORDER BY id ASC
+          LIMIT 10`,
+        orphanParams,
+      );
+      due.rows.push(...timerRows.rows, ...orphanRows.rows);
+    }
 
     // Phase 2 — one short tx per wait, acquiring the canonical lock order
     // (queue → runs → wait row; see runs.ts header) and re-checking the wait
@@ -480,24 +495,36 @@ export function startOrchestrator(
       await client.query('BEGIN');
       // Namespace-scoped: a staging daemon fires only staging schedules, and
       // the schedule's project_id rides along so the run is created in the
-      // schedule's own namespace (C2).
-      const due = await client.query<{
+      // schedule's own namespace (C2). The due-scan runs PER NAMESPACE
+      // (todos/02-performance.md p1-08): one query per namespace with its own
+      // fresh params array, LIMIT 50 each, results concatenated — per-namespace
+      // equalities bind the (project_id, env) index prefix, where one VALUES
+      // query over all namespaces becomes a semi-join that loses the
+      // equalities and sorts the whole backlog.
+      type ScheduleRow = {
         id: string;
         task_id: string;
         cron_pattern: string;
         cron_tz: string | null;
         project_id: string;
         env: string;
-      }>(
-        `SELECT id, task_id, cron_pattern, cron_tz, project_id, env
-           FROM schedules
-          WHERE enabled = true AND next_run_at IS NOT NULL AND next_run_at <= now()
-            AND ${cronNsPredicate}
-          ORDER BY next_run_at ASC
-          LIMIT 50
-          FOR UPDATE SKIP LOCKED`,
-        cronNsParams,
-      );
+      };
+      const due = { rows: [] as ScheduleRow[] };
+      for (const ns of namespaces) {
+        const params: unknown[] = [];
+        const predicate = nsPredicateFor('schedules', ns, params);
+        const res = await client.query<ScheduleRow>(
+          `SELECT id, task_id, cron_pattern, cron_tz, project_id, env
+             FROM schedules
+            WHERE enabled = true AND next_run_at IS NOT NULL AND next_run_at <= now()
+              AND ${predicate}
+            ORDER BY next_run_at ASC
+            LIMIT 50
+            FOR UPDATE SKIP LOCKED`,
+          params,
+        );
+        due.rows.push(...res.rows);
+      }
 
       for (const s of due.rows) {
         // Create + enqueue through the shared path so retry policy and
@@ -544,32 +571,45 @@ export function startOrchestrator(
     const failedTerminal: Array<{ runId: string; qNs: Namespace; hasParent: boolean }> = [];
     try {
       await client.query('BEGIN');
-      const stale = await client.query<{
+      // `lease_until IS NOT NULL` is redundant against `<= now()`, and not
+      // load-bearing for the plan: PG derives it from the comparison itself
+      // (NULL never compares true) and picks the *partial*
+      // queue_lease_until_idx either way — checked on 16.2. It is spelled out
+      // so the predicate matches that index's WHERE verbatim, stating "the
+      // in-flight subset" instead of relying on the planner's inference.
+      // ORDER BY matches that index's key order (no sort node) and, with the
+      // LIMIT, makes the batch the OLDEST expired leases — see REAP_BATCH.
+      // Namespace-scoped: a daemon only reaps leases it is configured for
+      // (C2); project_id/env ride along for the per-row statements below. The
+      // scan runs PER NAMESPACE (todos/02-performance.md p1-08): one query per
+      // namespace with its own fresh params array, LIMIT REAP_BATCH each,
+      // results concatenated — per-namespace equalities bind the
+      // (project_id, env) index prefix, where one VALUES query over all
+      // namespaces becomes a semi-join that loses the equalities and sorts the
+      // whole backlog.
+      type StaleRow = {
         id: number;
         run_id: string;
         project_id: string;
         env: string;
-      }>(
-        // `lease_until IS NOT NULL` is redundant against `<= now()`, and not
-        // load-bearing for the plan: PG derives it from the comparison itself
-        // (NULL never compares true) and picks the *partial*
-        // queue_lease_until_idx either way — checked on 16.2. It is spelled out
-        // so the predicate matches that index's WHERE verbatim, stating "the
-        // in-flight subset" instead of relying on the planner's inference.
-        // ORDER BY matches that index's key order (no sort node) and, with the
-        // LIMIT, makes the batch the OLDEST expired leases — see REAP_BATCH.
-        // Namespace-scoped: a daemon only reaps leases it is configured for
-        // (C2); project_id/env ride along for the per-row statements below.
-        `SELECT q.id, q.run_id, q.project_id, q.env
-           FROM queue q
-          WHERE q.lease_until IS NOT NULL
-            AND q.lease_until <= now()
-            AND ${reapNsPredicate}
-          ORDER BY q.lease_until ASC
-          LIMIT ${REAP_BATCH}
-          FOR UPDATE SKIP LOCKED`,
-        reapNsParams,
-      );
+      };
+      const stale = { rows: [] as StaleRow[] };
+      for (const ns of namespaces) {
+        const params: unknown[] = [];
+        const predicate = nsPredicateFor('q', ns, params);
+        const res = await client.query<StaleRow>(
+          `SELECT q.id, q.run_id, q.project_id, q.env
+             FROM queue q
+            WHERE q.lease_until IS NOT NULL
+              AND q.lease_until <= now()
+              AND ${predicate}
+            ORDER BY q.lease_until ASC
+            LIMIT ${REAP_BATCH}
+            FOR UPDATE SKIP LOCKED`,
+          params,
+        );
+        stale.rows.push(...res.rows);
+      }
 
       for (const q of stale.rows) {
         const qNs: Namespace = { projectId: q.project_id, env: q.env };

@@ -7,9 +7,10 @@
      - idempotency is per namespace: the same task + idempotency key in two
        namespaces must resolve two DIFFERENT existing runs — the unique index
        and the conflict lookup are both (project_id, env, …)-scoped;
-     - a claim can only ever take runs inside the worker's namespace pairs, and
-       the pairing is VALUES-based — two separate `= ANY` arrays would combine
-       in a cartesian product and leak runs across namespaces;
+     - a claim can only ever take runs inside the worker's namespace pairs: the
+       candidate scan runs once per namespace with constant (project_id, env)
+       equalities (p1-08) — two separate `= ANY` arrays would combine in a
+       cartesian product and leak runs across namespaces;
      - the concurrency-limiter advisory lock key embeds the namespace, so prod
        and staging throttle independently and can never serialize each other;
      - every SQL statement in the kernel that touches a namespace-scoped table
@@ -136,7 +137,7 @@ function claimPool(candidateRows: unknown[]) {
 }
 
 describe('claim scoping (C2)', () => {
-  it('filters candidates by paired (project_id, env) VALUES, never separate ANY arrays', async () => {
+  it('scans one candidate SELECT per namespace, each a constant-equality pair', async () => {
     const { pool, stmts } = claimPool([]);
 
     await claimRuns(pool, {
@@ -147,15 +148,30 @@ describe('claim scoping (C2)', () => {
       leaseMs: 60_000,
     });
 
-    const cand = stmts.find((s) => /FROM queue q/.test(s.sql))!;
-    expect(cand.sql).toMatch(/\(r\.project_id, r\.env\) IN \(VALUES/);
-    // Two independent ANY arrays would combine in a cartesian product, so a
-    // worker serving (acme, staging) + (other, prod) could claim runs in
-    // (acme, prod) — the exact leak this pairing exists to close.
-    expect(cand.sql).not.toMatch(/r\.project_id = ANY/);
-    expect(cand.sql).not.toMatch(/r\.env = ANY/);
-    // Task ids + window + the two namespace pairs, flattened in order.
-    expect(cand.params).toEqual([['t'], 10, 'acme', 'staging', 'acme', 'prod']);
+    const cands = stmts.filter((s) => /FROM queue q/.test(s.sql));
+    // p1-08: the claim hot path scans one namespace at a time, so a worker
+    // serving two namespaces issues two candidate SELECTs — each a pair of
+    // constant equalities. The q-side is what binds queue_claimable_idx's
+    // leading (project_id, env) columns directly; the r-side repeats the
+    // equality so the semantics are explicit instead of smuggled through the
+    // join.
+    expect(cands).toHaveLength(2);
+    for (const cand of cands) {
+      expect(cand.sql).toMatch(/q\.project_id = \$3::text AND q\.env = \$4::text/);
+      expect(cand.sql).toMatch(/r\.project_id = \$3::text AND r\.env = \$4::text/);
+      // A single VALUES list over both pairs would be a semi-join that sheds
+      // the index's leading-column equalities; separate `= ANY` arrays would
+      // combine in a cartesian product — a worker serving (acme, staging) +
+      // (other, prod) could claim runs in (acme, prod). The per-namespace
+      // scans close both: each constrains project_id AND env to one exact
+      // pair, so the pairing can never leak.
+      expect(cand.sql).not.toMatch(/r\.project_id = ANY/);
+      expect(cand.sql).not.toMatch(/r\.env = ANY/);
+      expect(cand.sql).not.toMatch(/IN \(VALUES/);
+    }
+    // Task ids + window + THIS namespace's pair, per scan.
+    expect(cands[0]!.params).toEqual([['t'], 10, 'acme', 'staging']);
+    expect(cands[1]!.params).toEqual([['t'], 10, 'acme', 'prod']);
   });
 
   it('matches the task config join on the run namespace too', async () => {
@@ -240,14 +256,17 @@ describe('claim scoping (C2)', () => {
 /* ---------------------------------------------------------------------------
  * Placeholder/param alignment (P0 regression)
  *
- * namespacePredicate() numbers its VALUES placeholders from params.length + 1,
- * so the caller must pre-fill ONE params array with everything that comes
- * before the predicate in SQL order. A fresh array made the predicate restart
- * at $1 and collide with the literal $n of the earlier clauses — invisible to
- * the shape-stub tests (they never bind against real Postgres), fatal on one.
- * These pin the concrete statement+params pairs, and a generic alignment check
- * (max placeholder === param count, every $1..$N present) catches any future
- * offset in any of the paths.
+ * namespacePredicate() / nsPredicateFor() number their placeholders from
+ * params.length + 1, so the caller must pre-fill ONE params array with
+ * everything that comes before the predicate in SQL order. A fresh array made
+ * the predicate restart at $1 and collide with the literal $n of the earlier
+ * clauses — invisible to the shape-stub tests (they never bind against real
+ * Postgres), fatal on one. With a single namespace the predicate is a pair of
+ * constant equalities (p1-08); with two+ it is the VALUES pairing, and claimRuns
+ * skips that form entirely by scanning once per namespace. These pin the
+ * concrete statement+params pairs, and a generic alignment check (max
+ * placeholder === param count, every $1..$N present) catches any future offset
+ * in any of the paths.
  * ------------------------------------------------------------------------- */
 
 function expectAligned(sql: string, params: unknown[]): void {
@@ -282,7 +301,7 @@ function recordPool(handlers: Array<(sql: string, params: unknown[]) => unknown>
 }
 
 describe('placeholder/param alignment on namespace predicates (P0)', () => {
-  it('claimRuns numbers the namespace VALUES after taskIds + window', async () => {
+  it('claimRuns numbers the namespace pair after taskIds + window, per scan', async () => {
     const { pool, stmts } = claimPool([]);
 
     await claimRuns(pool, {
@@ -293,17 +312,25 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
       leaseMs: 60_000,
     });
 
-    const cand = stmts.find((s) => /FROM queue q/.test(s.sql))!;
-    expectAligned(cand.sql, cand.params);
-    // $1 taskIds, $2 window, then the two namespace pairs.
-    expect(cand.params).toEqual([['t'], 10, 'acme', 'staging', 'acme', 'prod']);
-    expect(cand.sql).toMatch(
-      /JOIN runs r ON r\.id = q\.run_id\s+AND r\.project_id = q\.project_id AND r\.env = q\.env/,
-    );
-    expect(cand.sql).toMatch(/\(VALUES \(\$3::text, \$4::text\), \(\$5::text, \$6::text\)\)/);
+    const cands = stmts.filter((s) => /FROM queue q/.test(s.sql));
+    // p1-08: one scan per namespace — each carries its OWN ns pair, so there
+    // is no VALUES list to align, just two constant equalities (q + r) sharing
+    // one param pair.
+    expect(cands).toHaveLength(2);
+    for (const cand of cands) {
+      expectAligned(cand.sql, cand.params);
+      // $1 taskIds, $2 window, then THIS namespace's pair.
+      expect(cand.sql).toMatch(
+        /JOIN runs r ON r\.id = q\.run_id\s+AND r\.project_id = q\.project_id AND r\.env = q\.env/,
+      );
+      expect(cand.sql).toMatch(/q\.project_id = \$3::text AND q\.env = \$4::text/);
+      expect(cand.sql).toMatch(/r\.project_id = \$3::text AND r\.env = \$4::text/);
+    }
+    expect(cands[0]!.params).toEqual([['t'], 10, 'acme', 'staging']);
+    expect(cands[1]!.params).toEqual([['t'], 10, 'acme', 'prod']);
   });
 
-  it('claimRuns pinned numbers the namespace VALUES after the code versions', async () => {
+  it('claimRuns pinned numbers the namespace pair after the code versions', async () => {
     const { pool, stmts } = claimPool([]);
 
     await claimRuns(pool, {
@@ -320,7 +347,8 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
     // $1 taskIds, $2 window, $3 codeVersions, then the namespace pair.
     expect(cand.params).toEqual([['t'], 10, ['v1'], 'acme', 'staging']);
     expect(cand.sql).toMatch(/unnest\(\$1::text\[\], \$3::text\[\]\)/);
-    expect(cand.sql).toMatch(/\(VALUES \(\$4::text, \$5::text\)\)/);
+    expect(cand.sql).toMatch(/q\.project_id = \$4::text AND q\.env = \$5::text/);
+    expect(cand.sql).toMatch(/r\.project_id = \$4::text AND r\.env = \$5::text/);
   });
 
   it('heartbeat numbers the renewal and cancel-check predicates after their clauses', async () => {
@@ -340,13 +368,13 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
     expectAligned(renew.sql, renew.params);
     // $1 leaseMs, $2 workerId, $3 runIds, then the namespace pair.
     expect(renew.params).toEqual(['60000', 'w1', ['r1', 'r2'], 'acme', 'staging']);
-    expect(renew.sql).toMatch(/\(VALUES \(\$4::text, \$5::text\)\)/);
+    expect(renew.sql).toMatch(/queue\.project_id = \$4::text AND queue\.env = \$5::text/);
 
     const cancel = stmts.find((s) => /SELECT id FROM runs/.test(s.sql))!;
     expectAligned(cancel.sql, cancel.params);
     // $1 runIds, then the namespace pair.
     expect(cancel.params).toEqual([['r1', 'r2'], 'acme', 'staging']);
-    expect(cancel.sql).toMatch(/\(VALUES \(\$2::text, \$3::text\)\)/);
+    expect(cancel.sql).toMatch(/runs\.project_id = \$2::text AND runs\.env = \$3::text/);
   });
 
   it('scanStrandedRuns numbers the predicate after the LIMIT param', async () => {
@@ -365,7 +393,7 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
     expectAligned(sqls[0]!, paramLists[0]!);
     // $1 = the cap+1 limit, then the namespace pair.
     expect(paramLists[0]).toEqual([21, 'acme', 'staging']);
-    expect(sqls[0]).toMatch(/\(VALUES \(\$2::text, \$3::text\)\)/);
+    expect(sqls[0]).toMatch(/r\.project_id = \$2::text AND r\.env = \$3::text/);
   });
 
   it('prune countPrunable numbers the predicate after cutoff + statuses', async () => {
@@ -394,7 +422,7 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
     // the namespace pair.
     expect(doomed.params[0]).toBeInstanceOf(Date);
     expect(doomed.params.slice(1)).toEqual([statuses, 'acme', 'staging']);
-    expect(doomed.sql).toMatch(/\(VALUES \(\$3::text, \$4::text\)\)/);
+    expect(doomed.sql).toMatch(/r\.project_id = \$3::text AND r\.env = \$4::text/);
   });
 
   it('prune deleteBatch numbers the predicate after cutoff + statuses + limit', async () => {
@@ -415,7 +443,7 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
     expect(ids.params[0]).toBeInstanceOf(Date);
     expect(ids.params.slice(1)).toEqual([statuses, 2, 'acme', 'staging']);
     expect(ids.sql).toMatch(/LIMIT \$3/);
-    expect(ids.sql).toMatch(/\(VALUES \(\$4::text, \$5::text\)\)/);
+    expect(ids.sql).toMatch(/r\.project_id = \$4::text AND r\.env = \$5::text/);
   });
 
   it('releaseClaims numbers the predicate after the worker id', async () => {
@@ -432,7 +460,7 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
     expectAligned(held.sql, held.params);
     // $1 workerId (locked_by), then the namespace pair.
     expect(held.params).toEqual(['w1', 'acme', 'staging']);
-    expect(held.sql).toMatch(/\(VALUES \(\$2::text, \$3::text\)\)/);
+    expect(held.sql).toMatch(/queue\.project_id = \$2::text AND queue\.env = \$3::text/);
   });
 });
 
@@ -467,9 +495,10 @@ const ALLOWED_WITHOUT_MARKER: RegExp[] = [
 
 /**
  * A statement that interpolates the kernel's namespace predicate helper
- * (`namespacePredicate()` in queue.ts, which emits `(alias.project_id,
- * alias.env) IN (VALUES …)` by construction) is scoped even though the
- * marker text only exists at runtime.
+ * (`namespacePredicate()` / `nsPredicateFor()` in queue.ts — constant
+ * equalities for one namespace, the `(alias.project_id, alias.env) IN (VALUES
+ * …)` pairing for two+) is scoped even though the marker text only exists at
+ * runtime.
  */
 const PREDICATE_INTERPOLATION = /\$\{[a-zA-Z]*Predicate\}/;
 

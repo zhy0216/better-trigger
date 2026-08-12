@@ -12,8 +12,13 @@ import { assertIndexScan, describePg, planNodeTypes, withPg } from './helpers';
 
    Each query below is a VERBATIM copy of the one the kernel actually runs —
    a bench that measures a query nobody runs proves nothing:
-     - CANDIDATE_SQL: queue.ts claimRuns (the unpinned branch), also verbatim
-       in examples/basic/scripts/claim-scan-bench.ts.
+     - CANDIDATE_NS_SQL / CANDIDATE_SQL: queue.ts claimRuns (the unpinned
+       branch). claimRuns scans once PER NAMESPACE (p1-08), each scan a pair
+       of constant equalities (nsPredicateFor('q', ns, params)) — CANDIDATE_NS_SQL
+       is that per-namespace scan verbatim, the query that must bind
+       queue_claimable_idx even when the worker serves ≥2 namespaces.
+       CANDIDATE_SQL is the same single-namespace scan, also verbatim in
+       examples/basic/scripts/claim-scan-bench.ts.
      - STEP_SQL / LOGS_SQL: runs.ts snapshotRun (run detail page).
       - TIMER_WAITS_SQL / ORPHAN_WAITS_SQL: orchestrator.ts scanWaits phase 1
         (the due-wait sweep, split into a timer scan and an orphan scan).
@@ -38,7 +43,11 @@ const LIMIT = 100;
 /** Default namespace the seed rows live in (table defaults). */
 const NS = ['default', 'prod'];
 
-/** The unpinned claim candidate SELECT — queue.ts claimRuns, verbatim. */
+/** The unpinned claim candidate SELECT — queue.ts claimRuns, verbatim. This is
+ *  the single-namespace scan a claim call issues (p1-08: one scan per
+ *  namespace, each a pair of constant equalities — the q-side binds
+ *  queue_claimable_idx's leading (project_id, env) columns directly, the r-side
+ *  repeats the equality so the semantics are explicit). */
 const CANDIDATE_SQL = `SELECT q.id AS queue_id, q.run_id,
           r.task_id, r.payload, r.attempt, r.max_attempts,
           r.code_version, r.project_id, r.env, r.concurrency_key,
@@ -49,11 +58,37 @@ const CANDIDATE_SQL = `SELECT q.id AS queue_id, q.run_id,
      LEFT JOIN tasks t ON t.id = r.task_id
                 AND t.project_id = r.project_id AND t.env = r.env
     WHERE q.available_at <= now() AND q.locked_by IS NULL
-      AND (r.project_id, r.env) IN (VALUES ($3::text, $4::text))
+      AND q.project_id = $3::text AND q.env = $4::text
+      AND r.project_id = $3::text AND r.env = $4::text
       AND r.task_id = ANY($1::text[])
     ORDER BY q.priority DESC, q.id ASC
     LIMIT $2
     FOR UPDATE OF q SKIP LOCKED`;
+
+/** The per-namespace claim scan — queue.ts claimRuns (the unpinned branch),
+ *  verbatim. p1-08 splits the claim loop into one scan PER NAMESPACE: the
+ *  q-side predicate is nsPredicateFor('q', ns, params), numbered from $3
+ *  (after $1 task ids, $2 window); the r-side repeats the same $3/$4 pair.
+ *  Constant equalities on both sides bind queue_claimable_idx's leading
+ *  (project_id, env) columns directly even with ≥2 namespaces — the pre-p1-08
+ *  VALUES semi-join over every namespace at once is what abandoned the index.
+ *  Params: [taskIds, window, projectId, env]. */
+const CANDIDATE_NS_SQL = `SELECT q.id AS queue_id, q.run_id,
+      r.task_id, r.payload, r.attempt, r.max_attempts,
+      r.code_version, r.project_id, r.env, r.concurrency_key,
+      t.concurrency_limit
+   FROM queue q
+   JOIN runs r ON r.id = q.run_id
+              AND r.project_id = q.project_id AND r.env = q.env
+   LEFT JOIN tasks t ON t.id = r.task_id
+              AND t.project_id = r.project_id AND t.env = r.env
+  WHERE q.available_at <= now() AND q.locked_by IS NULL
+    AND q.project_id = $3::text AND q.env = $4::text
+    AND r.project_id = $3::text AND r.env = $4::text
+    AND r.task_id = ANY($1::text[])
+  ORDER BY q.priority DESC, q.id ASC
+  LIMIT $2
+  FOR UPDATE OF q SKIP LOCKED`;
 
 /** The claim-time step snapshot — queue.ts claimRuns, verbatim. */
 const STEP_SQL = `SELECT seq, kind, label, status, output, error, fingerprint
@@ -65,23 +100,25 @@ const LOGS_SQL = `SELECT id, step_seq, level, message, data, ts
      FROM logs WHERE run_id = $1 AND project_id = $2 AND env = $3
     ORDER BY id DESC LIMIT $4`;
 
-/** The due timer-wait scan — orchestrator.ts scanWaits phase 1, verbatim. */
+/** The due timer-wait scan — orchestrator.ts scanWaits phase 1, verbatim
+ *  (the per-namespace form via nsPredicateFor — p1-08). */
 const TIMER_WAITS_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
      FROM waits
     WHERE status = 'pending'
       AND kind IN ('duration','until')
       AND resume_at <= now()
-      AND (waits.project_id, waits.env) IN (VALUES ($1::text, $2::text))
+      AND waits.project_id = $1::text AND waits.env = $2::text
     ORDER BY resume_at ASC
     LIMIT 50`;
 
-/** The orphan run-wait scan — orchestrator.ts scanWaits phase 1, verbatim. */
+/** The orphan run-wait scan — orchestrator.ts scanWaits phase 1, verbatim
+ *  (the per-namespace form via nsPredicateFor — p1-08). */
 const ORPHAN_WAITS_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
      FROM waits
     WHERE status = 'pending'
       AND kind = 'run'
       AND child_run_id IS NULL
-      AND (waits.project_id, waits.env) IN (VALUES ($1::text, $2::text))
+      AND waits.project_id = $1::text AND waits.env = $2::text
     ORDER BY id ASC
     LIMIT 10`;
 
@@ -117,6 +154,47 @@ async function seedRuns(pool: Parameters<typeof assertIndexScan>[0], n: number, 
               CASE WHEN g % 10 = 0 THEN 1 + (g % 5) ELSE 0 END
          FROM generate_series(0, $1::int - 1) g`,
     [n, tasks, Math.floor(n / 2)],
+  );
+}
+
+/** Seed one namespace's claim backlog: `total` runs + queue rows across
+ *  `tasks` task ids, `claimable` of them unlocked. The queue rows are
+ *  md5-scattered so the claimable subset is not one contiguous block a
+ *  sequential scan would find immediately (mirrors the claim-scan bench).
+ *  `runPrefix` disambiguates run ids across namespaces (queue.run_id is
+ *  globally unique); rows land in `projectId`/prod. */
+async function seedClaimBacklog(
+  pool: Parameters<typeof assertIndexScan>[0],
+  total: number,
+  tasks: number,
+  claimable: number,
+  projectId: string,
+  runPrefix: string,
+) {
+  await pool.query(
+    `INSERT INTO runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority, project_id, env)
+       SELECT $3::text || g,
+              'task-' || (g % $2::int),
+              CASE WHEN g < $4::int THEN 'queued' ELSE 'running' END,
+              jsonb_build_object('n', g),
+              'api', 1, 3,
+              CASE WHEN g % 10 = 0 THEN 1 + (g % 5) ELSE 0 END,
+              $5, 'prod'
+         FROM generate_series(0, $1::int - 1) g`,
+    [total, tasks, runPrefix, Math.floor(total / 2), projectId],
+  );
+  await pool.query(
+    `INSERT INTO queue (run_id, available_at, priority, locked_by, locked_at, lease_until, project_id, env)
+       SELECT $3::text || g,
+              now() - interval '1 minute',
+              CASE WHEN g % 10 = 0 THEN 1 + (g % 5) ELSE 0 END,
+              CASE WHEN g < $4::int THEN NULL ELSE 'worker-' || (g % $2::int) END,
+              CASE WHEN g < $4::int THEN NULL ELSE now() - interval '30 seconds' END,
+              CASE WHEN g < $4::int THEN NULL ELSE now() + interval '30 seconds' END,
+              $5, 'prod'
+         FROM generate_series(0, $1::int - 1) g
+        ORDER BY md5(g::text)`,
+    [total, tasks, runPrefix, claimable, projectId],
   );
 }
 
@@ -184,21 +262,7 @@ describePg('index plans', () => {
            SELECT 'task-' || g, 'task ' || g, 'api' FROM generate_series(0, $1::int) g`,
         [TASKS - 1],
       );
-      await seedRuns(pool, TOTAL, TASKS);
-      // md5-scattered so the claimable subset is not one contiguous block a
-      // sequential scan would find immediately (mirrors the claim-scan bench).
-      await pool.query(
-        `INSERT INTO queue (run_id, available_at, priority, locked_by, locked_at, lease_until)
-           SELECT 'run-' || g,
-                  now() - interval '1 minute',
-                  CASE WHEN g % 10 = 0 THEN 1 + (g % 5) ELSE 0 END,
-                  CASE WHEN g < $3::int THEN NULL ELSE 'worker-' || (g % $2::int) END,
-                  CASE WHEN g < $3::int THEN NULL ELSE now() - interval '30 seconds' END,
-                  CASE WHEN g < $3::int THEN NULL ELSE now() + interval '30 seconds' END
-             FROM generate_series(0, $1::int - 1) g
-            ORDER BY md5(g::text)`,
-        [TOTAL, TASKS, CLAIMABLE],
-      );
+      await seedClaimBacklog(pool, TOTAL, TASKS, CLAIMABLE, 'default', 'run-');
       await pool.query('VACUUM ANALYZE tasks, runs, queue');
 
       const taskIds = Array.from({ length: TASKS }, (_, i) => `task-${i}`);
@@ -212,6 +276,41 @@ describePg('index plans', () => {
       // scan stops at the LIMIT; a Sort here means the LIMIT no longer bounds
       // the work and every claimable row gets ordered on every poll.
       expect(planNodeTypes(JSON.parse(plan))).not.toContain('Sort');
+    });
+  });
+
+  it('claim candidate scan per namespace is an Index Scan on queue_claimable_idx even with 2 namespaces', async () => {
+    await withPg('plans_claim_ns', async ({ pool }) => {
+      const TASKS = 8;
+      const TOTAL = 5000;
+      // 10% unclaimed — a busy backlog is mostly rows some worker holds, and
+      // those are exactly the rows the partial index must let the scan skip.
+      const CLAIMABLE = 500;
+      await pool.query(
+        `INSERT INTO tasks (id, name, trigger_source)
+           SELECT 'task-' || g, 'task ' || g, 'api' FROM generate_series(0, $1::int) g`,
+        [TASKS - 1],
+      );
+      // Two namespaces live side by side: the default backlog plus a second
+      // (acme) one. queue.run_id is globally unique, so the second namespace's
+      // runs get their own run-id prefix. claimRuns issues CANDIDATE_NS_SQL
+      // once per namespace — a worker serving ≥2 namespaces must still bind
+      // queue_claimable_idx per scan (p1-08; the VALUES semi-join the old
+      // single multi-namespace query used abandoned the index).
+      await seedClaimBacklog(pool, TOTAL, TASKS, CLAIMABLE, 'default', 'run-');
+      await seedClaimBacklog(pool, TOTAL, TASKS, CLAIMABLE, 'acme', 'run-acme-');
+      await pool.query('VACUUM ANALYZE tasks, runs, queue');
+
+      const taskIds = Array.from({ length: TASKS }, (_, i) => `task-${i}`);
+      for (const ns of [['default', 'prod'], ['acme', 'prod']] as const) {
+        const plan = await assertIndexScan(
+          pool,
+          CANDIDATE_NS_SQL,
+          [taskIds, CLAIM_WINDOW, ...ns],
+          'queue',
+        );
+        expect(planNodeTypes(JSON.parse(plan))).not.toContain('Sort');
+      }
     });
   });
 
