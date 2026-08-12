@@ -290,4 +290,41 @@ describe('scanWaits lock acquisition', () => {
       texts.some((t) => /INSERT INTO run_steps/.test(t) && /status <> 'completed'/.test(t)),
     ).toBe(true);
   }, 10_000);
+
+  it('phase 1 issues TWO scans — timer waits and orphan run-waits — each with its own LIMIT', async () => {
+    // A timer backlog must never crowd orphan run-waits out of the phase-1
+    // window (C5), so the scan is split: the timer query keeps the resume_at
+    // order, the orphan query orders by id with its own independent LIMIT.
+    // Prove the split structurally by capturing the SQL texts scanWaits issues.
+    const { pool, texts } = stubPool({
+      due: [{ id: 1, runId: 'run_a', stepSeq: 1 }],
+    });
+
+    const handle = startOrchestrator(pool, logger, WAITS_ONLY);
+    try {
+      await waitFor(() => texts.some((t) => /kind = 'run'[\s\S]*child_run_id IS NULL/.test(t)));
+    } finally {
+      handle.stop();
+    }
+
+    const timerQuery = texts.find(
+      (t) => /FROM waits/.test(t) && /resume_at <= now\(\)/.test(t),
+    );
+    const orphanQuery = texts.find((t) => /kind = 'run'[\s\S]*child_run_id IS NULL/.test(t));
+
+    expect(timerQuery).toBeDefined();
+    expect(orphanQuery).toBeDefined();
+    // The timer scan keeps the resume path's ordering and predicate ...
+    expect(timerQuery!).toMatch(/resume_at <= now\(\)/);
+    expect(timerQuery!).toMatch(/ORDER BY resume_at ASC/);
+    // ... and is free of the orphan predicate: the two classes are separate
+    // queries, so due timers can never push orphans out of the LIMIT.
+    expect(timerQuery!).not.toMatch(/child_run_id IS NULL/);
+    // The orphan scan is its own statement with its own LIMIT, ordered by id
+    // (it has no resume_at to order by).
+    expect(orphanQuery!).toMatch(/kind = 'run'[\s\S]*child_run_id IS NULL/);
+    expect(orphanQuery!).toMatch(/ORDER BY id ASC/);
+    expect(orphanQuery!).toMatch(/LIMIT 10/);
+    expect(orphanQuery!).not.toMatch(/resume_at <= now\(\)/);
+  }, 10_000);
 });

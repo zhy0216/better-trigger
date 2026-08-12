@@ -102,6 +102,11 @@ function stubPool(opts: {
     connect: async () => client,
     query: (async (text: string, params?: unknown[]) => {
       if (!opts.phase1) return { rows: [] };
+      // scanWaits phase 1 runs TWO scans (p1-05): the timer due scan and the
+      // orphan run-wait scan. The phase1 stub answers the timer scan; the
+      // orphan scan is a separate LIMIT-10 query and must return nothing here
+      // (it would otherwise hand the same due rows back a second time).
+      if (/child_run_id IS NULL/.test(text)) return { rows: [] };
       return opts.phase1(text, params);
     }) as Pool['query'],
   } as unknown as Pool;

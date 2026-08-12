@@ -296,10 +296,17 @@ export function startOrchestrator(
     // (duration string / until instant) when it suspended, and the resume must
     // stamp the completed step row with that same value (C1). project_id/env
     // ride along so every statement below re-scopes on the wait's namespace
-    // (C2) — a staging daemon never resumes prod waits. Orphan run-waits sort
-    // first (resume_at IS NULL, NULLS FIRST in ASC), so they are recovered
-    // before due timer waits rather than crowding them out of the LIMIT.
-    const due = await pool.query<{
+    // (C2) — a staging daemon never resumes prod waits.
+    //
+    // The scan is split into TWO queries with independent LIMITs so the two
+    // classes can never crowd each other out of the window. Postgres sorts
+    // ASC NULLS LAST, so a single query ordering by resume_at would push every
+    // orphan run-wait (resume_at IS NULL) behind all due timer waits; once 50
+    // timer waits are due per tick, orphans would never enter the LIMIT window
+    // and C5 recovery would starve. Each scan gets its own LIMIT instead: the
+    // timer scan keeps the resume_at order, the orphan scan orders by id (it
+    // has no resume_at to order by). Phase 2 below iterates the combined rows.
+    type WaitRow = {
       id: number;
       run_id: string;
       project_id: string;
@@ -308,19 +315,34 @@ export function startOrchestrator(
       fingerprint: string | null;
       kind: string;
       child_run_id: string | null;
-    }>(
+    };
+    const timerRows = await pool.query<WaitRow>(
       `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
          FROM waits
         WHERE status = 'pending'
-          AND (
-                (kind IN ('duration','until') AND resume_at <= now())
-             OR (kind = 'run' AND child_run_id IS NULL)
-          )
+          AND kind IN ('duration','until')
+          AND resume_at <= now()
           AND ${nsPredicate}
         ORDER BY resume_at ASC
         LIMIT 50`,
       nsParams,
     );
+    // namespacePredicate pushes into nsParams, so the orphan scan cannot reuse
+    // it as a live buffer — copy the already-flattened values into a fresh
+    // array so $1..$2n still line up with the shared nsPredicate string.
+    const orphanNsParams = [...nsParams];
+    const orphanRows = await pool.query<WaitRow>(
+      `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
+         FROM waits
+        WHERE status = 'pending'
+          AND kind = 'run'
+          AND child_run_id IS NULL
+          AND ${nsPredicate}
+        ORDER BY id ASC
+        LIMIT 10`,
+      orphanNsParams,
+    );
+    const due = { rows: [...timerRows.rows, ...orphanRows.rows] };
 
     // Phase 2 — one short tx per wait, acquiring the canonical lock order
     // (queue → runs → wait row; see runs.ts header) and re-checking the wait

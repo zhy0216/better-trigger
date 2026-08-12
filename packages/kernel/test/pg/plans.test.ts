@@ -15,7 +15,8 @@ import { assertIndexScan, describePg, planNodeTypes, withPg } from './helpers';
      - CANDIDATE_SQL: queue.ts claimRuns (the unpinned branch), also verbatim
        in examples/basic/scripts/claim-scan-bench.ts.
      - STEP_SQL / LOGS_SQL: runs.ts snapshotRun (run detail page).
-     - WAITS_SQL: orchestrator.ts scanWaits phase 1 (the due-wait sweep).
+      - TIMER_WAITS_SQL / ORPHAN_WAITS_SQL: orchestrator.ts scanWaits phase 1
+        (the due-wait sweep, split into a timer scan and an orphan scan).
      - RUNS_SQL: runs.ts getRunRow / lockRunRow (runs PK detail).
 
    Plans are only pinned where they are CORRECT today. The waits run_id wake
@@ -63,17 +64,25 @@ const LOGS_SQL = `SELECT id, step_seq, level, message, data, ts
      FROM logs WHERE run_id = $1 AND project_id = $2 AND env = $3
     ORDER BY id DESC LIMIT $4`;
 
-/** The due-wait sweep — orchestrator.ts scanWaits phase 1, verbatim. */
-const WAITS_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
+/** The due timer-wait scan — orchestrator.ts scanWaits phase 1, verbatim. */
+const TIMER_WAITS_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
      FROM waits
     WHERE status = 'pending'
-      AND (
-            (kind IN ('duration','until') AND resume_at <= now())
-         OR (kind = 'run' AND child_run_id IS NULL)
-      )
-      AND (project_id, env) IN (VALUES ($1::text, $2::text))
+      AND kind IN ('duration','until')
+      AND resume_at <= now()
+      AND (waits.project_id, waits.env) IN (VALUES ($1::text, $2::text))
     ORDER BY resume_at ASC
     LIMIT 50`;
+
+/** The orphan run-wait scan — orchestrator.ts scanWaits phase 1, verbatim. */
+const ORPHAN_WAITS_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
+     FROM waits
+    WHERE status = 'pending'
+      AND kind = 'run'
+      AND child_run_id IS NULL
+      AND (waits.project_id, waits.env) IN (VALUES ($1::text, $2::text))
+    ORDER BY id ASC
+    LIMIT 10`;
 
 /** The runs-row read — runs.ts getRunRow / lockRunRow, verbatim. */
 const RUNS_SQL = `SELECT id, task_id, status, attempt, max_attempts,
@@ -94,6 +103,22 @@ async function seedRuns(pool: Parameters<typeof assertIndexScan>[0], n: number, 
               CASE WHEN g % 10 = 0 THEN 1 + (g % 5) ELSE 0 END
          FROM generate_series(0, $1::int - 1) g`,
     [n, tasks, Math.floor(n / 2)],
+  );
+}
+
+/** Seed a mixed waits backlog: due timer waits (kind duration/until, resume_at
+ *  in the past) + orphan run-waits (kind run, child_run_id NULL — the C5
+ *  branch), with some resolved rows the 'pending' predicate must skip. */
+async function seedWaits(pool: Parameters<typeof assertIndexScan>[0], n: number, runs: number) {
+  await pool.query(
+    `INSERT INTO waits (run_id, step_seq, kind, resume_at, status, project_id, env)
+       SELECT 'run-' || (g % $2::int), g % 100,
+              CASE WHEN g % 10 = 0 THEN 'run' ELSE 'duration' END,
+              CASE WHEN g % 10 = 0 THEN NULL ELSE now() - interval '1 minute' END,
+              CASE WHEN g % 4 = 0 THEN 'completed' ELSE 'pending' END,
+              'default', 'prod'
+         FROM generate_series(0, $1::int - 1) g`,
+    [n, runs],
   );
 }
 
@@ -185,26 +210,25 @@ describePg('index plans', () => {
     });
   });
 
-  it('wait-due sweep is an Index Scan on waits_status_resume_idx', async () => {
-    await withPg('plans_waits', async ({ pool }) => {
+  it('timer wait-due sweep is an Index Scan on waits_status_resume_idx', async () => {
+    await withPg('plans_waits_timer', async ({ pool }) => {
       const RUNS = 8000;
       await seedRuns(pool, RUNS, 1);
-      // A mixed backlog: due timer waits (kind duration/until, resume_at in the
-      // past) + orphan run-waits (kind run, child_run_id NULL — the C5 branch),
-      // with some resolved rows the 'pending' predicate must skip.
-      await pool.query(
-        `INSERT INTO waits (run_id, step_seq, kind, resume_at, status, project_id, env)
-           SELECT 'run-' || (g % $2::int), g % 100,
-                  CASE WHEN g % 10 = 0 THEN 'run' ELSE 'duration' END,
-                  CASE WHEN g % 10 = 0 THEN NULL ELSE now() - interval '1 minute' END,
-                  CASE WHEN g % 4 = 0 THEN 'completed' ELSE 'pending' END,
-                  'default', 'prod'
-             FROM generate_series(0, $1::int - 1) g`,
-        [20000, RUNS],
-      );
+      await seedWaits(pool, 20000, RUNS);
       await pool.query('ANALYZE runs, waits');
 
-      await assertIndexScan(pool, WAITS_SQL, [...NS], 'waits');
+      await assertIndexScan(pool, TIMER_WAITS_SQL, [...NS], 'waits');
+    });
+  });
+
+  it('orphan run-wait sweep is an Index Scan on the waits PK', async () => {
+    await withPg('plans_waits_orphan', async ({ pool }) => {
+      const RUNS = 8000;
+      await seedRuns(pool, RUNS, 1);
+      await seedWaits(pool, 20000, RUNS);
+      await pool.query('ANALYZE runs, waits');
+
+      await assertIndexScan(pool, ORPHAN_WAITS_SQL, [...NS], 'waits');
     });
   });
 
