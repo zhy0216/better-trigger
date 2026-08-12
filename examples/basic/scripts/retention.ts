@@ -150,11 +150,21 @@ async function main(s: Scenario): Promise<void> {
     }
 
     const migrationsDir = fileURLToPath(new URL('../../../packages/db/migrations', import.meta.url));
-    // p1-06: 0012 (waits_run_idx) is the current newest migration; re-running
-    // 0011 requires deleting every younger journal record too, and its index
-    // must be gone or 0012's CREATE INDEX fails on re-apply.
+    // Re-running 0011 means making it (and everything younger) the newest
+    // migration again: de-journal 0011/0012/0013 and undo their schema effects
+    // so the re-migrate re-applies them cleanly — 0012's CREATE INDEX needs
+    // waits_run_idx gone, and 0013's DROP INDEX needs queue_available_priority_idx
+    // to exist first (it is the pre-0013 shape the fixture rebuilds).
     await s.pool.query(`DROP INDEX IF EXISTS waits_run_idx`);
-    for (const file of ['0011_thick_rage.sql', '0012_massive_punisher.sql']) {
+    await s.pool.query(
+      `CREATE INDEX "queue_available_priority_idx" ON "queue"
+         USING btree ("project_id", "env", "available_at", "priority" DESC NULLS LAST)`,
+    );
+    for (const file of [
+      '0011_thick_rage.sql',
+      '0012_massive_punisher.sql',
+      '0013_cool_nomad.sql',
+    ]) {
       const sql = readFileSync(`${migrationsDir}/${file}`, 'utf8');
       const hash = createHash('sha256').update(sql).digest('hex');
       await s.pool.query(`DELETE FROM drizzle.__drizzle_migrations WHERE hash = $1`, [hash]);

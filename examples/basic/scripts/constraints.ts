@@ -382,10 +382,18 @@ async function main(s: Scenario): Promise<void> {
     for (const c of checkTables) {
       await s.pool.query(`ALTER TABLE ${c.table} DROP CONSTRAINT ${c.name}`);
     }
+    // Undo the schema effects of the migrations younger than 0011 so the
+    // re-migrate re-applies them cleanly: 0012's CREATE INDEX needs waits_run_idx
+    // gone, and 0013's DROP INDEX needs queue_available_priority_idx to exist
+    // first (the pre-0013 shape this fixture rebuilds). De-journal 0011+0012+0013.
     await s.pool.query(`DROP INDEX IF EXISTS waits_run_idx`);
     await s.pool.query(
+      `CREATE INDEX "queue_available_priority_idx" ON "queue"
+         USING btree ("project_id", "env", "available_at", "priority" DESC NULLS LAST)`,
+    );
+    await s.pool.query(
       `DELETE FROM drizzle.__drizzle_migrations WHERE hash IN (
-         SELECT hash FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 2)`,
+         SELECT hash FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 3)`,
     );
     // Orphan queue row + orphan wait (run_id and child_run_id variants) +
     // orphan parent_run_id + orphan schedule, all pointing at 'run_gone'.

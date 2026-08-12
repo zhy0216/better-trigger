@@ -219,7 +219,12 @@ export const queue = pgTable(
   (t) => [
     // Namespace prefix on every index: the claim/reaper/scan loops all filter
     // by (project_id, env) first (C2).
-    index('queue_available_priority_idx').on(t.projectId, t.env, t.availableAt, t.priority.desc()),
+    // Deliberately KEPT though the kernel does not query it today: the
+    // concurrency running-count reads runs.concurrency_key, and moving that
+    // count onto the queue (where it belongs once claims own the key) will
+    // need this exact (project_id, env, concurrency_key) shape. Removing it
+    // would be reclaiming bytes on the hottest table at the cost of a forced
+    // migration later (p2-29).
     index('queue_concurrency_idx').on(t.projectId, t.env, t.concurrencyKey),
     // Partial, backing the reaper's expired-lease scan every 10s
     // (WHERE lease_until IS NOT NULL AND lease_until <= now() ORDER BY
