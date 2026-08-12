@@ -475,7 +475,36 @@ const SWEEP_FILES = ['queue.ts', 'runs.ts', 'orchestrator.ts', 'workers.ts', 'pr
  *  project_id / env / namespaces somewhere. */
 const SCOPED_TABLES = /\b(runs|queue|waits|run_steps|logs|tasks|schedules)\b/;
 const SQLISH = /\b(INSERT INTO|UPDATE|DELETE FROM|SELECT|WITH)\b/;
-const NS_MARKER = /(project_id|env|namespaces)/;
+
+/**
+ * The PREDICATE region of a statement — where a namespace marker has to live.
+ * For SELECT/UPDATE/DELETE that is everything from the first WHERE on (WHERE,
+ * ON CONFLICT, RETURNING all live there); for INSERT it is the column list
+ * between the table and VALUES, which must itself name the namespace columns
+ * (an INSERT's own `WHERE` belongs to ON CONFLICT and is NOT where the
+ * namespace is declared). A `project_id` that appears ONLY in a SELECT list (a
+ * read-back of already-scoped columns) must NOT satisfy the check — that is
+ * exactly the leak the sweep exists to catch (p2-28).
+ */
+function predicateRegion(sql: string): string {
+  const insertCols = /INSERT INTO \w+\s+\((.*?)\)/s.exec(sql);
+  if (insertCols) return insertCols[1]!;
+  const where = sql.search(/\bWHERE\b/);
+  if (where !== -1) return sql.slice(where);
+  return sql;
+}
+
+/**
+ * A scoped-table statement is namespace-scoped iff its PREDICATE region names
+ * BOTH project_id and env (constant equalities, the `(a.project_id, a.env) IN
+ * (VALUES …)` pairing, or an INSERT column list carrying both), or references
+ * the workers `namespaces` jsonb column.
+ */
+function hasNamespaceMarker(sql: string): boolean {
+  const region = predicateRegion(sql);
+  return /\bproject_id\b/.test(region) && /\benv\b/.test(region) ||
+    /\bnamespaces\b/.test(region);
+}
 
 /**
  * Statements that are legitimately namespace-free. Each entry is a deliberate
@@ -498,9 +527,10 @@ const ALLOWED_WITHOUT_MARKER: RegExp[] = [
  * (`namespacePredicate()` / `nsPredicateFor()` in queue.ts — constant
  * equalities for one namespace, the `(alias.project_id, alias.env) IN (VALUES
  * …)` pairing for two+) is scoped even though the marker text only exists at
- * runtime.
+ * runtime. Matches both the `…NsPredicate` names and the p1-08 per-namespace
+ * loops' lowercase `…${predicate}` interpolation.
  */
-const PREDICATE_INTERPOLATION = /\$\{[a-zA-Z]*Predicate\}/;
+const PREDICATE_INTERPOLATION = /\$\{[^}]*predicate\}/i;
 
 /** Every template literal of a source file, comments stripped. */
 function templateLiterals(src: string): string[] {
@@ -556,7 +586,7 @@ describe('every business SQL statement is namespace-scoped (C2)', () => {
     const offenders: { file: string; sql: string }[] = [];
     for (const file of SWEEP_FILES) {
       for (const sql of sqlStatements(file)) {
-        if (NS_MARKER.test(sql)) continue;
+        if (hasNamespaceMarker(sql)) continue;
         if (PREDICATE_INTERPOLATION.test(sql)) continue;
         if (ALLOWED_WITHOUT_MARKER.some((re) => re.test(sql))) continue;
         offenders.push({ file, sql });
@@ -573,5 +603,33 @@ describe('every business SQL statement is namespace-scoped (C2)', () => {
     const all = SWEEP_FILES.flatMap((f) => sqlStatements(f));
     expect(all.length).toBeGreaterThan(20);
     expect(all.some((s) => s.includes('project_id'))).toBe(true);
+  });
+
+  it('a SELECT-list-only project_id does NOT satisfy the marker (p2-28)', () => {
+    // The hole the tightened marker closes: a statement that READS the
+    // namespace columns but predicates on nothing namespace-scoped (the old
+    // bare-substring marker let it through). predicateRegion() must cut to
+    // WHERE, so this is flagged.
+    const leaky = `SELECT id, run_id, project_id, env, step_seq, fingerprint
+      FROM waits WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'`;
+    expect(hasNamespaceMarker(leaky)).toBe(false);
+
+    // And a genuinely scoped statement still passes.
+    const scoped = `SELECT id, run_id FROM waits
+      WHERE child_run_id = $1 AND status = 'pending'
+        AND project_id = $2 AND env = $3`;
+    expect(hasNamespaceMarker(scoped)).toBe(true);
+    // The VALUES pairing form also passes.
+    expect(
+      hasNamespaceMarker(
+        `SELECT id FROM runs WHERE (r.project_id, r.env) IN (VALUES ($1::text, $2::text))`,
+      ),
+    ).toBe(true);
+    // An INSERT column list naming both columns passes.
+    expect(
+      hasNamespaceMarker(
+        `INSERT INTO runs (id, project_id, env, status) VALUES ($1, $2, $3, $4)`,
+      ),
+    ).toBe(true);
   });
 });
