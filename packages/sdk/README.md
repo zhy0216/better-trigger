@@ -113,7 +113,7 @@ const trigger = betterTrigger({
 | Member | Description |
 | --- | --- |
 | `trigger(taskOrId, payload, opts?)` | Enqueue one run. → `RunHandle` |
-| `batchTrigger(items)` | Enqueue many runs in one transaction. → `RunHandle[]` |
+| `batchTrigger(items, opts?)` | Enqueue many runs in one all-or-nothing transaction, all in the namespace `opts` (env/projectId) names. → `RunHandle[]` |
 | `cancelRun(runId)` | Cancel a non-terminal run (terminal → no-op). |
 | `retryRun(runId)` | Re-run a failed/canceled run as a **new** run. → `{ runId }` |
 | `getRun(runId)` | Full run record. |
@@ -231,11 +231,15 @@ export const dailyReport = task({
 const run = await sendEmail.trigger({ to: "a@b.com" });
 await sendEmail.trigger({ to: "a@b.com" }, { delay: "10m", idempotencyKey: user.id });
 
-// Many runs
+// Many runs — one all-or-nothing batch in a single namespace
 const handles = await sendEmail.batchTrigger([
   { payload: { to: "a@b.com" } },
   { payload: { to: "b@b.com" } },
-]);
+], { env: "staging" });   // batch-level options name the namespace (env/projectId)
+
+// Per-item options may NOT carry env/projectId — a batch is all-or-nothing in
+// ONE namespace, so a per-item namespace used to be silently dropped (a
+// staging intent creating prod runs). It is a compile error now.
 
 // Trigger a child and durably wait for it (inside a task only)
 const result = await processVideo.triggerAndWait({ url });
@@ -252,9 +256,16 @@ if (result.ok) {
   idempotencyKey?: string;   // re-triggering with the same key returns the existing run
   priority?: number;         // higher-priority runs are claimed first
   concurrencyKey?: string;   // overrides the concurrency.key() result
-  env?: string;              // environment scope
+  env?: string;              // environment scope (defaults to 'prod')
+  projectId?: string;        // project scope (defaults to 'default'); pairs with env
 }
 ```
+
+`env`/`projectId` decide the run's namespace. `batchTrigger` takes them on the
+**batch** call (`batchTrigger(items, { env })`); per-item options are narrowed
+to exclude them. **Inside a running task**, children always inherit the parent's
+namespace, so `env`/`projectId` there is ignored (with a warning) — set the
+namespace at the parent trigger instead.
 
 When `trigger` / `batchTrigger` are called **inside a running task**, they are
 recorded as durable steps automatically — re-triggering on replay is idempotent.

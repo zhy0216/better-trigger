@@ -149,3 +149,30 @@ describe('waitForResult — budget discipline', () => {
     }
   });
 });
+
+describe('batchTrigger — namespace options in the request body (p1-15)', () => {
+  it('sends the batch-level env/projectId as the body options', async () => {
+    const { fetch, calls } = scriptedFetch([
+      new Response(JSON.stringify({ runIds: ['run_1'] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+
+    const handles = await trigger.batchTrigger(
+      [{ taskId: 'hello', payload: { n: 1 } }],
+      { env: 'staging', projectId: 'acme' },
+    );
+
+    expect(handles.map((h) => h.id)).toEqual(['run_1']);
+    expect(calls).toHaveLength(1);
+    const { url, init } = calls[0]!;
+    expect(url).toContain('/api/v1/batch-trigger');
+    // Exactly what apps/worker's routes/trigger.ts reads for the batch.
+    expect(JSON.parse(init.body as string)).toEqual({
+      items: [{ taskId: 'hello', payload: { n: 1 } }],
+      options: { env: 'staging', projectId: 'acme' },
+    });
+  });
+});

@@ -34,10 +34,43 @@ export interface ConcurrencyConfig<TPayload> {
 /** A cron may be a raw 5-field string or a { pattern, timezone } object. */
 export type CronInput = string | CronConfig;
 
+/** Per-item options for batchTrigger. The namespace (env/projectId) is
+ *  deliberately NOT here: a batch is all-or-nothing in ONE namespace (the
+ *  batch-level `options` of batchTrigger), so a per-item env/projectId used to
+ *  typecheck and then be silently dropped — a staging intent creating prod
+ *  runs. Now it is a compile error instead (p1-15). */
+export type BatchItemOptions = Omit<TriggerOptions, 'env' | 'projectId'>;
+
 /** Per-item payload for batchTrigger. */
 export interface BatchItem<TPayload> {
   payload: TPayload;
-  options?: TriggerOptions;
+  options?: BatchItemOptions;
+}
+
+/** Warn when a durable (in-run) trigger/batchTrigger is given an explicit
+ *  env/projectId: children always inherit the parent's namespace, so the value
+ *  is dropped. A compile error where the type can be narrowed (per-item batch
+ *  options), a loud warn where the shared TriggerOptions type cannot. */
+function warnIgnoredNamespace(options?: TriggerOptions): void {
+  if (options && (options.env !== undefined || options.projectId !== undefined)) {
+    console.warn(
+      `better-trigger: a durable trigger inside a run cannot change the namespace — ` +
+        `env/projectId on this call is ignored; the child run inherits the parent's ` +
+        `namespace. (p1-15)`,
+    );
+  }
+}
+
+/** Drop env/projectId from options headed into a durable step. Children always
+ *  inherit the parent's namespace, so the pair cannot be honoured — and it must
+ *  not ride along either, or the same call site with a different env would
+ *  fingerprint a different durable step row (replay drift for a value that is
+ *  ignored anyway, see p1-15). */
+function stripIgnoredNamespace(options?: TriggerOptions): TriggerOptions | undefined {
+  if (!options) return options;
+  if (options.env === undefined && options.projectId === undefined) return options;
+  const { env: _ignoredEnv, projectId: _ignoredProjectId, ...rest } = options;
+  return rest;
 }
 
 /** The object returned by task(); the user's handle to a task. */
@@ -55,10 +88,13 @@ export interface TaskHandle<TPayload, TOutput> {
   trigger(payload: TPayload, options?: TriggerOptions): Promise<RunHandle>;
 
   /**
-   * Trigger many runs. Outside a task → the default betterTrigger() instance.
-   * Inside → durable batch-trigger step. Returns one handle per item, in order.
+   * Trigger many runs. Outside a task → the default betterTrigger() instance,
+   * where `options` (env/projectId) names the namespace the WHOLE batch runs
+   * in. Inside a task → durable batch-trigger step; the children always inherit
+   * the parent's namespace, so `options` carries no namespace there (a set
+   * env/projectId is warned and ignored). Returns one handle per item, in order.
    */
-  batchTrigger(items: Array<BatchItem<TPayload>>): Promise<RunHandle[]>;
+  batchTrigger(items: Array<BatchItem<TPayload>>, options?: TriggerOptions): Promise<RunHandle[]>;
 
   /**
    * Trigger a child run and durably wait for it. MUST be called inside a task.
@@ -228,8 +264,11 @@ function makeHandle<TPayload, TOutput>(
       const executor = currentExecutor();
       if (executor) {
         // Durable: a 1-item batch-trigger step. Label = task id for traceability.
+        // The child inherits the parent's namespace, so an explicit env/projectId
+        // cannot be honoured — warn instead of silently dropping it (p1-15).
+        warnIgnoredNamespace(options);
         const runIds = await executor.durableBatchTrigger(
-          [{ taskId: def.id, payload, options: opts }],
+          [{ taskId: def.id, payload, options: stripIgnoredNamespace(opts) }],
           `trigger:${def.id}`,
         );
         // The child lives in the parent's namespace — carry it on the handle so
@@ -239,7 +278,7 @@ function makeHandle<TPayload, TOutput>(
       return requireDefaultInstance().trigger(def.id, payload, opts);
     },
 
-    async batchTrigger(items) {
+    async batchTrigger(items, options) {
       const executor = currentExecutor();
       const triggerItems = items.map((it) => ({
         taskId: def.id,
@@ -247,13 +286,17 @@ function makeHandle<TPayload, TOutput>(
         options: withConcurrencyKey(it.payload, it.options),
       }));
       if (executor) {
+        // Children always inherit the parent's namespace (C2); a batch-level
+        // env/projectId cannot be honoured in-run — say so instead of silently
+        // dropping a staging intent.
+        warnIgnoredNamespace(options);
         const runIds = await executor.durableBatchTrigger(
           triggerItems,
           `batchTrigger:${def.id}`,
         );
         return runIds.map((id) => makeRunHandle(id, undefined, undefined, executor.namespace));
       }
-      return requireDefaultInstance().batchTrigger(triggerItems);
+      return requireDefaultInstance().batchTrigger(triggerItems, options);
     },
 
     async triggerAndWait(payload, options) {
@@ -264,7 +307,13 @@ function makeHandle<TPayload, TOutput>(
         );
       }
       const opts = withConcurrencyKey(payload, options);
-      return executor.triggerAndWait<TOutput>(def.id, payload, `triggerAndWait:${def.id}`, opts);
+      warnIgnoredNamespace(options);
+      return executor.triggerAndWait<TOutput>(
+        def.id,
+        payload,
+        `triggerAndWait:${def.id}`,
+        stripIgnoredNamespace(opts),
+      );
     },
   };
 

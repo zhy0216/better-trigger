@@ -6,7 +6,9 @@
    stores) and the executor task (what runs). Everything here is pure — no
    executor in the AsyncLocalStorage, so trigger paths are not exercised.
    ============================================================================= */
-import { describe, expect, it } from 'vitest';
+import type { TriggerItem } from '@better-trigger/core';
+import { describe, expect, it, vi } from 'vitest';
+import { executorStorage, type RunExecutor } from '../src/context';
 import type { RunCtx } from '../src/context';
 import type { AnySchema } from '../src/schema';
 import { normalizeCron, task, toExecutorTask, toManifest, unwrapResult } from '../src/task';
@@ -197,5 +199,105 @@ describe('unwrapResult', () => {
 
   it('falls back to a message naming the run id', () => {
     expect(() => unwrapResult({ ok: false, id: 'run_3' })).toThrow('child run run_3 failed');
+  });
+});
+
+describe('batchTrigger per-item namespace narrowing (p1-15)', () => {
+  const handle = task('typed-batch', noop);
+
+  it('per-item env is a compile error', () => {
+    // Compile-only: the assignment types `BatchItem[]`, never triggering HTTP.
+    const items: Parameters<typeof handle.batchTrigger>[0] = [
+      { payload: { n: 1 } },
+      {
+        payload: { n: 2 },
+        // @ts-expect-error — per-item env would be silently dropped (p1-15)
+        options: { env: 'staging' },
+      },
+    ];
+    expect(items).toHaveLength(2);
+  });
+
+  it('per-item projectId is a compile error', () => {
+    const items: Parameters<typeof handle.batchTrigger>[0] = [
+      {
+        payload: { n: 1 },
+        // @ts-expect-error — per-item projectId would be silently dropped (p1-15)
+        options: { projectId: 'acme' },
+      },
+    ];
+    expect(items).toHaveLength(1);
+  });
+
+  it('batch-level env/projectId still typecheck (positive)', () => {
+    // Compile-only: batchTrigger is never invoked, so no instance is needed.
+    expect(handle.id).toBe('typed-batch');
+    const args: Parameters<typeof handle.batchTrigger> = [
+      [{ payload: { n: 1 } }],
+      { env: 'staging', projectId: 'acme' },
+    ];
+    expect(args[0]).toHaveLength(1);
+    expect(args[1]).toEqual({ env: 'staging', projectId: 'acme' });
+  });
+});
+
+describe('durable in-run trigger — namespace warning (p1-15)', () => {
+  const handle = task('durable-trigger', noop);
+
+  it('warns and does not forward env/projectId to the durable batch step', async () => {
+    const durableBatchTrigger = vi.fn(async (_items: TriggerItem[]) => ['run_child']);
+    const executor: RunExecutor = {
+      namespace: { projectId: 'default', env: 'prod' },
+      durableBatchTrigger,
+      triggerAndWait: vi.fn(async () => ({ id: 'run_child', ok: true })),
+    };
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let warned: unknown[] = [];
+    try {
+      await executorStorage.run(executor, async () => {
+        await handle.trigger({ n: 1 }, { env: 'staging', projectId: 'acme' });
+      });
+      warned = warnSpy.mock.calls.map((c) => c[0]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toMatch(/cannot change the namespace/);
+
+    expect(durableBatchTrigger).toHaveBeenCalledTimes(1);
+    const items = durableBatchTrigger.mock.calls[0]?.[0] as TriggerItem[];
+    expect(items[0]?.taskId).toBe('durable-trigger');
+    expect(items[0]?.payload).toEqual({ n: 1 });
+    // env/projectId were warned about and stripped — the child inherits the
+    // parent's namespace, and the pair must not poison the step fingerprint.
+    expect(items[0]?.options).toEqual({});
+  });
+
+  it('triggerAndWait also strips env/projectId and warns', async () => {
+    const triggerAndWait = vi.fn(async (_taskId: string, _p: unknown, _label: string, _o?: unknown) => ({
+      id: 'run_child',
+      ok: true,
+    }));
+    const executor: RunExecutor = {
+      namespace: { projectId: 'default', env: 'prod' },
+      durableBatchTrigger: vi.fn(async () => ['run_child']),
+      triggerAndWait,
+    };
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let warned: unknown[] = [];
+    try {
+      await executorStorage.run(executor, async () => {
+        const result = await handle.triggerAndWait({ n: 1 }, { env: 'staging' });
+        expect(result.ok).toBe(true);
+      });
+      warned = warnSpy.mock.calls.map((c) => c[0]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    expect(warned).toHaveLength(1);
+    expect(triggerAndWait).toHaveBeenCalledTimes(1);
+    expect(triggerAndWait.mock.calls[0]?.[3]).toEqual({});
   });
 });

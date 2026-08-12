@@ -365,7 +365,26 @@ export class Executor implements RunExecutor {
         taskId: string,
         payload: unknown,
         options?: TriggerOptions,
-      ) => this.triggerAndWait<TOutput>(taskId, payload, `triggerAndWait:${taskId}`, options),
+      ) => {
+        // p1-15: the child always inherits the parent's namespace, so an
+        // explicit env/projectId here is ignored AND would drift the replay
+        // fingerprint (it feeds the { taskId, payload, options } signature).
+        // Strip + warn instead of silently letting it corrupt the ledger.
+        if (options && (options.env !== undefined || options.projectId !== undefined)) {
+          this.log(
+            'warn',
+            `triggerAndWait("${taskId}"): env/projectId cannot change the namespace of a ` +
+              `child run — it is ignored; the child inherits the parent's namespace.`,
+          );
+        }
+        const { env: _env, projectId: _projectId, ...rest } = options ?? {};
+        return this.triggerAndWait<TOutput>(
+          taskId,
+          payload,
+          `triggerAndWait:${taskId}`,
+          rest,
+        );
+      },
       wait: {
         // The fingerprint hashes the DECLARED wait, not the computed instant:
         // ctx.wait.for('24h') must fingerprint as '24h' on every replay, while
