@@ -1,8 +1,8 @@
 /* =============================================================================
-   Better Trigger — data hooks. Plain useEffect + useState + setInterval(2s)
-   polling, no extra deps. No mock fallback: when the server is unreachable the
-   hooks surface an error (screens render it) and keep polling so the UI
-   recovers as soon as the server comes back.
+   Better Trigger — data hooks. Plain useEffect + useState + self-rescheduling
+   setTimeout polling (2s), no extra deps. No mock fallback: when the server is
+   unreachable the hooks surface an error (screens render it) and keep polling
+   so the UI recovers as soon as the server comes back.
    useConnection() exposes the aggregate state so the UI can show a live dot.
    ============================================================================= */
 import React from 'react';
@@ -75,7 +75,7 @@ interface PollResult<T> {
 }
 
 /**
- * Poll `fetcher` every 2s. Failures set `error` but never stop the interval —
+ * Poll `fetcher` every 2s. Failures set `error` but never stop the loop —
  * the next successful poll clears the error. `deps` re-arms the effect
  * (filters / id changes). `fetcher` receives an AbortSignal so in-flight
  * requests are canceled on unmount / dep change.
@@ -106,15 +106,17 @@ function usePoll<T>(
   }
 
   React.useEffect(() => {
-    // Paused: hold whatever data we have, issue no request, run no interval.
+    // Paused: hold whatever data we have, issue no request, run no timer.
     // enabled false→true re-arms this effect, which doubles as the immediate
     // refresh on resume.
     if (!enabled) return;
     let mounted = true;
     let controller: AbortController | null = null;
+    let timer: ReturnType<typeof setTimeout>;
 
+    // Self-rescheduling setTimeout: the next poll only starts once this one
+    // settles, so a slow response is never interrupted and never overlaps.
     const run = async () => {
-      controller?.abort();
       controller = new AbortController();
       try {
         const out = await fetcherRef.current(controller.signal);
@@ -125,20 +127,24 @@ function usePoll<T>(
         setConnection('live');
       } catch (e) {
         if (!mounted) return;
+        // Only the effect cleanup aborts (unmount / deps change / enabled
+        // flip); when that fires mid-flight `mounted` is already false, so a
+        // silent return here is safe — the mounted guard swallowed it.
         if (e instanceof Error && e.name === 'AbortError') return;
         setError(e instanceof Error ? e.message || 'request failed' : 'request failed');
         setLoading(false);
         recordConnectionError(e);
+      } finally {
+        if (mounted) timer = setTimeout(run, POLL_MS);
       }
     };
 
     void run();
-    const timer = setInterval(run, POLL_MS);
 
     return () => {
       mounted = false;
       controller?.abort();
-      clearInterval(timer);
+      clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, enabled, apiKeyVersion]);

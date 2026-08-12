@@ -112,6 +112,34 @@ describe('usePoll (via useRuns)', () => {
     expect(result.current.loading).toBe(false);
   });
 
+  it('never interrupts or overlaps a slow (>2s) response, and resumes polling after it lands', async () => {
+    fetchMock
+      .mockImplementationOnce(
+        () => new Promise((resolve) => setTimeout(() => resolve(res(page(['slow'], null))), 6000)),
+      )
+      .mockImplementation(() => res(page(['b0'], 'c2')));
+    const { result } = renderHook(() => useRuns('prod'));
+
+    await flush();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    // The slow response landed — it was NOT aborted by a 2s tick.
+    expect(result.current.data?.map((r) => r.id)).toEqual(['slow']);
+    expect(result.current.loading).toBe(false);
+    // No second request fired during the slow fetch (no overlap).
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    // The loop resumed after the slow response settled.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.current.data?.map((r) => r.id)).toEqual(['b0']);
+  });
+
   it('unmount aborts the in-flight request', async () => {
     let captured: AbortSignal | null | undefined;
     fetchMock.mockImplementation((_url: unknown, init?: RequestInit) => {
