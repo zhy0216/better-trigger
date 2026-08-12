@@ -192,6 +192,16 @@ export function keyFingerprint(key: string): string {
   return `key_${createHash('sha256').update(key).digest('hex').slice(0, 12)}`;
 }
 
+/** TCP peer address off the node IncomingMessage (@hono/node-server puts it
+ *  in c.env.incoming); null for in-process fetches. Shared by the audit log's
+ *  caller field and the rate limiter's keyless per-IP bucket (p2-31). */
+export function remoteAddressOf(c: { env: unknown }): string | null {
+  const incoming = (c.env as
+    | { incoming?: { socket?: { remoteAddress?: string } } }
+    | undefined)?.incoming;
+  return incoming?.socket?.remoteAddress ?? null;
+}
+
 /**
  * Bearer auth against every configured key (multi-key, O6). No-op when no
  * key is configured. /api/v1/health is always open. On success the matched

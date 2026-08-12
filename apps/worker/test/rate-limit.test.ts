@@ -71,6 +71,56 @@ const perKeyOnly = () => {
   process.env.BETTER_TRIGGER_RATE_LIMIT_BURST = '1';
 };
 
+/** A request whose peer socket claims `ip`. */
+const postFrom = (ip: string) => ({
+  req: post('/api/v1/trigger', { taskId: 't', payload: null }),
+  env: { incoming: { socket: { remoteAddress: ip } } },
+});
+
+describe('keyless per-IP bucketing (p2-31)', () => {
+  beforeEach(() => {
+    perKeyOnly();
+    delete process.env.BETTER_TRIGGER_API_KEYS;
+    delete process.env.BETTER_TRIGGER_API_KEY;
+  });
+
+  afterEach(() => {
+    delete process.env.BETTER_TRIGGER_API_KEYS;
+    delete process.env.BETTER_TRIGGER_API_KEY;
+  });
+
+  it('two source addresses get separate per-key buckets when no key is configured', async () => {
+    const app = makeApp();
+    // A FRESH request per fetch — a Request body can only be consumed once.
+    const a = () => postFrom('10.0.0.1');
+    const b = () => postFrom('10.0.0.2');
+    // A exhausts its bucket: first 200, second 429.
+    expect((await app.fetch(a().req, a().env)).status).toBe(200);
+    expect((await app.fetch(a().req, a().env)).status).toBe(429);
+    // B's bucket is separate: its FIRST request passes even though A is fully
+    // exhausted (the p2-31 fix); B's second hits B's own burst cap.
+    expect((await app.fetch(b().req, b().env)).status).toBe(200);
+    expect((await app.fetch(b().req, b().env)).status).toBe(429);
+  });
+
+  it('a configured key keeps the address OUT of the bucket identity', async () => {
+    process.env.BETTER_TRIGGER_API_KEY = 'k-1';
+    const app = makeApp();
+    // Same key, two addresses — the per-key bucket is keyed by the KEY, so
+    // the second request (from a different address) is still throttled.
+    const authedFrom = (ip: string) => ({
+      req: new Request(`http://localhost:4848/api/v1/trigger`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer k-1' },
+        body: JSON.stringify({ taskId: 't', payload: null }),
+      }),
+      env: { incoming: { socket: { remoteAddress: ip } } },
+    });
+    expect((await app.fetch(authedFrom('10.0.0.1').req, authedFrom('10.0.0.1').env)).status).toBe(200);
+    expect((await app.fetch(authedFrom('10.0.0.2').req, authedFrom('10.0.0.2').env)).status).toBe(429);
+  });
+});
+
 describe('endpointOf', () => {
   it.each<[string, string, RateLimitedEndpoint | 'read' | null]>([
     ['POST', '/api/v1/trigger', 'trigger'],

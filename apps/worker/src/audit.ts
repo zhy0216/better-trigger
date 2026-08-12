@@ -46,9 +46,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Context } from 'hono';
 import type { MiddlewareHandler } from 'hono';
-import type { AppVariables } from './middleware';
+import { remoteAddressOf, type AppVariables } from './middleware';
 import { endpointOf, type RateLimitedEndpoint } from './rate-limit';
-
 /** Cap on task/run ids recorded in one audit line — enough to correlate, not
  *  enough to bloat the log with a 500-item batch's full id list. */
 const IDS_CAP = 10;
@@ -238,13 +237,4 @@ async function jsonBodyOf(res: Response): Promise<unknown | null> {
   } catch {
     return null;
   }
-}
-
-/** TCP peer address off the node IncomingMessage (@hono/node-server puts it
- *  in c.env.incoming); null for in-process fetches. */
-function remoteAddressOf(c: Context<{ Variables: AppVariables }>): string | null {
-  const incoming = (c.env as
-    | { incoming?: { socket?: { remoteAddress?: string } } }
-    | undefined)?.incoming;
-  return incoming?.socket?.remoteAddress ?? null;
 }

@@ -304,6 +304,13 @@ starve its neighbours) and **per endpoint** (even several keys together cannot
 drive the endpoint past the overall cap). Over the limit is `429` with the
 standard envelope, `{ error: { code: 'rate_limited', message } }`.
 
+**With no API key configured, the per-key dimension falls back to the source
+address** (p2-31): the bucket is keyed by the socket peer IP, so one local
+process exhausting the rate cannot starve another. The address is the TCP
+peer, never `X-Forwarded-For` (spoofable). Loopback shares one address, so
+several local processes on one host still contend for the same per-IP bucket —
+the global bucket remains the fleet-wide backstop.
+
 Knobs (see the env table): `BETTER_TRIGGER_RATE_LIMIT_RPS` (per key per
 endpoint, default 50/s), `BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS` (per endpoint
 over all keys, default 200/s), `BETTER_TRIGGER_RATE_LIMIT_BURST` (bucket

@@ -58,7 +58,7 @@
    ============================================================================= */
 import type { MiddlewareHandler } from 'hono';
 import { KernelError } from '@better-trigger/kernel';
-import type { AppVariables } from './middleware';
+import { remoteAddressOf, type AppVariables } from './middleware';
 
 /** The run-affecting endpoints the rate limit guards. */
 export type RateLimitedEndpoint = 'trigger' | 'batch-trigger' | 'retry' | 'cancel';
@@ -129,6 +129,15 @@ export function rateLimitConfigFromEnv(env = process.env): RateLimitConfig {
 export class TokenBuckets {
   private readonly buckets = new Map<string, { tokens: number; refillAt: number }>();
 
+  /**
+   * Cap on distinct buckets before the least-recently-touched are evicted.
+   * The per-key dimension is bounded by the number of API keys; the keyless
+   * per-IP fallback (p2-31) is bounded by the distinct source addresses the
+   * daemon sees — both tiny in practice, but a misconfigured proxy that
+   * rotates source addresses must not grow this map without bound.
+   */
+  private static readonly MAX_ENTRIES = 4_096;
+
   constructor(private readonly now: () => number = () => Date.now()) {}
 
   /** Refill by `now` and try to take one token from `key`; false = over the
@@ -140,6 +149,22 @@ export class TokenBuckets {
     if (bucket === undefined) {
       // Fresh bucket: the first request takes the first token; a zero
       // capacity means even that is refused.
+      if (this.buckets.size >= TokenBuckets.MAX_ENTRIES) {
+        // Evict the earliest-INSERTED per-key bucket (Map preserves insertion
+        // order; an existing key is mutated in place, never re-inserted, so the
+        // front is the oldest). This is FIFO-by-insertion, not true LRU — fine
+        // for a memory bound: an evicted bucket is re-created full-burst on its
+        // next touch, so eviction can only ever be permissive. The `global:`
+        // buckets are deliberately never evicted — resetting the fleet-wide
+        // backstop to a fresh burst under a >4096-address flood would be a real
+        // rate hole, not just memory churn.
+        for (const oldest of this.buckets.keys()) {
+          if (oldest.startsWith('key:')) {
+            this.buckets.delete(oldest);
+            break;
+          }
+        }
+      }
       this.buckets.set(key, { tokens: Math.max(capacity - 1, 0), refillAt: now });
       return capacity > 0;
     }
@@ -169,7 +194,12 @@ export function rateLimitMiddleware(now?: () => number): MiddlewareHandler<{ Var
     const endpoint = endpointOf(c.req.method, c.req.path);
     if (endpoint === null) return next();
     const cfg = rateLimitConfigFromEnv();
-    const keyId = c.get('authKeyId') ?? 'anon';
+    // Per-key identity: an authenticated key is its fingerprint; with no key
+    // configured the per-key dimension falls back to the source address so one
+    // local process exhausting the rate cannot starve its neighbours (p2-31).
+    // The socket address is deliberately NOT spoofable via X-Forwarded-For.
+    const ip = remoteAddressOf(c);
+    const keyId = c.get('authKeyId') ?? (ip !== null ? `ip:${ip}` : 'anon');
     const read = endpoint === 'read';
     const bucket = read ? 'read' : endpoint;
     const rps = read ? cfg.readRps : cfg.rps;
