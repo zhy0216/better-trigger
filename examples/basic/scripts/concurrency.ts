@@ -61,6 +61,7 @@
    ============================================================================= */
 import { fileURLToPath } from 'node:url';
 import {
+  freePort,
   portFromEnv,
   runScenario,
   sleep,
@@ -73,7 +74,8 @@ import {
 import { betterTrigger } from 'better-trigger';
 import { CC_LIMIT, CC_SERIAL_LIMIT, ccLimited, ccSerial } from './concurrency-tasks';
 
-const PORT = portFromEnv('BT_CONCURRENCY_PORT', 4906);
+const PORT =
+  process.env.BT_CONCURRENCY_PORT !== undefined ? Number(process.env.BT_CONCURRENCY_PORT) : await freePort();
 const TASKS_MODULE = fileURLToPath(new URL('./concurrency-tasks.ts', import.meta.url));
 
 /** Execution slots per executor; 2 executors → 8 slots for a per-key cap of 2.

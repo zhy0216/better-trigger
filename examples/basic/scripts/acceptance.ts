@@ -123,17 +123,32 @@ interface Result {
   ms: number;
 }
 
-/** Run one harness, inheriting stdio so its own ✓/✗ output stays live. */
+/** Run one harness, inheriting stdio so its own ✓/✗ output stays live.
+ *  Bounded by a per-harness timeout (default 5m, BT_ACCEPTANCE_TIMEOUT_MS to
+ *  tune): a hung scenario kills its child and fails the suite NAMING the
+ *  harness, instead of eating CI's whole job timeout with no pointer. */
 function run(harness: Harness): Promise<number> {
   const script = fileURLToPath(new URL(`./${harness.file}`, import.meta.url));
+  const timeoutMs = Number(process.env.BT_ACCEPTANCE_TIMEOUT_MS ?? 5 * 60_000);
   return new Promise((resolve) => {
     const proc = spawn('bun', [script], { stdio: 'inherit', env: process.env });
+    const timer = setTimeout(() => {
+      console.error(
+        `\n✗ ${harness.name} exceeded ${timeoutMs}ms and was killed — the scenario hung. ` +
+          `(raise BT_ACCEPTANCE_TIMEOUT_MS if it is merely slow)`,
+      );
+      proc.kill('SIGKILL');
+    }, timeoutMs);
     proc.on('error', (err) => {
+      clearTimeout(timer);
       console.error(`\n✗ failed to spawn ${harness.file}: ${err.message}`);
       resolve(1);
     });
     // A harness killed by a signal has no exit code — count it as a failure.
-    proc.on('exit', (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+    proc.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve(code ?? (signal ? 1 : 0));
+    });
   });
 }
 

@@ -23,9 +23,10 @@
      BT_STATS_PORT override the daemon's port (default 4906)
    ============================================================================= */
 import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import { portFromEnv, runScenario, startDaemon, type Scenario } from '@better-trigger/testing';
+import { freePort, portFromEnv, runScenario, startDaemon, type Scenario } from '@better-trigger/testing';
 
-const PORT = portFromEnv('BT_STATS_PORT', 4906);
+const PORT =
+  process.env.BT_STATS_PORT !== undefined ? Number(process.env.BT_STATS_PORT) : await freePort();
 
 interface TaskRow {
   id: string;

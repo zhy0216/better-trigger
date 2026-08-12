@@ -57,6 +57,7 @@
    ============================================================================= */
 import { fileURLToPath } from 'node:url';
 import {
+  freePort,
   createMarker,
   portFromEnv,
   runScenario,
@@ -70,8 +71,15 @@ import {
 } from '@better-trigger/testing';
 import { betterTrigger } from 'better-trigger';
 
-const PORT = portFromEnv('BT_GRACEFUL_RESTART_PORT', 4905);
-const RESULT_PORT = portFromEnv('BT_GRACEFUL_RESTART_RESULT_PORT', 4906);
+// P2-35: freePort() defaults so the two restart scenarios cannot collide.
+const PORT =
+  process.env.BT_GRACEFUL_RESTART_PORT !== undefined
+    ? Number(process.env.BT_GRACEFUL_RESTART_PORT)
+    : await freePort();
+const RESULT_PORT =
+  process.env.BT_GRACEFUL_RESTART_RESULT_PORT !== undefined
+    ? Number(process.env.BT_GRACEFUL_RESTART_RESULT_PORT)
+    : await freePort();
 const TASKS_MODULE = fileURLToPath(new URL('./graceful-restart-tasks.ts', import.meta.url));
 
 /** Longer than this scenario takes: expiry must never be what rescues the run. */

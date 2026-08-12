@@ -34,6 +34,7 @@
    ============================================================================= */
 import { fileURLToPath } from 'node:url';
 import {
+  freePort,
   createMarker,
   portFromEnv,
   readLatestCodeVersion,
@@ -48,7 +49,10 @@ import {
 } from '@better-trigger/testing';
 import { betterTrigger, type RunStatus } from 'better-trigger';
 
-const PORT = portFromEnv('BT_PIN_PORT', 4905);
+// P2-35: freePort() default so parallel-ish runs and a lingering TIME_WAIT
+// can't collide; BT_PIN_PORT override preserved for CI orchestration.
+const PORT =
+  process.env.BT_PIN_PORT !== undefined ? Number(process.env.BT_PIN_PORT) : await freePort();
 const V1_MODULE = fileURLToPath(new URL('./replay-drift-tasks-v1.ts', import.meta.url));
 const V2_MODULE = fileURLToPath(new URL('./replay-drift-tasks-v2.ts', import.meta.url));
 
