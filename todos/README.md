@@ -14,7 +14,7 @@
 |---|------|--------|------|
 | 1 | [p0-01-fingerprint-drift-bypass.md](./done/p0-01-fingerprint-drift-bypass.md) ✅ | fingerprint 校验被 kind/label 漂移绕过,lenient 下旧输出喂给新代码 | — |
 | 2 | [p0-02-dashboard-poll-self-abort.md](./done/p0-02-dashboard-poll-self-abort.md) ✅ | dashboard 轮询每 2s abort 上一请求,慢响应永远完成不了 | — |
-| 3 | [p0-03-sdk-result-retry.md](./p0-03-sdk-result-retry.md) | `handle.result()` 无重试,daemon 滚动重启拒绝所有等待者 | — |
+| 3 | [p0-03-sdk-result-retry.md](./done/p0-03-sdk-result-retry.md) ✅ | `handle.result()` 无重试,daemon 滚动重启拒绝所有等待者 | — |
 | 4 | [p1-22-kernel-pg-correctness-suite.md](./p1-22-kernel-pg-correctness-suite.md) | 真 PG correctness suite(先立测试床,后续 kernel 修复直接落用例) | — |
 | 5 | [p1-04-triggerandwait-require-task.md](./p1-04-triggerandwait-require-task.md) | `triggerAndWait` 打错 task id → 父 run 永久 waiting | p1-22 |
 | 6 | [p1-05-orphan-wait-nulls-order.md](./p1-05-orphan-wait-nulls-order.md) | 孤儿 wait 排序方向反了(ASC 默认 NULLS LAST) | p1-22 |
@@ -63,3 +63,4 @@
 - [done/03-operability.md](./done/03-operability.md) ✅(O1–O6)
 - [done/p0-01-fingerprint-drift-bypass.md](./done/p0-01-fingerprint-drift-bypass.md) ✅(kind/label 漂移一律硬失败)
 - [done/p0-02-dashboard-poll-self-abort.md](./done/p0-02-dashboard-poll-self-abort.md) ✅(usePoll 改为自我重排 setTimeout,不再 abort in-flight)
+- [done/p0-03-sdk-result-retry.md](./done/p0-03-sdk-result-retry.md) ✅(result() 预算内重试瞬态 5xx/网络错误,waiter 关停映射 503)

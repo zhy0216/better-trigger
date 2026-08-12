@@ -19,7 +19,7 @@ import { triggerRoutes } from './routes/trigger';
 import { runRoutes } from './routes/runs';
 import { dashboardRoutes } from './routes/dashboard';
 import { metricsRoutes, type MetricsSources } from './routes/metrics';
-import type { WaiterRegistry } from './waiters';
+import { WaiterRegistryStoppedError, type WaiterRegistry } from './waiters';
 
 export interface AppDeps {
   /** The kernel backing trigger/cancel/retry (owned by the caller). */
@@ -159,6 +159,18 @@ export function createApp(deps: AppDeps): Hono<{ Variables: AppVariables }> {
 
   // Uniform error handler.
   app.onError((err, c) => {
+    // PF2 shutdown: the waiter registry rejected every pending /result waiter
+    // because the daemon is exiting. Deliberately NOT `internal_error` — that
+    // reads like a real failure, while this is a transient abandonment the SDK
+    // can retry against another daemon (it stays a plain 5xx → HttpError). The
+    // message is ours, so like KernelError it is never redacted and needs no
+    // requestId.
+    if (err instanceof WaiterRegistryStoppedError) {
+      const body: ApiErrorBody = {
+        error: { code: 'waiter_abandoned', message: err.message },
+      };
+      return c.json(body, 503);
+    }
     if (err instanceof KernelError) {
       const status = STATUS_BY_CODE[err.code];
       if (status) {

@@ -20,8 +20,8 @@ import type {
   WaitForResultOptions,
   WaitResult,
 } from '@better-trigger/core';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import { HttpClient, type HttpClientOptions } from './client';
+import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
+import { HttpClient, HttpError, type HttpClientOptions } from './client';
 import { registry } from './registry';
 import type { TaskHandle } from './task';
 
@@ -213,6 +213,30 @@ function nsQuery(namespace: Namespace | undefined): string {
   return `?${new URLSearchParams({ projectId: namespace.projectId, env: namespace.env })}`;
 }
 
+/* ---------------------------------------------------------------------------
+ * waitForResult retry helpers
+ * ------------------------------------------------------------------------- */
+
+/** ±20% jitter on a backoff base, so N callers retrying in lockstep don't
+ *  thundering-herd one target. */
+function jitter(ms: number): number {
+  return ms * (0.8 + Math.random() * 0.4);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Errors worth another hop. KernelErrors (e.g. not_found) and 4xx are
+ *  deterministic answers — retrying cannot change them. Transport failures
+ *  (status 0: daemon down, proxy cut, timeout) and server 5xx (transient, or
+ *  the deliberate WaiterRegistryStoppedError shutdown 5xx) may clear on the
+ *  next attempt, ideally against a different daemon. */
+function isRetriable(err: unknown): boolean {
+  if (err instanceof KernelError) return false;
+  return err instanceof HttpError && (err.status === 0 || err.status >= 500);
+}
+
 /**
  * Create a better-trigger client bound to a worker daemon. Returns
  * synchronously; nothing is contacted until the first call.
@@ -283,9 +307,22 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
       );
     },
 
+    /**
+     * Poll until terminal, retrying transient failures within the caller's
+     * budget. Retry contract: a 5xx or a transport failure (HttpError status 0
+     * — daemon unreachable, a proxy cut the long-poll, a timeout) is retried
+     * with jittered exponential backoff while budget remains — the daemon is
+     * designed for this (a redeploy answers in-flight waiters with a 5xx so
+     * the SDK hops to another daemon). When the budget is exhausted the LAST
+     * error is thrown, never a fabricated terminal status. 4xx and
+     * KernelErrors (e.g. not_found) fail immediately: retrying cannot change
+     * them.
+     */
     async waitForResult(runId, namespace, opts) {
       const deadline = Date.now() + (opts?.timeoutMs ?? 30_000);
       const pollMs = opts?.pollMs;
+      // Backoff base: 200ms, ×2 per retry, capped at 2s, ±20% jitter.
+      let backoffMs = 200;
       for (;;) {
         // Each hop long-polls server-side for at most MAX_LONGPOLL_MS; the
         // remaining budget can be 0, which asks for a single immediate read.
@@ -298,11 +335,26 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
           query.set('projectId', namespace.projectId);
           query.set('env', namespace.env);
         }
-        const res = await http.request<WaitResult>(
-          `/runs/${encodeURIComponent(runId)}/result?${query}`,
-          // Give the request headroom over the server-side wait it asked for.
-          { timeoutMs: slice + 10_000 },
-        );
+        let res: WaitResult;
+        try {
+          res = await http.request<WaitResult>(
+            `/runs/${encodeURIComponent(runId)}/result?${query}`,
+            // Give the request headroom over the server-side wait it asked for.
+            { timeoutMs: slice + 10_000 },
+          );
+        } catch (err) {
+          // Terminal for us: budget spent, or an error retrying cannot fix.
+          if (!isRetriable(err) || Date.now() >= deadline) throw err;
+          // Clamp the backoff to the remaining budget — never overshoot the
+          // caller's deadline, and skip the sleep entirely when nothing is
+          // left.
+          const sleepMs = Math.min(jitter(backoffMs), deadline - Date.now());
+          if (sleepMs > 0) await sleep(sleepMs);
+          backoffMs = Math.min(backoffMs * 2, 2000);
+          continue;
+        }
+        // A poll that got a response (terminal or not) resets the backoff.
+        backoffMs = 200;
         if (TERMINAL.includes(res.status) || Date.now() >= deadline) return res;
       }
     },

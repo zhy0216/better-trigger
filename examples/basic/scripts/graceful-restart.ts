@@ -10,18 +10,21 @@
    that is gone: neither counter moves and the handover is immediate.
 
    Runs on @better-trigger/testing (runScenario provisions + migrates the
-   database) with two daemons: an API node (no --tasks) that serves the
-   scenario's client, plus an executor node (--tasks graceful-restart-tasks.ts
-   --no-serve) that gets SIGTERMed mid-run.
+   database) with an API node (no --tasks) that serves the scenario's client,
+   plus two executor nodes (--tasks graceful-restart-tasks.ts) that also serve
+   HTTP on a second port (RESULT_PORT), so the SDK's result() client talks to
+   whichever executor is currently up. Executor #1 gets SIGTERMed mid-run;
+   executor #2 binds the same port after it exits.
 
    The lease (60s) and every reaper interval (60s) are set LONGER than the whole
    scenario on purpose: nothing here can be rescued by expiry, so a run that
    gets picked up seconds after the restart was handed over deliberately.
 
    Flow: spawn executor #1 → trigger gr-restart (retry { maxAttempts: 1 }) →
-   wait until it is parked on ctx.signal past step1 → SIGTERM the executor and
-   wait for it to exit → inspect the ledger with NO worker alive → spawn
-   executor #2 → the run finishes.
+   wait until it is parked on ctx.signal past step1 → park an SDK result() on
+   executor #1's waiter registry → SIGTERM the executor and wait for it to exit
+   → inspect the ledger with NO worker alive → spawn executor #2 → the run
+   finishes and the parked result() resolves with its terminal state.
 
    Asserts, with the daemon already gone:
      - the queue row is free: locked_by / locked_at / lease_until NULL and
@@ -36,18 +39,28 @@
        body was entered twice (the pure marker line)
      - the shared ledger invariants hold
 
+   ③ the SDK contract (p0-03): an SDK result() parked on the restarting
+   daemon's waiter registry is abandoned at shutdown (WaiterRegistryStoppedError
+   → HTTP 503 waiter_abandoned), the SDK backs off and retries the same URL,
+   gets connection-refused while no executor is up, and resolves with the run's
+   terminal state once executor #2 serves RESULT_PORT and finishes the run — a
+   restart never turns an in-flight result() into an error.
+
    Env:
      DATABASE_URL              base connection derived from it; default
                                postgres://localhost:5432/better_trigger
      BT_GRACEFUL_RESTART_DB    override the provisioned database name
                                (default better_trigger_graceful_restart)
      BT_GRACEFUL_RESTART_PORT  port the API node listens on (default 4905)
+     BT_GRACEFUL_RESTART_RESULT_PORT
+                               port the executors serve HTTP on (default 4906)
    ============================================================================= */
 import { fileURLToPath } from 'node:url';
 import {
   createMarker,
   portFromEnv,
   runScenario,
+  sleep,
   spawnDaemon,
   startDaemon,
   waitFor,
@@ -58,6 +71,7 @@ import {
 import { betterTrigger } from 'better-trigger';
 
 const PORT = portFromEnv('BT_GRACEFUL_RESTART_PORT', 4905);
+const RESULT_PORT = portFromEnv('BT_GRACEFUL_RESTART_RESULT_PORT', 4906);
 const TASKS_MODULE = fileURLToPath(new URL('./graceful-restart-tasks.ts', import.meta.url));
 
 /** Longer than this scenario takes: expiry must never be what rescues the run. */
@@ -79,7 +93,11 @@ async function main(s: Scenario): Promise<void> {
     spawnDaemon({
       databaseUrl: s.db.url,
       tasks: TASKS_MODULE,
-      serve: false,
+      // A serving executor also claims runs (same as --no-serve + a claim
+      // loop): serve HTTP on RESULT_PORT so the SDK's result() client can park
+      // a waiter on whatever executor currently owns the run.
+      serve: true,
+      port: RESULT_PORT,
       concurrency: 1,
       leaseMs: LEASE_MS,
       reaperIntervalMs: REAPER_MS,
@@ -95,6 +113,9 @@ async function main(s: Scenario): Promise<void> {
   });
   s.cleanup(() => api.stop());
   const client = betterTrigger({ url: api.url! });
+  // Second client pointed at the executors' serving port: the whole point of
+  // this scenario is that a result() parked HERE survives the restart below.
+  const resultClient = betterTrigger({ url: `http://localhost:${RESULT_PORT}` });
 
   /* -- boot executor #1 and park a run inside it --------------------------- */
   let proc = spawnExecutor();
@@ -133,6 +154,17 @@ async function main(s: Scenario): Promise<void> {
   );
   s.assert(claimed?.lease_until != null, 'claimed run should hold a lease before the restart');
   s.ok(`run claimed by executor #1 with a live ${LEASE_MS / 1000}s lease`);
+
+  /* -- park an SDK result() on the daemon about to be killed ---------------- */
+  // p0-03: an in-flight result() during the restart must resolve with the
+  // terminal state, NOT reject. Start it now, on executor #1's waiter registry
+  // — the 1.5s beat below lets the long-poll actually land before the SIGTERM.
+  // The 40s budget covers: 503 waiter_abandoned from executor #1's drain →
+  // SDK backoff + retry → connection-refused while no executor is up → executor
+  // #2 binds RESULT_PORT and takes the run over. A rejection here would fail
+  // the scenario outright.
+  const resultPromise = resultClient.waitForResult(handle.id, undefined, { timeoutMs: 40_000 });
+  await sleep(1_500);
 
   /* -- the deploy: SIGTERM, wait for the process to be gone ---------------- */
   const restartedAt = Date.now();
@@ -184,8 +216,12 @@ async function main(s: Scenario): Promise<void> {
 
   /* -- executor #2 picks the run up and finishes it ------------------------ */
   proc = spawnExecutor();
-  // Shorter than the lease on purpose: a pass here cannot have come from expiry.
-  const result = await client.waitForResult(handle.id, undefined, { timeoutMs: 30_000 });
+  // The result() we started on executor #1's waiter registry BEFORE the SIGTERM
+  // is the same call we now await: it was abandoned (503 waiter_abandoned),
+  // retried with backoff, hit connection-refused while no executor served
+  // RESULT_PORT, and lands on executor #2 the moment it binds the port. It must
+  // resolve with the terminal state — a rejection here fails the scenario.
+  const result = await resultPromise;
   const elapsed = Date.now() - restartedAt;
 
   s.assert(result.status === 'completed', `run should complete, got '${result.status}'`);
@@ -197,7 +233,7 @@ async function main(s: Scenario): Promise<void> {
   s.ok(`executor #2 took over and completed the run in ${(elapsed / 1000).toFixed(1)}s`);
 
   const detail = await client.getRunDetail(handle.id);
-  s.assertEqual(detail.run.output, payload, 'run output');
+  s.assertEqual(result.output, payload, 'run output');
   s.assert(
     detail.run.attempt === 1,
     `attempt must still be 1 after the handover, got ${detail.run.attempt}`,

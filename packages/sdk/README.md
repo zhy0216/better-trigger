@@ -118,7 +118,7 @@ const trigger = betterTrigger({
 | `retryRun(runId)` | Re-run a failed/canceled run as a **new** run. → `{ runId }` |
 | `getRun(runId)` | Full run record. |
 | `getRunDetail(runId, opts?)` | `{ run, steps, stepsTruncated, waits, waitsTruncated, logs, logsNextCursor }` — one snapshot; newest 200 logs by default, `opts.logsBefore` pages older logs. |
-| `waitForResult(runId, opts?)` | Wait for a terminal state. → `{ status, output?, error? }` |
+| `waitForResult(runId, opts?)` | Wait for a terminal state. → `{ status, output?, error? }` Transient 5xx / network errors are retried automatically within the timeout budget (jittered backoff); if the budget runs out the last error is thrown. 4xx and kernel errors fail immediately. |
 | `health()` | Daemon liveness probe. → `{ ok, version }` |
 | `setDefault()` | Make this instance the module-level default. |
 | `url` | The base URL this instance talks to. |
