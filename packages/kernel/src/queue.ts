@@ -147,10 +147,18 @@ export interface ClaimRunsArgs {
    * can still replay it instead of handing it to code that will drift.
    *
    * `code_version IS NULL` is claimable by anyone on purpose: it means the run
-   * was created before its task was ever registered, so there is no version to
-   * honour and no ledger written against one.
-   */
+    * was created before its task was ever registered, so there is no version to
+    * honour and no ledger written against one.
+    */
   codeVersions?: string[];
+  /**
+   * Cap on the replayed step ledger per claimed run (env BETTER_TRIGGER_MAX_STEPS).
+   * 0/undefined = unlimited (backward compatible). When exceeded, the run is
+   * claimed but marked `stepsTruncated` so the worker fails it non-retryably —
+   * the ledger read runs OUTSIDE the claim transaction and reads `maxSteps + 1`
+   * rows to detect overflow without a second count.
+   */
+  maxSteps?: number;
 }
 
 /**
@@ -202,23 +210,45 @@ export function claimWindow(limit: number): number {
 }
 
 /**
- * Claim up to `limit` runs for the given worker. Single transaction:
+ * Claim up to `limit` runs for the given worker, in two phases:
+ *
+ * Phase 1 — the claim transaction:
  *   SELECT a claimWindow(limit)-wide candidate set FOR UPDATE SKIP LOCKED
  *   (available + unclaimed, by priority, task set filtered in SQL), for each
  *   candidate skip if the concurrency limit is hit, otherwise claim it: take
  *   the lease on the queue row (locked_by/locked_at + lease_until = now() +
  *   leaseMs), then flip the run to running and bump runs.fencing_token —
  *   queue row locked before the runs row, the canonical kernel lock order
- *   (see runs.ts header). Returns claimed runs + step snapshots + the fencing
- *   token guarding each claim's writes. Expired-lease recovery is the reaper's
- *   job alone — candidates here stay `locked_by IS NULL`.
+ *   (see runs.ts header). COMMIT.
+ *
+ * Phase 2 — the ledger read, AFTER the transaction (p1-07):
+ *   for each claimed run, read its run_steps snapshot OUTSIDE any transaction.
+ *   The window's `FOR UPDATE SKIP LOCKED` rows are all released at COMMIT, so a
+ *   fat ledger can no longer stall peer workers: the lock is held only for the
+ *   fast claim, never for the materialization of thousands of steps. The read is
+ *   safe outside the tx because the claim already holds the lease and the bumped
+ *   fencing token — run_steps is append-only for a claimed run (stale-fencing
+ *   writes are rejected), so there is no torn state to see. A read error here
+ *   surfaces from claimRuns with the claims already committed: the runs hold
+ *   valid leases and are recovered by the lease reaper exactly as after a
+ *   worker crash (each spends one `recoveries`, never an `attempt`).
+ *
+ * When `maxSteps` is set, the snapshot reads `maxSteps + 1` rows so an overflow
+ * is visible without a second count: the run is still claimed but marked
+ * `stepsTruncated` (and its steps trimmed to `maxSteps`), which the executor
+ * fails non-retryably — replaying a truncated ledger would silently skip steps.
+ *
+ * Returns claimed runs + step snapshots + the fencing token guarding each
+ * claim's writes. Expired-lease recovery is the reaper's job alone — candidates
+ * here stay `locked_by IS NULL`.
  *
  * The candidate SELECT carries every column the loop needs (todos/02-performance.md
  * PF4). It already had to `JOIN runs` for the task filter, so the run's execution
  * columns and the task's concurrency_limit ride along for free instead of costing
  * two round trips *per candidate* — a window of 10 used to mean 20+ statements for
  * a call that normally claims one run. Only `run_steps` stays per-run: it is needed
- * for the runs actually claimed, which is a small subset of the window.
+ * for the runs actually claimed, which is a small subset of the window — and, as of
+ * p1-07, it runs after COMMIT so the window lock is never extended for it.
  *
  * Locking is unchanged by the join. `FOR UPDATE OF q` locks queue rows and only
  * queue rows — `runs` and `tasks` are read, never locked — so the scan still
@@ -325,9 +355,20 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
       params,
     );
 
-    const claimed: ClaimedRun[] = [];
+    interface PendingClaim {
+      runId: string;
+      taskId: string;
+      payload: unknown;
+      attempt: number;
+      maxAttempts: number;
+      codeVersion: string | null;
+      projectId: string;
+      env: string;
+      fencingToken: number;
+    }
+    const pending: PendingClaim[] = [];
     for (const cand of candidates.rows) {
-      if (claimed.length >= args.limit) break;
+      if (pending.length >= args.limit) break;
 
       // Concurrency limit: the task's limit came back with the candidate; if set,
       // count running runs sharing the same concurrency_key (redundantly stored
@@ -384,6 +425,43 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
       );
       const fencingToken = Number(tokenRes.rows[0]?.fencing_token ?? 0);
 
+      pending.push({
+        runId: cand.run_id,
+        taskId: cand.task_id,
+        payload: cand.payload,
+        attempt: cand.attempt,
+        maxAttempts: cand.max_attempts,
+        codeVersion: cand.code_version,
+        projectId: cand.project_id,
+        env: cand.env,
+        fencingToken,
+      });
+    }
+
+    await client.query('COMMIT');
+
+    // Phase 2 (p1-07): read each claimed run's step ledger OUTSIDE the
+    // transaction, so the claim window's FOR UPDATE SKIP LOCKED rows were all
+    // released the moment COMMIT ran — a fat ledger can no longer stall peer
+    // workers while it materializes. The claim already holds the lease and the
+    // bumped fencing token, and run_steps is append-only for a claimed run
+    // (stale-fencing writes are rejected), so there is no torn state to read.
+    // With a cap set, read maxSteps + 1 rows: overflow is then visible without
+    // a second count, and the run is claimed but flagged stepsTruncated.
+    const cap = args.maxSteps ?? 0;
+    const stepsSql =
+      cap > 0
+        ? `SELECT seq, kind, label, status, output, error, fingerprint
+             FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
+             ORDER BY seq ASC
+             LIMIT $4`
+        : `SELECT seq, kind, label, status, output, error, fingerprint
+             FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
+             ORDER BY seq ASC`;
+    const claimed: ClaimedRun[] = [];
+    for (const p of pending) {
+      const stepsParams: unknown[] = [p.runId, p.projectId, p.env];
+      if (cap > 0) stepsParams.push(cap + 1);
       const stepsRes = await client.query<{
         seq: number;
         kind: string;
@@ -392,12 +470,7 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
         output: unknown;
         error: unknown;
         fingerprint: string | null;
-      }>(
-        `SELECT seq, kind, label, status, output, error, fingerprint
-           FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
-           ORDER BY seq ASC`,
-        [cand.run_id, cand.project_id, cand.env],
-      );
+      }>(stepsSql, stepsParams);
       const steps: StepSnapshot[] = stepsRes.rows.map((s) => ({
         seq: s.seq,
         kind: s.kind as StepSnapshot['kind'],
@@ -408,21 +481,28 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
         fingerprint: s.fingerprint ?? null,
       }));
 
-      claimed.push({
-        id: cand.run_id,
-        taskId: cand.task_id,
-        payload: cand.payload,
-        attempt: cand.attempt,
-        maxAttempts: cand.max_attempts,
-        codeVersion: cand.code_version,
-        projectId: cand.project_id,
-        env: cand.env,
+      const run: ClaimedRun = {
+        id: p.runId,
+        taskId: p.taskId,
+        payload: p.payload,
+        attempt: p.attempt,
+        maxAttempts: p.maxAttempts,
+        codeVersion: p.codeVersion,
+        projectId: p.projectId,
+        env: p.env,
         steps,
-        fencingToken,
-      });
+        fencingToken: p.fencingToken,
+      };
+      if (cap > 0 && steps.length > cap) {
+        // Overflow: the worker must fail this run non-retryably rather than
+        // replay a ledger it could not fully see. Keep only the cap's worth of
+        // rows so the shape stays valid (they will not be executed).
+        run.stepsTruncated = true;
+        run.steps = steps.slice(0, cap);
+      }
+      claimed.push(run);
     }
 
-    await client.query('COMMIT');
     return claimed;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});

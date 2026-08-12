@@ -19,7 +19,7 @@
 | 5 | [p1-04-triggerandwait-require-task.md](./done/p1-04-triggerandwait-require-task.md) ✅ | `triggerAndWait` 打错 task id → 父 run 永久 waiting | p1-22 |
 | 6 | [p1-05-orphan-wait-nulls-order.md](./done/p1-05-orphan-wait-nulls-order.md) ✅ | 孤儿 wait 排序方向反了(ASC 默认 NULLS LAST) | p1-22 |
 | 7 | [p1-06-waits-run-id-index.md](./done/p1-06-waits-run-id-index.md) ✅ | waits 缺 run_id 索引;唤醒查询不带 namespace 谓词 | p1-22 |
-| 8 | [p1-07-claim-ledger-unbounded.md](./p1-07-claim-ledger-unbounded.md) | claim 在持锁事务内无界读取整个 run_steps 账本 | — |
+| 8 | [p1-07-claim-ledger-unbounded.md](./done/p1-07-claim-ledger-unbounded.md) ✅ | claim 在持锁事务内无界读取整个 run_steps 账本 | — |
 | 9 | [p1-08-multi-namespace-plans.md](./p1-08-multi-namespace-plans.md) | ≥2 namespace 时 `IN (VALUES)` 让热路径索引全部失效 | p1-22 |
 | 10 | [p1-09-cron-clock-skew.md](./p1-09-cron-clock-skew.md) | cron 用 daemon 时钟算、DB 时钟比 → 偏移时重复触发 | p1-22 |
 | 11 | [p1-10-concurrency-work-notify.md](./p1-10-concurrency-work-notify.md) | 并发受限任务完成不发 work 通知,下一个 run 白等退避 | — |
@@ -68,3 +68,4 @@
 - [done/p1-04-triggerandwait-require-task.md](./done/p1-04-triggerandwait-require-task.md) ✅(waitForChildRun/retryRun requireTask,task_not_found → AbortError,RunCtx.triggerAndWait)
 - [done/p1-05-orphan-wait-nulls-order.md](./done/p1-05-orphan-wait-nulls-order.md) ✅(孤儿扫描独立 LIMIT,timer 积压不再挤占孤儿恢复)
 - [done/p1-06-waits-run-id-index.md](./done/p1-06-waits-run-id-index.md) ✅(waits_run_idx 迁移,wakeParentIfWaiting 带 namespace 谓词)
+- [done/p1-07-claim-ledger-unbounded.md](./done/p1-07-claim-ledger-unbounded.md) ✅(账本读取移出 claim 事务,BETTER_TRIGGER_MAX_STEPS 上限 + stepsTruncated)

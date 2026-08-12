@@ -18,9 +18,9 @@
         have left it;
      2. seed old-version data (task, run, step, log, queue row, wait row,
         schedule) using only columns that existed then;
-     3. run the real `migrate()` — it must apply 0008..0011 and skip the
+     3. run the real `migrate()` — it must apply 0008..0012 and skip the
         already-journaled 0000..0007;
-     4. the seeded rows survive with their values, the journal holds all 12
+     4. the seeded rows survive with their values, the journal holds all 13
         migrations, and the constraints the new migrations added actually
         fire (23514 status/level CHECKs, 23503 FK refusals).
 
@@ -180,10 +180,10 @@ async function main(s: Scenario): Promise<void> {
     s.assertEqual(await count(s, `SELECT count(*) FROM waits WHERE run_id = 'run_old'`), 1, 'wait row');
     s.assertEqual(await count(s, `SELECT count(*) FROM schedules WHERE id = 'sch_old'`), 1, 'schedule');
 
-    // The journal holds all 12 migrations — none pending, none re-run.
+    // The journal holds all 13 migrations — none pending, none re-run.
     s.assertEqual(
       await count(s, `SELECT count(*) FROM "drizzle"."__drizzle_migrations"`),
-      12,
+      13,
       'journal entries after upgrade',
     );
   });
@@ -296,7 +296,7 @@ async function main(s: Scenario): Promise<void> {
     await migrate(s.pool);
     s.assertEqual(
       await count(s, `SELECT count(*) FROM "drizzle"."__drizzle_migrations"`),
-      12,
+      13,
       'journal unchanged by the second migrate',
     );
   });

@@ -153,6 +153,10 @@ Env:
                            Max serialized payload per run (default 262144 =
                            256 KiB). Over it: 400 \`bad_request\` — keep large
                            objects elsewhere and pass a reference
+  BETTER_TRIGGER_MAX_STEPS  Cap on a run's replayed step ledger (default 10000;
+                           0 = unlimited). A run past the cap fails with a
+                           non-retryable AbortError telling you to split it
+                           with continueAsNew.
 `;
 
 const PRUNE_USAGE = `better-trigger-worker prune — delete history past a retention window
@@ -204,6 +208,8 @@ interface Options {
   serve: boolean;
   /** Claim only runs whose code version this process still serves. */
   pinCodeVersion: boolean;
+  /** Cap on a run's replayed step ledger; 0 = unlimited. */
+  maxSteps: number;
   /** Namespaces this worker serves (claim / register / orchestrator scope). */
   namespaces: Namespace[];
 }
@@ -272,6 +278,25 @@ function requireInt(flag: string, raw: string): number {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) {
     throw new Error(`${flag} must be a positive number, got "${raw}"`);
+  }
+  return n;
+}
+
+/**
+ * BETTER_TRIGGER_MAX_STEPS: cap on a run's replayed step ledger. Unset → the
+ * 10000 default; 0 means unlimited (the pre-p1-07 behaviour). Negative or
+ * unparseable is a startup error on purpose — a typo'd cap must not silently
+ * become unlimited, and a typo'd cap that stays at the default would go
+ * unnoticed until a run fails for a reason nobody configured.
+ */
+function parseMaxSteps(raw: string | undefined): number {
+  if (raw === undefined) return 10000;
+  const n = Number(raw);
+  // Integer, not just numeric: a fractional cap would flow into the claim's
+  // `LIMIT $4` param as "10000.5" and explode at the database (bigint parse
+  // error) on the first over-cap claim instead of failing at startup.
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`BETTER_TRIGGER_MAX_STEPS must be a non-negative integer, got "${raw}"`);
   }
   return n;
 }
@@ -362,6 +387,9 @@ function parseArgs(argv: string[]): Options {
     migrate: true,
     serve: true,
     pinCodeVersion: envFlag(process.env.BETTER_TRIGGER_PIN_CODE_VERSION),
+    // A run past this cap is claimed but marked stepsTruncated and failed
+    // non-retryably (see executor.ts) — see parseMaxSteps for the defaults.
+    maxSteps: parseMaxSteps(process.env.BETTER_TRIGGER_MAX_STEPS),
     // --namespace flags append to the env list; parseArgs defaults the result
     // to [DEFAULT_NAMESPACE] once both sources are in.
     namespaces: parseNamespaces('BETTER_TRIGGER_NAMESPACES', process.env.BETTER_TRIGGER_NAMESPACES ?? ''),
@@ -931,6 +959,7 @@ async function main(): Promise<void> {
         name: opts.name,
         leaseMs: opts.leaseMs,
         pinCodeVersion: opts.pinCodeVersion,
+        maxSteps: opts.maxSteps,
         namespaces: opts.namespaces,
       },
     );

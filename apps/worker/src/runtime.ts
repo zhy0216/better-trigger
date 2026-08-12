@@ -61,6 +61,13 @@ export interface StartOptions {
    */
   pinCodeVersion?: boolean;
   /**
+   * Cap on a run's replayed step ledger (env BETTER_TRIGGER_MAX_STEPS; default
+   * 10000, 0 = unlimited). A run whose ledger exceeds it is claimed but marked
+   * `stepsTruncated` — the executor fails it non-retryably instead of replaying
+   * a truncated ledger that would silently skip steps (p1-07).
+   */
+  maxSteps?: number;
+  /**
    * Namespaces this worker serves (from `--namespace` /
    * BETTER_TRIGGER_NAMESPACES, resolved by the CLI to default/prod when
    * unset). Registration upserts the task definitions in every one of them,
@@ -244,6 +251,9 @@ export async function startWorkerRuntime(
           // Undefined (not an empty array) when pinning is off: the kernel keys
           // "filter or not" off the field's presence.
           codeVersions: options.pinCodeVersion ? taskVersions : undefined,
+          // p1-07: cap the replayed step ledger; the kernel claims an over-cap
+          // run with stepsTruncated set so the executor can fail it.
+          maxSteps: options.maxSteps,
         });
         counters.consecutiveClaimErrors = 0;
         run = claimed[0];

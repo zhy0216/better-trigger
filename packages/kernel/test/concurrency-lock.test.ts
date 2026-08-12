@@ -108,8 +108,12 @@ describe('concurrency limiter advisory lock', () => {
     expect(shapes[0]).toBe('BEGIN');
     expect(lockAt).toBeGreaterThan(0);
     expect(countAt).toBeGreaterThan(lockAt);
-    // Transaction scoped: released by COMMIT, never unlocked by hand.
+    // Transaction scoped: released by COMMIT, never unlocked by hand. COMMIT
+    // still ends the claim transaction (releasing the xact lock) — the run_steps
+    // snapshot read now follows it outside the transaction (p1-07).
     expect(stmts.some((s) => /pg_advisory_unlock/.test(s.sql))).toBe(false);
-    expect(stmts.at(-1)!.sql).toBe('COMMIT');
+    const commitAt = stmts.findIndex((s) => s.sql === 'COMMIT');
+    expect(commitAt).toBeGreaterThan(countAt);
+    expect(stmts.findIndex((s) => /FROM run_steps/.test(s.sql))).toBeGreaterThan(commitAt);
   });
 });

@@ -140,6 +140,7 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_MAX_BATCH` | `500` | Max items in one `batchTrigger`; over it `400 bad_request` — split the fan-out |
 | `BETTER_TRIGGER_MAX_BATCH_PAYLOAD_BYTES` | `1048576` (1 MiB) | Max TOTAL serialized payload across one `batchTrigger`; over it `400 bad_request` — split the fan-out (500 items at the per-item cap would be 128 MiB in one write tx) |
 | `BETTER_TRIGGER_MAX_PAYLOAD_BYTES` | `262144` (256 KiB) | Max serialized payload per run; over it `413 payload_too_large` |
+| `BETTER_TRIGGER_MAX_STEPS` | `10000` | Cap on a run's replayed step ledger. A run past the cap is claimed but marked truncated and fails with a **non-retryable** AbortError — replaying a truncated ledger would silently skip steps, so split the task with `continueAsNew` before it grows this large. `0` = unlimited |
 | `BETTER_TRIGGER_STEP_OUTPUT_MAX_BYTES` | `262144` (256 KiB) | Max serialized output/error per step row; over it the step records as **failed** with a `SerializationError` diagnostic and the run fails |
 | `BETTER_TRIGGER_RUN_OUTPUT_MAX_BYTES` | `262144` (256 KiB) | Max serialized run output; over it the run fails `413 payload_too_large` |
 | `BETTER_TRIGGER_ERROR_MAX_BYTES` | `65536` (64 KiB) | Max serialized error record (message/name/stack); a larger one is stored as a `SerializationError` stub so the failure itself still lands |

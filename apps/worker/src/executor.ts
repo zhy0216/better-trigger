@@ -236,6 +236,23 @@ export class Executor implements RunExecutor {
   /* ---- execution entry point ------------------------------------------- */
 
   async execute(): Promise<ExecutionResult> {
+    // p1-07: the claim truncated this run's ledger at BETTER_TRIGGER_MAX_STEPS.
+    // Replaying a truncated ledger would silently skip steps — fail the run
+    // non-retryably instead. continueAsNew is the intended fix for long runs.
+    if (this.run.stepsTruncated) {
+      const cap = Number(process.env.BETTER_TRIGGER_MAX_STEPS ?? 10000);
+      await this.failRun(
+        serializeError(new Error(
+          `run ${this.run.id} has more than ${cap} steps (BETTER_TRIGGER_MAX_STEPS) — ` +
+            `its ledger was truncated at claim time and cannot be replayed; ` +
+            `split the task with continueAsNew before it grows this large.`,
+        )),
+        undefined,
+        true, // abort → non-retryable
+        undefined,
+      );
+      return { type: 'failed' };
+    }
     this.startLogTimer();
     try {
       // Payload validation: failure is non-retryable (treated as AbortError).

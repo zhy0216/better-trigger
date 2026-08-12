@@ -31,6 +31,16 @@
    delayed rows with 3k due ones (md5-scattered, same priority), so the index
    really does hit the delayed rows before the due ones.
 
+   Phase 3 (p1-07) asks the CLAIM TIME question, not the plan question: does a
+   run whose run_steps ledger is huge stall the claim? Since 0006 the candidate
+   window's `FOR UPDATE SKIP LOCKED` rows are released the moment the claim
+   transaction COMMITs, and each claimed run's ledger is read AFTER that — so a
+   20k-step ledger must not change the order of magnitude of a claimRuns call.
+   The check drives the real kernel `claimRuns` (via createKernel) against 5k
+   ordinary claimable rows plus one priority-100 run carrying a 20k completed
+   step ledger, with maxSteps: 10000, and compares the end-to-end time against
+   the same claim once that run's queue row is deleted.
+
    Runs on @better-trigger/testing: runScenario provisions + migrates the
    scenario's database and folds the verdict into the exit code. A live Postgres
    is required, so this is NOT part of `bun run test`, and it is not in
@@ -43,6 +53,8 @@
      BT_CLAIM_SCAN_DB   override the provisioned database name
    ============================================================================= */
 import { runScenario, type Scenario } from '@better-trigger/testing';
+import { createKernel, type ClaimRunsArgs } from '@better-trigger/kernel';
+import type { ClaimedRun } from '@better-trigger/core';
 
 /** Queue rows to seed — a backlog big enough that a sequential scan shows. */
 const TOTAL = 50_000;
@@ -66,6 +78,31 @@ const D2_HELD = 30_000;
 const D2_DELAYED = 27_000;
 /** Due + unclaimed — the only rows the scan can return. */
 const D2_DUE = D2_TOTAL - D2_HELD - D2_DELAYED;
+
+/* Phase 3 (p1-07): the window lock must not depend on a run's ledger size. The
+   claim's `FOR UPDATE SKIP LOCKED` rows are released at COMMIT and the ledger
+   read runs after it, so a run with a huge run_steps ledger is claimed just as
+   fast as one with none. Claim against a fresh dataset whose first candidate
+   is exactly such a run, and compare the end-to-end claimRuns time with and
+   without it. */
+const P3_TOTAL = 5_000;
+/** The fat-ledger run. Its priority beats every scattered row's (max 5), so it
+ *  is ALWAYS the window's first candidate — the timing is only meaningful if
+ *  this run is actually claimed. */
+const P3_FAT_RUN = 'fat-ledger-0';
+const P3_FAT_PRIORITY = 100;
+/** Completed step rows seeded for that run. */
+const P3_FAT_STEPS = 20_000;
+/** maxSteps cap passed to claimRuns: the ledger read is bounded to cap + 1
+ *  rows and the claim is flagged stepsTruncated when it overflows. */
+const P3_MAX_STEPS = 10_000;
+/** Candidate window of each claimRuns call (`limit: 10` → claimWindow 20). */
+const P3_LIMIT = 10;
+/** Trials per timing; the best (min) wins so a GC pause cannot fail a claim. */
+const P3_TRIALS = 3;
+/** ms slack on top of `timingA <= timingB * 3` — leaves room for a cold cache
+ *  while still failing loudly if the ledger read were back inside the lock. */
+const P3_MARGIN_MS = 250;
 
 /**
  * VERBATIM copy of the unpinned claim candidate SELECT in
@@ -331,12 +368,144 @@ async function main(s: Scenario): Promise<void> {
     `delayed-heavy: ${delayed.ms} ms / ${delayed.buffers} buffers / ${delayed.removed} rows skipped` +
       `   baseline: ${baseline.ms} ms / ${baseline.buffers} buffers`,
   );
+
+  /* -------------------------------------------------------------------------
+   * Phase 3 (p1-07): the window lock must not depend on a run's ledger size.
+   * The claim's FOR UPDATE SKIP LOCKED rows are all released at COMMIT and the
+   * per-run ledger read now runs AFTER it (queue.ts claimRuns Phase 2) — so
+   * materializing thousands of steps can no longer extend the lock that peer
+   * workers block on. Fresh dataset: 5k ordinary claimable rows (md5-scattered
+   * priorities) plus one priority-100 run carrying a 20k completed step ledger.
+   * maxSteps caps the ledger read at maxSteps + 1 rows and flags the claim
+   * stepsTruncated; the end-to-end claim time with the fat run in the window
+   * must stay within a small multiple of the same claim without it.
+   * ----------------------------------------------------------------------- */
+  await pool.query('DELETE FROM runs'); // queue cascades
+  await pool.query(
+    `INSERT INTO runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority)
+       SELECT 'p3-' || g,
+              'task-' || (g % $2::int),
+              'queued',
+              jsonb_build_object('n', g),
+              'api', 1, 3,
+              CASE WHEN g % 10 = 0 THEN 1 + (g % 5) ELSE 0 END
+         FROM generate_series(0, $1::int - 1) g`,
+    [P3_TOTAL, TASKS],
+  );
+  await pool.query(
+    `INSERT INTO queue (run_id, available_at, priority)
+       SELECT 'p3-' || g,
+              now() - interval '1 minute',
+              CASE WHEN g % 10 = 0 THEN 1 + (g % 5) ELSE 0 END
+         FROM generate_series(0, $1::int - 1) g
+        ORDER BY md5(g::text)`,
+    [P3_TOTAL],
+  );
+  await pool.query(
+    `INSERT INTO runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority)
+       VALUES ($1, 'task-0', 'queued', jsonb_build_object('fat', true), 'api', 1, 3, $2)`,
+    [P3_FAT_RUN, P3_FAT_PRIORITY],
+  );
+  await pool.query(
+    `INSERT INTO queue (run_id, available_at, priority) VALUES ($1, now() - interval '1 minute', $2)`,
+    [P3_FAT_RUN, P3_FAT_PRIORITY],
+  );
+  await pool.query(
+    `INSERT INTO run_steps (run_id, seq, kind, status, label, output, attempt, started_at, finished_at)
+       SELECT $1, g, 'step', 'completed', 'step ' || g, jsonb_build_object('n', g), 1,
+              now() - interval '1 minute', now()
+         FROM generate_series(0, $2::int - 1) g`,
+    [P3_FAT_RUN, P3_FAT_STEPS],
+  );
+  await pool.query('VACUUM ANALYZE runs, queue, run_steps');
+  s.log(
+    `phase 3: ${P3_TOTAL} claimable rows (scattered priorities) + ` +
+      `${P3_FAT_RUN} with a ${P3_FAT_STEPS}-step ledger (priority ${P3_FAT_PRIORITY})`,
+  );
+
+  const kernel = createKernel({ pool });
+  const claimArgs: ClaimRunsArgs = {
+    workerId: 'bench',
+    namespaces: [{ projectId: 'default', env: 'prod' }],
+    taskIds,
+    limit: P3_LIMIT,
+    leaseMs: 60_000,
+    maxSteps: P3_MAX_STEPS,
+  };
+
+  // Timing A: the fat-ledger run is in the window and gets claimed (its 20k
+  // steps are read after COMMIT, capped at maxSteps). Timing B: the same rows
+  // with the fat run's queue row deleted so it is not in the window. Each runs
+  // a few times and the best (min) wins — the claim itself is fast, so a GC
+  // pause or cold buffer cache must not be able to fail a timing claim. The
+  // fat run is re-queued after EVERY trial: once claimed it drops out of the
+  // candidate window (locked_by IS NULL fails), so a min across trials where
+  // only the first contains it would measure the non-fat claim and pass even
+  // pre-fix. Every trial here must claim it for the comparison to bite.
+  const aTimes: number[] = [];
+  let fatClaim: ClaimedRun | undefined;
+  for (let i = 0; i < P3_TRIALS; i++) {
+    const t0 = Date.now();
+    const claimed = await kernel.claimRuns(claimArgs);
+    aTimes.push(Date.now() - t0);
+    if (i === 0) fatClaim = claimed.find((c) => c.id === P3_FAT_RUN);
+    await pool.query(
+      `UPDATE queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL
+        WHERE run_id = $1`,
+      [P3_FAT_RUN],
+    );
+    await pool.query(
+      `UPDATE runs SET status = 'queued', fencing_token = fencing_token + 1
+        WHERE id = $1`,
+      [P3_FAT_RUN],
+    );
+  }
+  const timingA = Math.min(...aTimes);
+
+  await pool.query('DELETE FROM queue WHERE run_id = $1', [P3_FAT_RUN]);
+  const bTimes: number[] = [];
+  for (let i = 0; i < P3_TRIALS; i++) {
+    const t0 = Date.now();
+    await kernel.claimRuns(claimArgs);
+    bTimes.push(Date.now() - t0);
+  }
+  const timingB = Math.min(...bTimes);
+
+  s.log(
+    `fat-ledger claim: ${timingA.toFixed(1)} ms (with ${P3_FAT_STEPS}-step ledger)` +
+      `   ${timingB.toFixed(1)} ms (without)   trials=${P3_TRIALS}`,
+  );
+
+  await s.check('a 20k-step ledger does not dominate the claim time (p1-07)', async () => {
+    // The ledger read is one indexed query bounded to maxSteps + 1 rows, run
+    // AFTER the claim transaction COMMITs, so it must not change the claim's
+    // order of magnitude. A pre-p1-07 claim materialized all 20k rows inside
+    // the locked transaction, making timingA dwarf timingB.
+    s.assert(
+      timingA <= timingB * 3 + P3_MARGIN_MS,
+      `the fat ledger dominates the claim: ${timingA.toFixed(1)} ms with it ` +
+        `vs ${timingB.toFixed(1)} ms without — the ledger read is not staying ` +
+        `outside the window lock`,
+    );
+  });
+
+  await s.check('the 20k-step ledger caps at maxSteps and is flagged stepsTruncated', async () => {
+    s.assert(
+      fatClaim !== undefined && fatClaim.stepsTruncated === true,
+      `the fat-ledger run should be claimed with stepsTruncated, got ` +
+        `${fatClaim ? `stepsTruncated=${String(fatClaim.stepsTruncated)}` : 'no claim'}`,
+    );
+    s.assert(
+      fatClaim !== undefined && fatClaim.steps.length === P3_MAX_STEPS,
+      `the cap should leave exactly maxSteps steps, got ${fatClaim?.steps.length ?? 'none'}`,
+    );
+  });
 }
 
 await runScenario(
   {
     name: 'claim-scan-bench',
-    what: 'the claim candidate scan uses queue_claimable_idx (PF2); delayed rows do not worsen it (PF5)',
+    what: 'the claim candidate scan uses queue_claimable_idx (PF2); delayed rows do not worsen it (PF5); a fat run_steps ledger does not dominate the claim time (p1-07)',
     db: { name: 'better_trigger_claim_scan', envVar: 'BT_CLAIM_SCAN_DB' },
   },
   main,

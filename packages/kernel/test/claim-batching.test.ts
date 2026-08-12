@@ -133,14 +133,16 @@ describe('claimRuns candidate fan-out', () => {
 
     await claimRuns(pool, { ...ARGS, limit: 1 });
 
-    // BEGIN, candidates, UPDATE queue, UPDATE runs, run_steps, COMMIT.
+    // BEGIN, candidates, UPDATE queue, UPDATE runs, COMMIT — then the run_steps
+    // snapshot read AFTER the claim transaction (p1-07: the ledger must not keep
+    // the claim window's FOR UPDATE SKIP LOCKED rows held).
     expect(stmts.map((s) => s.sql.trim().split(/\s+/).slice(0, 2).join(' '))).toEqual([
       'BEGIN',
       'SELECT q.id',
       'UPDATE queue',
       'UPDATE runs',
-      'SELECT seq,',
       'COMMIT',
+      'SELECT seq,',
     ]);
     expect(perCandidateReads(stmts)).toHaveLength(0);
   });

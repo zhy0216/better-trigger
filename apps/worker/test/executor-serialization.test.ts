@@ -158,4 +158,27 @@ describe('executor serialization (C3)', () => {
     expect((caught as AbortError).message).toContain('not registered');
     expect(calls.waitForChildRun).toHaveLength(1); // task_not_found fingerprints fine; the kernel refused it
   });
+
+  it('a claim that truncated the ledger at BETTER_TRIGGER_MAX_STEPS fails the run non-retryably without executing', async () => {
+    const { kernel, calls } = fakeKernel();
+    let ran = 0;
+    const task: ExecutorTask = {
+      id: 'demo',
+      run: async () => {
+        ran += 1;
+      },
+    };
+    const truncated = claimed();
+    truncated.stepsTruncated = true;
+    const ex = new Executor(kernel, task, truncated, 'w1', null);
+
+    expect(await ex.execute()).toEqual({ type: 'failed' });
+    expect(calls.failRun).toHaveLength(1);
+    expect(calls.failRun[0]).toMatchObject({ abort: true, retry: undefined });
+    expect((calls.failRun[0] as { error: { message: string } }).error.message).toContain(
+      'BETTER_TRIGGER_MAX_STEPS',
+    );
+    expect(ran).toBe(0); // the truncated guard fires before the task body ever runs
+    expect(calls.reportStep).toEqual([]); // nothing executed
+  });
 });

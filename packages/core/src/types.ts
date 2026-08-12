@@ -177,6 +177,12 @@ export interface DequeuedRun {
 /** A claimed run: the fencing token is the claim's write credential. */
 export interface ClaimedRun extends DequeuedRun {
   fencingToken: number;
+  /**
+   * True when the claim truncated the run's step ledger at the worker's
+   * BETTER_TRIGGER_MAX_STEPS cap (p1-07). The executor must fail such a run
+   * non-retryably — replaying a truncated ledger would silently skip steps.
+   */
+  stepsTruncated?: boolean;
 }
 
 /** One structured log line reported by a worker. */

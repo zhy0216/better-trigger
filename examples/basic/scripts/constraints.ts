@@ -362,6 +362,8 @@ async function main(s: Scenario): Promise<void> {
     // ADD CONSTRAINT fail — and with it every daemon's boot. ALL of 0011's
     // constraints go (the CHECKs too): the re-run re-adds every one, and an
     // existing constraint would fail it with a duplicate_object error instead.
+    // 0012 (p1-06, waits_run_idx) is younger than 0011, so it must be dropped
+    // and de-journaled as well, or its CREATE INDEX fails on the re-migrate.
     const checkTables: Array<{ name: string; table: string }> = [
       { name: 'runs_status_check', table: 'runs' },
       { name: 'runs_attempt_check', table: 'runs' },
@@ -380,9 +382,10 @@ async function main(s: Scenario): Promise<void> {
     for (const c of checkTables) {
       await s.pool.query(`ALTER TABLE ${c.table} DROP CONSTRAINT ${c.name}`);
     }
+    await s.pool.query(`DROP INDEX IF EXISTS waits_run_idx`);
     await s.pool.query(
       `DELETE FROM drizzle.__drizzle_migrations WHERE hash IN (
-         SELECT hash FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 1)`,
+         SELECT hash FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 2)`,
     );
     // Orphan queue row + orphan wait (run_id and child_run_id variants) +
     // orphan parent_run_id + orphan schedule, all pointing at 'run_gone'.
