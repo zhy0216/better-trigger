@@ -29,6 +29,12 @@
         exactly that (classid, objid, objsubid=2) — and no run of that key start
         — until it commits. That pins the classid, the objid derivation and the
         two-argument form against the live engine, not against a string.
+     5. a serialized backlog (limit 1) advances run-to-run by wake, not by
+        backoff (todos/p1-10): a terminal run carrying a concurrency_key sends a
+        `work` notification, so the next run's start lands well inside the idle
+        poll base (`IDLE_POLL_BASE_MS`, 300ms) instead of at the next poll
+        boundary — and the same measurement proves the cap held (run i+1's
+        started_at ≥ run i's finished_at, so no two runs of the key overlapped).
 
    Note on (4): while the lock is held, claims of OTHER keys stall too — a
    blocked claim transaction is still holding its candidate rows FOR UPDATE, and
@@ -65,7 +71,7 @@ import {
   type Scenario,
 } from '@better-trigger/testing';
 import { betterTrigger } from 'better-trigger';
-import { CC_LIMIT, ccLimited } from './concurrency-tasks';
+import { CC_LIMIT, CC_SERIAL_LIMIT, ccLimited, ccSerial } from './concurrency-tasks';
 
 const PORT = portFromEnv('BT_CONCURRENCY_PORT', 4906);
 const TASKS_MODULE = fileURLToPath(new URL('./concurrency-tasks.ts', import.meta.url));
@@ -80,6 +86,24 @@ const RUNS_PER_GROUP = 5;
 /** How long each run holds its slot — wide enough that the runs a correct
  *  limiter admits together are still together when the next claim lands. */
 const HOLD_MS = 1_200;
+
+/* -- serialized-chain latency (todos/p1-10) ------------------------------- */
+/** The key the limit-1 chain runs under; never used by the steps above. */
+const SERIAL_GROUP = 'cc-serial';
+/** Backlog length of the serialized chain. */
+const SERIAL_RUNS = 3;
+/** Body length of one serial run — a fast step, so the measured gap is the
+ *  hand-off latency, not the work itself. */
+const SERIAL_HOLD_MS = 25;
+/**
+ * The idle claim loop's base poll, duplicated from apps/worker/src/runtime.ts
+ * IDLE_POLL_BASE_MS on purpose: the assertion is that a serialized backlog
+ * advances by `work` notification, NOT by waiting out this backoff, so it must
+ * not import the value it is checking. The run-to-run gap must land clearly
+ * under this base — the threshold is the base minus 50ms of margin.
+ */
+const IDLE_POLL_BASE_MS = 300;
+const GAP_MAX_MS = IDLE_POLL_BASE_MS - 50;
 
 /**
  * `classid` of the limiter's advisory locks, duplicated from
@@ -241,7 +265,7 @@ async function main(s: Scenario): Promise<void> {
     name: 'cc-registrar',
   });
   s.cleanup(() => registrar.stop());
-  await waitForTasks(s.pool, [ccLimited.id]);
+  await waitForTasks(s.pool, [ccLimited.id, ccSerial.id]);
   await registrar.stop();
 
   const limitRes = await s.pool.query<{ concurrency_limit: number | null }>(
@@ -253,6 +277,19 @@ async function main(s: Scenario): Promise<void> {
   // gated on exactly this column.
   s.assertEqual(limitRes.rows[0]?.concurrency_limit, CC_LIMIT, 'tasks.concurrency_limit');
   s.ok(`${ccLimited.id} registered with concurrency_limit ${CC_LIMIT}, registrar gone`);
+
+  // Same guard for the serialized chain: the latency assertion is meaningless
+  // if cc-serial has anything but a hard cap of 1.
+  const serialLimit = await s.pool.query<{ concurrency_limit: number | null }>(
+    `SELECT concurrency_limit FROM tasks WHERE id = $1`,
+    [ccSerial.id],
+  );
+  s.assertEqual(
+    serialLimit.rows[0]?.concurrency_limit,
+    CC_SERIAL_LIMIT,
+    'tasks.concurrency_limit (serial)',
+  );
+  s.ok(`${ccSerial.id} registered with concurrency_limit ${CC_SERIAL_LIMIT}`);
 
   /* -- 2. fill the queue before any slot exists ---------------------------- */
   // Round-robin, so the two keys' queue rows interleave — see the header.
@@ -449,6 +486,80 @@ async function main(s: Scenario): Promise<void> {
   s.ok(
     `releasing the lock let both ${GATED_GROUP} runs through (peak ${gatedPeak} ≤ ${CC_LIMIT})`,
   );
+
+  /* -- 6. a serialized backlog advances by wake, not by backoff ----------- */
+  // p1-10: a run going terminal WITH a concurrency_key now sends a `work`
+  // notification — its finishing write is itself the event that makes the next
+  // run claimable. NOTE on what this check can and cannot prove: the slot that
+  // completes run N is by construction the one that just freed the key, and it
+  // hot-reclaims immediately (runtime.ts never sleeps after a successful
+  // claim), so the measured finish→start gap below is dominated by the claim
+  // round-trip, not by the wake. The wake's discriminating guard is the kernel
+  // stub test (notify.test.ts: a keyed terminal run must emit `work`) — this
+  // scenario still proves the cap of 1 held (no overlap) and keeps the gap as
+  // a regression sanity bound well inside the idle-poll base.
+  for (let i = 0; i < SERIAL_RUNS; i += 1) {
+    await client.trigger(ccSerial, { group: SERIAL_GROUP, holdMs: SERIAL_HOLD_MS });
+  }
+  s.log(
+    `${SERIAL_RUNS} ${ccSerial.id} runs queued back-to-back on key ${SERIAL_GROUP} ` +
+      `(limit ${CC_SERIAL_LIMIT})`,
+  );
+
+  await waitFor(`all ${SERIAL_RUNS} serial runs to complete`, 30_000, async () => {
+    const done = await countRows(
+      s,
+      `SELECT count(*)::int AS n FROM runs
+        WHERE concurrency_key = $1 AND status = 'completed'`,
+      [SERIAL_GROUP],
+    );
+    if (done === SERIAL_RUNS) return true;
+    const broken = await countRows(
+      s,
+      `SELECT count(*)::int AS n FROM runs
+        WHERE concurrency_key = $1 AND status IN ('failed', 'canceled')`,
+      [SERIAL_GROUP],
+    );
+    return broken > 0 ? { abort: `${broken} serial run(s) failed or were canceled` } : false;
+  });
+
+  const serialSpans = (await readSpans(s, [SERIAL_GROUP])).sort(
+    (a, b) => a.from - b.from || a.runId.localeCompare(b.runId),
+  );
+  s.assertEqual(serialSpans.length, SERIAL_RUNS, 'serial runs with a measured running window');
+
+  await s.check('serialized backlog advances run-to-run well inside the idle backoff', async () => {
+    // For each adjacency, gap = startedAt(next) − finishedAt(prev), read from
+    // the engine's own timestamps (readSpans keeps Postgres's microsecond
+    // resolution). The overlap guard is the primary assertion — run i+1 may
+    // only start once run i is terminal, proving the cap of 1 held. The gap
+    // bound is a sanity floor: the completing slot hot-reclaims (see the
+    // section comment), so this is a claim round-trip bound, kept well inside
+    // the idle-poll base as a regression tripwire, not as the wake's proof.
+    const gaps: number[] = [];
+    for (let i = 1; i < serialSpans.length; i += 1) {
+      const prev = serialSpans[i - 1]!;
+      const next = serialSpans[i]!;
+      const gap = next.from - prev.to;
+      gaps.push(gap);
+      s.assert(
+        next.from >= prev.to,
+        `serial run ${i + 1} started at ${next.from}ms before run ${i} finished ` +
+          `at ${prev.to}ms — the cap of ${CC_SERIAL_LIMIT} was breached`,
+      );
+      s.assert(
+        gap < GAP_MAX_MS,
+        `serial hand-off ${i}→${i + 1} took ${gap}ms (finished_at ${prev.to}ms → ` +
+          `started_at ${next.from}ms); the wake must land well under the ` +
+          `${IDLE_POLL_BASE_MS}ms idle-poll base, but ${gap}ms ≥ ${GAP_MAX_MS}ms ` +
+          `(the base minus ${IDLE_POLL_BASE_MS - GAP_MAX_MS}ms margin)`,
+      );
+    }
+    s.log(
+      `serial hand-offs finished→started: ${gaps.map((g) => `${g}ms`).join(', ')} — ` +
+        `each well under the ${IDLE_POLL_BASE_MS}ms idle-poll base`,
+    );
+  });
 }
 
 await runScenario(

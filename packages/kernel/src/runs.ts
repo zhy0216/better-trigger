@@ -1644,8 +1644,10 @@ export async function completeRun(pool: Pool, args: CompleteRunArgs): Promise<vo
     // Terminal: result waiters wake. If a parent was woken inside the same tx,
     // it may also be claimable again — the extra `work` notification is
     // harmless when it was not (the claim scan just comes back empty).
+    // Completing a run also releases its concurrency slot, so a run waiting on
+    // that concurrency limit needs a wake even when there is no parent.
     await notifyTerminal(client, args.runId, args.namespace);
-    if (run.parent_run_id) await notifyWork(client);
+    if (run.parent_run_id || run.concurrency_key) await notifyWork(client);
   });
 }
 
@@ -1684,9 +1686,11 @@ export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult
       await terminalFail(client, run, args.error);
       // Terminal (no retry): wake result waiters, and the parent if there is
       // one to wake. The extra `work` notification is harmless when no parent
-      // actually got re-enqueued.
+      // actually got re-enqueued. Failing a run also releases its concurrency
+      // slot, so a run waiting on that concurrency limit needs a wake even when
+      // there is no parent.
       await notifyTerminal(client, args.runId, args.namespace);
-      if (run.parent_run_id) await notifyWork(client);
+      if (run.parent_run_id || run.concurrency_key) await notifyWork(client);
       return { willRetry: false };
     }
 
@@ -1748,10 +1752,12 @@ export async function cancelRun(
       });
     }
     // Terminal: wake result waiters (and the claim loops if a parent may have
-    // been re-enqueued — harmless when it was not). The already-terminal
-    // no-op early return above never reaches this point.
+    // been re-enqueued — harmless when it was not). Canceling a run also
+    // releases its concurrency slot, so a run waiting on that concurrency limit
+    // needs a wake even when there is no parent. The already-terminal no-op
+    // early return above never reaches this point.
     await notifyTerminal(client, runId, namespace);
-    if (run.parent_run_id) await notifyWork(client);
+    if (run.parent_run_id || run.concurrency_key) await notifyWork(client);
   });
 }
 

@@ -376,6 +376,94 @@ describe('notify sources — terminal notifications', () => {
   });
 });
 
+describe('notify sources — concurrency-slot release wakes waiting runs', () => {
+  it('completeRun of a concurrency-keyed run sends terminal AND work (the slot was released)', async () => {
+    const { pool, notified, texts } = stubPool({
+      handlers: [
+        () => ({ rows: [{ locked_by: 'w1' }] }),
+        () => ({ rows: [runRow({ concurrency_key: 'user-42' })] }),
+        () => ({ rowCount: 1 }), // UPDATE runs → completed
+        () => ({ rowCount: 1 }), // DELETE queue
+      ],
+    });
+    await completeRun(pool, {
+      runId: 'run_1',
+      output: { ok: true },
+      workerId: 'w1',
+      fencingToken: 1,
+      namespace: DEFAULT_NAMESPACE,
+    });
+    expect(notified.map((c) => c.payload)).toEqual([
+      { type: 'terminal', runId: 'run_1', projectId: DEFAULT_NAMESPACE.projectId, env: DEFAULT_NAMESPACE.env },
+      { type: 'work' },
+    ]);
+    expectNotifyIsLastStatement(texts);
+  });
+
+  it('failRun terminal of a concurrency-keyed run sends terminal AND work (the slot was released)', async () => {
+    const { pool, notified, texts } = stubPool({
+      handlers: [
+        () => ({ rows: [{ locked_by: 'w1' }] }),
+        () => ({ rows: [runRow({ attempt: 3, max_attempts: 3, concurrency_key: 'user-42' })] }),
+        () => ({ rowCount: 1 }), // UPDATE runs → failed
+        () => ({ rowCount: 1 }), // DELETE queue
+        () => ({ rowCount: 1 }), // UPDATE waits → canceled
+      ],
+    });
+    const res = await failRun(pool, {
+      runId: 'run_1',
+      error: { message: 'boom' },
+      workerId: 'w1',
+      fencingToken: 1,
+      namespace: DEFAULT_NAMESPACE,
+    });
+    expect(res.willRetry).toBe(false);
+    expect(notified.map((c) => c.payload)).toEqual([
+      { type: 'terminal', runId: 'run_1', projectId: DEFAULT_NAMESPACE.projectId, env: DEFAULT_NAMESPACE.env },
+      { type: 'work' },
+    ]);
+    expectNotifyIsLastStatement(texts);
+  });
+
+  it('cancelRun of a concurrency-keyed run sends terminal AND work (the slot was released)', async () => {
+    const { pool, notified, texts } = stubPool({
+      handlers: [
+        () => ({ rows: [{ locked_by: null }] }),
+        () => ({ rows: [runRow({ status: 'queued', concurrency_key: 'user-42' })] }),
+        () => ({ rowCount: 1 }), // UPDATE runs → canceled
+        () => ({ rowCount: 1 }), // DELETE queue
+        () => ({ rowCount: 1 }), // UPDATE waits → canceled
+      ],
+    });
+    await cancelRun(pool, 'run_1', DEFAULT_NAMESPACE);
+    expect(notified.map((c) => c.payload)).toEqual([
+      { type: 'terminal', runId: 'run_1', projectId: DEFAULT_NAMESPACE.projectId, env: DEFAULT_NAMESPACE.env },
+      { type: 'work' },
+    ]);
+    expectNotifyIsLastStatement(texts);
+  });
+
+  it('completeRun of a run with neither a parent nor a concurrency_key sends terminal only (no work)', async () => {
+    const { pool, notified, texts } = stubPool({
+      handlers: [
+        ...FENCED_HEAD,
+        () => ({ rowCount: 1 }), // UPDATE runs → completed
+        () => ({ rowCount: 1 }), // DELETE queue
+      ],
+    });
+    await completeRun(pool, {
+      runId: 'run_1',
+      output: { ok: true },
+      workerId: 'w1',
+      fencingToken: 1,
+      namespace: DEFAULT_NAMESPACE,
+    });
+    expectTerminal(notified);
+    expect(notified.map((c) => c.payload)).not.toContainEqual({ type: 'work' });
+    expectNotifyIsLastStatement(texts);
+  });
+});
+
 describe('notify sources — orchestrator loops', () => {
   const waitFor = async (pred: () => boolean, timeoutMs = 5_000): Promise<void> => {
     const deadline = Date.now() + timeoutMs;
