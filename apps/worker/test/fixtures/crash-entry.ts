@@ -14,6 +14,9 @@
    BT_CRASH=handoff-fail  a clean SIGTERM whose `pool.end()` rejects
    BT_CRASH=second-signal  a clean SIGTERM whose drain can never finish — the
                       test drives a second signal on top of it (p1-12)
+   BT_CRASH=stray-rejection  a promise nobody awaits, on a daemon that then
+                      KEEPS SERVING — the p1-13 non-fatal default. The test
+                      SIGTERMs it afterwards and asserts exit 0.
 
    The last three are built by patching `pool.end()` — the last step of the
    handoff, so a pool that ends slowly (or never) is a handoff still running

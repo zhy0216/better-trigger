@@ -58,6 +58,17 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+/** Poll a reader function until its current text matches `re`, or return false
+ *  on timeout. Used to wait for a spawned daemon's own boot log line. */
+async function waitForLine(read: () => string, re: RegExp, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (re.test(read())) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
+
 /** Boots the daemon, lets the fixture fault it, and reports how it died. */
 async function crashDaemon(
   mode: 'rejection' | 'exception' | 'wedge' | 'drain-race' | 'handoff-fail',
@@ -75,6 +86,12 @@ async function crashDaemon(
         DATABASE_URL: 'postgres://127.0.0.1:1/better_trigger_absent',
         BT_CRASH: mode,
         BT_CRASH_PORT: String(port),
+        // p1-13: unhandledRejection is non-fatal by default (logged, daemon
+        // keeps serving). These fixtures test the FATAL path, so they opt back
+        // in via the gate — which also exercises the gate itself.
+        ...(mode === 'rejection' || mode === 'wedge' || mode === 'drain-race'
+          ? { BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION: '1' }
+          : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -285,6 +302,75 @@ describe('a handoff step that fails', () => {
       // ...and the closing line still ran, with the step marked.
       expect(stdout).toMatch(/handoff complete:.*pool\(failed\)/);
       expect(stdout).toMatch(/handoff complete:.*\bserver\b/);
+    },
+    TIMEOUT,
+  );
+});
+
+describe('an unhandled rejection that is not fatal (p1-13)', () => {
+  it(
+    'keeps serving, counts it on /metrics, and exits 0 on the next SIGTERM',
+    async () => {
+      // No BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION: the default is to log the
+      // stray rejection (usually a non-awaited promise in task code) and keep
+      // the daemon — and every unrelated in-flight run — alive.
+      const port = await freePort();
+      const clean = { ...process.env };
+      delete clean.BETTER_TRIGGER_API_KEY;
+      delete clean.BETTER_TRIGGER_HOST;
+      const child = spawn('bun', [ENTRY, '--port', String(port), '--no-migrate'], {
+        env: {
+          ...clean,
+          DATABASE_URL: 'postgres://127.0.0.1:1/better_trigger_absent',
+          BT_CRASH: 'stray-rejection',
+          BT_CRASH_PORT: String(port),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
+      child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
+      const timer = setTimeout(() => child.kill('SIGKILL'), 25_000);
+      try {
+        // Wait for the daemon's own "listening on" line (a fetch to a port that
+        // has not bound yet can be refused-and-cached by the client), then the
+        // fixture fires the rejection and the daemon must survive it.
+        const booted = await waitForLine(
+          () => stdout,
+          /listening on/,
+          20_000,
+        );
+        expect(booted).toBe(true);
+        // Give the rejection handler a beat to run, then prove it survived it.
+        await new Promise((r) => setTimeout(r, 1_500));
+        expect(child.exitCode).toBeNull(); // still alive — the rejection was not fatal
+        expect(stderr).toContain('unhandledRejection');
+        expect(stderr).toMatch(/usually a promise in task code that was never awaited/);
+        // ...and it must NOT claim the daemon is going down (the non-fatal
+        // context line says "keeps serving", never "fatal … exiting").
+        expect(stderr).not.toContain('fatal unhandledRejection');
+        expect(stderr).not.toMatch(/exiting\./);
+        // The run context is still useful: which worker was up when it landed.
+        expect(stderr).toContain('worker=');
+
+        // It is counted, so a rising better_trigger_unhandled_rejections_total
+        // points at task hygiene without a silent death.
+        const metrics = await (await fetch(`http://127.0.0.1:${port}/api/v1/metrics`)).text();
+        expect(metrics).toMatch(/better_trigger_unhandled_rejections_total 1/);
+
+        // The daemon is still healthy and shuts down cleanly afterwards.
+        expect((await fetch(`http://127.0.0.1:${port}/api/v1/health`)).ok).toBe(true);
+        child.kill('SIGTERM');
+        const code = await new Promise<number | null>((resolve) => {
+          child.on('close', (c) => resolve(c));
+        });
+        expect(code).toBe(0);
+        expect(stdout).toContain('handoff complete:');
+      } finally {
+        clearTimeout(timer);
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      }
     },
     TIMEOUT,
   );

@@ -75,6 +75,9 @@ export interface MetricsSources {
    *  process-wide — read directly because an API-only daemon has no worker
    *  counters to fold them into. */
   pool?: { poolCheckoutTimeouts: number } | null;
+  /** Stray unhandledRejections (p1-13): logged, daemon keeps serving. A
+   *  rising rate points at task code that never awaits its promises. */
+  unhandledRejections?: { count: number } | null;
 }
 
 export type MetricType = 'counter' | 'gauge';
@@ -435,6 +438,12 @@ export async function collectMetrics(
       help: 'Business-pool connection checkouts that timed out (connectionTimeoutMillis). Each one is a moment the pool was saturated — every client busy and the checkout queue waited too long; a rising rate means the pool is too small for the concurrency plus orchestrator/waiter headroom.',
       type: 'counter',
       samples: [{ value: poolCheckoutTimeouts }],
+    },
+    {
+      name: 'unhandled_rejections_total',
+      help: 'Stray unhandledRejections the daemon logged and survived (p1-13). Almost always a promise in task code that was never awaited; a rising rate is task hygiene, not a daemon fault. Set BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION=1 to make them fatal instead.',
+      type: 'counter',
+      samples: [{ value: sources.unhandledRejections?.count ?? 0 }],
     },
     {
       name: 'orchestrator_errors_total',

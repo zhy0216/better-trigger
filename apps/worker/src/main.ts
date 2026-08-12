@@ -178,8 +178,14 @@ Env:
                            Server-side statement timeout in ms (default 30000;
                            0 = off). Sent as statement_timeout in the
                            connection startup packet, so PostgreSQL itself
-                           cancels a query that runs longer and returns the
-                           connection to the pool.
+                            cancels a query that runs longer and returns the
+                            connection to the pool.
+   BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION
+                            Default off: a stray unhandledRejection (almost
+                            always a non-awaited promise in task code) is logged
+                            and counted on better_trigger_unhandled_rejections_total
+                            while the daemon keeps serving. Set to 1 to make it
+                            fatal (exit 1) like an uncaughtException.
 `;
 
 const PRUNE_USAGE = `better-trigger-worker prune — delete history past a retention window
@@ -831,7 +837,44 @@ function crash(kind: string, err: unknown): void {
   );
 }
 
-process.on('unhandledRejection', (reason) => crash('unhandledRejection', reason));
+// p1-13: a stray unhandledRejection is most likely a user task's non-awaited
+// promise (the daemon loads and executes task modules in-process); it must not
+// take down the daemon and every unrelated in-flight run. Counter is
+// process-wide so /metrics can see it even before the runtime exists.
+const unhandledRejections = { count: 0 };
+/**
+ * A rejected promise nobody handled. `uncaughtException` may have corrupted
+ * state and exits; a stray rejection has no such claim — Node's own guidance
+ * is that the process state is still usable. Record it loudly (with the
+ * context of what was running, and a hint at the usual culprit) and keep
+ * serving. `BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION=1` restores the old
+ * fail-fast behavior for those who want it.
+ */
+function handleUnhandledRejection(reason: unknown): void {
+  if (process.env.BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION === '1') {
+    crash('unhandledRejection', reason);
+    return;
+  }
+  unhandledRejections.count += 1;
+  // Context WITHOUT the "fatal … exiting" wording — the daemon is neither.
+  console.error(
+    formatCrashContext(
+      'unhandledRejection (non-fatal, daemon keeps serving)',
+      daemon.worker?.workerId,
+      daemon.worker?.inFlightRunIds() ?? [],
+      false,
+    ),
+  );
+  // The whole reason, not `.message`: this is the only record of the fault.
+  console.error(
+    `[better-trigger] unhandledRejection (${unhandledRejections.count} total; daemon keeps serving — ` +
+      `usually a promise in task code that was never awaited):`,
+    reason,
+  );
+}
+
+process.on('unhandledRejection', (reason) => handleUnhandledRejection(reason));
+// An uncaught exception may have corrupted state — exiting is the right call.
 process.on('uncaughtException', (err) => crash('uncaughtException', err));
 // Signals registered at load time so a SIGTERM during boot (loadTasks /
 // migrate / registerWorker) also runs the graceful handoff instead of Node's
@@ -1119,6 +1162,7 @@ async function main(): Promise<void> {
         // Process-wide business-pool checkout timeouts — visible even on an
         // API-only daemon (no worker counters exist there).
         pool: poolCounters,
+        unhandledRejections,
       },
       waiters,
       // The DB gauges /metrics exports are namespace-labelled per configured

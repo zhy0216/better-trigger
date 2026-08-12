@@ -176,14 +176,19 @@ export function createNotifyCounters(): NotifyCounters {
  * gone this log is the only place they are named. Rendered here, not inline at
  * the call site, so the "with in-flight ids" shape is testable without spawning
  * a daemon that happens to be busy.
+ *
+ * `fatal` toggles the wording: the crash handlers print "fatal <kind>: exiting",
+ * while the p1-13 non-fatal unhandledRejection path prints the same worker /
+ * in-flight context WITHOUT claiming the daemon is going down.
  */
 export function formatCrashContext(
   kind: string,
   workerId: string | null | undefined,
   runIds: readonly string[],
+  fatal = true,
 ): string {
   return (
-    `[better-trigger] fatal ${kind}: exiting. ` +
+    `[better-trigger] ${fatal ? `fatal ${kind}: exiting. ` : `${kind}: `}` +
     `worker=${workerId ?? 'none'} ` +
     `in-flight=${runIds.length > 0 ? runIds.join(',') : 'none'}`
   );

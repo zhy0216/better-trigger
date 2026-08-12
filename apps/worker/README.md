@@ -144,6 +144,7 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_POOL_MAX` | _derived_ | Business-pool connection max. Defaults to `BETTER_TRIGGER_CONCURRENCY + 8` (headroom for the orchestrator loops, heartbeat, waiter sweep and HTTP slack). Raise it when `better_trigger_pool_checkout_timeouts_total` climbs |
 | `BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS` | `10000` | Business-pool checkout / connect timeout in ms. A saturated pool answers a checkout with an error after this instead of queueing it forever; each one is counted on `better_trigger_pool_checkout_timeouts_total`. `0` = a checkout waits forever (pg's default) |
 | `BETTER_TRIGGER_POOL_STATEMENT_TIMEOUT_MS` | `30000` | Server-side statement timeout in ms, sent as `statement_timeout` in the connection startup packet — PostgreSQL itself cancels a query that runs longer and returns the connection to the pool. `0` = off |
+| `BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION` | _(unset)_ | Set to `1` to make a stray `unhandledRejection` fatal (exit 1, like an `uncaughtException`). Default off: a stray rejection is logged and counted on `better_trigger_unhandled_rejections_total` while the daemon keeps serving — it is almost always a non-awaited promise in **task code**, and one bad task promise should not take down every unrelated in-flight run |
 | `BETTER_TRIGGER_STEP_OUTPUT_MAX_BYTES` | `262144` (256 KiB) | Max serialized output/error per step row; over it the step records as **failed** with a `SerializationError` diagnostic and the run fails |
 | `BETTER_TRIGGER_RUN_OUTPUT_MAX_BYTES` | `262144` (256 KiB) | Max serialized run output; over it the run fails `413 payload_too_large` |
 | `BETTER_TRIGGER_ERROR_MAX_BYTES` | `65536` (64 KiB) | Max serialized error record (message/name/stack); a larger one is stored as a `SerializationError` stub so the failure itself still lands |
@@ -509,6 +510,12 @@ A pool that is too small for the concurrency + loops it serves shows up as
 timed out is one moment the pool was saturated. A rising rate there means raise
 `BETTER_TRIGGER_POOL_MAX` (or reduce `--concurrency`), before the timeouts
 start rejecting work.
+
+A rising `better_trigger_unhandled_rejections_total` is not a daemon fault: a
+stray `unhandledRejection` (a promise in a task body that was never awaited)
+is logged with the run context and the daemon keeps serving, so one task's
+promise hygiene cannot take down every unrelated in-flight run. Set
+`BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION=1` if you want fail-fast semantics.
 
 ## API
 
