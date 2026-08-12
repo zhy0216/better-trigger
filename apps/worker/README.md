@@ -141,6 +141,9 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_MAX_BATCH_PAYLOAD_BYTES` | `1048576` (1 MiB) | Max TOTAL serialized payload across one `batchTrigger`; over it `400 bad_request` — split the fan-out (500 items at the per-item cap would be 128 MiB in one write tx) |
 | `BETTER_TRIGGER_MAX_PAYLOAD_BYTES` | `262144` (256 KiB) | Max serialized payload per run; over it `413 payload_too_large` |
 | `BETTER_TRIGGER_MAX_STEPS` | `10000` | Cap on a run's replayed step ledger. A run past the cap is claimed but marked truncated and fails with a **non-retryable** AbortError — replaying a truncated ledger would silently skip steps, so split the task with `continueAsNew` before it grows this large. `0` = unlimited |
+| `BETTER_TRIGGER_POOL_MAX` | _derived_ | Business-pool connection max. Defaults to `BETTER_TRIGGER_CONCURRENCY + 8` (headroom for the orchestrator loops, heartbeat, waiter sweep and HTTP slack). Raise it when `better_trigger_pool_checkout_timeouts_total` climbs |
+| `BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS` | `10000` | Business-pool checkout / connect timeout in ms. A saturated pool answers a checkout with an error after this instead of queueing it forever; each one is counted on `better_trigger_pool_checkout_timeouts_total`. `0` = a checkout waits forever (pg's default) |
+| `BETTER_TRIGGER_POOL_STATEMENT_TIMEOUT_MS` | `30000` | Server-side statement timeout in ms, sent as `statement_timeout` in the connection startup packet — PostgreSQL itself cancels a query that runs longer and returns the connection to the pool. `0` = off |
 | `BETTER_TRIGGER_STEP_OUTPUT_MAX_BYTES` | `262144` (256 KiB) | Max serialized output/error per step row; over it the step records as **failed** with a `SerializationError` diagnostic and the run fails |
 | `BETTER_TRIGGER_RUN_OUTPUT_MAX_BYTES` | `262144` (256 KiB) | Max serialized run output; over it the run fails `413 payload_too_large` |
 | `BETTER_TRIGGER_ERROR_MAX_BYTES` | `65536` (64 KiB) | Max serialized error record (message/name/stack); a larger one is stored as a `SerializationError` stub so the failure itself still lands |
@@ -474,6 +477,39 @@ BETTER_TRIGGER_RUN_OUTPUT_MAX_BYTES=1048576 better-trigger-worker
 A value that is absent, zero, negative or unparseable falls back to the default
 rather than switching the cap off.
 
+### Business pool sizing
+
+One `pg` Pool backs the claim loops, the orchestrator loops (waits / cron /
+lease reaper / offline markers), the heartbeat, the waiter registry and every
+HTTP route's query. The daemon sizes it to its own work:
+
+```
+max = --concurrency + 8
+```
+
+The 8 is headroom above the execution slots: one checkout for each orchestrator
+loop, the heartbeat, the waiter sweep, and slack for HTTP routes. A pool smaller
+than the concurrency it serves is the failure this whole design exists to make
+visible, so it is **derived, not configured** — but `BETTER_TRIGGER_POOL_MAX`
+overrides it when the arithmetic does not fit your workload (e.g. many
+concurrent long-polling `/result` requests).
+
+The pool's deadlines have defaults too:
+
+- `BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS` (default `10000`): a saturated or
+  black-holed pool answers a checkout with an error after this instead of
+  queueing the request forever. `0` restores pg's wait-forever default.
+- `BETTER_TRIGGER_POOL_STATEMENT_TIMEOUT_MS` (default `30000`): sent as
+  `statement_timeout` in the connection startup packet, so **PostgreSQL itself**
+  cancels a query that runs longer (a queue-row lock, a slow scan) and returns
+  the connection to the pool. `0` disables it.
+
+A pool that is too small for the concurrency + loops it serves shows up as
+`better_trigger_pool_checkout_timeouts_total` climbing: each checkout that
+timed out is one moment the pool was saturated. A rising rate there means raise
+`BETTER_TRIGGER_POOL_MAX` (or reduce `--concurrency`), before the timeouts
+start rejecting work.
+
 ## API
 
 All endpoints live under `/api/v1`, speak camelCase JSON, and travel dates as
@@ -570,8 +606,10 @@ their errors have been swallowing them all afternoon. Everything is prefixed
 | `claim_errors_total`, `claim_errors_consecutive` | counter, gauge | The "daemon looks idle but is actually failing to claim" case |
 | `heartbeat_errors_total`, `heartbeat_errors_consecutive` | counter, gauge | Leases drifting towards being reaped |
 | `executor_errors_total`, `fail_report_errors_total`, `log_flush_errors_total` | counter | The other best-effort catches |
+| `pool_checkout_timeouts_total` | counter | Times a business-pool checkout timed out (`connectionTimeoutMillis`) — each one is a pool that was saturated at that moment. A rising rate means the pool is too small (see "Business pool sizing") |
 | `reaper_recovered_total{outcome=requeued\|failed}` | counter | How much work the lease reaper had to rescue |
 | `orchestrator_errors_total{loop}` | counter | Background loop iterations that threw |
+| `loop_last_success_timestamp{loop}` | gauge | Epoch ms of the last tick each background loop completed without throwing. A loop whose timestamp stops advancing is **stalled** even when its error counter stays 0 — the re-entrancy guard swallowed the ticks |
 | `stranded_runs` | gauge | Due runs pinned to a code version no online worker serves. `0` unless `--pin-code-version` is on — **alert on this one** |
 | `stranded_runs_by_version{task_id,code_version}` | gauge | Which build has to come back. Present only while something is stranded |
 | `notifications_received_total` | counter | pg_notify messages received on the `bt` channel (the notification fast-path) |

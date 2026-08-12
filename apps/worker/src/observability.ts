@@ -115,6 +115,12 @@ export interface WorkerCounters {
   failReportErrors: number;
   /** Log flushes that were dropped. */
   logFlushErrors: number;
+  /** Times a business-pool connection checkout timed out (connectionTimeoutMillis).
+   *  Each one is a pool that was saturated at that moment; a rising rate means
+   *  the pool is too small for the concurrency + orchestrator loops it serves
+   *  (see main.ts's max = concurrency + ORCHESTRATOR_HEADROOM). Counted by the
+   *  pool's onError hook, which the daemon wires in main.ts. */
+  poolCheckoutTimeouts: number;
 }
 
 export function createWorkerCounters(): WorkerCounters {
@@ -128,6 +134,7 @@ export function createWorkerCounters(): WorkerCounters {
     stepReportErrors: 0,
     failReportErrors: 0,
     logFlushErrors: 0,
+    poolCheckoutTimeouts: 0,
   };
 }
 

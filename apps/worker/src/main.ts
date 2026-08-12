@@ -23,6 +23,7 @@
    uncaught exception takes that same path and then exits non-zero.
    ============================================================================= */
 import { fileURLToPath } from 'node:url';
+import type { Pool } from 'pg';
 import {
   assertNamespace,
   DEFAULT_NAMESPACE,
@@ -31,6 +32,7 @@ import {
 } from '@better-trigger/core';
 import { createHealthPool, createPool, DEFAULT_DATABASE_URL, migrate } from '@better-trigger/db';
 import { createKernel, MIN_RETENTION_MS, type OrchestratorCounters } from '@better-trigger/kernel';
+import { derivePoolConfig } from './pool-config';
 import { setResultResolver } from 'better-trigger/internal';
 import { createApp } from './app';
 import { startHttpServer } from './listen';
@@ -157,6 +159,27 @@ Env:
                            0 = unlimited). A run past the cap fails with a
                            non-retryable AbortError telling you to split it
                            with continueAsNew.
+  BETTER_TRIGGER_POOL_MAX
+                           Override for the business-pool connection max. By
+                           default the pool is sized to the daemon's own work:
+                           max = --concurrency + 8, the 8 being headroom for
+                           the orchestrator loops (waits / cron / reaper /
+                           worker-offline), the heartbeat, the waiter sweep and
+                           HTTP slack. Raise it when
+                           better_trigger_pool_checkout_timeouts_total climbs.
+  BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS
+                           Pool checkout / connect timeout in ms (default
+                           10000; 0 = a checkout waits forever, pg's default).
+                           A saturated pool answers a checkout with an error
+                           after this instead of queueing the request forever;
+                           each timeout is counted on
+                           better_trigger_pool_checkout_timeouts_total.
+  BETTER_TRIGGER_POOL_STATEMENT_TIMEOUT_MS
+                           Server-side statement timeout in ms (default 30000;
+                           0 = off). Sent as statement_timeout in the
+                           connection startup packet, so PostgreSQL itself
+                           cancels a query that runs longer and returns the
+                           connection to the pool.
 `;
 
 const PRUNE_USAGE = `better-trigger-worker prune — delete history past a retention window
@@ -860,7 +883,58 @@ async function main(): Promise<void> {
   // should fail immediately, not after the process has registered itself.
   const loaded = opts.tasks.length > 0 ? await loadTasks(opts.tasks) : null;
 
-  const pool = createPool(opts.databaseUrl); // falls back to DATABASE_URL
+  // The business pool is sized to the daemon's own work: the concurrency claim
+  // loops plus headroom for the orchestrator loops, heartbeat, waiter sweep and
+  // HTTP slack (see derivePoolConfig). Its deadlines are what turn a saturated
+  // pool or a hung query into a bounded error instead of a hang, and the
+  // connect() wrapper below is what makes the saturation visible on /metrics —
+  // pg-pool rejects a checkout that outlived connectionTimeoutMillis, but it
+  // does NOT emit a pool-level 'error' event for that (only idle-client errors
+  // do), so the counter has to ride on the checkout itself. The pool is created
+  // before the runtime, so the counter lives in a standalone object the metrics
+  // route reads process-wide.
+  const poolCounters = { poolCheckoutTimeouts: 0 };
+  const pool = createPool(opts.databaseUrl, console, derivePoolConfig(opts.concurrency, process.env));
+  // Count real checkout timeouts. pg-pool surfaces a saturated checkout as
+  // "timeout exceeded when trying to connect" (its connectionTimeoutMillis
+  // timer) on the REJECTED promise of connect()/query() — it does NOT emit a
+  // pool 'error' event for it (only idle-client errors do), so the counter
+  // has to ride on the checkout/query promises. query() internally uses the
+  // callback form of connect(), which is why query() must be wrapped too —
+  // an API-only daemon is 100% pool.query traffic. The match is deliberately
+  // narrow (both pg-pool timeout messages, no generic /timeout/i, which would
+  // misfire on idle_session_timeout / idle-in-transaction / statement_timeout
+  // errors that are not pool saturation).
+  {
+    const isCheckoutTimeout = (err: unknown): boolean => {
+      const message = err instanceof Error ? err.message : String(err);
+      const code = (err as { code?: unknown }).code;
+      return (
+        code === 'ETIMEDOUT' ||
+        /timeout exceeded when trying to connect/i.test(message) ||
+        /connection terminated due to connection timeout/i.test(message)
+      );
+    };
+    const wrapRejection = (p: Promise<unknown> | undefined): void => {
+      if (p && typeof p.catch === 'function') {
+        p.catch((err: unknown) => {
+          if (isCheckoutTimeout(err)) poolCounters.poolCheckoutTimeouts += 1;
+        });
+      }
+    };
+    const connect = pool.connect.bind(pool) as (...args: unknown[]) => unknown;
+    pool.connect = ((...args: unknown[]) => {
+      const result = connect(...args);
+      wrapRejection(result as Promise<unknown> | undefined);
+      return result;
+    }) as typeof pool.connect;
+    const query = pool.query.bind(pool) as (...args: unknown[]) => unknown;
+    pool.query = ((...args: unknown[]) => {
+      const result = query(...args);
+      wrapRejection(result as Promise<unknown> | undefined);
+      return result;
+    }) as typeof pool.query;
+  }
   daemon.pool = pool;
   // PF4: a small dedicated pool for the /health?deep=1 and /metrics probes.
   // It has its own max/statement_timeout/connect-timeout, so a hung or
@@ -965,6 +1039,9 @@ async function main(): Promise<void> {
     );
     daemon.worker = worker;
     orchestratorCounters = worker.orchestratorCounters;
+    // The pool checkout-timeout counter stays in the standalone poolCounters
+    // object the metrics route reads via `pool:` — no fold needed, so the
+    // counter is live process-wide (task-serving AND API-only daemons).
   } else {
     // No tasks: bookkeeping only. waits/cron stay off so an API-only process
     // never resumes work that nothing in it is able to execute.
@@ -1002,7 +1079,14 @@ async function main(): Promise<void> {
       kernel,
       pool,
       probePool,
-      metrics: { worker, orchestrator: orchestratorCounters, notify: notifyCounters },
+      metrics: {
+        worker,
+        orchestrator: orchestratorCounters,
+        notify: notifyCounters,
+        // Process-wide business-pool checkout timeouts — visible even on an
+        // API-only daemon (no worker counters exist there).
+        pool: poolCounters,
+      },
       waiters,
       // The DB gauges /metrics exports are namespace-labelled per configured
       // namespace — an operator must be able to tell default/prod's queue from

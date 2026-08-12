@@ -39,6 +39,43 @@ describe('createPool — idle client errors', () => {
     await pool.end();
   });
 
+  it('forwards max / connectionTimeoutMillis / statementTimeoutMs to pg', async () => {
+    const pool = createPool(UNREACHABLE, { error: () => {} }, {
+      max: 3,
+      connectionTimeoutMillis: 1500,
+      statementTimeoutMs: 30_000,
+    });
+    expect(pool.options.max).toBe(3);
+    expect(pool.options.connectionTimeoutMillis).toBe(1500);
+    // node-postgres maps this to the `statement_timeout` startup-packet config,
+    // exactly as createHealthPool does for its probe pool.
+    expect(pool.options.statement_timeout).toBe(30_000);
+    await pool.end();
+  });
+
+  it('leaves pg defaults alone when an option is undefined', async () => {
+    const pool = createPool(UNREACHABLE, { error: () => {} }, { max: 7 });
+    expect(pool.options.max).toBe(7);
+    // Not passed → keys absent from the config pg receives, so its own
+    // defaults stand (connectionTimeoutMillis 0 = wait forever, no timeout).
+    expect(pool.options.connectionTimeoutMillis).toBeUndefined();
+    expect(pool.options.statement_timeout).toBeUndefined();
+    await pool.end();
+  });
+
+  it('calls onError alongside the logger on an idle client error', async () => {
+    const onErrors: Error[] = [];
+    const pool = createPool(UNREACHABLE, { error: () => {} }, {
+      onError: (err) => onErrors.push(err),
+    });
+
+    const boom = new Error('boom');
+    expect(() => pool.emit('error', boom)).not.toThrow();
+    expect(onErrors).toEqual([boom]);
+
+    await pool.end();
+  });
+
   it('keeps the pool usable — the bad client is dropped, not the pool', async () => {
     const pool = createPool(UNREACHABLE, { error: () => {} });
     pool.emit('error', new Error('boom'));

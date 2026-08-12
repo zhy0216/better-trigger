@@ -199,6 +199,17 @@ export interface OrchestratorCounters {
     gc: number;
     stranded: number;
   };
+  /** Epoch ms of the last tick that completed without throwing, per loop. A
+   *  loop whose last success stops advancing is stalled — the re-entrancy
+   *  guard would otherwise swallow the stall with loopErrors still 0. */
+  loopLastSuccess: {
+    waits: number;
+    cron: number;
+    reaper: number;
+    workers: number;
+    gc: number;
+    stranded: number;
+  };
 }
 
 export function createOrchestratorCounters(): OrchestratorCounters {
@@ -209,6 +220,10 @@ export function createOrchestratorCounters(): OrchestratorCounters {
     gcWorkersDeleted: 0,
     stranded: { groups: [], truncated: false },
     loopErrors: { waits: 0, cron: 0, reaper: 0, workers: 0, gc: 0, stranded: 0 },
+    // 0 = "this loop has never ticked" — the metrics reader emits only loops
+    // that have actually run, so a deliberately-disabled loop (e.g. waits on
+    // an API-only daemon) does not read as a stalled one.
+    loopLastSuccess: { waits: 0, cron: 0, reaper: 0, workers: 0, gc: 0, stranded: 0 },
   };
 }
 
@@ -273,6 +288,11 @@ export function startOrchestrator(
       running[key] = true;
       try {
         await fn();
+        // A tick that completes stamps its last-success gauge; when a loop
+        // hangs (e.g. a queue-row lock with no statement_timeout) this stops
+        // advancing, which is the only signal that the loop died silently —
+        // the re-entrancy guard swallows later ticks and loopErrors stays 0.
+        counters.loopLastSuccess[key] = Date.now();
       } catch (err) {
         // Keep loops alive; surface for debugging.
         counters.loopErrors[key] += 1;

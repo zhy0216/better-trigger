@@ -1,11 +1,12 @@
 /* =============================================================================
    @better-trigger/example-basic — acceptance suite entry point.
 
-   The sixteen scenarios in this directory are the project's real correctness
+   The seventeen scenarios in this directory are the project's real correctness
    evidence (exactly-once steps under SIGKILL, fencing, replay drift, version
    pinning, rolling deploys, migration upgrades, worker loss, graceful
    restart, per-key concurrency limits, retention cascades, probe-pool
-   behaviour on a live Postgres).
+   behaviour on a live Postgres, orchestrator-loop self-healing under a
+   statement timeout).
    Each one is a `runScenario()` call from @better-trigger/testing, so it
    already provisions its own database, spawns its own daemons, runs its own
    teardown and exits non-zero on any failed assertion — this script only runs
@@ -108,6 +109,11 @@ const HARNESSES: Harness[] = [
     name: 'health-pool',
     file: 'health-pool.ts',
     what: 'probe pool: statement_timeout server-side, 57014 cancellation, connection return, single-flight (PF4)',
+  },
+  {
+    name: 'loop-hang',
+    file: 'loop-hang.ts',
+    what: 'a blocked scanWaits resume is cancelled by statement_timeout and the loop self-heals (p1-11)',
   },
 ];
 

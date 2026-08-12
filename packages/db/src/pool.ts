@@ -17,11 +17,53 @@ export interface PoolLogger {
   error(...args: unknown[]): void;
 }
 
+/**
+ * Sizing and deadline knobs for the business pool. Plain `new Pool({
+ * connectionString })` gives pg defaults of `max: 10`,
+ * `connectionTimeoutMillis: 0` (a checkout waits forever) and no
+ * `statement_timeout` — the three things a shared pool must bound:
+ *
+ *   - `max` caps pool saturation, so N claim loops can never queue unboundedly
+ *     against the same budget the heartbeat, waiters and HTTP routes draw on.
+ *   - `connectionTimeoutMillis` turns a black-holed or exhausted pool into a
+ *     bounded checkout error instead of a forever-hanging `pool.connect()`.
+ *   - `statementTimeoutMs` is sent as `statement_timeout` in the connection
+ *     startup packet (same mechanism as createHealthPool), so PostgreSQL
+ *     itself cancels a lock-waiting or hung query and returns the connection
+ *     to the pool instead of letting it block a loop indefinitely.
+ *
+ * Any key left undefined is not passed to pg, so its default stands.
+ */
+export interface PoolOptions {
+  /** Max clients (default: pg's 10). */
+  max?: number;
+  /** Connection checkout timeout in ms (default: 0 = wait forever, pg's default). */
+  connectionTimeoutMillis?: number;
+  /** Server-side statement timeout in ms, sent as `statement_timeout` in the
+   *  startup packet (default: unset/off). */
+  statementTimeoutMs?: number;
+  /** Called for every pool-level 'error' event. Note this fires only for
+   *  IDLE-CLIENT errors (a lost connection, an idle-in-transaction kill) —
+   *  a checkout that times out does NOT emit it (pg-pool rejects the
+   *  connect()/query() promise instead), so saturation is better observed on
+   *  the connect/query rejections. */
+  onError?: (err: Error) => void;
+}
+
 export function createPool(
   connectionString: string = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
   logger: PoolLogger = console,
+  opts: PoolOptions = {},
 ): pg.Pool {
-  const pool = new Pool({ connectionString });
+  const poolOptions: pg.PoolConfig = { connectionString };
+  if (opts.max !== undefined) poolOptions.max = opts.max;
+  if (opts.connectionTimeoutMillis !== undefined) {
+    poolOptions.connectionTimeoutMillis = opts.connectionTimeoutMillis;
+  }
+  if (opts.statementTimeoutMs !== undefined) {
+    poolOptions.statement_timeout = opts.statementTimeoutMs;
+  }
+  const pool = new Pool(poolOptions);
   // pg emits 'error' on *idle* clients (Postgres restart, network drop,
   // idle_in_transaction_session_timeout, laptop sleep/wake). It is an
   // EventEmitter 'error' event: with no listener Node rethrows it as an
@@ -30,6 +72,7 @@ export function createPool(
   // deliberately no process.exit here.
   pool.on('error', (err: Error) => {
     logger.error('[better-trigger] idle client error:', err.message);
+    opts.onError?.(err);
   });
   return pool;
 }

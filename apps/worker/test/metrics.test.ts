@@ -232,7 +232,12 @@ describe('the parser these tests rely on', () => {
 
 describe('exposition format', () => {
   it('parses as Prometheus text, every family typed and documented', async () => {
-    const { res, families } = await scrape();
+    // A live orchestrator with a couple of loops having ticked, so the
+    // loop_last_success family is non-empty (it only emits ticked loops).
+    const live = createOrchestratorCounters();
+    live.loopLastSuccess.waits = 1_700_000_000_000;
+    live.loopLastSuccess.reaper = 1_700_000_100_000;
+    const { res, families } = await scrape({ orchestrator: live });
 
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('text/plain; version=0.0.4; charset=utf-8');
@@ -554,6 +559,7 @@ describe('in-process counters', () => {
     counters.stepReportErrors = 6;
     counters.failReportErrors = 2;
     counters.logFlushErrors = 3;
+    counters.poolCheckoutTimeouts = 4;
     counters.runOutcomes.completed = 100;
     counters.runOutcomes.failed = 4;
     counters.runOutcomes.suspended = 8;
@@ -571,6 +577,7 @@ describe('in-process counters', () => {
     expect(sampleValue(families, 'better_trigger_step_report_errors_total')).toBe(6);
     expect(sampleValue(families, 'better_trigger_fail_report_errors_total')).toBe(2);
     expect(sampleValue(families, 'better_trigger_log_flush_errors_total')).toBe(3);
+    expect(sampleValue(families, 'better_trigger_pool_checkout_timeouts_total')).toBe(4);
     expect(sampleValue(families, 'better_trigger_worker_inflight_runs')).toBe(2);
 
     const outcomes = families.get('better_trigger_runs_total')!;
@@ -601,6 +608,8 @@ describe('in-process counters', () => {
     orchestrator.reaperRequeued = 12;
     orchestrator.reaperFailed = 3;
     orchestrator.loopErrors.cron = 6;
+    orchestrator.loopLastSuccess.waits = 1_700_000_000_000;
+    orchestrator.loopLastSuccess.reaper = 1_700_000_100_000;
 
     const { families } = await scrape({ orchestrator });
     expect(
@@ -615,6 +624,18 @@ describe('in-process counters', () => {
     expect(
       sampleValue(families, 'better_trigger_orchestrator_errors_total', { loop: 'reaper' }),
     ).toBe(0);
+    // One sample per loop, reading the live last-success timestamps (the
+    // "this loop stalled" gauge).
+    expect(
+      sampleValue(families, 'better_trigger_loop_last_success_timestamp', { loop: 'waits' }),
+    ).toBe(1_700_000_000_000);
+    expect(
+      sampleValue(families, 'better_trigger_loop_last_success_timestamp', { loop: 'reaper' }),
+    ).toBe(1_700_000_100_000);
+    // Only loops that have actually ticked (loopLastSuccess > 0) are emitted —
+    // a deliberately-disabled loop must not read as a stall.
+    const lastSuccess = families.get('better_trigger_loop_last_success_timestamp')!;
+    expect(lastSuccess.samples.map((s) => s.labels.loop).sort()).toEqual(['reaper', 'waits']);
   });
 
   it('keeps the series alive as zeros on a daemon that runs no tasks', async () => {

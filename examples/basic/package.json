@@ -20,6 +20,7 @@
     "batch-perf": "bun scripts/batch-perf.ts",
     "constraints": "bun scripts/constraints.ts",
     "health-pool": "bun scripts/health-pool.ts",
+    "loop-hang": "bun scripts/loop-hang.ts",
     "concurrency": "bun scripts/concurrency.ts",
     "test:acceptance": "bun scripts/acceptance.ts",
     "lint": "eslint .",

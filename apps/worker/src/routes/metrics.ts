@@ -71,6 +71,10 @@ export interface MetricsSources {
   /** Notification fast-path counters (PF2) — the LISTEN connection's
    *  deliveries and reconnects, and how many waiters/claim sleeps it settled. */
   notify?: NotifyCounters | null;
+  /** Business-pool connection checkout timeouts (pool saturation),
+   *  process-wide — read directly because an API-only daemon has no worker
+   *  counters to fold them into. */
+  pool?: { poolCheckoutTimeouts: number } | null;
 }
 
 export type MetricType = 'counter' | 'gauge';
@@ -298,6 +302,9 @@ export async function collectMetrics(
   const counters = worker?.counters ?? createWorkerCounters();
   const orchestrator = sources.orchestrator ?? createOrchestratorCounters();
   const notify = sources.notify ?? createNotifyCounters();
+  // The pool counter lives process-wide (sources.pool); the worker-counters
+  // fallback keeps tests and embedded callers that only pass a worker working.
+  const poolCheckoutTimeouts = sources.pool?.poolCheckoutTimeouts ?? counters.poolCheckoutTimeouts;
   // `undefined` means "load it" (the pre-PF4 path); `null` is a *failed* load
   // and must not trigger a second query.
   const g = gauges === undefined ? await gaugesOrNull(pool, namespaces) : gauges;
@@ -424,6 +431,12 @@ export async function collectMetrics(
       ],
     },
     {
+      name: 'pool_checkout_timeouts_total',
+      help: 'Business-pool connection checkouts that timed out (connectionTimeoutMillis). Each one is a moment the pool was saturated — every client busy and the checkout queue waited too long; a rising rate means the pool is too small for the concurrency plus orchestrator/waiter headroom.',
+      type: 'counter',
+      samples: [{ value: poolCheckoutTimeouts }],
+    },
+    {
       name: 'orchestrator_errors_total',
       help: 'Background loop iterations that threw, by loop. These are swallowed to keep the loops alive, so the rate is the only sign.',
       type: 'counter',
@@ -431,6 +444,16 @@ export async function collectMetrics(
         labels: { loop },
         value,
       })),
+    },
+    {
+      name: 'loop_last_success_timestamp',
+      help: 'Epoch ms of the last tick that completed without throwing, per loop. A loop that stops advancing is stalled (the re-entrancy guard swallows the stall). Only loops this process actually runs are emitted — a deliberately-disabled loop has no series, so it cannot read as a stall.',
+      type: 'gauge',
+      // loopLastSuccess starts at 0 for every loop and is stamped after each
+      // successful tick; emitting only the >0 loops keeps disabled loops out.
+      samples: Object.entries(orchestrator.loopLastSuccess)
+        .filter(([, value]) => value > 0)
+        .map(([loop, value]) => ({ labels: { loop }, value })),
     },
     {
       name: 'stranded_runs',
