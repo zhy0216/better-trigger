@@ -6,11 +6,11 @@ Vite + React 18 + TypeScript + Tailwind.
 ## Scripts
 
 ```bash
-pnpm dev         # vite dev server (http://localhost:5173)
-pnpm build       # tsc --noEmit && vite build  → dist/
-pnpm preview     # serve the production build
-pnpm typecheck   # tsc --noEmit
-pnpm lint        # eslint
+bun run dev        # vite dev server (http://localhost:5173)
+bun run build      # tsc --noEmit && vite build  → dist/
+bun run preview    # serve the production build
+bun run typecheck  # tsc --noEmit
+bun run lint       # eslint
 ```
 
 ## API key mode
@@ -30,7 +30,7 @@ server falls back to `http://localhost:4848` when `VITE_BT_API_URL` is unset.
 For local development only, `VITE_BT_API_KEY` can provide the initial key:
 
 ```bash
-VITE_BT_API_KEY=local-dev-secret VITE_BT_API_URL=http://localhost:4848 pnpm dev
+VITE_BT_API_KEY=local-dev-secret VITE_BT_API_URL=http://localhost:4848 bun run dev
 ```
 
 Vite embeds `VITE_*` values in the browser bundle. Therefore
@@ -45,8 +45,12 @@ src/
 ├── main.tsx              # React entry; imports the three CSS layers
 ├── App.tsx              # routing, theme/density/accent, Tweaks wiring
 ├── types.ts            # shared domain types (Run, Span, Trace, …)
-├── data/
-│   └── mock.ts          # typed mock data (was window.BT_DATA)
+├── vite-env.d.ts        # Vite/VITE_* typing
+├── api/
+│   ├── client.ts        # fetch wrapper (auth, error mapping)
+│   ├── adapter.ts       # server JSON → types.ts shapes
+│   ├── hooks.ts         # polling hooks + connection aggregation
+│   └── mergeRuns.ts     # keyset page merge (PF3)
 ├── hooks/
 │   └── useTweaks.ts     # tweak state (host-protocol persistence removed)
 ├── components/
@@ -110,7 +114,6 @@ This app was exported from a single Babel-in-browser HTML prototype. The main
 mechanical changes:
 
 - `window.*` globals → ES module `import` / `export`
-- `window.BT_DATA` → typed exports in `data/mock.ts`
+- `window.BT_DATA` → the live API client (`src/api/client.ts`)
 - added `types.ts` and prop interfaces throughout (strict TS)
 - React/Babel CDN `<script>` tags → Vite bundling
-- playback position still persists to `localStorage` (`bt_playback`)

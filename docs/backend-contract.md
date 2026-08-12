@@ -47,10 +47,7 @@
 | `BETTER_TRIGGER_MAX_BATCH` | `500` | 单次 batchTrigger 的 items 条数上限;超出 `400 bad_request` |
 | `BETTER_TRIGGER_MAX_PAYLOAD_BYTES` | `262144`(256 KiB) | 单个 run 序列化后的 payload 字节上限;超出 `400 bad_request` |
 | `BETTER_TRIGGER_MAX_RECOVERIES` | `10` | 创建 run 时盖章的 `max_recoveries`:reaper 最多为这个 run 接管几次(worker 消失)。**与 `maxAttempts` 是两本账**(见 §3.5);`0` 合法,表示"lease 一过期就判死",非整数 / 负数回落默认值 |
-| `BETTER_TRIGGER_API_URL` | `http://localhost:4848` | SDK / worker 指向的 server |
-| `VITE_BT_API_URL` | `http://localhost:4848` | 前端指向的 server;**不设置时前端用 mock 数据** |
 
-SDK 侧也可用 `configure({ apiUrl, apiKey })` 显式覆盖。
 
 CORS(`hono/cors`):默认只放行 dashboard 自己的来源 —— http/https + `localhost` / `127.0.0.0/8` / `[::1]` + 任意端口(dev vite 端口不固定,所以做函数式 origin 校验:`new URL()` 解析后比对 host,`http://localhost.evil.com` 不算 loopback)。其余来源不回 `Access-Control-Allow-Origin`,浏览器丢弃响应。`--cors-origin <origin>`(可重复 / 逗号分隔,`*` 表示全放开)显式加白。不带 `Origin` 的调用方(SDK、curl)不受影响。
 
@@ -394,7 +391,7 @@ await startWorker({ tasks: [hello, onboarding, daily], concurrency: 5 });
 ## 7. 前端接线(apps/web)
 
 - 新增 `src/api/client.ts`(fetch 封装)+ `src/api/adapter.ts`(server JSON → 现有 `src/types.ts` 形状)+ `src/api/hooks.ts`(`useTasks/useRuns/useRun/useSchedules`,轮询 2s 刷新,简单 useEffect+useState,**不引入新依赖**)。
-- `VITE_BT_API_URL` 未设置或首次请求失败 → 整体回落 mock(现有页面零破坏);Alerts / Deployments 页面保持 mock(本期无后端)。
+- **无 mock 回落**:server 不可达时 hooks 显示错误并持续轮询(src/api/hooks.ts 明写 'No mock fallback');VITE_BT_API_URL 仅决定 dev server 的目标,不设置时生产 build 走同源。
 - 映射:`completed→success`,`waiting→frozen`,`canceled→canceled`(types.ts 的 RunStatus 加 `'canceled'`,样式灰色);Run.duration 由 durationMs 格式化("640ms"/"2.1s");started 由 createdAt 相对化("3m ago");Trace spans:t0 = min(run.startedAt, steps[].startedAt),root span = run 本身(kind 'task'),每 step/wait 一个 level-1 span(step→'fn',wait→'fn' label 前缀 "wait ",trigger-and-wait→'task',now/random/uuid 不展示);SPAN_LOGS 等价物按 stepSeq 分组,root(s0)收 stepSeq 为 null 的日志。
 - RunsList 的 env 筛选传 `?env=`;点击 run 行进入 RunView 要带上选中的 runId(现有代码无参跳转,需把选中 id 提升到 App state)。
 

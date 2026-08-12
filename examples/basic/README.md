@@ -95,7 +95,7 @@ bun run --filter @better-trigger/example-basic health-pool    #  4 checks · db 
 bun run --filter @better-trigger/example-basic rolling-deploy #  8 checks · db _roll · :4911
 bun run --filter @better-trigger/example-basic migration      #  7 checks · db _migrate · no daemon
 
-bun run test:acceptance                                      # all sixteen, one exit code
+bun run test:acceptance                                      # all harnesses, one exit code
 ```
 
 `crash`, `worker-lost` and `replay-drift` run **two** daemons: an API node (no

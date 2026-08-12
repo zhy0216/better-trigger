@@ -101,7 +101,7 @@ better-trigger-worker(daemon)
 | Run 状态 | 由 payload、run_steps 记忆与确定性代码重建;不序列化调用栈 |
 | step 结果记录 | 历史层 exactly-once(`(run_id, seq)` 唯一 + fencing) |
 | step 执行(外部副作用) | **at-least-once**;不承诺通用 exactly-once |
-| LLM / 工具调用 | 昂贵副作用:重放不重打(memoized);重试需幂等键,`ctx` 暴露 `idempotencyKey` / `attempt` |
+| LLM / 工具调用 | 昂贵副作用:重放不重打(memoized);重试需幂等键(经 trigger `options.idempotencyKey` 传入);当前 attempt 见 `ctx.run.attempt` |
 | wait / timer | deadline 持久化;无 daemon 在线时不运行,恢复后尽快触发,只产生一次恢复 |
 | daemon crash | lease 过期后由任意存活 daemon 接管;旧 lease 持有者的迟到写被 fencing token 拒绝 |
 | 接管的代价 | 接管消耗 run 的 `recoveries`(上限 `max_recoveries`,默认 10),**不消耗 `attempt`** —— `maxAttempts` 是"我的代码可以失败几次",部署 / OOM / 机器休眠不该花它;优雅关停两本都不动。恢复在**同一个 attempt** 上按账本继续。`max_recoveries` 耗尽 → 终态 `worker lost`,错误文案里写明耗尽的是哪本预算 |
@@ -201,7 +201,7 @@ planner fan-out 3 个 researcher → `gather` 汇总 → `requestApproval` 人�
 | 多一个进程要运维 | 单命令启动、auto-migrate、`--no-serve`/无 `--tasks` 覆盖多节点形态;docker-compose 直接给出 |
 | 「没 daemon 在线就没人调度」被误解 | README/文档使用承诺表原文;dashboard 显示「无在线 worker」警示 |
 | daemon 与业务共库干扰 | 独立 `better_trigger` schema;建议独立数据库 |
-| step 非幂等 + at-least-once → 副作用重复 | `ctx.idempotencyKey` 自动提供;文档强调;LLM 步骤给出幂等实践 |
+| step 非幂等 + at-least-once → 副作用重复 | 幂等键由调用方在 trigger `options.idempotencyKey` 提供;文档强调;LLM 步骤给出幂等实践 |
 | 确定性被违反 | fingerprint 硬检测 + eslint-plugin + `ctx.now/random/uuid`;VM sandbox 明确为远期(本地跑可信代码) |
 | run_steps 无限增长(agent 长循环) | `continueAsNew` + 长度警告;不做 snapshot(与代码版本兼容复杂) |
 | 代码升级致重放漂移 | per-task code_version + `--pin-code-version`(claim 只领本进程能重放的版本,孤儿 run 有 metric 兜底);远期 `ctx.patched()` |

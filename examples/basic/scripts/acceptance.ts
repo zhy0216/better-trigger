@@ -1,7 +1,8 @@
 /* =============================================================================
    @better-trigger/example-basic — acceptance suite entry point.
 
-   The seventeen scenarios in this directory are the project's real correctness
+   The harnesses in this directory (one per scenario; the suite header prints
+   the live count) are the project's real correctness
    evidence (exactly-once steps under SIGKILL, fencing, replay drift, version
    pinning, rolling deploys, migration upgrades, worker loss, graceful
    restart, per-key concurrency limits, retention cascades, probe-pool
