@@ -85,6 +85,13 @@
       "when": 1786416356002,
       "tag": "0011_thick_rage",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786546990014,
+      "tag": "0012_massive_punisher",
+      "breakpoints": true
     }
   ]
 }

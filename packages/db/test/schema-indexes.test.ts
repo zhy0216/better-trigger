@@ -88,3 +88,18 @@ describe('queue_claimable_idx (claim candidate scan, PF2)', () => {
     expect(create).not.toMatch(/available_at/);
   });
 });
+
+describe('waits_run_idx (per-run waits lookups)', () => {
+  const create = shippedIndex('waits_run_idx');
+
+  it('is created by a migration, on (project_id, env, run_id, step_seq)', () => {
+    // Namespace prefix first (C2), then the run id every per-run waits query
+    // filters on; the step_seq tail covers waitForChildRun's `run_id + step_seq`
+    // probe. Without it terminalFail/cancelRun's cleanups, the child-wait probe,
+    // and getRunDetail's waits page all scan the never-deleted waits table.
+    expect(create).toBeDefined();
+    expect(create).toMatch(
+      /ON "waits" USING btree \("project_id","env","run_id","step_seq"\)/,
+    );
+  });
+});

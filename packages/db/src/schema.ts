@@ -289,6 +289,12 @@ export const waits = pgTable(
   (t) => [
     index('waits_status_resume_idx').on(t.projectId, t.env, t.status, t.resumeAt),
     index('waits_child_run_idx').on(t.projectId, t.env, t.childRunId),
+    // Per-run lookups: terminalFail/cancelRun's waits cleanups, waitForChildRun's
+    // `run_id + step_seq` probe, and getRunDetail's waits page all hit
+    // `WHERE run_id = ...` (waits rows are never deleted, so without this every
+    // such query degenerates to a full table scan over time). Namespace prefix
+    // first (C2); the step_seq tail covers the child-wait probe.
+    index('waits_run_idx').on(t.projectId, t.env, t.runId, t.stepSeq),
     // C5: closed enums (WaitKind / 'pending'|'completed'|'canceled' in core).
     check('waits_kind_check', sql`${t.kind} IN ('duration','until','run')`),
     check('waits_status_check', sql`${t.status} IN ('pending','completed','canceled')`),

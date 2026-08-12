@@ -1452,10 +1452,16 @@ export async function batchTriggerChild(
  * with { id, ok, output?, error? } and re-enqueue the parent. Runs inside the
  * caller's transaction (which holds the CHILD's locks — the parent's rows are
  * re-acquired here in canonical order: queue → runs → wait row).
+ *
+ * `namespace` is the CHILD's namespace; the wait row lives in the same one
+ * because children inherit their parent's namespace (C2). The predicate lets
+ * `waits_child_run_idx` (project_id, env, child_run_id) bind its leading
+ * columns instead of full-scanning waits on every child completion.
  */
 export async function wakeParentIfWaiting(
   client: PoolClient,
   childRunId: string,
+  namespace: Namespace,
   result: { ok: boolean; output?: unknown; error?: SerializedError },
 ): Promise<void> {
   // Locate the parent's pending wait WITHOUT locking it — the wait row may
@@ -1473,8 +1479,9 @@ export async function wakeParentIfWaiting(
     fingerprint: string | null;
   }>(
     `SELECT id, run_id, project_id, env, step_seq, fingerprint FROM waits
-      WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'`,
-    [childRunId],
+      WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'
+        AND project_id = $2 AND env = $3`,
+    [childRunId, namespace.projectId, namespace.env],
   );
   const wait = waitRes.rows[0];
   if (!wait) return;
@@ -1580,7 +1587,12 @@ export async function terminalFail(
     [run.id, ns.projectId, ns.env],
   );
   if (run.parent_run_id) {
-    await wakeParentIfWaiting(client, run.id, { ok: false, error });
+    await wakeParentIfWaiting(
+      client,
+      run.id,
+      { projectId: run.project_id, env: run.env },
+      { ok: false, error },
+    );
   }
 }
 
@@ -1624,7 +1636,10 @@ export async function completeRun(pool: Pool, args: CompleteRunArgs): Promise<vo
     );
     await removeFromQueue(client, args.runId, args.namespace);
     if (run.parent_run_id) {
-      await wakeParentIfWaiting(client, args.runId, { ok: true, output: args.output });
+      await wakeParentIfWaiting(client, args.runId, args.namespace, {
+        ok: true,
+        output: args.output,
+      });
     }
     // Terminal: result waiters wake. If a parent was woken inside the same tx,
     // it may also be claimable again — the extra `work` notification is
@@ -1727,7 +1742,7 @@ export async function cancelRun(
       [runId, namespace.projectId, namespace.env],
     );
     if (run.parent_run_id) {
-      await wakeParentIfWaiting(client, runId, {
+      await wakeParentIfWaiting(client, runId, namespace, {
         ok: false,
         error: { message: 'child canceled' },
       });

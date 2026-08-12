@@ -121,12 +121,13 @@ async function main(s: Scenario): Promise<void> {
 
   /* -- 2. the migration history survives a database full of orphans -------- */
   await s.check('0011 cleans orphans before adding the constraints', async () => {
-    // Rebuild the pre-0011 shape: drop every FK/CHECK 0011 adds and remove
-    // 0011 from the journal, so `migrate()` re-applies it — orphan cleanups
-    // included. (The journal record is identified by its hash, which is
-    // sha256(sql file content), computed exactly as drizzle's migrator does.
-    // Only 0011 re-runs: the migrator skips everything older than the newest
-    // remaining record, so 0007..0010 stay applied as-is.)
+    // Rebuild the pre-0011 shape: drop every FK/CHECK 0011 adds, drop the
+    // index-only 0012 object, and remove 0011 AND 0012 from the journal, so
+    // `migrate()` re-applies them — orphan cleanups included. (Journal records
+    // are identified by their hash, which is sha256(sql file content),
+    // computed exactly as drizzle's migrator does. Only 0011/0012 re-run: the
+    // migrator skips everything older than the newest remaining record, so
+    // 0007..0010 stay applied as-is.)
     const C5_CONSTRAINTS: Array<{ table: string; name: string }> = [
       { table: 'queue', name: 'queue_run_id_runs_id_fk' },
       { table: 'runs', name: 'runs_parent_run_id_runs_id_fk' },
@@ -149,9 +150,15 @@ async function main(s: Scenario): Promise<void> {
     }
 
     const migrationsDir = fileURLToPath(new URL('../../../packages/db/migrations', import.meta.url));
-    const sql = readFileSync(`${migrationsDir}/0011_thick_rage.sql`, 'utf8');
-    const hash = createHash('sha256').update(sql).digest('hex');
-    await s.pool.query(`DELETE FROM drizzle.__drizzle_migrations WHERE hash = $1`, [hash]);
+    // p1-06: 0012 (waits_run_idx) is the current newest migration; re-running
+    // 0011 requires deleting every younger journal record too, and its index
+    // must be gone or 0012's CREATE INDEX fails on re-apply.
+    await s.pool.query(`DROP INDEX IF EXISTS waits_run_idx`);
+    for (const file of ['0011_thick_rage.sql', '0012_massive_punisher.sql']) {
+      const sql = readFileSync(`${migrationsDir}/${file}`, 'utf8');
+      const hash = createHash('sha256').update(sql).digest('hex');
+      await s.pool.query(`DELETE FROM drizzle.__drizzle_migrations WHERE hash = $1`, [hash]);
+    }
 
     // Orphans that would make ADD CONSTRAINT fail — and with it every
     // daemon's boot. (logs / run_steps orphans are the 0007 cleanup's job and

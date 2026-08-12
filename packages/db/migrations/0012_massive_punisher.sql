@@ -1,0 +1,1 @@
+CREATE INDEX "waits_run_idx" ON "waits" USING btree ("project_id","env","run_id","step_seq");

@@ -541,7 +541,10 @@ describe('wakeParentIfWaiting step-row failure (C3)', () => {
     process.env.BETTER_TRIGGER_STEP_OUTPUT_MAX_BYTES = '32';
     const { client, sqls } = makeClient();
     await expect(
-      wakeParentIfWaiting(client, 'child_run_1', { ok: true, output: 'x'.repeat(100) }),
+      wakeParentIfWaiting(client, 'child_run_1', TEST_NS, {
+        ok: true,
+        output: 'x'.repeat(100),
+      }),
     ).rejects.toMatchObject({ code: 'payload_too_large' });
     // The wait had already been flipped to 'completed' inside the (would-be)
     // caller tx; the rejection rolls it back, so the parent is never

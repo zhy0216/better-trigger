@@ -19,9 +19,10 @@ import { assertIndexScan, describePg, planNodeTypes, withPg } from './helpers';
         (the due-wait sweep, split into a timer scan and an orphan scan).
      - RUNS_SQL: runs.ts getRunRow / lockRunRow (runs PK detail).
 
-   Plans are only pinned where they are CORRECT today. The waits run_id wake
-   query (waits_child_run_idx) is deliberately absent: that index gap is the
-   p1-06 regression and its plan test lands with the fix.
+   Plans are only pinned where they are CORRECT today. The p1-06 waits-index
+   gap landed its fix (migration 0012 + the namespace-scoped child-wake probe
+   in runs.ts) and its plan tests land with it: WAKE_SQL pins waits_child_run_idx,
+   CANCEL_SELECT_SQL pins waits_run_idx.
 
    Seeding sizes are tuned so the planner's cost model picks the index on
    default cost parameters — small tables seq-scan (a 200-row claim backlog
@@ -90,6 +91,19 @@ const RUNS_SQL = `SELECT id, task_id, status, attempt, max_attempts,
             payload, project_id, env, concurrency_key, priority, code_version, fencing_token
      FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`;
 
+/** The child-completion parent-wake probe — runs.ts wakeParentIfWaiting,
+ *  verbatim. child_run_id + the child's namespace (default, prod) bind the
+ *  leading columns of waits_child_run_idx. */
+const WAKE_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerprint FROM waits
+      WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'
+        AND project_id = $2 AND env = $3`;
+
+/** The cancel-cleanup scan — runs.ts cancelRun's `UPDATE waits SET
+ *  status='canceled' WHERE run_id=$1 AND status='pending' AND project_id=$2
+ *  AND env=$3`, in SELECT form (EXPLAIN on the UPDATE would execute it). */
+const CANCEL_SELECT_SQL = `SELECT id FROM waits
+     WHERE run_id = $1 AND status = 'pending' AND project_id = $2 AND env = $3`;
+
 /** Seed `n` runs across `tasks` task ids (task rows may be absent — the claim
  *  query LEFT JOINs them; the other cases' FKs only need the runs row). */
 async function seedRuns(pool: Parameters<typeof assertIndexScan>[0], n: number, tasks: number) {
@@ -117,9 +131,44 @@ async function seedWaits(pool: Parameters<typeof assertIndexScan>[0], n: number,
               CASE WHEN g % 10 = 0 THEN NULL ELSE now() - interval '1 minute' END,
               CASE WHEN g % 4 = 0 THEN 'completed' ELSE 'pending' END,
               'default', 'prod'
-         FROM generate_series(0, $1::int - 1) g`,
+          FROM generate_series(0, $1::int - 1) g`,
     [n, runs],
   );
+}
+
+/** Seed `n` waits md5-scattered across run ids, child_run_id values, kinds and
+ *  statuses, with exactly ONE row in the default namespace that is both the
+ *  child-wake match (child_run_id `match`, kind 'run', status 'pending') and
+ *  the cancel-cleanup match (run_id 'run-0', status 'pending'). The predicate
+ *  rows share the scattered position their g-value lands in, so neither probe
+ *  is served by a contiguous block a seq scan would find immediately. */
+async function seedScatteredWaits(
+  pool: Parameters<typeof assertIndexScan>[0],
+  n: number,
+  runs: number,
+  matchG: number,
+) {
+  await pool.query(
+    `INSERT INTO waits (run_id, step_seq, kind, resume_at, status, project_id, env, child_run_id)
+       SELECT CASE WHEN g = $3::int THEN 'run-0' ELSE 'run-' || (g % $2::int) END, g % 100,
+              CASE WHEN g = $3::int THEN 'run'
+                   WHEN g % 7 = 0 THEN 'run'
+                   WHEN g % 2 = 0 THEN 'duration'
+                   ELSE 'until' END,
+              CASE WHEN g % 7 = 0 THEN NULL ELSE now() - interval '1 minute' END,
+              CASE WHEN g = $3::int THEN 'pending'
+                   WHEN g % 5 = 0 THEN 'completed'
+                   WHEN g % 5 = 1 THEN 'canceled'
+                   ELSE 'pending' END,
+              'default', 'prod',
+              CASE WHEN g = $3::int THEN 'run-0'
+                   WHEN g % 7 = 0 THEN 'run-' || (g % $2::int)
+                   ELSE NULL END
+         FROM generate_series(0, $1::int - 1) g
+        ORDER BY md5(g::text)`,
+    [n, runs, matchG],
+  );
+  await pool.query('VACUUM ANALYZE waits');
 }
 
 describePg('index plans', () => {
@@ -229,6 +278,34 @@ describePg('index plans', () => {
       await pool.query('ANALYZE runs, waits');
 
       await assertIndexScan(pool, ORPHAN_WAITS_SQL, [...NS], 'waits');
+    });
+  });
+
+  it('child-wake probe is an Index Scan on waits_child_run_idx', async () => {
+    await withPg('plans_wake', async ({ pool }) => {
+      const RUNS = 20000;
+      await seedRuns(pool, RUNS, 1);
+      // 40k waits scattered across run ids / child_run_id values / kinds /
+      // statuses; exactly ONE is the child-wake match (child_run_id 'run-0',
+      // kind 'run', status 'pending') in the default namespace.
+      await seedScatteredWaits(pool, 40000, RUNS, 12345);
+
+      const plan = await assertIndexScan(pool, WAKE_SQL, ['run-0', ...NS], 'waits');
+      expect(planNodeTypes(JSON.parse(plan))).not.toContain('Seq Scan');
+    });
+  });
+
+  it('cancelRun waits cleanup is an Index Scan on waits_run_idx', async () => {
+    await withPg('plans_cancel', async ({ pool }) => {
+      const RUNS = 20000;
+      await seedRuns(pool, RUNS, 1);
+      // The cancel-cleanup match (run_id 'run-0', status 'pending') is the
+      // same scattered row — run_id 'run-0' otherwise only ever carries
+      // completed/canceled rows here.
+      await seedScatteredWaits(pool, 40000, RUNS, 12345);
+
+      const plan = await assertIndexScan(pool, CANCEL_SELECT_SQL, ['run-0', ...NS], 'waits');
+      expect(planNodeTypes(JSON.parse(plan))).not.toContain('Seq Scan');
     });
   });
 
