@@ -40,7 +40,12 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_MS = 1_000;
 const TERMINAL: ReadonlySet<RunStatus> = new Set(['completed', 'failed', 'canceled']);
 
+/** Monotonically increasing waiter id (p1-14): lets the registry name a
+ *  specific entry, so an abort can target exactly the waiter it was handed. */
+let nextWaiterId = 0;
+
 interface PendingWaiter {
+  id: number;
   runId: string;
   namespace: Namespace;
   resolve: (r: WaitResult) => void;
@@ -69,9 +74,32 @@ export class WaiterRegistryStoppedError extends Error {
   }
 }
 
+/**
+ * Rejected to a /result waiter whose client disconnected before the run
+ * reached a terminal state. `name` is 'AbortError' (the DOM convention) so
+ * the HTTP route can recognise it and answer 499 — Client Closed Request —
+ * instead of surfacing as a 500: the client is gone, the only point is
+ * freeing the waiter and its socket, not delivering a body.
+ */
+export class ResultWaitAbortedError extends Error {
+  constructor() {
+    super('result wait aborted by the client');
+    this.name = 'AbortError';
+  }
+}
+
 export interface WaiterRegistry {
-  /** Wait for a terminal state (timeout → latest non-terminal status). */
-  register(runId: string, namespace: Namespace, opts?: WaitForResultOptions): Promise<WaitResult>;
+  /** Wait for a terminal state (timeout → latest non-terminal status). A
+   *  caller that can observe client disconnects passes `signal`; when it
+   *  aborts while the waiter is still pending, the entry is removed at once
+   *  and the promise rejects with ResultWaitAbortedError (name 'AbortError')
+   *  instead of hanging to the deadline on a dead socket. */
+  register(
+    runId: string,
+    namespace: Namespace,
+    opts?: WaitForResultOptions,
+    signal?: AbortSignal,
+  ): Promise<WaitResult>;
   /** A `terminal` notification arrived for this runId (namespace already
    *  matched by the dispatch). Settles every waiter for it. */
   resolve(runId: string): Promise<void>;
@@ -142,8 +170,12 @@ export function createWaiterRegistry(deps: {
     runId: string,
     namespace: Namespace,
     opts: WaitForResultOptions = {},
+    signal?: AbortSignal,
   ): Promise<WaitResult> {
     if (stopped) throw new WaiterRegistryStoppedError(); // defensive: the server is closed first
+    // An already-disconnected client: settle immediately, and do not even
+    // spend the initial read on a request nobody will see the answer to.
+    if (signal?.aborted) throw new ResultWaitAbortedError();
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
     // One read up front: the run may already be terminal (or already gone).
@@ -157,6 +189,7 @@ export function createWaiterRegistry(deps: {
 
     return new Promise<WaitResult>((resolve, reject) => {
       const entry: PendingWaiter = {
+        id: nextWaiterId++,
         runId,
         namespace,
         resolve,
@@ -164,6 +197,25 @@ export function createWaiterRegistry(deps: {
         deadline: Date.now() + timeoutMs,
         lastStatus: row.status,
       };
+      const onAbort = () => {
+        // Only an entry that is still pending may be settled here; a waiter
+        // the sweep or a notification already resolved must not be disturbed
+        // (its client got an answer, and the promise settles once).
+        if (!isPending(entry)) return;
+        remove(entry);
+        reject(new ResultWaitAbortedError());
+      };
+      // The aborted check is re-done in the executor: the pre-read guard above
+      // and this one bracket the async read, so an abort that lands while the
+      // read was in flight still frees the entry instead of registering it.
+      // The addEventListener is safe here — abort events are dispatched on the
+      // task queue, never synchronously, so a signal that reads `aborted ===
+      // false` now will deliver its abort to the listener.
+      if (signal?.aborted) {
+        reject(new ResultWaitAbortedError());
+        return;
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
       let set = pending.get(runId);
       if (!set) {
         set = new Set();

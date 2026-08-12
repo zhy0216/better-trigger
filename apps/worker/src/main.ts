@@ -23,7 +23,6 @@
    uncaught exception takes that same path and then exits non-zero.
    ============================================================================= */
 import { fileURLToPath } from 'node:url';
-import type { Pool } from 'pg';
 import {
   assertNamespace,
   DEFAULT_NAMESPACE,
@@ -127,6 +126,15 @@ Env:
                            Per-endpoint overall cap (default 200/s; 0 disables
                            the global bucket). In-memory per process — put an
                            exact fleet-wide cap at the reverse proxy
+  BETTER_TRIGGER_RATE_LIMIT_READ_RPS
+                           Per-key rate cap on the read surface (/api/v1 reads:
+                           /runs/:id/record, /runs/:id/result, /runs, /tasks,
+                           /schedules, /workers, /metrics). Default 200/s;
+                           loose on purpose — it bounds an attack, not a
+                           dashboard. 0 disables the per-key read bucket
+  BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS
+                           Overall read cap over all keys (default 1000/s;
+                           0 disables the global read bucket)
   BETTER_TRIGGER_RATE_LIMIT_BURST
                            Token-bucket burst capacity (default: the larger of
                            the two rates above)

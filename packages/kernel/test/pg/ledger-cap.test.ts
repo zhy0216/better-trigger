@@ -23,7 +23,7 @@
    whole materialization. Case 1 below is the regression: it must truncate.
    ============================================================================= */
 import type { Pool } from 'pg';
-import { describe, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import { describePg, withPg, type PgContext } from './helpers';
 
 const NS = { projectId: 'default', env: 'prod' };

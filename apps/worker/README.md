@@ -155,7 +155,9 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_API_KEYS` | _(unset)_ | Additional bearer keys, comma-separated, each optionally carrying the same `@<date>` expiry suffix. ANY configured key authenticates — this is the rotation mechanism (see "Network exposure") |
 | `BETTER_TRIGGER_RATE_LIMIT_RPS` | `50` | Per-key per-endpoint token-bucket rate on `trigger` / `batch-trigger` / `retry` / `cancel` (tokens per second). `0` disables the per-key bucket |
 | `BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS` | `200` | Per-endpoint token-bucket rate over all keys (tokens per second). `0` disables the global bucket. In-memory per process — see "Network exposure" for the multi-daemon boundary |
-| `BETTER_TRIGGER_RATE_LIMIT_BURST` | _larger rate above_ | Token-bucket capacity (max burst) for both buckets; negative or unparseable values fall back to the default, `0` is honoured |
+| `BETTER_TRIGGER_RATE_LIMIT_READ_RPS` | `200` | Per-key token-bucket rate across the read surface — every `/api/v1` read: `/runs/:id/record`, `/runs/:id/result`, `/runs`, `/tasks`, `/schedules`, `/workers`, `/metrics` (tokens per second). Deliberately loose (see "Rate limiting"); `0` disables the per-key read bucket |
+| `BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS` | `1000` | Token-bucket rate over all keys across the whole read surface (tokens per second). `0` disables the global read bucket. In-memory per process, like the write buckets |
+| `BETTER_TRIGGER_RATE_LIMIT_BURST` | _larger write rate above_ | Token-bucket capacity (max burst) for both buckets; negative or unparseable values fall back to the default, `0` is honoured |
 | `BETTER_TRIGGER_PIN_CODE_VERSION` | _(unset)_ | `1`/`true` = same as `--pin-code-version` |
 | `BETTER_TRIGGER_VERSION` | _(build identity)_ | Code version reported on registration. Defaults to the build identity (`0.1.0+<git sha>`, the same value `/health` reports; version-only outside git); setting it overrides the worker-level version AND every per-task version at once |
 
@@ -306,8 +308,21 @@ Knobs (see the env table): `BETTER_TRIGGER_RATE_LIMIT_RPS` (per key per
 endpoint, default 50/s), `BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS` (per endpoint
 over all keys, default 200/s), `BETTER_TRIGGER_RATE_LIMIT_BURST` (bucket
 capacity, default the larger of the two rates). `0` disables that bucket —
-e.g. set both to `0` for the pre-O6 behaviour. Reads, the dashboard, `/health`
-and `/metrics` are never limited, and neither are non-POST calls.
+e.g. set both to `0` for the pre-O6 behaviour.
+
+**Reads are bucketed too, but loosely (p1-14).** Every `/api/v1` read — `GET
+/runs/:id/record`, `/runs/:id/result`, `/runs`, `/tasks`, `/schedules`,
+`/workers`, `/metrics`, and any unknown `/api/v1` path — draws from a shared
+`read` bucket: per key (default `BETTER_TRIGGER_RATE_LIMIT_READ_RPS`, 200/s)
+and over all keys (`BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS`, 1000/s). The
+defaults are loose on purpose: a single read can be a DB query (a `/result`
+long-poll even parks a waiter), so on a network-exposed daemon an unbounded
+read storm starves the claim/heartbeat loops on the shared business pool —
+but a dashboard legitimately polls `/tasks` and `/runs` every few seconds,
+and that must never be throttled. The read bucket exists to bound an attack,
+not a dashboard. Set both read knobs to `0` to restore unlimited reads.
+`/health`, OPTIONS preflights and the dashboard's static assets (outside
+`/api/v1/`) are never limited.
 
 Deliberately NOT bucketed: **IP** (behind a reverse proxy — the deployment
 this feature exists for — the socket address is the proxy's, and

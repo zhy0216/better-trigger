@@ -18,7 +18,7 @@
    (queue.ts) — which is exactly what makes the old token stale.
    ============================================================================= */
 import type { Pool } from 'pg';
-import { describe, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import { RunNotRunningError, StaleLeaseError, type ClaimedRun } from '@better-trigger/core';
 import { describePg, withPg, type PgContext } from './helpers';
 

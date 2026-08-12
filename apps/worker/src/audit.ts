@@ -114,7 +114,12 @@ async function buildEntry(
 ): Promise<AuditEntry> {
   const method = c.req.method;
   const path = c.req.path;
-  const endpoint = endpointOf(method, path);
+  // endpointOf also classifies reads as 'read' (so the rate limiter can bucket
+  // them); the audit line's endpoint field keeps meaning "the run-affecting
+  // write endpoint" — reads stay null, and nothing on a read is parsed for
+  // task/run ids (that parsing is for the four write endpoints' id lists).
+  const classified = endpointOf(method, path);
+  const endpoint: RateLimitedEndpoint | null = classified === 'read' ? null : classified;
   const status = c.res.status;
   const accepted = status < 400;
   let reason: string | null = null;

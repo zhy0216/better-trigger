@@ -1,10 +1,13 @@
 /* =============================================================================
    @better-trigger/worker — rate-limit tests (O6).
 
-   The four run-affecting endpoints (trigger / batch-trigger / retry /
-   cancel) are token-bucket limited, per key AND per endpoint, so a hostile
-   or misconfigured client cannot create runs without bound. Two buckets are
-   consumed per request; both must have a token.
+   Two rate-limit classes. The four run-affecting endpoints (trigger /
+   batch-trigger / retry / cancel) are token-bucket limited, per key AND per
+   endpoint, so a hostile or misconfigured client cannot create runs without
+   bound. Every other /api/v1 path is a `read`, bucketed loosely (default
+   200/s per key, 1000/s global) so an unbounded read storm cannot starve the
+   business pool while a polling dashboard is never throttled. Two buckets
+   are consumed per request in each class; both must have a token.
 
    Driven through createApp with stub deps (no Postgres) and an injected
    clock so refill behaviour is deterministic. Env knobs are read per
@@ -42,6 +45,8 @@ const post = (path: string, body?: unknown) =>
 const RATE_ENVS = [
   'BETTER_TRIGGER_RATE_LIMIT_RPS',
   'BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS',
+  'BETTER_TRIGGER_RATE_LIMIT_READ_RPS',
+  'BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS',
   'BETTER_TRIGGER_RATE_LIMIT_BURST',
 ] as const;
 
@@ -49,9 +54,7 @@ const saved: Record<string, string | undefined> = {};
 
 beforeEach(() => {
   for (const k of RATE_ENVS) saved[k] = process.env[k];
-  delete process.env.BETTER_TRIGGER_RATE_LIMIT_RPS;
-  delete process.env.BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS;
-  delete process.env.BETTER_TRIGGER_RATE_LIMIT_BURST;
+  for (const k of RATE_ENVS) delete process.env[k];
 });
 
 afterEach(() => {
@@ -69,17 +72,23 @@ const perKeyOnly = () => {
 };
 
 describe('endpointOf', () => {
-  it.each<[string, string, RateLimitedEndpoint | null]>([
+  it.each<[string, string, RateLimitedEndpoint | 'read' | null]>([
     ['POST', '/api/v1/trigger', 'trigger'],
     ['POST', '/api/v1/batch-trigger', 'batch-trigger'],
     ['POST', '/api/v1/runs/run_1/cancel', 'cancel'],
     ['POST', '/api/v1/runs/run_1/retry', 'retry'],
-    ['POST', '/api/v1/runs/run_1/result', null],
-    ['GET', '/api/v1/runs/run_1/record', null],
-    ['POST', '/api/v1/runs/run_1/record', null],
+    ['POST', '/api/v1/runs/run_1/result', 'read'],
+    ['GET', '/api/v1/runs/run_1/result', 'read'],
+    ['GET', '/api/v1/runs/run_1/record', 'read'],
+    ['POST', '/api/v1/runs/run_1/record', 'read'],
+    ['GET', '/api/v1/runs', 'read'],
+    ['GET', '/api/v1/tasks', 'read'],
+    ['GET', '/api/v1/schedules', 'read'],
+    ['GET', '/api/v1/workers', 'read'],
+    ['GET', '/api/v1/metrics', 'read'],
     ['GET', '/api/v1/health', null],
     ['OPTIONS', '/api/v1/trigger', null],
-    ['POST', '/api/v1/not-a-route', null],
+    ['POST', '/api/v1/not-a-route', 'read'],
   ])('%s %s → %s', (method, path, expected) => {
     expect(endpointOf(method, path)).toBe(expected);
   });
@@ -170,17 +179,47 @@ describe('per-endpoint rate limit (defaults)', () => {
     }
   });
 
-  it('leaves reads and the dashboard untouched', async () => {
-    perKeyOnly();
+  it('loosely buckets reads: a burst over the read rate answers 429, normal reads pass', async () => {
+    // Reads share one loose bucket (defaults 200/s per key / 1000/s global),
+    // distinct from the write buckets: tightening it must NOT touch writes.
+    process.env.BETTER_TRIGGER_RATE_LIMIT_READ_RPS = '1';
+    process.env.BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS = '0';
+    process.env.BETTER_TRIGGER_RATE_LIMIT_BURST = '1';
     const app = makeApp();
-    await app.fetch(post('/api/v1/trigger', { taskId: 't', payload: null }));
-    await app.fetch(post('/api/v1/trigger', { taskId: 't', payload: null }));
-    expect((await app.fetch(new Request('http://localhost:4848/api/v1/health'))).status).toBe(
+    const get = (path: string) => new Request(`http://localhost:4848${path}`);
+    expect((await app.fetch(get('/api/v1/tasks'))).status).toBe(200);
+    // Second read, same key: the per-key read bucket is empty → 429.
+    const res = await app.fetch(get('/api/v1/tasks'));
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('rate_limited');
+    // /health is exempt even with a depleted read bucket.
+    expect((await app.fetch(get('/api/v1/health'))).status).toBe(200);
+    // The write buckets were never touched: trigger still has its own token.
+    expect((await app.fetch(post('/api/v1/trigger', { taskId: 't', payload: null }))).status).toBe(
       200,
     );
-    expect(
-      (await app.fetch(new Request('http://localhost:4848/api/v1/tasks'))).status,
-    ).toBe(200);
+  });
+
+  it('reads pass without bound when the read buckets are disabled (0)', async () => {
+    process.env.BETTER_TRIGGER_RATE_LIMIT_READ_RPS = '0';
+    process.env.BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS = '0';
+    const app = makeApp();
+    const get = (path: string) => new Request(`http://localhost:4848${path}`);
+    for (let i = 0; i < 5; i++) {
+      expect((await app.fetch(get('/api/v1/tasks'))).status).toBe(200);
+    }
+  });
+
+  it('default read limits are generous enough that a polling dashboard is never throttled', async () => {
+    const app = makeApp();
+    const get = (path: string) => new Request(`http://localhost:4848${path}`);
+    // ~50 dashboard polls across several read endpoints, all under the 200/s
+    // default per-key read rate — every one passes.
+    for (let i = 0; i < 50; i++) {
+      expect((await app.fetch(get('/api/v1/tasks'))).status).toBe(200);
+      expect((await app.fetch(get('/api/v1/runs'))).status).toBe(200);
+    }
   });
 });
 
@@ -242,9 +281,11 @@ describe('disabling the rate limit', () => {
   it('falls back to the defaults on garbage input', () => {
     process.env.BETTER_TRIGGER_RATE_LIMIT_RPS = 'banana';
     process.env.BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS = '-3';
+    process.env.BETTER_TRIGGER_RATE_LIMIT_READ_RPS = 'NaN';
+    process.env.BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS = '12.5';
     process.env.BETTER_TRIGGER_RATE_LIMIT_BURST = 'NaN';
     const cfg = rateLimitConfigFromEnv();
-    expect(cfg).toEqual({ rps: 50, globalRps: 200, burst: 200 });
+    expect(cfg).toEqual({ rps: 50, globalRps: 200, readRps: 200, readGlobalRps: 1000, burst: 200 });
   });
 
   it('burst defaults to the larger of the two rates', () => {

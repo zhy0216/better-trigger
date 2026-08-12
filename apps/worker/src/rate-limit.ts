@@ -1,15 +1,31 @@
 /* =============================================================================
    @better-trigger/worker — rate limiting (O6, todos/03-operability.md).
 
-   The four endpoints that create or control runs — POST /trigger,
-   /batch-trigger, /runs/:id/cancel, /runs/:id/retry — are token-bucket
-   limited so that a hostile or misconfigured client cannot create runs
-   without bound. Two buckets are consumed per request:
+   Two rate-limit classes. The WRITE class covers the four endpoints that
+   create or control runs — POST /trigger, /batch-trigger, /runs/:id/cancel,
+   /runs/:id/retry — token-bucket limited so that a hostile or
+   misconfigured client cannot create runs without bound. The READ class
+   covers everything else under /api/v1/ — GET /runs/:id/record,
+   /runs/:id/result, /runs, /tasks, /schedules, /workers, /metrics, and any
+   unknown /api/v1 path: each request can hit the DB (a /result long-poll is
+   even a per-request query amplifier), so on a network-exposed daemon an
+   unbounded read storm starves the claim/heartbeat loops on the shared
+   business pool. /health, OPTIONS preflights and the dashboard's static
+   assets (which live OUTSIDE /api/v1/) stay exempt.
 
-     - per key   (`key:<endpoint>:<keyFingerprint>`) — one noisy client
-       cannot starve its neighbours;
-     - per endpoint (`global:<endpoint>`) — even several keys together
-       cannot drive the endpoint past the overall cap.
+   Two buckets are consumed per request in each class:
+
+     - per key (`key:<bucket>:<keyFingerprint>`) — one noisy client cannot
+       starve its neighbours;
+     - per bucket (`global:<bucket>`) — even several keys together cannot
+       drive the endpoint past the overall cap. Writes key the bucket by
+       endpoint (`global:trigger`, …); reads share one `global:read`.
+
+   The read bucket is deliberately LOOSE (defaults 200/s per key, 1000/s
+   global): reads are far cheaper than a run-creating write, and a dashboard
+   legitimately polls /tasks and /runs every few seconds — the read bucket
+   only bounds an attack, it never throttles a dashboard. The write bucket
+   stays strict.
 
    The dimensions NOT bucketed, deliberately: IP (unreliable behind a
    reverse proxy, which is the deployment this feature exists for —
@@ -25,9 +41,11 @@
    Configuration (all read per request, so tests can flip them; 0 disables
    that dimension; negative or unparseable values fall back to the default):
 
-     BETTER_TRIGGER_RATE_LIMIT_RPS           per-key tokens/second   (default 50)
-     BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS    per-endpoint tokens/sec (default 200)
-     BETTER_TRIGGER_RATE_LIMIT_BURST         bucket capacity/burst   (default = larger rate)
+     BETTER_TRIGGER_RATE_LIMIT_RPS              per-key write tokens/s  (default 50)
+     BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS       per-endpoint write cap (default 200)
+     BETTER_TRIGGER_RATE_LIMIT_READ_RPS         per-key read tokens/s   (default 200)
+     BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS  read cap over all keys  (default 1000)
+     BETTER_TRIGGER_RATE_LIMIT_BURST            bucket capacity/burst   (default = larger write rate)
 
    Over the limit the middleware throws KernelError('rate_limited') →
    429 `{ error: { code: 'rate_limited', message } }` via app.onError, and
@@ -45,28 +63,44 @@ import type { AppVariables } from './middleware';
 /** The run-affecting endpoints the rate limit guards. */
 export type RateLimitedEndpoint = 'trigger' | 'batch-trigger' | 'retry' | 'cancel';
 
-/** Classify a request into its rate-limited endpoint, or null (reads, the
- *  dashboard, /health, OPTIONS — none of them create or control runs). */
-export function endpointOf(method: string, path: string): RateLimitedEndpoint | null {
-  if (method !== 'POST') return null;
-  if (path === '/api/v1/trigger') return 'trigger';
-  if (path === '/api/v1/batch-trigger') return 'batch-trigger';
-  const match = /^\/api\/v1\/runs\/[^/]+\/(cancel|retry)$/.exec(path);
-  if (match !== null) return match[1] as RateLimitedEndpoint;
+/** Classify a request into its rate-limited endpoint, 'read' for the loose
+ *  read bucket, or null for the exempt surface.
+ *  The four write endpoints keep their existing (POST-only) classification.
+ *  Everything else under /api/v1/ — GET /runs/:id/record, /runs/:id/result,
+ *  /runs, /tasks, /schedules, /workers, /metrics and any unknown path, on
+ *  any method — is a read: each one can hit the DB per request, so they all
+ *  share the read bucket. /health and OPTIONS preflights stay exempt, and
+ *  the dashboard's static assets never reach here (they live outside
+ *  /api/v1/). */
+export function endpointOf(method: string, path: string): RateLimitedEndpoint | 'read' | null {
+  if (method === 'POST') {
+    if (path === '/api/v1/trigger') return 'trigger';
+    if (path === '/api/v1/batch-trigger') return 'batch-trigger';
+    const match = /^\/api\/v1\/runs\/[^/]+\/(cancel|retry)$/.exec(path);
+    if (match !== null) return match[1] as RateLimitedEndpoint;
+  }
+  if (method === 'OPTIONS' || path === '/api/v1/health') return null;
+  if (path.startsWith('/api/v1/')) return 'read';
   return null;
 }
 
 export interface RateLimitConfig {
-  /** Tokens per second per API key per endpoint; 0 disables the per-key bucket. */
+  /** Tokens per second per API key per write endpoint; 0 disables the per-key bucket. */
   rps: number;
-  /** Tokens per second per endpoint overall; 0 disables the global bucket. */
+  /** Tokens per second per write endpoint overall; 0 disables the global bucket. */
   globalRps: number;
-  /** Token bucket capacity (max burst), shared by both dimensions. */
+  /** Tokens per second per API key across all reads; 0 disables the per-key bucket. */
+  readRps: number;
+  /** Tokens per second across all reads over all keys; 0 disables the global bucket. */
+  readGlobalRps: number;
+  /** Token bucket capacity (max burst), shared by all four dimensions. */
   burst: number;
 }
 
 const DEFAULT_RPS = 50;
 const DEFAULT_GLOBAL_RPS = 200;
+const DEFAULT_READ_RPS = 200;
+const DEFAULT_READ_GLOBAL_RPS = 1000;
 
 function envInt(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw === '') return fallback;
@@ -80,8 +114,13 @@ function envInt(raw: string | undefined, fallback: number): number {
 export function rateLimitConfigFromEnv(env = process.env): RateLimitConfig {
   const rps = envInt(env.BETTER_TRIGGER_RATE_LIMIT_RPS, DEFAULT_RPS);
   const globalRps = envInt(env.BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS, DEFAULT_GLOBAL_RPS);
+  const readRps = envInt(env.BETTER_TRIGGER_RATE_LIMIT_READ_RPS, DEFAULT_READ_RPS);
+  const readGlobalRps = envInt(
+    env.BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS,
+    DEFAULT_READ_GLOBAL_RPS,
+  );
   const burst = envInt(env.BETTER_TRIGGER_RATE_LIMIT_BURST, Math.max(rps, globalRps));
-  return { rps, globalRps, burst };
+  return { rps, globalRps, readRps, readGlobalRps, burst };
 }
 
 /** In-memory token buckets: each bucket holds up to `capacity` tokens and
@@ -118,9 +157,11 @@ export class TokenBuckets {
 }
 
 /**
- * Gate on the four run-affecting endpoints. Both buckets must have a token:
- * the per-key one first (a misbehaving key is the common case), then the
- * global one. Anything else passes through untouched.
+ * Gate on the run-affecting write endpoints AND the read surface. Writes draw
+ * from their per-endpoint buckets; reads draw from the shared `read` buckets.
+ * Both buckets must have a token: the per-key one first (a misbehaving key is
+ * the common case), then the global one. Anything else (the dashboard, /health,
+ * OPTIONS) passes through untouched.
  */
 export function rateLimitMiddleware(now?: () => number): MiddlewareHandler<{ Variables: AppVariables }> {
   const buckets = new TokenBuckets(now);
@@ -129,10 +170,14 @@ export function rateLimitMiddleware(now?: () => number): MiddlewareHandler<{ Var
     if (endpoint === null) return next();
     const cfg = rateLimitConfigFromEnv();
     const keyId = c.get('authKeyId') ?? 'anon';
-    if (cfg.rps > 0 && !buckets.consume(`key:${endpoint}:${keyId}`, cfg.rps, cfg.burst)) {
+    const read = endpoint === 'read';
+    const bucket = read ? 'read' : endpoint;
+    const rps = read ? cfg.readRps : cfg.rps;
+    const globalRps = read ? cfg.readGlobalRps : cfg.globalRps;
+    if (rps > 0 && !buckets.consume(`key:${bucket}:${keyId}`, rps, cfg.burst)) {
       throw new KernelError('rate_limited', `rate limit exceeded for ${endpoint}`);
     }
-    if (cfg.globalRps > 0 && !buckets.consume(`global:${endpoint}`, cfg.globalRps, cfg.burst)) {
+    if (globalRps > 0 && !buckets.consume(`global:${bucket}`, globalRps, cfg.burst)) {
       throw new KernelError('rate_limited', `rate limit exceeded for ${endpoint}`);
     }
     return next();

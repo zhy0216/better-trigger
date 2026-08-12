@@ -15,7 +15,7 @@
      queued → canceled, terminal → untouched no-op, waiting → waits cleaned,
      and the cancel-vs-claim lock ordering with a second real connection.
    ============================================================================= */
-import { describe, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import type { Kernel } from '../../src';
 import type { ClaimedRun } from '@better-trigger/core';
 import { describePg, withPg } from './helpers';

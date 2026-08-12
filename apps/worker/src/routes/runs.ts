@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import type { Kernel } from '@better-trigger/kernel';
 import type { OkResponse, RetryRunResponse } from '../types';
-import type { WaiterRegistry } from '../waiters';
+import { ResultWaitAbortedError, type WaiterRegistry } from '../waiters';
 import { namespaceFromQuery } from '../namespace';
 
 /** Upper bound on a single long-poll, so a request cannot outlive a proxy. */
@@ -59,10 +59,22 @@ export function runRoutes(deps: { kernel: Kernel; waiters?: WaiterRegistry }): H
     // 1s sweep (plus terminal notifications) instead of N independent 4-QPS
     // poll loops. The kernel poll stays as the fallback for embedded hosts
     // that do not own a registry.
-    const result = deps.waiters
-      ? await deps.waiters.register(id, namespace, opts)
-      : await kernel.waitForResult(id, namespace, opts);
-    return c.json(result);
+    if (!deps.waiters) {
+      const result = await kernel.waitForResult(id, namespace, opts);
+      return c.json(result);
+    }
+    // p1-14: the registry is told about the request's abort signal so a client
+    // that disconnects mid-poll frees its waiter immediately instead of
+    // hanging to the deadline on a dead socket. There is nothing to deliver to
+    // a gone client, so an abort answers 499 (Client Closed Request) rather
+    // than surfacing as a 500.
+    try {
+      const result = await deps.waiters.register(id, namespace, opts, c.req.raw.signal);
+      return c.json(result);
+    } catch (err) {
+      if (err instanceof ResultWaitAbortedError) return new Response(null, { status: 499 });
+      throw err;
+    }
   });
 
   return app;

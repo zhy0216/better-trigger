@@ -8,16 +8,23 @@
    correctness contract mirrors kernel.waitForResult exactly:
 
      - run already terminal at register() → resolved immediately (this is also
-       the race guard against a notification that fired before the waiter);
+        the race guard against a notification that fired before the waiter);
      - terminal notification (registry.resolve) → settled with output/error;
      - deadline passed → settled with the latest non-terminal status;
-     - run vanished → rejected not_found.
+     - run vanished → rejected not_found;
+     - the client disconnected (signal aborted, p1-14) while pending → the
+        entry is freed at once and the promise rejects with
+        ResultWaitAbortedError (name 'AbortError'); an abort that lands before
+        registration never even reads the DB, and a late abort after settlement
+        is a no-op. The route maps it to a 499.
 
    No Postgres: the registry takes a Pool, so a fake pool that answers the two
    query shapes (single-run read, batch ANY read) is enough.
    ============================================================================= */
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
+import type { Kernel } from '@better-trigger/kernel';
+import { createApp } from '../src/app';
 import { createNotifyCounters } from '../src/observability';
 import { createWakeSignal, sleepWithWake } from '../src/notify';
 import { createWaiterRegistry, type WaiterRegistry } from '../src/waiters';
@@ -183,6 +190,92 @@ describe('waiter registry', () => {
       'daemon shutting down',
     );
     expect(selects()).toBe(0); // refused before the initial read
+  });
+
+  /* ---------------------------------------------------- p1-14: disconnect */
+
+  it('an aborted signal frees the pending waiter and rejects it', async () => {
+    const { reg, runs } = registry();
+    runs.set('run_abort', { id: 'run_abort', status: 'running' });
+    const controller = new AbortController();
+    const p = reg.register('run_abort', NS, { timeoutMs: 30_000 }, controller.signal);
+    await new Promise((r) => setTimeout(r, 5)); // let the registration land
+    expect(reg.pending()).toBe(1);
+
+    controller.abort();
+    await expect(p).rejects.toMatchObject({
+      name: 'AbortError',
+      message: expect.stringContaining('aborted by the client'),
+    });
+    // The waiter was freed on the abort — not left hanging to the 30s deadline.
+    expect(reg.pending()).toBe(0);
+    reg.stop();
+  });
+
+  it('an already-aborted signal rejects without registering', async () => {
+    const { reg, runs, selects } = registry();
+    runs.set('run_aborted', { id: 'run_aborted', status: 'running' });
+    const controller = new AbortController();
+    controller.abort(); // the client disconnected before the request landed
+    await expect(
+      reg.register('run_aborted', NS, { timeoutMs: 30_000 }, controller.signal),
+    ).rejects.toMatchObject({
+      name: 'AbortError',
+      message: expect.stringContaining('aborted by the client'),
+    });
+    expect(reg.pending()).toBe(0);
+    // The initial read was skipped: nobody is left to see an answer to this wait.
+    expect(selects()).toBe(0);
+    reg.stop();
+  });
+
+  it('a settled waiter ignores a late abort', async () => {
+    const { reg, runs } = registry();
+    runs.set('run_late', { id: 'run_late', status: 'running' });
+    const controller = new AbortController();
+    const p = reg.register('run_late', NS, { timeoutMs: 5_000 }, controller.signal);
+    await new Promise((r) => setTimeout(r, 5)); // let the registration land
+    runs.set('run_late', { id: 'run_late', status: 'completed', output: 'ok' });
+    await reg.resolve('run_late');
+    expect(await p).toEqual({ status: 'completed', output: 'ok', error: undefined });
+    expect(reg.pending()).toBe(0);
+
+    controller.abort(); // after settlement the abort is a no-op
+    expect(reg.pending()).toBe(0);
+    // ...and it must not have unsettled the promise: the result still comes back.
+    expect(await p).toEqual({ status: 'completed', output: 'ok', error: undefined });
+    reg.stop();
+  });
+
+  /* ------------------------- route-level: a disconnect answers 499 */
+
+  it('a request aborted mid-poll answers 499', async () => {
+    const f = fakePool();
+    f.runs.set('run_route', { id: 'run_route', status: 'running' });
+    const reg = createWaiterRegistry({
+      pool: f.pool,
+      counters: createNotifyCounters(),
+      pollMs: 20,
+    });
+    const app = createApp({ kernel: {} as Kernel, pool: f.pool, waiters: reg });
+    const controller = new AbortController();
+    const resP = app.fetch(
+      new Request('http://localhost:4848/api/v1/runs/run_route/result?timeoutMs=30000', {
+        signal: controller.signal,
+      }),
+    );
+    // Wait for the waiter to land in the registry (the long-poll is pending).
+    const deadline = Date.now() + 500;
+    while (reg.pending() === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1));
+    }
+    expect(reg.pending()).toBe(1);
+
+    controller.abort();
+    const res = await resP;
+    expect(res.status).toBe(499);
+    expect(reg.pending()).toBe(0);
+    reg.stop();
   });
 });
 
