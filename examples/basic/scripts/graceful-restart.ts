@@ -59,7 +59,6 @@ import { fileURLToPath } from 'node:url';
 import {
   freePort,
   createMarker,
-  portFromEnv,
   runScenario,
   sleep,
   spawnDaemon,
