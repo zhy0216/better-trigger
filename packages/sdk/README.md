@@ -6,10 +6,12 @@ Declare background tasks as plain async functions, run durable steps, wait for
 seconds or days, retry with backoff, schedule with cron — on top of one Postgres
 database. No Redis, no ClickHouse.
 
-This package is the **client half**: it defines tasks and triggers them over
-HTTP. It has zero runtime dependencies and never opens a database connection.
-The **worker daemon** (`better-trigger-worker`, from `@better-trigger/worker`)
-owns Postgres, imports your task modules and executes them.
+This package is the **client half**: it defines tasks and triggers them through
+the worker HTTP surface. It has zero runtime dependencies and never opens a
+database connection. The worker runtime (`@better-trigger/worker`) owns
+Postgres and executes tasks, either as the standalone `better-trigger-worker`
+daemon or embedded in a long-lived Node/Bun application through
+`@better-trigger/worker/embedded`.
 
 `better-trigger` uses a **replay** model instead of container snapshots: when a
 run suspends on a wait, the execution slot is released; when the wait expires
@@ -24,6 +26,9 @@ cached results instantly. The code reads like a straight-line `async` function.
 npm install better-trigger              # your app
 npm install -D @better-trigger/worker   # the daemon (wherever you run it)
 ```
+
+For embedded mode, install `@better-trigger/worker` as a normal runtime
+dependency instead of a dev dependency.
 
 Requires Node.js 18+ (or Bun) and a reachable PostgreSQL database. That's the
 whole stack.

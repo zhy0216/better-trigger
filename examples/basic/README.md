@@ -5,9 +5,10 @@ end-to-end acceptance scripts that exercise the full engine (replay,
 suspend/resume, parent/child, batch, retry, abort, cron, crash recovery,
 lease fencing).
 
-The split mirrors production: `src/tasks.ts` is loaded by the **worker daemon**,
-while `src/trigger.ts` is the HTTP client an application would hold. Only the
-daemon (and the harnesses' direct-SQL assertions) ever sees `DATABASE_URL`.
+The default split mirrors production: `src/tasks.ts` is loaded by the **worker
+daemon**, while `src/trigger.ts` is the HTTP client an application would hold.
+`src/embedded.ts` demonstrates the alternate one-process host, where the app
+owns the runtime and therefore sees `DATABASE_URL` itself.
 
 ## What's inside
 
@@ -15,7 +16,9 @@ daemon (and the harnesses' direct-SQL assertions) ever sees `DATABASE_URL`.
 |---|---|
 | `src/tasks.ts` | The example task set (one feature per task — see table below). Loaded via `--tasks`. |
 | `src/trigger.ts` | `betterTrigger({ url })` — the shared HTTP client. |
+| `src/embedded.ts` | `createEmbeddedRuntime({ tasks })` — same engine, no daemon process or TCP port. |
 | `scripts/e2e.ts` | End-to-end assertions through the HTTP client (self-provisions its db, spawns one daemon). |
+| `scripts/embedded.ts` | Live-Postgres acceptance for `createEmbeddedRuntime`: migration, registration, in-process trigger/result, durable steps and shutdown. |
 | `scripts/crash.ts` + `scripts/crash-tasks.ts` | Crash recovery: 3 SIGKILLs of the executor node, exactly-once durable steps. |
 | `scripts/fencing.ts` | Kernel-level lease/fencing test (no daemon, no HTTP): 6 fenced ops rejected with zero state change, token monotonic across suspend/resume. |
 | `scripts/replay-drift.ts` + `scripts/replay-drift-tasks-v{1,2}.ts` | Mid-flight redeploy: `code_version` stamping, body fingerprinting, `replay: 'strict'` refusing a drifted ledger. |
@@ -74,6 +77,19 @@ const handle = await trigger.trigger('hello-world', { name: 'ada' });
 console.log(await handle.result()); // { status: 'completed', output: 'hi ada' }
 ```
 
+## Running embedded
+
+Use the same database, but let the example application own the worker runtime:
+
+```bash
+export DATABASE_URL=postgres://localhost:5432/better_trigger
+bun run --filter @better-trigger/example-basic embedded
+```
+
+This executes `src/embedded.ts`, triggers `hello-world` through the in-process
+client, prints its result and gracefully stops the runtime. A real application
+would keep the runtime alive until its normal shutdown hook fires.
+
 ## Acceptance scripts
 
 Each script **provisions its own scratch database** (DROP/CREATE against the
@@ -84,6 +100,7 @@ needs on its own port, and exits non-zero on any failed assertion:
 export DATABASE_URL=postgres://localhost:5432/better_trigger
 
 bun run --filter @better-trigger/example-basic e2e           # 18 checks · db _e2e · :4901
+bun run --filter @better-trigger/example-basic embedded:acceptance # 4 checks · db _embedded · no daemon/port
 bun run --filter @better-trigger/example-basic fencing       # 22 checks · db _fencing · no daemon
 bun run --filter @better-trigger/example-basic replay-drift  # 17 checks · db _drift · :4903
 bun run --filter @better-trigger/example-basic crash         # 14 checks · db _crash · :4902

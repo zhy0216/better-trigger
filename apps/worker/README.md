@@ -1,12 +1,14 @@
 # @better-trigger/worker
 
-The **worker daemon**: the one process that owns Postgres. It imports your task
-modules, executes runs with the replay executor, runs the orchestrator loops
-(waits / cron / lease reaper / offline markers), and serves the HTTP API that
-the `better-trigger` SDK and `apps/web` talk to.
+The better-trigger execution runtime. The normal host is the
+`better-trigger-worker` daemon: it owns Postgres, imports task modules, executes
+runs with the replay executor, runs the orchestrator loops (waits / cron / lease
+reaper / offline markers), and serves the HTTP API used by the SDK and dashboard.
 
-Applications never connect to the database — they hold `betterTrigger({ url })`
-and speak HTTP to this.
+Long-lived Node/Bun applications may instead use
+`@better-trigger/worker/embedded` to host the same runtime in-process without
+opening a port. The standalone daemon remains the isolation and independent-
+scaling default.
 
 Stack: Hono + `@hono/node-server`, `pg` (Pool via `@better-trigger/db`),
 `@better-trigger/kernel` (the durable engine), `better-trigger` (task handle
@@ -46,6 +48,37 @@ runs → stop the loops → close the server → drain the pool.
 The daemon `import()`s your task modules, so **TypeScript entries require a TS
 runtime** — run it under `bun` (as above) or `tsx`, or point `--tasks` at
 compiled JavaScript.
+
+### Embedded host
+
+```ts
+import { createEmbeddedRuntime } from '@better-trigger/worker/embedded';
+import { allTasks } from './tasks';
+
+const runtime = await createEmbeddedRuntime({
+  databaseUrl: process.env.DATABASE_URL,
+  tasks: allTasks,
+  concurrency: 5,
+});
+
+// runtime.client is the normal BetterTrigger client. It calls the Hono API
+// through an in-process fetch adapter and is also installed as TaskHandle's
+// default client unless setDefault: false is requested.
+
+await runtime.stop(); // host shutdown hook
+```
+
+`createEmbeddedRuntime()` owns the same kernel/runtime lifecycle as the CLI:
+migrations, task registration, claims, heartbeat, orchestrator loops, shared
+result waiters and optional LISTEN/NOTIFY. It exposes `client`, `app`, `fetch`,
+`worker` counters and `pool`; it never creates a TCP listener. One embedded
+runtime may be active per process because task context and in-run result
+resolution use the process-wide SDK registry.
+
+An injected `pool` remains application-owned by default. Supply `databaseUrl`
+alongside an injected pool to enable the dedicated LISTEN connection, or omit
+it to use the polling fallback. This mode requires a long-lived Node/Bun host:
+Postgres persists queued state while the host is down, but cannot execute it.
 
 ### Node shapes
 

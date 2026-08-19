@@ -1,21 +1,23 @@
-# better-trigger 架构定案 — 客户端 / worker daemon 分离
+# better-trigger 架构定案 — 客户端 / worker runtime 分离
 
 > 状态:**已定案**(2026-07-29 用户拍板)。本文档是唯一基准。
-> 形态:应用进程只装 `better-trigger`(定义 task + 通过 HTTP 触发,零运行时依赖、不碰 pg);
-> 执行、队列、编排、HTTP API 全部收在 `better-trigger-worker` 这一个 daemon 里。
+> 默认形态:应用进程只装 `better-trigger`(定义 task + 通过 HTTP 触发,零运行时依赖、不碰 pg);
+> 执行、队列、编排、HTTP API 全部收在 `better-trigger-worker` daemon 里。
+> 2026-08-19 增加可选 embedded host:长驻 Node/Bun 应用可在本进程启动同一套 runtime,
+> 不监听端口;daemon 仍是隔离与独立扩缩容的默认部署形态(见 ADR 8)。
 > **推翻**:2026-07-28 的「嵌入式 no-server(better-auth 形态)」定案(见 ADR 6)。
 > `docs/backend-contract.md` 的 §3 引擎语义(位置 seq 重放、退避公式、并发限制、cron、suspend/resume 状态机)**继续有效**;§4 的 worker HTTP 协议依旧作废——worker 与 kernel 现在同进程,不存在 worker 协议。
 
 ## 一句话定位
 
-一个 TypeScript-first、PostgreSQL-backed 的 durable execution runtime,面向**纯本地多 AI agent 系统**:跑一个本地 daemon(`better-trigger-worker --tasks ./src/tasks.ts`),它加载你的 task 模块、执行、并对外提供 HTTP;应用只用 `betterTrigger({ url })` 触发。Postgres 是唯一基础设施。
+一个 TypeScript-first、PostgreSQL-backed 的 durable execution runtime,面向**纯本地多 AI agent 系统**:默认跑本地 daemon(`better-trigger-worker --tasks ./src/tasks.ts`),也可用 `createEmbeddedRuntime({tasks})` 把同一 runtime 放进长驻 Node/Bun 应用。Postgres 是唯一基础设施。
 
 ## 产品原则
 
-1. **应用侧零负担**:`better-trigger` 只做两件事——`task()` 定义、`betterTrigger({url})` 触发。零运行时依赖,不打开数据库连接,可以安心 import 进 web server / CLI。
+1. **应用侧默认零负担**:`better-trigger` 只做两件事——`task()` 定义、`betterTrigger({url})` 触发。零运行时依赖,不打开数据库连接,可以安心 import 进 web server / CLI。需要单进程部署时,应用显式安装 `@better-trigger/worker` 并选择 embedded host,重依赖不会进入基础 SDK。
 2. **API 维持 trigger.dev/Inngest 风格**:`task()` + inline `ctx.step()` + 直线 async(2026-06-05 用户选定)。不采用 Temporal 的 `defineWorkflow` / `proxyActivities` 表面。
 3. **执行模型维持 step 记忆重放**(位置 seq + memoized 结果 + SuspendSignal),不重写为 event-history/command-matching;用 step fingerprint 硬化漂移检测。
-4. **v1 绑定 PostgreSQL、不绑定用户 ORM**:runtime 自管 `better_trigger` system schema(drizzle 迁移,daemon 启动时 auto-migrate,`--no-migrate` 可关)。措辞:*PostgreSQL-backed and ORM-agnostic*,不说「数据库无关」。
+4. **v1 绑定 PostgreSQL、不绑定用户 ORM**:runtime 自管 `better_trigger` system schema(drizzle 迁移,host 启动时 auto-migrate,daemon 用 `--no-migrate`、embedded 用 `migrate:false` 可关)。措辞:*PostgreSQL-backed and ORM-agnostic*,不说「数据库无关」。
 5. **Dashboard 由 daemon 直接托管**,不是独立组件;agent 原语(P5)建立在 signal/event 内核(P3)之上。
 
 ## 形态速写
@@ -51,13 +53,14 @@ const handle = await onboarding.trigger({ userId: "u1" }, { idempotencyKey: "u1"
 await handle.result();             // 服务端 long-poll 等待终态
 ```
 
-**关键约束**:task 模块要被 daemon 独立 import,所以 `run` **不能闭包应用内部状态**(请求上下文、内存单例)。需要外部资源就在 `run` 里自行获取。
+**daemon 模式关键约束**:task 模块要被 daemon 独立 import,所以 `run` **不能闭包应用内部状态**(请求上下文、内存单例)。embedded 直接接收 TaskHandle,可使用应用级依赖,但仍不能依赖重启后无法重建的 request-scoped/临时状态。
 
 **进程模型**
 
 - 单进程(默认):一个 daemon = 执行 + 编排 + API + dashboard。
+- 单进程(embedded):宿主应用调用 `createEmbeddedRuntime({tasks})`;执行 + 编排在应用进程内运行,SDK 经 in-process fetch 复用同一套 Hono API,不监听 TCP 端口。一个进程只允许一个 embedded runtime。
 - 多进程:N 个 daemon 共享 PG;task claim 与 timer/cron 扫描全部 `FOR UPDATE SKIP LOCKED`,天然多进程安全,**无 leader 选举**。`--no-serve` 得到纯执行节点,不带 `--tasks` 得到纯 API/dashboard 节点(只跑 lease reaper + worker 离线标记,**不跑 cron/waits/claim**)。
-- 停机语义(诚实承诺):没有 daemon 在线时**只保存状态,不执行任何 timer/cron/step**;恢复后尽快继续。cron 错过的窗口不补跑。
+- 停机语义(诚实承诺):没有任何 worker runtime host 在线时**只保存状态,不执行任何 timer/cron/step**;恢复后尽快继续。cron 错过的窗口不补跑。
 
 ## 目标架构(分层)
 
@@ -126,7 +129,8 @@ better-trigger-worker(daemon)
 ```
 apps/
   worker/           ← @better-trigger/worker:daemon(loader + executor + runtime +
-                      orchestrator + Hono API),bin `better-trigger-worker`
+                      orchestrator + Hono API),bin `better-trigger-worker`,
+                      subpath `@better-trigger/worker/embedded`
   web/              ← dashboard(Vite + React)
 packages/
   sdk/              ← better-trigger:task() + ctx 类型 + HTTP 客户端。零运行时依赖
@@ -199,7 +203,9 @@ planner fan-out 3 个 researcher → `gather` 汇总 → `requestApproval` 人�
 |---|---|
 | task 模块必须可独立 import(不能闭包 app 状态) | 文档写在承诺表里;loader 报错信息明确;示例全部按此写 |
 | 多一个进程要运维 | 单命令启动、auto-migrate、`--no-serve`/无 `--tasks` 覆盖多节点形态;docker-compose 直接给出 |
-| 「没 daemon 在线就没人调度」被误解 | README/文档使用承诺表原文;dashboard 显示「无在线 worker」警示 |
+| embedded 与业务共享事件循环/内存/连接预算 | embedded 是显式 opt-in;共享 pool 时由宿主定容量,需要故障隔离或独立扩缩容时使用 daemon |
+| embedded 被误解为“无需在线 worker” | 文档明确:它只去掉独立 OS 进程;宿主停止时状态仍 durable,但 task/timer/cron 不执行 |
+| 「没有 runtime host 在线仍会调度」的误解 | README/文档使用承诺表原文;dashboard 显示「无在线 worker」警示 |
 | daemon 与业务共库干扰 | 独立 `better_trigger` schema;建议独立数据库 |
 | step 非幂等 + at-least-once → 副作用重复 | 幂等键由调用方在 trigger `options.idempotencyKey` 提供;文档强调;LLM 步骤给出幂等实践 |
 | 确定性被违反 | fingerprint 硬检测 + eslint-plugin + `ctx.now/random/uuid`;VM sandbox 明确为远期(本地跑可信代码) |
@@ -216,3 +222,4 @@ planner fan-out 3 个 researcher → `gather` 汇总 → `requestApproval` 人�
 5. **多 agent 是产品层** — 建立在 P3 signal/event 内核上;第一批仅 handoff/gather/requestApproval + ctx.llm。
 6. **客户端 / worker daemon 分离** — 2026-07-29 定案,推翻 ADR 1。理由:应用进程不该为了触发一个任务而拿到数据库连接池和一整套执行循环;`pg` 也不该出现在一个「只想 `await hello.trigger()`」的包的依赖树里。代价是多一个进程和「task 模块必须可独立 import」的约束,两者都写进承诺表。
 7. **进程级 registry(`Symbol.for`)承载 ALS** — 让 `better-trigger` 的重复副本不再破坏 `ctx` 检测;代价是一个全局符号,收益是去掉「必须恰好一份副本」这条隐性前提。
+8. **daemon 默认 + embedded 可选 host** — 2026-08-19 定案。不回退 ADR 6 的包边界:`better-trigger` 继续零依赖、只认 HTTP 语义;`@better-trigger/worker/embedded` 显式把 pg/kernel/runtime 带进长驻 Node/Bun 宿主,并用 in-process fetch 复用 Hono 路由。这样“不跑独立 daemon”是部署选择,不是第二套 client/kernel 语义。代价是应用与 task 共享故障域,且所有宿主停止时仍无人执行 durable 状态。

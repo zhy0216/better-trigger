@@ -47,6 +47,11 @@ interface Harness {
  *  up before the slower fault-injection harnesses. */
 const HARNESSES: Harness[] = [
   { name: 'e2e', file: 'e2e.ts', what: 'end-to-end smoke test over the HTTP client' },
+  {
+    name: 'embedded',
+    file: 'embedded.ts',
+    what: 'the same runtime runs in-process without a daemon or TCP listener',
+  },
   { name: 'fencing', file: 'fencing.ts', what: 'fencing tokens reject late writes' },
   { name: 'replay-drift', file: 'replay-drift.ts', what: 'replay drift across code versions' },
   {

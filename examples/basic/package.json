@@ -7,6 +7,8 @@
   "license": "MIT",
   "scripts": {
     "worker": "bunx --bun better-trigger-worker --tasks src/tasks.ts",
+    "embedded": "bun src/embedded.ts",
+    "embedded:acceptance": "bun scripts/embedded.ts",
     "e2e": "bun scripts/e2e.ts",
     "crash": "bun scripts/crash.ts",
     "worker-lost": "bun scripts/worker-lost.ts",

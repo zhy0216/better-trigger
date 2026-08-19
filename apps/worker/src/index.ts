@@ -1,8 +1,9 @@
 /* =============================================================================
    @better-trigger/worker — library surface.
    Exports the app factory, the execution runtime, the task loader, db handles
-   and the REST types, so the daemon can be embedded or driven from tests.
-   The runnable process entry is src/main.ts (bin: better-trigger-worker).
+   and the REST types, so custom hosts and tests can assemble lower-level
+   shapes. The first-class high-level host is `@better-trigger/worker/embedded`;
+   the runnable process entry is src/main.ts (bin: better-trigger-worker).
    ============================================================================= */
 export { createApp, type AppDeps } from './app';
 export { type MetricsSources } from './routes/metrics';

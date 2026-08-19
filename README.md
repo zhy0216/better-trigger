@@ -1,14 +1,18 @@
 # better-trigger
 
-A TypeScript-first, PostgreSQL-backed durable execution runtime. You run one
-small **worker daemon** that owns the database and executes your tasks; your
-application only ever speaks HTTP to it. **No Redis, no ClickHouse** — Postgres
+A TypeScript-first, PostgreSQL-backed durable execution runtime. Run the worker
+as a small standalone **daemon** (the default), or embed the same runtime in an
+existing long-lived Node/Bun application. **No Redis, no ClickHouse** — Postgres
 is the only infrastructure.
 
-- **One daemon owns Postgres** — queue, orchestrator loops (timers / cron /
-  lease reaper) and the replay executor all live in `better-trigger-worker`.
-  Run N daemons against the same database and they coordinate via
-  `FOR UPDATE SKIP LOCKED` — no leader election.
+- **The worker runtime owns Postgres** — queue, orchestrator loops (timers /
+  cron / lease reaper) and the replay executor live in `@better-trigger/worker`.
+  Run it as a daemon or embedded host; N processes against one database
+  coordinate via `FOR UPDATE SKIP LOCKED` — no leader election.
+- **Embedded when one process is the product** —
+  `createEmbeddedRuntime({ tasks })` starts those same loops in your app and
+  connects the normal SDK client through an in-process fetch adapter: no port,
+  no second process, no second execution model.
 - **The SDK is an HTTP client** — `better-trigger` ships `task()` and
   `betterTrigger({ url })`, has zero runtime dependencies and never opens a
   database connection, so it is safe to import into a web server or a CLI.
@@ -20,9 +24,9 @@ is the only infrastructure.
   crash or a long `wait`, the task function re-runs and cached steps return
   instantly. Persistent leases plus a monotonic **fencing token** per claim
   reject late writes from a dead worker, so step history stays exactly-once.
-- **Batteries in the same process** — retries with backoff, idempotency keys,
-  cron, concurrency limits, a live dashboard, `/health` and Prometheus
-  `/metrics`.
+- **Batteries in the runtime** — retries with backoff, idempotency keys, cron
+  and concurrency limits; the daemon host additionally serves the dashboard,
+  `/health` and Prometheus `/metrics` on its HTTP port.
 
 ## Quick start
 
@@ -95,6 +99,42 @@ of the output — always check `result.status` if the run may run long, or pass
 The daemon runs your TypeScript task modules directly under `bun`. Under plain
 `node`, point `--tasks` at compiled JavaScript (or use a loader such as `tsx`).
 
+### Embedded mode (no separate daemon)
+
+For a long-lived Node/Bun application, install the worker package as a runtime
+dependency and start it during application boot:
+
+```ts
+import { createEmbeddedRuntime } from "@better-trigger/worker/embedded";
+import { hello } from "./tasks";
+
+const runtime = await createEmbeddedRuntime({
+  databaseUrl: process.env.DATABASE_URL,
+  tasks: [hello],
+  concurrency: 5,
+});
+
+// createEmbeddedRuntime makes runtime.client the default, so TaskHandle APIs
+// keep the same shape as daemon mode.
+const handle = await hello.trigger({ name: "ada" });
+console.log((await handle.result()).output);
+
+// Wire this into the host framework's graceful-shutdown hook.
+await runtime.stop();
+```
+
+The runtime applies migrations by default, owns its pool when given a
+`databaseUrl`, starts claim/heartbeat/timer/cron/reaper loops, and drains plus
+releases claims on `stop()`. Pass an existing `pool` to share the application's
+pool; injected pools are not closed unless `closePoolOnStop: true` is set.
+
+Embedded mode removes the extra OS process, not the need for an online worker:
+when the application is stopped, durable state remains in Postgres but tasks,
+timers and cron do not execute. It is intended for long-lived Node/Bun hosts,
+not scale-to-zero request functions. Task execution also shares the host's CPU,
+memory and failure domain; use the daemon when isolation or independent scaling
+matters.
+
 ### Dashboard
 
 The daemon serves the built dashboard itself: `docker compose up` and open
@@ -140,8 +180,10 @@ export const onboarding = task({
 await onboarding.trigger({ userId: "u1" }, { idempotencyKey: "u1" });
 ```
 
-Task modules are imported by the daemon, so they must be importable on their
-own — a task's `run` may not close over your application's request state.
+Task modules are imported by the daemon, so daemon-hosted tasks must be
+importable on their own. Embedded tasks are passed as handles and may use
+application-level dependencies, but durable runs still must not capture
+request-scoped or ephemeral state that cannot be reconstructed after restart.
 
 See [`packages/sdk/README.md`](./packages/sdk/README.md) for the full SDK API
 (cron, `triggerAndWait`, `batchTrigger`, `ctx.now/random/uuid`, AbortError).
@@ -270,15 +312,16 @@ bun run test:acceptance   # every acceptance harness — REQUIRES a live Postgre
 
 bun run check:deps     # core stays zero-dep; the SDK depends on core and nothing else
 bun run check:drift    # packages/db schema.ts vs. the generated migrations (offline)
-bun run check:exports  # publint + attw on the published core/sdk artifacts
+bun run check:exports  # publint + attw on the published core/sdk/worker artifacts
 ```
 
 `test:acceptance` runs every harness in `examples/basic/scripts/acceptance.ts`
-(e2e, fencing, replay-drift, code-version-pinning, rolling-deploy, migration,
-concurrency, crash, worker-lost, graceful-restart, retention, stats, run-detail,
-notify, batch-perf, constraints, health-pool). Each provisions its own database
-from `DATABASE_URL`, spawns its own daemons and exits non-zero on a failed
-assertion. Pass names to run a subset: `bun scripts/acceptance.ts fencing crash`.
+(e2e, embedded, fencing, replay-drift, code-version-pinning, rolling-deploy,
+migration, concurrency, crash, worker-lost, graceful-restart, retention, stats,
+run-detail, notify, batch-perf, constraints, health-pool, loop-hang). Each
+provisions its own database and starts the hosts it needs; the embedded scenario
+uses no daemon or TCP port. Pass names to run a subset:
+`bun scripts/acceptance.ts embedded fencing crash`.
 Everything above runs on every PR — see
 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 

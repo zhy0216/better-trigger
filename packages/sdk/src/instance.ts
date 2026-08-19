@@ -175,6 +175,23 @@ export function setResultResolver(resolver: RunResultResolver | null): void {
   registry.resultResolver = resolver;
 }
 
+/** Internal host lifecycle seam: embedded runtimes snapshot and restore the
+ * resolver they replace, instead of leaving a stopped runtime installed in
+ * the process-wide registry. Not exported from the public package surface. */
+export function getResultResolver(): RunResultResolver | null {
+  return registry.resultResolver;
+}
+
+/** Internal host lifecycle seam; see getResultResolver(). */
+export function getDefaultInstance(): BetterTrigger | null {
+  return registry.defaultInstance;
+}
+
+/** Internal host lifecycle seam; see getResultResolver(). */
+export function setDefaultInstance(instance: BetterTrigger | null): void {
+  registry.defaultInstance = instance;
+}
+
 /** The default instance instance-free TaskHandles use outside a run. */
 export function requireDefaultInstance(): BetterTrigger {
   if (!registry.defaultInstance) {

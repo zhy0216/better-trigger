@@ -90,7 +90,8 @@ jobs:
         run: bun run build
 
       # publint + attw on the built tarballs: the dual ESM/CJS maps and the
-      # ./internal subpath are the kind of thing that only breaks after publish.
+      # ./internal + worker/embedded subpaths are the kind of thing that only
+      # breaks after publish.
       - name: Package exports
         run: bun run check:exports
 
@@ -136,6 +137,13 @@ jobs:
             "const bt = require('better-trigger'); if (typeof bt.task !== 'function') process.exit(1)")
           (cd "$install_dir" && node --input-type=module -e \
             "import('better-trigger').then((m) => { if (typeof m.task !== 'function') process.exit(1) })")
+          # Embedded worker subpath, both module systems. Import only: starting
+          # it would require Postgres/task config, while resolution/export shape
+          # is the publishing invariant this clean install owns.
+          (cd "$install_dir" && node -e \
+            "const e = require('@better-trigger/worker/embedded'); if (typeof e.createEmbeddedRuntime !== 'function') process.exit(1)")
+          (cd "$install_dir" && node --input-type=module -e \
+            "import('@better-trigger/worker/embedded').then((m) => { if (typeof m.createEmbeddedRuntime !== 'function') process.exit(1) })")
           # Phase B — registry dependency correctness. Stage A installed the
           # five tarballs together, which cannot prove the worker's internal
           # deps would resolve from a registry. What CAN be proven here: (1)

@@ -24,5 +24,10 @@ export { setExecutorStorage } from './registry';
 export { toExecutorTask, toManifest, normalizeCron } from './task';
 export type { ResolvedTaskDefinition } from './task';
 
-export { setResultResolver } from './instance';
+export {
+  getDefaultInstance,
+  getResultResolver,
+  setDefaultInstance,
+  setResultResolver,
+} from './instance';
 export type { RunResultResolver } from './instance';
