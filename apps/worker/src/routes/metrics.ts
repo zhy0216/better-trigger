@@ -267,15 +267,22 @@ async function gaugesOrNull(
   pool: Pool,
   namespaces: readonly Namespace[],
 ): Promise<DbGauges[] | null> {
-  const query = queryGauges(pool, namespaces).then(
-    (g) => g,
-    () => null,
-  );
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<null>((resolve) => {
     timer = setTimeout(() => resolve(null), QUERY_TIMEOUT_MS);
   });
   try {
+    // Fold a query failure to null (rather than a rejection) so the race's
+    // winner *be* the answer. Same rationale as the deep health probe: the
+    // query itself is cancelled by the probe pool's statement_timeout, so the
+    // loser's rejection is the query's own and is still an observed one.
+    const query = (async () => {
+      try {
+        return await queryGauges(pool, namespaces);
+      } catch {
+        return null;
+      }
+    })();
     return await Promise.race([query, deadline]);
   } finally {
     clearTimeout(timer);

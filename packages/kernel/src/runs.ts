@@ -864,6 +864,10 @@ async function createRunsInBatch(
   const recoveries = maxRecoveries();
   interface ResolvedItem {
     runId: string;
+    /** Copied from the batch item so the later stages never index two arrays. */
+    taskId: string;
+    /** Serialized payload from the batch item (goes into the runs INSERT). */
+    payloadJson: string;
     concurrencyKey: string | null;
     policy: RetryPolicy;
     codeVersion: string | null;
@@ -881,6 +885,8 @@ async function createRunsInBatch(
     const hasLimit = (task?.concurrency_limit ?? 0) > 0;
     return {
       runId: genRunId(),
+      taskId: p.taskId,
+      payloadJson: p.payloadJson,
       concurrencyKey: hasLimit ? p.concurrencyKey ?? p.taskId : p.concurrencyKey ?? null,
       policy: resolveRetryPolicy(task?.retry ?? undefined),
       codeVersion: task?.latest_code_version ?? null,
@@ -908,24 +914,21 @@ async function createRunsInBatch(
      ON CONFLICT (project_id, env, task_id, idempotency_key)
        WHERE idempotency_key IS NOT NULL DO NOTHING
      RETURNING id`,
-    resolved.flatMap((r, i) => {
-      const p = args.items[i]!;
-      return [
-        r.runId,
-        projectId,
-        env,
-        p.taskId,
-        p.payloadJson,
-        args.triggerType,
-        args.parentRunId,
-        p.idempotencyKey,
-        r.concurrencyKey,
-        r.priority,
-        r.policy.maxAttempts,
-        recoveries,
-        r.codeVersion,
-      ];
-    }),
+    resolved.flatMap((r) => [
+      r.runId,
+      projectId,
+      env,
+      r.taskId,
+      r.payloadJson,
+      args.triggerType,
+      args.parentRunId,
+      r.idempotencyKey,
+      r.concurrencyKey,
+      r.priority,
+      r.policy.maxAttempts,
+      recoveries,
+      r.codeVersion,
+    ]),
   );
 
   // 3. Idempotency conflicts: a VALUES row whose id is missing from RETURNING
@@ -933,8 +936,8 @@ async function createRunsInBatch(
   // Re-read exactly those (task_id, idempotency_key) pairs in one statement.
   const insertedIds = new Set(inserted.rows.map((r) => r.id));
   const existingByIdKey = new Map<string, string>();
-  const conflictPairs = resolved.flatMap((r, i) =>
-    insertedIds.has(r.runId) ? [] : [{ taskId: args.items[i]!.taskId, key: r.idempotencyKey! }],
+  const conflictPairs = resolved.flatMap((r) =>
+    insertedIds.has(r.runId) ? [] : [{ taskId: r.taskId, key: r.idempotencyKey! }],
   );
   if (conflictPairs.length > 0) {
     const cb = 1;
@@ -964,8 +967,7 @@ async function createRunsInBatch(
   const runIds: string[] = [];
   const toEnqueue = [];
   let createdAny = false;
-  for (let i = 0; i < resolved.length; i++) {
-    const r = resolved[i]!;
+  for (const r of resolved) {
     if (insertedIds.has(r.runId)) {
       runIds.push(r.runId);
       createdAny = true;
@@ -977,9 +979,7 @@ async function createRunsInBatch(
         namespace: args.namespace,
       });
     } else {
-      const existingId = existingByIdKey.get(
-        `${args.items[i]!.taskId}\u0000${r.idempotencyKey}`,
-      );
+      const existingId = existingByIdKey.get(`${r.taskId}\u0000${r.idempotencyKey}`);
       if (!existingId) {
         // Defensive: a DO NOTHING with no surviving row should not happen.
         throw new Error('failed to create run');

@@ -121,14 +121,12 @@ export interface TriggerOptions {
   projectId?: string;
 }
 
-/** Result of triggerAndWait — never throws for child failure; check `ok`. */
-export interface TaskRunResult<TOutput = unknown> {
-  /** Child run id. */
-  id: string;
-  ok: boolean;
-  output?: TOutput;
-  error?: SerializedError;
-}
+/** Result of triggerAndWait — never throws for child failure; check `ok`.
+ *  Discriminated on `ok` so consumers get `output` narrowed to the task's
+ *  output type and `error` narrowed to the serialized child error. */
+export type TaskRunResult<TOutput = unknown> =
+  | { id: string; ok: true; output: TOutput; error?: never }
+  | { id: string; ok: false; output?: never; error?: SerializedError };
 
 /** Memoized step snapshot shipped to workers on claim for replay. */
 export interface StepSnapshot {

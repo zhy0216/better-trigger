@@ -1,9 +1,12 @@
 /* =============================================================================
    Better Trigger — UI primitives. Theme-aware (--fg, --surface, --border,
    --accent …) so they work in light AND dark. Lucide-style 2px-stroke icons.
+   Interactive states (:hover / :focus) live in theme.css, not imperative
+   style writes on mouse events — see the .bt-* helper classes there.
    ============================================================================= */
 import React from 'react';
 import type { RunStatus } from '../types';
+import { STATUS_META } from './status-meta';
 
 const ICONS: Record<string, React.ReactNode> = {
   // nav
@@ -96,23 +99,31 @@ export const Button = ({
     subtle:  { background: 'var(--fill)', color: 'var(--fg)', borderColor: 'transparent' },
     danger:  { background: 'var(--surface)', color: 'var(--red-text)', borderColor: 'var(--red-border)' },
   };
+  // Hover background lives in theme.css (.bt-btn:hover) keyed off this variable
+  // so the inline background never has to be mutated on mouse events.
+  const hoverBackground: Record<ButtonVariant, string> = {
+    primary: 'var(--accent-hover)',
+    danger:  'var(--red-fill)',
+    outline: 'var(--hover)',
+    ghost:   'var(--hover)',
+    subtle:  'var(--hover)',
+  };
   const v = variants[variant];
   return (
     <button type={type} onClick={onClick} disabled={disabled} title={title}
+      className="bt-btn" data-variant={variant}
       style={{
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-        fontFamily: 'var(--font-sans)', fontWeight: 500, border: '1px solid ' + v.borderColor,
+        fontFamily: 'var(--font-sans)', fontWeight: 500, border: `1px solid ${v.borderColor}`,
         cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.45 : 1,
         transition: 'background var(--dur-fast), border-color var(--dur-fast), opacity var(--dur-fast)',
-        whiteSpace: 'nowrap', ...sizes[size], background: v.background, color: v.color, ...style,
-      }}
-      onMouseEnter={(e) => {
-        if (disabled) return;
-        if (variant === 'primary') e.currentTarget.style.background = 'var(--accent-hover)';
-        else if (variant === 'danger') e.currentTarget.style.background = 'var(--red-fill)';
-        else e.currentTarget.style.background = 'var(--hover)';
-      }}
-      onMouseLeave={(e) => { e.currentTarget.style.background = v.background; }}>
+        whiteSpace: 'nowrap', ...sizes[size],
+        background: 'var(--btn-bg)', color: 'var(--btn-fg)',
+        ['--btn-bg' as string]: v.background,
+        ['--btn-fg' as string]: v.color,
+        ['--btn-hover-bg' as string]: hoverBackground[variant],
+        ...style,
+      }}>
       {icon && <Icon name={icon} size={size === 'sm' ? 13 : 14} />}
       {children}
       {iconRight && <Icon name={iconRight} size={size === 'sm' ? 13 : 14} />}
@@ -131,28 +142,16 @@ export interface IconButtonProps {
 
 export const IconButton = ({ name, active, onClick, size = 16, title, box = 30 }: IconButtonProps) => (
   <button onClick={onClick} title={title}
+    data-active={active}
+    className="bt-icon-btn"
     style={{
       width: box, height: box, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
       borderRadius: 8, border: 'none', cursor: 'pointer', flexShrink: 0,
-      background: active ? 'var(--accent-fill)' : 'transparent',
-      color: active ? 'var(--accent)' : 'var(--fg-muted)',
       transition: 'background var(--dur-fast), color var(--dur-fast)',
-    }}
-    onMouseEnter={(e) => { if (!active) { e.currentTarget.style.background = 'var(--hover)'; e.currentTarget.style.color = 'var(--fg)'; } }}
-    onMouseLeave={(e) => { if (!active) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--fg-muted)'; } }}>
+    }}>
     <Icon name={name} size={size} />
   </button>
 );
-
-export const STATUS_META: Record<string, { color: string; label: string; tone: string }> = {
-  running: { color: 'var(--st-running)', label: 'Running',   tone: 'blue' },
-  queued:  { color: 'var(--st-queued)',  label: 'Queued',    tone: 'gray' },
-  success: { color: 'var(--st-success)', label: 'Completed', tone: 'green' },
-  warning: { color: 'var(--st-warning)', label: 'Warning',   tone: 'orange' },
-  failed:  { color: 'var(--st-failed)',  label: 'Failed',    tone: 'red' },
-  frozen:  { color: 'var(--st-frozen)',  label: 'Frozen',    tone: 'blue' },
-  canceled:{ color: 'var(--st-canceled)', label: 'Canceled', tone: 'gray' },
-};
 
 export const StatusDot = ({ status, size = 8, live }: { status: string; size?: number; live?: boolean }) => {
   const m = STATUS_META[status] || STATUS_META.queued;
@@ -175,9 +174,9 @@ export const StatusBadge = ({ status, size = 'md' }: { status: string; size?: 's
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 6, padding: pad, borderRadius: 9999,
       fontSize: fs, fontWeight: 500, lineHeight: 1, whiteSpace: 'nowrap',
-      background: 'color-mix(in srgb, ' + m.color + ' 13%, transparent)',
+      background: `color-mix(in srgb, ${m.color} 13%, transparent)`,
       color: m.color,
-      border: '1px solid color-mix(in srgb, ' + m.color + ' 26%, transparent)',
+      border: `1px solid color-mix(in srgb, ${m.color} 26%, transparent)`,
     }}>
       <StatusDot status={status} size={6} />
       {m.label}
@@ -187,7 +186,7 @@ export const StatusBadge = ({ status, size = 'md' }: { status: string; size?: 's
 
 type BadgeTone = 'gray' | 'blue' | 'green' | 'orange' | 'red';
 
-export const Badge = ({ tone = 'gray', children, style }: { tone?: string; children?: React.ReactNode; style?: React.CSSProperties }) => {
+export const Badge = ({ tone = 'gray', children, style }: { tone?: BadgeTone; children?: React.ReactNode; style?: React.CSSProperties }) => {
   const map: Record<BadgeTone, { c: string }> = {
     gray:   { c: 'var(--fg-muted)' },
     blue:   { c: 'var(--accent)' },
@@ -195,13 +194,13 @@ export const Badge = ({ tone = 'gray', children, style }: { tone?: string; child
     orange: { c: 'var(--orange-primary)' },
     red:    { c: 'var(--red-primary)' },
   };
-  const c = (map[tone as BadgeTone] || map.gray).c;
+  const c = (map[tone] || map.gray).c;
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 500,
       padding: '2px 8px', borderRadius: 9999, lineHeight: 1.4, whiteSpace: 'nowrap',
-      background: 'color-mix(in srgb, ' + c + ' 11%, transparent)', color: c,
-      border: '1px solid color-mix(in srgb, ' + c + ' 22%, transparent)', ...style,
+      background: `color-mix(in srgb, ${c} 11%, transparent)`, color: c,
+      border: `1px solid color-mix(in srgb, ${c} 22%, transparent)`, ...style,
     }}>{children}</span>
   );
 };
@@ -241,15 +240,14 @@ export const Input = ({ value, onChange, placeholder, icon, style, mono, type = 
   <div style={{ position: 'relative', display: 'flex', alignItems: 'center', width: '100%', ...style }}>
     {icon && <Icon name={icon} size={14} style={{ position: 'absolute', left: 10, color: 'var(--fg-subtle)', pointerEvents: 'none' }} />}
     <input type={type} value={value ?? ''} onChange={(e) => onChange?.(e.target.value)} placeholder={placeholder}
+      className="bt-input"
       style={{
         fontFamily: mono ? 'var(--font-mono)' : 'var(--font-sans)', fontSize: 13, height: 32,
-        border: '1px solid var(--border-strong)', borderRadius: 8,
         padding: icon ? '0 10px 0 30px' : '0 10px', width: '100%', boxSizing: 'border-box',
-        background: 'var(--surface)', color: 'var(--fg)', outline: 'none',
+        background: 'var(--surface)', color: 'var(--fg)',
         transition: 'box-shadow var(--dur-fast), border-color var(--dur-fast)',
       }}
-      onFocus={(e) => { e.target.style.borderColor = 'var(--accent)'; e.target.style.boxShadow = '0 0 0 3px var(--accent-ring)'; if (selectOnFocus) e.target.select(); }}
-      onBlur={(e) => { e.target.style.borderColor = 'var(--border-strong)'; e.target.style.boxShadow = 'none'; }} />
+      onFocus={(e) => { if (selectOnFocus) e.target.select(); }} />
   </div>
 );
 

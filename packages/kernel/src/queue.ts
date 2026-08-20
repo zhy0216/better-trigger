@@ -325,15 +325,16 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
   if (args.taskIds.length === 0 || args.limit <= 0) return [];
   assertNamespaces(args.namespaces);
 
+  const codeVersions = args.codeVersions ?? [];
   const pinned = args.codeVersions !== undefined;
-  if (pinned && args.codeVersions!.length !== args.taskIds.length) {
+  if (pinned && codeVersions.length !== args.taskIds.length) {
     // Positional arrays: a length mismatch would silently pin some task to
     // another's version and quietly stop claiming its runs. Refuse instead —
     // the caller built both arrays from one list and cannot be off by one on
     // purpose.
     throw new KernelError(
       'bad_request',
-      `codeVersions must be parallel to taskIds (${args.codeVersions!.length} vs ${args.taskIds.length})`,
+      `codeVersions must be parallel to taskIds (${codeVersions.length} vs ${args.taskIds.length})`,
     );
   }
 
@@ -385,7 +386,7 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
       if (remaining <= 0) break;
 
       const params: unknown[] = pinned
-        ? [args.taskIds, claimWindow(remaining), args.codeVersions]
+        ? [args.taskIds, claimWindow(remaining), codeVersions]
         : [args.taskIds, claimWindow(remaining)];
       const qPredicate = nsPredicateFor('q', ns, params);
       const rStart = params.length - 1;

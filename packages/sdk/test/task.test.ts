@@ -6,7 +6,7 @@
    stores) and the executor task (what runs). Everything here is pure — no
    executor in the AsyncLocalStorage, so trigger paths are not exercised.
    ============================================================================= */
-import type { TriggerItem, WaitResult } from '@better-trigger/core';
+import type { TaskRunResult, TriggerItem, TriggerOptions, WaitResult } from '@better-trigger/core';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { executorStorage, type RunExecutor } from '../src/context';
 import type { RunCtx } from '../src/context';
@@ -279,7 +279,13 @@ describe('durable in-run trigger — namespace warning (p1-15)', () => {
     const executor: RunExecutor = {
       namespace: { projectId: 'default', env: 'prod' },
       durableBatchTrigger,
-      triggerAndWait: vi.fn(async () => ({ id: 'run_child', ok: true })),
+      triggerAndWait: vi.fn(
+        async (_taskId: string, _payload: unknown, _label: string, _options?: TriggerOptions): Promise<TaskRunResult<never>> => ({
+          id: 'run_child',
+          ok: true,
+          output: undefined as never,
+        }),
+      ),
     };
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     let warned: unknown[] = [];
@@ -305,10 +311,13 @@ describe('durable in-run trigger — namespace warning (p1-15)', () => {
   });
 
   it('triggerAndWait also strips env/projectId and warns', async () => {
-    const triggerAndWait = vi.fn(async (_taskId: string, _p: unknown, _label: string, _o?: unknown) => ({
-      id: 'run_child',
-      ok: true,
-    }));
+    const triggerAndWait = vi.fn(
+      async (_taskId: string, _p: unknown, _label: string, _o?: unknown): Promise<TaskRunResult<never>> => ({
+        id: 'run_child',
+        ok: true,
+        output: undefined as never,
+      }),
+    );
     const executor: RunExecutor = {
       namespace: { projectId: 'default', env: 'prod' },
       durableBatchTrigger: vi.fn(async () => ['run_child']),

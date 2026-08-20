@@ -20,6 +20,12 @@ import type { WorkerSummary } from './client';
 
 const POLL_MS = 2000;
 
+/** Stable poll key from primitive parts (env/task/filter values). The caller
+ *  owns the key: usePoll only ever treats it as an opaque identity, so it
+ *  never has to serialize/deserialize a dependency list. */
+const pollKey = (...parts: Array<string | number | null | undefined>): string =>
+  parts.map((p) => p ?? '').join('\u0000');
+
 /* ---- module-level connection state ---------------------------------------- */
 // Aggregated across every mounted poll. Each usePoll registers a per-instance
 // entry recording {ts, outcome}; the derived state is recomputed from the whole
@@ -157,13 +163,16 @@ interface PollResult<T> {
 
 /**
  * Poll `fetcher` every 2s. Failures set `error` but never stop the loop —
- * the next successful poll clears the error. `deps` re-arms the effect
- * (filters / id changes). `fetcher` receives an AbortSignal so in-flight
- * requests are canceled on unmount / dep change.
+ * the next successful poll clears the error. `queryKey` is a stable string
+ * identity for the current query (built by the caller from its own primitive
+ * inputs); a change re-arms the effect and drops the held frame. `fetcher`
+ * receives an AbortSignal so in-flight requests are canceled on unmount /
+ * key change. The fetcher is read through a ref, so it may close over the
+ * latest render without being an effect dependency.
  */
 function usePoll<T>(
+  queryKey: string,
   fetcher: (signal: AbortSignal) => Promise<T>,
-  deps: React.DependencyList,
   enabled: boolean = true,
 ): PollResult<T> {
   const [data, setData] = React.useState<T | null>(null);
@@ -173,14 +182,13 @@ function usePoll<T>(
   const fetcherRef = React.useRef(fetcher);
   fetcherRef.current = fetcher;
 
-  // deps change (other run / other filters) → the held frame is for the wrong
-  // query; drop it during render so stale data never flashes (React's
+  // queryKey change (other run / other filters) → the held frame is for the
+  // wrong query; drop it during render so stale data never flashes (React's
   // derive-state-from-props pattern). `enabled` toggles deliberately excluded:
   // pausing must hold the current frame.
-  const depsKey = JSON.stringify(deps);
-  const lastKey = React.useRef(depsKey);
-  if (lastKey.current !== depsKey) {
-    lastKey.current = depsKey;
+  const lastKey = React.useRef(queryKey);
+  if (lastKey.current !== queryKey) {
+    lastKey.current = queryKey;
     setData(null);
     setLoading(true);
     setError(null);
@@ -209,7 +217,7 @@ function usePoll<T>(
         reportOutcome(id, 'ok');
       } catch (e) {
         if (!mounted) return;
-        // Only the effect cleanup aborts (unmount / deps change / enabled
+        // Only the effect cleanup aborts (unmount / key change / enabled
         // flip); when that fires mid-flight `mounted` is already false, so a
         // silent return here is safe — the mounted guard swallowed it.
         if (e instanceof Error && e.name === 'AbortError') return;
@@ -229,8 +237,7 @@ function usePoll<T>(
       clearTimeout(timer);
       unregisterConnection(id);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, enabled, apiKeyVersion]);
+  }, [queryKey, enabled, apiKeyVersion]);
 
   return { data, loading, error };
 }
@@ -239,8 +246,8 @@ function usePoll<T>(
 
 export function useTasks(): PollResult<Task[]> {
   return usePoll<Task[]>(
+    'tasks',
     async (signal) => adaptTasks((await api.tasks(signal)).tasks),
-    [],
   );
 }
 
@@ -269,13 +276,16 @@ export function useRuns(
   const status = filters.status;
   const taskId = filters.taskId;
   const pageLimit = filters.limit ?? 50;
+  // Stable identity for the whole runs query — used both by the poll and by
+  // the tail-invalidation effect so they can never drift apart.
+  const queryKey = pollKey('runs', env, status, taskId, pageLimit);
 
   const base = usePoll<{ runs: Run[]; nextCursor: string | null }>(
+    queryKey,
     async (signal) => {
       const res = await api.runs({ env, status, taskId, limit: pageLimit }, signal);
       return { runs: adaptRuns(res.runs), nextCursor: res.nextCursor };
     },
-    [env, status, taskId, pageLimit],
     enabled,
   );
 
@@ -299,12 +309,11 @@ export function useRuns(
 
   // A filter/env change invalidates appended pages — they were loaded for the
   // previous query.
-  const depsKey = JSON.stringify([env, status, taskId, pageLimit]);
   React.useEffect(() => {
     setTail([]);
     setTailCursor(undefined);
     setLoadingMore(false);
-  }, [depsKey]);
+  }, [queryKey]);
 
   const loadMore = React.useCallback(async (): Promise<boolean> => {
     if (loadingMore || !enabled) return false;
@@ -358,8 +367,8 @@ export interface RunDetailResult extends PollResult<AdaptedRunDetail> {
  */
 export function useRun(runId: string | null): RunDetailResult {
   const base = usePoll<RunDetailResponse>(
+    pollKey('run', runId),
     async (signal) => api.run(runId!, undefined, signal),
-    [runId],
     runId !== null,
   );
 
@@ -424,15 +433,15 @@ export function useRun(runId: string | null): RunDetailResult {
 
 export function useSchedules(): PollResult<Schedule[]> {
   return usePoll<Schedule[]>(
+    'schedules',
     async (signal) => adaptSchedules((await api.schedules(signal)).schedules),
-    [],
   );
 }
 
 export function useWorkers(): PollResult<WorkerSummary[]> {
   return usePoll<WorkerSummary[]>(
+    'workers',
     async (signal) => (await api.workers(signal)).workers,
-    [],
   );
 }
 

@@ -169,3 +169,28 @@ body {
   border-radius: 9999px; background: var(--st-running);
   animation: bt-ping 1.6s var(--ease-standard) infinite;
 }
+
+/* ---- interactive-state helpers -----------------------------------------
+   :hover / :focus in CSS instead of imperative style writes on mouse events
+   (avoids mutating currentTarget.style and re-implementing hover in JS).
+   Active/selected states are keyed off data-* attributes so the same class
+   covers both the base and the selected look. */
+.bt-nav-item { background: transparent; color: var(--fg-muted); font-weight: 500; }
+.bt-nav-item:hover { background: var(--hover); color: var(--fg); }
+.bt-nav-item[data-active="true"] { background: var(--accent-fill); color: var(--accent); font-weight: 600; }
+.bt-nav-item[data-active="true"]:hover { background: var(--accent-fill); color: var(--accent); }
+
+.bt-menu-item { background: transparent; }
+.bt-menu-item:hover { background: var(--hover); }
+.bt-menu-item[data-selected="true"] { background: var(--hover); }
+
+.bt-btn { background: var(--btn-bg, var(--surface)); color: var(--btn-fg, var(--fg)); }
+.bt-btn:hover:not(:disabled) { background: var(--btn-hover-bg, var(--hover)); }
+
+.bt-icon-btn { background: transparent; color: var(--fg-muted); }
+.bt-icon-btn:hover { background: var(--hover); color: var(--fg); }
+.bt-icon-btn[data-active="true"] { background: var(--accent-fill); color: var(--accent); }
+.bt-icon-btn[data-active="true"]:hover { background: var(--accent-fill); color: var(--accent); }
+
+.bt-input { border: 1px solid var(--border-strong); border-radius: 8px; outline: none; }
+.bt-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }

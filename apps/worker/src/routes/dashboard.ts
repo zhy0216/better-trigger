@@ -105,22 +105,27 @@ async function probeDb(pool: Pool): Promise<NonNullable<HealthResponse['db']>> {
       c.release();
     }
   };
-  const query = pool.connect().then(
-    (c) => {
-      client = c;
-      return c.query('SELECT 1').then(
-        () => {
-          releaseOnce(c);
-          return 'ok' as const;
-        },
-        () => {
-          releaseOnce(c);
-          return 'query_failed' as const;
-        },
-      );
-    },
-    () => 'query_failed' as const,
-  );
+  // The query starts immediately (the async IIFE runs until its first await
+  // before the race is set up), so the deadline still races a connect/query
+  // that hangs. Every outcome resolves — connect failure, query failure and
+  // the timeout all fold to a non-throwing value.
+  const query = (async (): Promise<'ok' | 'query_failed'> => {
+    let c: PoolClient;
+    try {
+      c = await pool.connect();
+    } catch {
+      return 'query_failed';
+    }
+    client = c;
+    try {
+      await c.query('SELECT 1');
+      releaseOnce(c);
+      return 'ok';
+    } catch {
+      releaseOnce(c);
+      return 'query_failed';
+    }
+  })();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<'timeout'>((resolve) => {
     timer = setTimeout(() => resolve('timeout'), DEEP_PROBE_TIMEOUT_MS);

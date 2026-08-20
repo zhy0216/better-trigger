@@ -3,54 +3,42 @@
    ============================================================================= */
 import React from 'react';
 import { Icon, IconButton } from './primitives';
+import { NAV, type NavEntry } from './navigation';
 import type { Route } from '../types';
 
 export const Logo = ({ size = 26 }: { size?: number }) => (
-  <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-    <div style={{
-      width: size, height: size, borderRadius: 7, background: 'var(--accent)',
-      display: 'grid', placeItems: 'center', flexShrink: 0,
-      boxShadow: '0 1px 2px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.25)',
-    }}>
-      <svg viewBox="0 0 24 24" width={size * 0.6} height={size * 0.6} fill="none">
-        <path d="M13 2 5 13h6l-1 9 9-12h-6z" fill="#fff" stroke="#fff" strokeWidth="1.4" strokeLinejoin="round" />
-      </svg>
-    </div>
+  <div style={{
+    width: size, height: size, borderRadius: 7, background: 'var(--accent)',
+    display: 'grid', placeItems: 'center', flexShrink: 0,
+    boxShadow: '0 1px 2px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.25)',
+  }}>
+    <svg viewBox="0 0 24 24" width={size * 0.6} height={size * 0.6} fill="none">
+      <path d="M13 2 5 13h6l-1 9 9-12h-6z" fill="#fff" stroke="#fff" strokeWidth="1.4" strokeLinejoin="round" />
+    </svg>
   </div>
 );
 
-interface NavEntry {
-  id: string;
-  label: string;
-  icon: string;
-}
-
-export const NAV: NavEntry[] = [
-  { id: 'runs',        label: 'Runs',        icon: 'activity' },
-  { id: 'tasks',       label: 'Tasks',       icon: 'task' },
-  { id: 'schedules',   label: 'Schedules',   icon: 'clock' },
-  { id: 'alerts',      label: 'Alerts',      icon: 'bell' },
-  { id: 'deployments', label: 'Deployments', icon: 'rocket' },
+const ENVS = [
+  { id: 'prod', label: 'Production', dot: 'var(--green-primary)' },
+  { id: 'staging', label: 'Staging', dot: 'var(--orange-primary)' },
+  { id: 'dev', label: 'Development', dot: 'var(--accent)' },
 ];
 
-export function Sidebar({ route, setRoute, collapsed }: { route: string; setRoute: (r: string) => void; collapsed: boolean }) {
+export function Sidebar({ route, setRoute, collapsed }: { route: Route; setRoute: (r: Route) => void; collapsed: boolean }) {
   const w = collapsed ? 60 : 224;
   const navItem = (item: NavEntry) => {
     const on = route === item.id;
     return (
       <button key={item.id} onClick={() => setRoute(item.id)}
         title={collapsed ? item.label : undefined}
+        data-active={on}
+        className="bt-nav-item"
         style={{
           display: 'flex', alignItems: 'center', gap: 10, width: '100%',
           height: 36, padding: collapsed ? 0 : '0 10px', justifyContent: collapsed ? 'center' : 'flex-start',
           borderRadius: 8, border: 'none', cursor: 'pointer', position: 'relative',
-          background: on ? 'var(--accent-fill)' : 'transparent',
-          color: on ? 'var(--accent)' : 'var(--fg-muted)',
-          fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: on ? 600 : 500,
-          transition: 'background var(--dur-fast), color var(--dur-fast)',
-        }}
-        onMouseEnter={(e) => { if (!on) { e.currentTarget.style.background = 'var(--hover)'; e.currentTarget.style.color = 'var(--fg)'; } }}
-        onMouseLeave={(e) => { if (!on) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--fg-muted)'; } }}>
+          fontFamily: 'var(--font-sans)', fontSize: 13,
+        }}>
         <Icon name={item.icon} size={17} strokeWidth={on ? 2.2 : 2} />
         {!collapsed && <span style={{ flex: 1, textAlign: 'left' }}>{item.label}</span>}
       </button>
@@ -85,12 +73,7 @@ export function Sidebar({ route, setRoute, collapsed }: { route: string; setRout
 
 export function EnvSwitcher({ env, setEnv }: { env: string; setEnv: (e: string) => void }) {
   const [open, setOpen] = React.useState(false);
-  const envs = [
-    { id: 'prod', label: 'Production', dot: 'var(--green-primary)' },
-    { id: 'staging', label: 'Staging', dot: 'var(--orange-primary)' },
-    { id: 'dev', label: 'Development', dot: 'var(--accent)' },
-  ];
-  const cur = envs.find((e) => e.id === env) || envs[0];
+  const cur = ENVS.find((e) => e.id === env) || ENVS[0];
   return (
     <div style={{ position: 'relative' }}>
       <button onClick={() => setOpen((o) => !o)}
@@ -111,15 +94,15 @@ export function EnvSwitcher({ env, setEnv }: { env: string; setEnv: (e: string) 
             border: '1px solid var(--border)', borderRadius: 10, boxShadow: 'var(--shadow-pop)', padding: 5, zIndex: 50,
             animation: 'bt-fade-up 140ms var(--ease-standard)',
           }}>
-            {envs.map((e) => (
+            {ENVS.map((e) => (
               <button key={e.id} onClick={() => { setEnv(e.id); setOpen(false); }}
+                data-selected={env === e.id}
+                className="bt-menu-item"
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8, width: '100%', height: 32, padding: '0 9px', borderRadius: 7,
-                  border: 'none', background: env === e.id ? 'var(--hover)' : 'transparent', color: 'var(--fg)', cursor: 'pointer',
+                  border: 'none', color: 'var(--fg)', cursor: 'pointer',
                   fontFamily: 'var(--font-sans)', fontSize: 13, textAlign: 'left',
-                }}
-                onMouseEnter={(ev) => (ev.currentTarget.style.background = 'var(--hover)')}
-                onMouseLeave={(ev) => (ev.currentTarget.style.background = env === e.id ? 'var(--hover)' : 'transparent')}>
+                }}>
                 <span style={{ width: 7, height: 7, borderRadius: 9999, background: e.dot }} />
                 <span style={{ flex: 1 }}>{e.label}</span>
                 {env === e.id && <Icon name="check" size={14} style={{ color: 'var(--accent)' }} />}

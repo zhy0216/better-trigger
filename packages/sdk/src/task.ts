@@ -178,14 +178,36 @@ export function task(
   idOrConfig: string | object,
   maybeFn?: (payload: any, ctx: RunCtx) => unknown,
 ): TaskHandle<any, any> {
-  const def = normalizeDefinition(idOrConfig as string | Record<string, unknown>, maybeFn);
+  const def = normalizeDefinition(
+    typeof idOrConfig === 'string' ? idOrConfig : (idOrConfig as TaskConfigInput),
+    maybeFn,
+  );
   return makeHandle(def);
 }
 
 /* ---- definition normalization ------------------------------------------- */
 
+/**
+ * Loose shape the runtime boundary actually receives from `task(config)`.
+ * The public signature accepts `string | object`, so this is the ONE cast that
+ * erases the caller's generics; everything after it is typed and validated
+ * against fields rather than per-field `as` assertions.
+ */
+interface TaskConfigInput {
+  id: string;
+  name?: string;
+  description?: string;
+  filePath?: string;
+  cron?: CronInput;
+  retry?: RetryPolicy;
+  replay?: ReplayMode;
+  schema?: AnySchema<any>;
+  concurrency?: ConcurrencyConfig<any>;
+  run: (payload: any, ctx: RunCtx) => unknown;
+}
+
 function normalizeDefinition(
-  idOrConfig: string | Record<string, unknown>,
+  idOrConfig: string | TaskConfigInput,
   maybeFn?: (payload: any, ctx: RunCtx) => unknown,
 ): ResolvedTaskDefinition<any, any> {
   if (typeof idOrConfig === 'string') {
@@ -195,7 +217,7 @@ function normalizeDefinition(
     return { id: idOrConfig, run: maybeFn };
   }
 
-  const config = idOrConfig as Record<string, unknown>;
+  const config = idOrConfig;
   const id = config.id;
   if (typeof id !== 'string' || id.length === 0) {
     throw new Error('task(config): "id" is required and must be a non-empty string');
@@ -218,15 +240,15 @@ function normalizeDefinition(
 
   return {
     id,
-    name: config.name as string | undefined,
-    description: config.description as string | undefined,
-    filePath: config.filePath as string | undefined,
-    cron: normalizeCron(config.cron as CronInput | undefined),
-    retry: config.retry as RetryPolicy | undefined,
-    replay: config.replay as ReplayMode | undefined,
-    concurrency: config.concurrency as ConcurrencyConfig<any> | undefined,
-    schema: config.schema as AnySchema<any> | undefined,
-    run: config.run as (payload: any, ctx: RunCtx) => unknown,
+    name: config.name,
+    description: config.description,
+    filePath: config.filePath,
+    cron: normalizeCron(config.cron),
+    retry: config.retry,
+    replay: config.replay,
+    concurrency: config.concurrency,
+    schema: config.schema,
+    run: config.run,
   };
 }
 
@@ -337,13 +359,14 @@ function makeHandle<TPayload, TOutput>(
 export function toExecutorTask(
   def: ResolvedTaskDefinition<any, any>,
 ): ExecutorTask {
+  const { schema } = def;
   return {
     id: def.id,
     retry: def.retry,
     replay: def.replay,
     run: def.run,
-    validate: def.schema
-      ? (payload: unknown) => validateSchema(def.schema!, payload)
+    validate: schema
+      ? (payload: unknown) => validateSchema(schema, payload)
       : undefined,
   };
 }
@@ -370,5 +393,5 @@ export function unwrapResult<TOutput>(result: TaskRunResult<TOutput>): TOutput {
     if (result.error?.stack) err.stack = result.error.stack;
     throw err;
   }
-  return result.output as TOutput;
+  return result.output;
 }

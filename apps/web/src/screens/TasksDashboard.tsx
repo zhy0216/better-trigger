@@ -5,8 +5,9 @@ import React from 'react';
 import { Icon, Sparkline } from '../components/primitives';
 import { Page, Card, Metric, ErrorState, LoadingState } from '../components/Layout';
 import { useTasks, useSchedules, useWorkers } from '../api/hooks';
+import type { Route } from '../types';
 
-export function TasksDashboard({ setRoute }: { onOpenRun?: (runId?: string) => void; setRoute: (r: string) => void }) {
+export function TasksDashboard({ setRoute }: { onOpenRun?: (runId?: string) => void; setRoute: (r: Route) => void }) {
   const { data: tasks, error } = useTasks();
   const { data: schedules } = useSchedules();
   const { data: workers } = useWorkers();

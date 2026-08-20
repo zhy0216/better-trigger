@@ -6,6 +6,7 @@
 import React from 'react';
 import { Icon, Button, Badge, IconButton } from '../components/primitives';
 import { Page } from '../components/Layout';
+import type { Route } from '../types';
 
 type Token = [string] | [string, string];
 
@@ -62,7 +63,7 @@ function CodeBlock({ tokens, title }: { tokens: Token[]; title: string }) {
   );
 }
 
-export function Onboarding({ setRoute }: { setRoute: (r: string) => void }) {
+export function Onboarding({ setRoute }: { setRoute: (r: Route) => void }) {
   const [step, setStep] = React.useState(1);
   const steps = [
     { n: 1, title: 'Install the SDK', body: 'Add the package to the application that triggers tasks.' },

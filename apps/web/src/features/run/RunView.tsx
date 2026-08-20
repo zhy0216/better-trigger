@@ -4,7 +4,8 @@
    rendered from live run detail. vizStyle: "waterfall" | "tree".
    ============================================================================= */
 import React from 'react';
-import { Icon, Badge, Button, StatusBadge, StatusDot, STATUS_META } from '../../components/primitives';
+import { Icon, Badge, Button, StatusBadge, StatusDot } from '../../components/primitives';
+import { STATUS_META } from '../../components/status-meta';
 import { ErrorState, LoadingState } from '../../components/Layout';
 import { useRun, api } from '../../api/hooks';
 import { relativeFuture, type AdaptedRunDetail } from '../../api/adapter';

@@ -108,9 +108,9 @@ export default function App() {
     el.style.setProperty('--accent', t.accent);
   }, [t.theme, t.density, t.accent]);
 
-  const goTo = (r: string) => navigate(r as Route);
+  const goTo = (r: Route) => navigate(r);
   const activeNav = route === 'run' ? 'runs' : route;
-  const titles: Record<string, string> = {
+  const titles: Record<Route, string> = {
     run: 'Run', runs: 'Runs', tasks: 'Tasks', schedules: 'Schedules',
     alerts: 'Alerts', deployments: 'Deployments', onboarding: 'Get started',
   };
@@ -126,7 +126,7 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }} data-screen-label={titles[route]}>
-      <Sidebar route={activeNav} setRoute={(r) => navigate(r as Route)} collapsed={collapsed} />
+      <Sidebar route={activeNav} setRoute={navigate} collapsed={collapsed} />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <TopBar title={titles[route]} env={env} setEnv={setEnv}
           onToggleSidebar={() => setCollapsed((c) => !c)}
