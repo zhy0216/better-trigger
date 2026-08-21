@@ -7,9 +7,12 @@
   "scripts": {
     "dev": "vitepress dev .",
     "build": "vitepress build .",
-    "preview": "vitepress preview ."
+    "preview": "vitepress preview .",
+    "check:mermaid": "node validate-mermaid.mjs"
   },
   "devDependencies": {
+    "dompurify": "^3.4.14",
+    "jsdom": "^25.0.1",
     "mermaid": "^11.17.0",
     "vitepress": "^1.6.4",
     "vitepress-plugin-mermaid": "^2.0.17"
