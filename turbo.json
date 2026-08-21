@@ -15,6 +15,11 @@
       "dependsOn": ["^build", "@better-trigger/web#build"],
       "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
     },
+    // The VitePress site outputs under .vitepress/dist, not dist/ — declare it
+    // so turbo can cache the docs build like any other.
+    "@better-trigger/docs#build": {
+      "outputs": [".vitepress/dist/**"]
+    },
     "dev": {
       "cache": false,
       "persistent": true

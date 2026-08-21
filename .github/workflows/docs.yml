@@ -1,0 +1,62 @@
+# =============================================================================
+# Deploy the VitePress docs site (apps/docs) to GitHub Pages.
+#
+# Pages is configured in the repo settings with build_type "workflow", so this
+# workflow builds the static site and hands it to actions/deploy-pages. The
+# site lives at https://zhy0216.github.io/better-trigger/ (base: /better-trigger/).
+# =============================================================================
+name: Deploy docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/docs/**"
+      - "bun.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Validate mermaid diagrams
+        working-directory: apps/docs
+        run: bun run check:mermaid
+
+      - name: Build
+        working-directory: apps/docs
+        run: bun run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/docs/.vitepress/dist
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
