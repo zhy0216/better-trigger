@@ -6,7 +6,7 @@ hero:
   text: Durable execution for TypeScript, on Postgres
   tagline: Replay-based background tasks, cron, retries and fan-out — with one Postgres database. No Redis, no ClickHouse, no second runtime.
   image:
-    src: /better-trigger/logo.svg
+    src: /logo.svg
     alt: better-trigger
   actions:
     - theme: brand

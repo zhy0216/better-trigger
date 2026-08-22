@@ -30,6 +30,10 @@ const sharedHead = [
     },
   ],
   ["meta", { property: "og:type", content: "website" }],
+  [
+    "link",
+    { rel: "icon", href: "/better-trigger/logo.svg", type: "image/svg+xml" },
+  ],
 ];
 
 export default defineConfig(
@@ -49,7 +53,7 @@ export default defineConfig(
       build: { chunkSizeWarningLimit: 2500 },
     },
     themeConfig: {
-      logo: "/logo.svg",
+      logo: { src: "/logo.svg", alt: "better-trigger" },
       search: { provider: "local" },
       socialLinks: [
         { icon: "github", link: "https://github.com/zhy0216/better-trigger" },

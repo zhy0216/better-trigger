@@ -6,7 +6,7 @@ hero:
   text: 基于 Postgres 的 TypeScript 持久化执行
   tagline: 重放式的后台任务、cron、重试与扇出 —— 只需要一个 Postgres 数据库。没有 Redis、没有 ClickHouse、没有第二套运行时。
   image:
-    src: /better-trigger/logo.svg
+    src: /logo.svg
     alt: better-trigger
   actions:
     - theme: brand
