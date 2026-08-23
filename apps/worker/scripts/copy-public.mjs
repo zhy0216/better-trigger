@@ -2,7 +2,7 @@
 /* =============================================================================
    @better-trigger/worker — embed the built dashboard into dist/public (O3).
 
-   Runs AFTER tsup (tsup's `clean: true` wipes dist/, so the copy must be the
+   Runs AFTER tsdown (tsdown's `clean: true` wipes dist/, so the copy must be the
    last step of the build). Builds apps/web first, then copies its dist into
    apps/worker/dist/public — the directory the daemon serves on / and the SPA
    fallback. dist/public travels with the published package ("files": ["dist"])

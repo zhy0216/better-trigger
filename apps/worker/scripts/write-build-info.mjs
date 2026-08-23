@@ -7,7 +7,7 @@
    published tarball) and the git commit it is being built from, then writes
    src/generated/build-info.ts — the module /health, /metrics, the boot log
    and workers.code_version all read. Runs at the START of `bun run build`
-   (before tsup), so dist/ always carries the values the build was made from.
+   (before tsdown), so dist/ always carries the values the build was made from.
 
    The commit identity resolves in this order:
      1. BT_GIT_SHA / GIT_SHA env — the trusted build environment (CI injects

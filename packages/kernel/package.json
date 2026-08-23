@@ -22,22 +22,22 @@
   },
   "homepage": "https://github.com/zhy0216/better-trigger#readme",
   "scripts": {
-    "build": "tsup",
+    "build": "tsdown",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint .",
+    "lint": "eslint --no-error-on-unmatched-pattern '**/*.{js,jsx,mjs,cjs}'",
     "test": "vitest run"
   },
   "dependencies": {
     "@better-trigger/core": "workspace:*",
-    "croner": "^9.0.0",
-    "pg": "^8.13.1"
+    "croner": "^10.0.1",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@better-trigger/testing": "workspace:*",
-    "@types/node": "^22.7.4",
-    "@types/pg": "^8.11.10",
-    "tsup": "^8.3.0",
-    "typescript": "^5.6.2",
-    "vitest": "^2.1.8"
+    "@types/node": "^26.2.0",
+    "@types/pg": "^8.23.1",
+    "tsdown": "^0.22.14",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
   }
 }

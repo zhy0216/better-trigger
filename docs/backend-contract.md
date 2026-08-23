@@ -28,7 +28,7 @@
 | `examples/basic` | `@better-trigger/example-basic` | 示例任务 + worker 入口 + e2e 冒烟脚本 |
 | `apps/web` | `@better-trigger/web` | Dashboard(本期接真 API,mock 作 fallback)|
 
-- 全部 TypeScript ESM(`"type": "module"`),构建用 **tsup**(esm+cjs+dts),`"build": "tsup"`,产物 `dist/`。
+- 全部 TypeScript ESM(`"type": "module"`),构建用 **tsdown**(esm+cjs+dts),`"build": "tsdown"`,产物 `dist/`。
 - workspace 内部依赖用 `"workspace:*"`。包管理器 bun。
 - 根 `package.json` 的 `workspaces` 需追加 `"examples/*"`。
 - **不要运行 `bun install`**(集成阶段统一装);只写 package.json。

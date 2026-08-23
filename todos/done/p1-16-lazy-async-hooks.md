@@ -6,7 +6,7 @@
 
 ## 现状
 
-`packages/sdk/src/registry.ts:15`:`import { AsyncLocalStorage } from 'node:async_hooks'`,并在 `:36` 模块加载时就实例化。import 链 `index.ts → instance.ts/task.ts → context.ts → registry.ts` 使它无条件到达每个消费者。`tsup.config.ts` target node18。
+`packages/sdk/src/registry.ts:15`:`import { AsyncLocalStorage } from 'node:async_hooks'`,并在 `:36` 模块加载时就实例化。import 链 `index.ts → instance.ts/task.ts → context.ts → registry.ts` 使它无条件到达每个消费者。`tsdown.config.ts` target node18。
 
 README(`:12-14`)承诺 SDK "zero runtime dependencies… safe to import into a web server or a CLI"。但 ALS 只有 **daemon 内**执行 task 时才需要(ctx 检测);应用侧触发只需要 fetch。
 
@@ -18,7 +18,7 @@ README(`:12-14`)承诺 SDK "zero runtime dependencies… safe to import into a w
 
 1. 把 ALS 获取改为惰性 + 环境守护,注意 SDK 是 ESM/CJS 双构建:
    - 新建 `als.ts`,导出 `getExecutorStorage(): AsyncLocalStorage<T> | undefined`;
-   - 实现:首次调用时 try/catch 加载 `node:async_hooks`——CJS 构建下用 `require`,ESM 构建下用 `createRequire(import.meta.url)`(tsup 对两种格式分别产出;验证产物,必要时用 `typeof require !== 'undefined'` 分支);不可用则缓存 `undefined`;
+   - 实现:首次调用时 try/catch 加载 `node:async_hooks`——CJS 构建下用 `require`,ESM 构建下用 `createRequire(import.meta.url)`(tsdown 对两种格式分别产出;验证产物,必要时用 `typeof require !== 'undefined'` 分支);不可用则缓存 `undefined`;
    - `registry.ts` 存储惰性 slot 而不是实例;`currentExecutor()` 在 storage 为 undefined 时返回 undefined(应用进程里本来就恒为空)。
 2. daemon 侧(`better-trigger/internal` 缝)首次真正使用 ALS 时必然处于 Node/bun,惰性加载必成功——不需要 daemon 改动,但加一条断言:daemon 环境下 storage 必须非 undefined,否则抛清晰错误。
 3. 冒烟测试:vitest 用 alias 把 `node:async_hooks` stub 成 throw 的模块,断言 `import 'better-trigger'` 成功、`betterTrigger({url}).trigger(...)`(mock fetch)可用、`currentExecutor()` 返回 undefined。
@@ -34,6 +34,6 @@ README(`:12-14`)承诺 SDK "zero runtime dependencies… safe to import into a w
 ## 涉及文件
 
 - `packages/sdk/src/registry.ts:15,28-39`、新建 `packages/sdk/src/als.ts`
-- `packages/sdk/src/context.ts`、`packages/sdk/tsup.config.ts`(验证,不一定改)
+- `packages/sdk/src/context.ts`、`packages/sdk/tsdown.config.ts`(验证,不一定改)
 - `packages/sdk/test/`(新增 edge 冒烟)
 - `README.md:12-14`、`packages/sdk/README.md`

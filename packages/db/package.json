@@ -22,9 +22,9 @@
   },
   "homepage": "https://github.com/zhy0216/better-trigger#readme",
   "scripts": {
-    "build": "tsup",
+    "build": "tsdown",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint .",
+    "lint": "eslint --no-error-on-unmatched-pattern '**/*.{js,jsx,mjs,cjs}'",
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
@@ -32,14 +32,14 @@
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",
-    "pg": "^8.13.1"
+    "pg": "^8.23.0"
   },
   "devDependencies": {
-    "@types/node": "^22.7.4",
-    "@types/pg": "^8.11.10",
+    "@types/node": "^26.2.0",
+    "@types/pg": "^8.23.1",
     "drizzle-kit": "^0.31.10",
-    "tsup": "^8.3.0",
-    "typescript": "^5.6.2",
-    "vitest": "^2.1.8"
+    "tsdown": "^0.22.14",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
   }
 }

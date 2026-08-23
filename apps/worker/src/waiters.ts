@@ -246,7 +246,7 @@ export function createWaiterRegistry(deps: {
     // A run lives in exactly one namespace, so every waiter of one runId
     // shares it in practice; read with the first entry's.
     const namespace = [...set][0]!.namespace;
-    let row: RunRead | null = null;
+    let row: RunRead | null;
     try {
       row = await readRun(runId, namespace);
     } catch {
@@ -273,7 +273,7 @@ export function createWaiterRegistry(deps: {
     if (entries.length === 0) return;
 
     const ids = [...new Set(entries.map((e) => e.runId))];
-    let rows: Array<{ id: string; status: string; output: unknown; error: unknown }> = [];
+    let rows: Array<{ id: string; status: string; output: unknown; error: unknown }>;
     try {
       const res = await pool.query<{ id: string; status: string; output: unknown; error: unknown }>(
         `SELECT id, status, output, error FROM runs WHERE id = ANY($1::text[])`,

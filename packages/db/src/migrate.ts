@@ -10,7 +10,7 @@ import { migrate as drizzleMigrate } from 'drizzle-orm/node-postgres/migrator';
 import type pg from 'pg';
 
 // Resolves to <package root>/migrations from both src/ (dev) and dist/ (built);
-// tsup `shims: true` provides import.meta.url for the cjs build.
+// tsdown `shims: true` provides import.meta.url for the cjs build.
 const MIGRATIONS_FOLDER = fileURLToPath(new URL('../migrations', import.meta.url));
 
 /* Advisory-lock key for the migration itself, in the two-argument

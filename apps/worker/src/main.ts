@@ -324,7 +324,7 @@ function requireDuration(flag: string, raw: string): number {
   try {
     ms = parseDuration(raw);
   } catch (err) {
-    throw new Error(`${flag}: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`${flag}: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
   }
   if (ms < MIN_RETENTION_MS) {
     throw new Error(
@@ -350,7 +350,7 @@ function parseNamespace(flag: string, raw: string): Namespace {
   try {
     assertNamespace(ns);
   } catch (err) {
-    throw new Error(`${flag} "${raw}": ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`${flag} "${raw}": ${err instanceof Error ? err.message : String(err)}`, { cause: err });
   }
   return ns;
 }
@@ -1062,7 +1062,7 @@ async function main(): Promise<void> {
   let worker: WorkerHandle | null = null;
   // Whichever orchestrator this process ends up owning — the runtime's, or the
   // bookkeeping-only one below. /metrics reads its reaper counters.
-  let orchestratorCounters: OrchestratorCounters | null = null;
+  let orchestratorCounters: OrchestratorCounters | null;
 
   if (loaded) {
     worker = await startWorkerRuntime(

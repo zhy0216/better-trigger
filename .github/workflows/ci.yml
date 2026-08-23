@@ -61,10 +61,10 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
-      # O5: every production TypeScript package lints through the shared
-      # flat config (eslint.config.mjs) — web picks it up from its own
-      # config, the rest resolve it from the repo root. Runs first so a
-      # lint regression fails in seconds, before the build.
+      # O5: every workspace runs the shared JavaScript lint baseline
+      # (eslint.config.mjs) — web picks it up from its own config, the rest
+      # resolve it from the repo root. TypeScript is checked separately below.
+      # Runs first so a lint regression fails in seconds, before the build.
       - name: Lint
         run: bun run lint
 

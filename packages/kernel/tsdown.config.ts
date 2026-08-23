@@ -1,4 +1,4 @@
-import { defineConfig } from 'tsup';
+import { defineConfig } from 'tsdown';
 
 export default defineConfig({
   entry: ['src/index.ts'],
@@ -6,9 +6,8 @@ export default defineConfig({
   dts: true,
   sourcemap: true,
   clean: true,
+  fixedExtension: false,
   target: 'node18',
-  // import.meta.url shim for the cjs build (migrations dir resolution in migrate.ts).
-  shims: true,
   // Keep heavy/native deps external so they resolve from node_modules at runtime.
-  external: ['pg', 'drizzle-orm'],
+  deps: { neverBundle: ['pg', 'croner'] },
 });

@@ -30,8 +30,8 @@ npm install -D @better-trigger/worker   # the daemon (wherever you run it)
 For embedded mode, install `@better-trigger/worker` as a normal runtime
 dependency instead of a dev dependency.
 
-Requires Node.js 18+ (or Bun) and a reachable PostgreSQL database. That's the
-whole stack.
+The SDK supports Node.js 18+ (or Bun). The worker daemon/embedded runtime
+requires Node.js 20+ (or Bun) and a reachable PostgreSQL database.
 
 ---
 

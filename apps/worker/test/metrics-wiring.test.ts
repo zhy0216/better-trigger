@@ -103,7 +103,7 @@ async function scrapeUntil(
   timeoutMs = 15_000,
 ): Promise<{ status: number; contentType: string; body: string }> {
   const deadline = Date.now() + timeoutMs;
-  let last = '';
+  let last: string;
   for (;;) {
     const res = await fetch(`http://127.0.0.1:${port}/api/v1/metrics`);
     last = await res.text();

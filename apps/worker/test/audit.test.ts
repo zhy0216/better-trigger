@@ -76,8 +76,8 @@ afterEach(() => {
 /** The most recent [audit] line produced so far. */
 const lastAuditLine = (): AuditEntry => {
   const lines = logSpy.mock.calls
-    .map(([arg]) => String(arg))
-    .filter((s) => s.startsWith('[audit] '));
+    .map(([arg]: [unknown]) => String(arg))
+    .filter((s: string) => s.startsWith('[audit] '));
   expect(lines.length).toBeGreaterThan(0);
   return JSON.parse(lines[lines.length - 1]!.slice('[audit] '.length)) as AuditEntry;
 };
@@ -300,7 +300,9 @@ describe('audit — exempt paths', () => {
     const app = makeApp();
     await app.fetch(new Request('http://localhost:4848/api/v1/health'));
     await app.fetch(new Request('http://localhost:4848/api/v1/health?deep=1'));
-    const lines = logSpy.mock.calls.map(([arg]) => String(arg)).filter((s) => s.startsWith('[audit]'));
+    const lines = logSpy.mock.calls
+      .map(([arg]: [unknown]) => String(arg))
+      .filter((s: string) => s.startsWith('[audit]'));
     expect(lines).toHaveLength(0);
   });
 
@@ -312,7 +314,9 @@ describe('audit — exempt paths', () => {
         headers: { Origin: 'http://localhost:5173' },
       }),
     );
-    const lines = logSpy.mock.calls.map(([arg]) => String(arg)).filter((s) => s.startsWith('[audit]'));
+    const lines = logSpy.mock.calls
+      .map(([arg]: [unknown]) => String(arg))
+      .filter((s: string) => s.startsWith('[audit]'));
     expect(lines).toHaveLength(0);
   });
 

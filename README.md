@@ -301,9 +301,9 @@ your application installs, cannot reach the database even by accident —
 
 ```bash
 bun run dev            # turbo run dev
-bun run build          # build all packages (tsup) + web (tsc + vite)
+bun run build          # build all packages (tsdown) + web (tsc + vite)
 bun run typecheck      # tsc --noEmit everywhere
-bun run lint
+bun run lint              # ESLint on JavaScript/config files; TypeScript via typecheck
 bun run test           # vitest unit tests. DB-free by default; the kernel's
                        # true-Postgres suite (packages/kernel/test/pg) runs
                        # automatically when DATABASE_URL is set, skips cleanly

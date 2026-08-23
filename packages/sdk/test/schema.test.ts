@@ -102,7 +102,10 @@ describe('validateSchema — real ZodError extraction', () => {
     expect((err as Error).name).toBe('SchemaValidationError');
     const msg = (err as Error).message;
     expect(msg).toContain('email: Invalid email');
-    expect(msg).toContain('count: Expected number, received string');
+    // Zod 3 and Zod 4 phrase the invalid-type detail differently; the SDK
+    // contract is the path plus the received type, not a validator version's
+    // exact wording.
+    expect(msg).toMatch(/count: .*received string/);
   });
 });
 

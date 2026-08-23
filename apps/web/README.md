@@ -1,7 +1,7 @@
 # @better-trigger/web
 
 The Better Trigger dashboard — a run-observability UI for background tasks.
-Vite + React 18 + TypeScript + Tailwind.
+Vite + React 19 + TypeScript + Tailwind 4.
 
 ## Scripts
 
@@ -10,7 +10,7 @@ bun run dev        # vite dev server (http://localhost:5173)
 bun run build      # tsc --noEmit && vite build  → dist/
 bun run preview    # serve the production build
 bun run typecheck  # tsc --noEmit
-bun run lint       # eslint
+bun run lint       # eslint (JavaScript/config files; TypeScript via tsc)
 ```
 
 ## API key mode
@@ -70,7 +70,7 @@ src/
 └── styles/
     ├── tokens.css       # Runner AI color/type/space tokens
     ├── theme.css        # light/dark surfaces, density, keyframes
-    └── index.css        # @tailwind base/components/utilities
+    └── index.css        # Tailwind 4 entrypoint
 ```
 
 ## Design system & Tailwind
@@ -80,9 +80,10 @@ Styling is driven by **CSS custom properties** (see `styles/tokens.css` and
 an `--accent` override set from `App.tsx`. Components mostly read those variables
 directly via inline styles.
 
-Tailwind is wired up and maps the most-used tokens to utilities
-(`tailwind.config.ts`), so new UI can use `bg-surface`, `text-fg-muted`,
-`border-line`, `font-mono`, `text-status-running`, etc. CSS load order in
+Tailwind 4 is wired through the `@tailwindcss/postcss` plugin and keeps the
+legacy token map in `tailwind.config.ts` (loaded from `styles/index.css`), so
+new UI can use `bg-surface`, `text-fg-muted`, `border-line`, `font-mono`,
+`text-status-running`, etc. CSS load order in
 `main.tsx` puts the tokens/theme **after** Tailwind's preflight so the design
 system wins on shared element rules.
 

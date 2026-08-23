@@ -28,14 +28,14 @@
     "loop-hang": "bun scripts/loop-hang.ts",
     "concurrency": "bun scripts/concurrency.ts",
     "test:acceptance": "bun scripts/acceptance.ts",
-    "lint": "eslint .",
+    "lint": "eslint --no-error-on-unmatched-pattern '**/*.{js,jsx,mjs,cjs}'",
     "bench:claim-scan": "bun scripts/claim-scan-bench.ts",
     "bench:stats": "bun scripts/stats-bench.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "better-trigger": "workspace:*",
-    "zod": "^3.23"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@better-trigger/core": "workspace:*",
@@ -43,7 +43,7 @@
     "@better-trigger/kernel": "workspace:*",
     "@better-trigger/testing": "workspace:*",
     "@better-trigger/worker": "workspace:*",
-    "@types/node": "^22.7.4",
-    "typescript": "^5.6.2"
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
   }
 }

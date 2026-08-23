@@ -23,7 +23,9 @@ import { createKernel, type Kernel } from '../../src/index';
 export const PG_AVAILABLE = Boolean(process.env.DATABASE_URL);
 
 /** `describe` that is cleanly skipped when DATABASE_URL is not set. */
-export const describePg = PG_AVAILABLE ? describe : describe.skip;
+export const describePg: typeof describe = PG_AVAILABLE
+  ? describe
+  : (describe.skip as typeof describe);
 
 export interface PgContext {
   /** The kernel over the provisioned database. */

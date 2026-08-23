@@ -10,9 +10,12 @@ Long-lived Node/Bun applications may instead use
 opening a port. The standalone daemon remains the isolation and independent-
 scaling default.
 
+The current worker runtime requires Node.js 20+ (or Bun). The `better-trigger`
+SDK itself continues to support Node.js 18+.
+
 Stack: Hono + `@hono/node-server`, `pg` (Pool via `@better-trigger/db`),
 `@better-trigger/kernel` (the durable engine), `better-trigger` (task handle
-shape + the executor storage). ESM, built with tsup (esm + cjs + dts).
+shape + the executor storage). ESM, built with tsdown (esm + cjs + dts).
 
 ## Quick start
 

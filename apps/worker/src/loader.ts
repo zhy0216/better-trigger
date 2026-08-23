@@ -61,7 +61,7 @@ export async function loadTasks(entries: string[]): Promise<LoadedTasks> {
       mod = (await import(pathToFileURL(abs).href)) as Record<string, unknown>;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      throw new Error(`failed to import tasks entry "${entry}": ${detail}`);
+      throw new Error(`failed to import tasks entry "${entry}": ${detail}`, { cause: err });
     }
 
     const found: AnyTask[] = [];

@@ -46,10 +46,7 @@ import {
   type EmbeddedRuntime,
 } from '../src/embedded';
 
-interface FakePool extends Pool {
-  end: ReturnType<typeof vi.fn>;
-  query: ReturnType<typeof vi.fn>;
-}
+type FakePool = Pool;
 
 function fakePool(): FakePool {
   return {

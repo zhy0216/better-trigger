@@ -406,7 +406,11 @@ export async function createEmbeddedRuntime(
   } catch (err) {
     const cleanupErrors = await cleanup(worker !== null);
     if (cleanupErrors.length > 0) {
-      throw new AggregateError([err, ...cleanupErrors], 'embedded runtime startup failed');
+      throw new AggregateError(
+        [err, ...cleanupErrors],
+        'embedded runtime startup failed',
+        { cause: err },
+      );
     }
     throw err;
   }
