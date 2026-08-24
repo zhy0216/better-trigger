@@ -174,8 +174,12 @@ export interface Kernel {
   completeRun(args: CompleteRunArgs): Promise<void>;
   /** Failure: retry with backoff or terminal fail + parent wakeup (fenced). */
   failRun(args: FailRunArgs): Promise<FailResult>;
-  /** Best-effort log append, any non-terminal run status (no fencing); a run
-   *  that is gone or already finished absorbs nothing and raises nothing. */
+  /** Best-effort log append with a STRICT terminal boundary (p2-40): each
+   *  chunk serializes against complete/fail/cancel via the run row lock, so a
+   *  run never absorbs a line after its finished_at; a gone or already
+   *  terminal run absorbs nothing and raises nothing (the drop is logged as a
+   *  `[runs:logs]` warn). No fencing — a superseded executor's last flush is
+   *  still worth keeping. */
   appendLogs(runId: string, namespace: Namespace, entries: LogEntry[]): Promise<void>;
 
   /* ------------------------------------------------------ orchestration */
@@ -225,7 +229,7 @@ export function createKernel(opts: KernelOptions): Kernel {
     batchTriggerChild: (args) => batchTriggerChild(pool, args),
     completeRun: (args) => completeRun(pool, args),
     failRun: (args) => failRun(pool, args),
-    appendLogs: (runId, namespace, entries) => appendLogs(pool, runId, namespace, entries),
+    appendLogs: (runId, namespace, entries) => appendLogs(pool, runId, namespace, entries, logger),
 
     startOrchestrator: (o) => startOrchestrator(pool, logger, o, waitGraph),
     prune: (args) => prune(pool, args),

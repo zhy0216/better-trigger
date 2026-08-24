@@ -2,7 +2,9 @@
    @better-trigger/kernel — kernel run lifecycle.
    Create (idempotent) / steps / suspend / wait-for-child / batch-trigger /
    complete / fail / cancel / retry, plus parent-wakeup for child runs, run
-   reads (getRun / getRunDetail / waitForResult) and best-effort logs.
+   reads (getRun / getRunDetail / waitForResult) and strictly-bounded logs
+   (appendLogs: best-effort in the sense that lines may be dropped, but a
+   terminal run never absorbs a line committed after its finished_at).
    See docs/backend-contract.md §3.2–3.7. All multi-row mutations are wrapped
    in a single transaction via withTx().
 
@@ -60,6 +62,19 @@
    for that run. lease_until is deliberately NOT part of validity: an
    expired-but-unreclaimed owner is still the only owner, so its writes stay
    legal until the reaper or a new claim invalidates the token.
+
+   LOG BOUNDARY (p2-40): appendLogs is the deliberate exception to the
+   canonical order — a per-chunk, single-row tx that takes ONLY position 2
+   (the runs row, FOR UPDATE, never the queue row) and then either inserts the
+   chunk (finished_at IS NULL) or drops it. Skipping position 1 is required:
+   a waiting/suspended run has no queue row but must still absorb logs. The
+   lock is held for exactly one INSERT (not the whole flush), and because the
+   tx takes no other TABLE row lock it can neither close a cycle with a 1→2 tx
+   (it never waits on a queue row) nor lengthen a terminal tx's own hold: the
+   terminal side only ever waits behind a single in-flight log INSERT. (The
+   logs INSERT does acquire logs heap/index page locks; page-level cycles with
+   prune's cascade deletes are resolved by PG's deadlock detector, and the
+   losing flush fails as a dropped best-effort chunk.)
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import {
@@ -98,7 +113,7 @@ import {
 } from '@better-trigger/core';
 import { stepFingerprint } from './fingerprint';
 import { runId as genRunId } from './ids';
-import type { WaitGraphCounters } from './kernel';
+import type { KernelLogger, WaitGraphCounters } from './kernel';
 import { notifyTerminal, notifyWork } from './notify';
 import { enqueue, enqueueMany, removeFromQueue } from './queue';
 
@@ -2018,7 +2033,7 @@ export async function retryRun(
 }
 
 /* ---------------------------------------------------------------------------
- * Logs (best effort, any non-terminal run — no fencing)
+ * Logs (no fencing; strict terminal boundary via the runs row lock, p2-40)
  * ------------------------------------------------------------------------- */
 
 /** Rows per INSERT. 5 bind params each (+1 shared run_id) → 5001 params, well
@@ -2113,36 +2128,43 @@ function shrinkRowForBatch(row: PreparedLogRow, maxBytes: number): PreparedLogRo
 }
 
 /**
- * Append log lines to a run. Best effort in both directions: no fencing (a
+ * Append log lines to a run. Best effort in one direction only — no fencing (a
  * superseded executor's last flush is still worth keeping) and no error when
- * the write lands nowhere.
+ * the write lands nowhere — but STRICT about the terminal boundary: no log
+ * line ever commits after the run's own finished_at.
  *
- * The existence + liveness test rides along with the INSERT instead of being a
- * separate SELECT: `WHERE EXISTS (... finished_at IS NULL)` writes 0 rows for a
- * run that is gone or already terminal, which drops the per-flush round trip
- * (the executor flushes once a second per in-flight run) and keeps lines from
- * appearing *after* a run's own terminal timestamp — a fenced-out executor used
- * to be able to write those, and a history where logs continue past the end is
- * actively misleading to read.
+ * Linearization (p2-40): each chunk runs in its own short transaction that
+ * first takes the run row `FOR UPDATE` and reads finished_at under the lock.
+ * A terminal tx (complete/fail/cancel) holds the same row lock while it sets
+ * finished_at, so every chunk is serialized against the terminal write:
+ *   - the chunk that gets the lock first inserts BEFORE finished_at exists —
+ *     its lines are part of the run's history;
+ *   - a chunk that gets the lock after the terminal commit sees
+ *     finished_at IS NOT NULL (or the run gone) and drops itself — 0 rows,
+ *     no error, one `[runs:logs]` warn distinguishing "run does not exist"
+ *     from "already terminal (late flush / terminal race)".
+ * There is no "statement snapshot passed the liveness test, then the FK check
+ * waited for the terminal tx and inserted anyway" window left: the INSERT no
+ * longer carries a `WHERE EXISTS (...)` guard, and the FK's key-share check is
+ * satisfied by the very lock the decision was made under. A run that goes
+ * terminal mid-flush stops absorbing the remaining chunks exactly at the
+ * chunk boundary.
  *
- * The trade-off, taken deliberately: a line emitted in the same instant the run
- * is being finalized can be evaluated against the already-terminal row and
- * silently dropped. Serializing against that would mean taking the runs row
- * under FOR UPDATE on every flush, which is the cost this path refuses to pay —
- * and losing the last few milliseconds of logs is what "best effort" was
- * already promising.
- *
- * Since PF6 added logs.run_id REFERENCES runs(id) ON DELETE CASCADE, the INSERT
- * does take a FOR KEY SHARE lock on the parent run row — enough to block behind
- * a concurrent FOR UPDATE holder, not enough to serialize against one the way
- * the paragraph above rules out. No deadlock edge comes with it: this is a
- * single autocommit statement that holds no other lock while it waits.
+ * Lock cost: the run row is held only for the duration of one chunk's INSERT
+ * (the chunk cap bounds it to ≤ LOG_INSERT_CHUNK rows / one statement), NOT
+ * the whole flush — each chunk is its own tx, so a multi-chunk flush releases
+ * the lock between chunks. The executor flushes once a second per in-flight
+ * run with a 50-line threshold (usually one chunk), so the steady-state
+ * overhead is one extra `SELECT ... FOR UPDATE` round trip per flush; a
+ * terminal tx can be delayed only by the INSERT it is actually racing, on the
+ * order of a single statement's write time.
  */
 export async function appendLogs(
   pool: Pool,
   runId: string,
   namespace: Namespace,
   entries: LogEntry[],
+  logger: KernelLogger = console,
 ): Promise<void> {
   if (entries.length === 0) return;
   assertNamespace(namespace);
@@ -2184,10 +2206,13 @@ export async function appendLogs(
   }
   if (current.length > 0) chunks.push(current);
 
+  let droppedKind: 'missing' | 'terminal' | null = null;
+  let droppedLines = 0;
+
   for (const chunk of chunks) {
     const values: string[] = [];
-    // $1 is the run id, $2/$3 the namespace (shared by the SELECT list and the
-    // EXISTS test); row params start at $4.
+    // $1 is the run id, $2/$3 the namespace (shared by the lock SELECT and the
+    // INSERT's SELECT list); row params start at $4.
     const params: unknown[] = [runId, namespace.projectId, namespace.env];
     let i = 4;
     for (const r of chunk) {
@@ -2199,16 +2224,57 @@ export async function appendLogs(
       );
       params.push(r.stepSeq, r.level, r.message, r.dataJson, r.ts);
     }
-    await pool.query(
-      `INSERT INTO logs (project_id, env, run_id, step_seq, level, message, data, ts)
-       SELECT $2::text, $3::text, $1::text, v.step_seq, v.level, v.message, v.data, v.ts
-         FROM (VALUES ${values.join(',')}) AS v(step_seq, level, message, data, ts)
-        WHERE EXISTS (
-          SELECT 1 FROM runs WHERE id = $1 AND finished_at IS NULL
-            AND project_id = $2 AND env = $3
-        )`,
-      params,
-    );
+    // Each chunk is its own short transaction: lock the run row, decide under
+    // the lock, insert, commit. The row lock is released at COMMIT, so the
+    // hold time is one INSERT at most, never the whole flush.
+    await withTx(pool, async (client) => {
+      const locked = await client.query<{ finished_at: Date | null }>(
+        `SELECT finished_at FROM runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
+        [runId, namespace.projectId, namespace.env],
+      );
+      if (!locked.rows[0]) {
+        // Run gone (or not in this namespace — same verdict: this flush has
+        // no home). finished_at can never go back to NULL and a missing run
+        // never reappears, so every remaining chunk drops too; the single
+        // warn at the end reports the whole flush.
+        if (droppedKind === null) droppedKind = 'missing';
+        droppedLines += chunk.length;
+        return;
+      }
+      if (locked.rows[0].finished_at !== null) {
+        // Terminal: this chunk raced a complete/fail/cancel and lost (or the
+        // flush is simply late). Strict boundary — the lines are dropped, and
+        // the run's history ends at finished_at.
+        if (droppedKind === null) droppedKind = 'terminal';
+        droppedLines += chunk.length;
+        return;
+      }
+      // No EXISTS guard anymore: the lock above IS the liveness decision, so
+      // there is no snapshot-then-wait-on-FK window a terminal commit could
+      // slip through. The FK's key-share check on runs is satisfied by the
+      // FOR UPDATE we already hold.
+      await client.query(
+        `INSERT INTO logs (project_id, env, run_id, step_seq, level, message, data, ts)
+         SELECT $2::text, $3::text, $1::text, v.step_seq, v.level, v.message, v.data, v.ts
+           FROM (VALUES ${values.join(',')}) AS v(step_seq, level, message, data, ts)`,
+        params,
+      );
+    });
+  }
+
+  if (droppedKind !== null) {
+    // Observable, never fatal: logs are the best-effort data plane, but the
+    // boundary is strict, so the drop is recorded once per flush with the
+    // verdict that caused it (run absent vs terminal race), not retried.
+    const who = `run ${runId} (${namespace.projectId}/${namespace.env})`;
+    if (droppedKind === 'missing') {
+      logger.warn(`[runs:logs] dropped ${droppedLines} log line(s): ${who} does not exist`);
+    } else {
+      logger.warn(
+        `[runs:logs] dropped ${droppedLines} log line(s): ${who} already terminal ` +
+          `— lines past the terminal boundary (late flush or terminal race)`,
+      );
+    }
   }
 }
 

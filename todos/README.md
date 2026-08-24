@@ -13,7 +13,7 @@
 | 1 | [p1-37-triggerandwait-wait-graph.md](./done/p1-37-triggerandwait-wait-graph.md) ✅ | `triggerAndWait` 的全局幂等键可把父 run 接到已终态/自身/环上的 child，造成永久 waiting 或只唤醒一个 waiter | — |
 | 2 | [p2-38-retry-idempotency-race.md](./done/p2-38-retry-idempotency-race.md) ✅ | 并发或重放 `/retry` 请求会创建多个语义相同的新 run | — |
 | 3 | [p2-39-stale-state-transition-guards.md](./done/p2-39-stale-state-transition-guards.md) ✅ | claim / timer resume 对目标状态缺少防御性谓词，陈旧 queue/wait 行可能复活终态 run | — |
-| 4 | [p2-40-log-terminal-boundary.md](./p2-40-log-terminal-boundary.md) | `appendLogs` 的快照检查与终态提交之间存在窗口，日志可在终态提交后才落库 | — |
+| 4 | [p2-40-log-terminal-boundary.md](./done/p2-40-log-terminal-boundary.md) ✅ | `appendLogs` 的快照检查与终态提交之间存在窗口，日志可在终态提交后才落库 | — |
 | 5 | [p2-41-suspend-work-notify.md](./p2-41-suspend-work-notify.md) | suspend 释放并发槽后不发 `work` 通知，其他 run 只能等退避轮询 | — |
 
 ## 执行约定

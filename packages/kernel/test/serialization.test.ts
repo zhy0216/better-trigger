@@ -342,14 +342,25 @@ interface Stmt {
 const makeLogPool = () => {
   const stmts: Stmt[] = [];
   const inserted: { runId: string; rows: number }[] = [];
-  const pool = {
-    query: async (sql: string, params: unknown[] = []) => {
+  const query = async (sql: string, params: unknown[] = []) => {
+    if (/^BEGIN/i.test(sql) || /^COMMIT/i.test(sql) || /^ROLLBACK/i.test(sql)) {
+      return { rows: [], rowCount: 0 };
+    }
+    // p2-40: liveness is decided by the per-chunk lock SELECT; the stub's run
+    // is always alive, so every chunk proceeds to its INSERT.
+    if (/^SELECT finished_at/.test(sql)) {
+      return { rows: [{ finished_at: null }], rowCount: 1 };
+    }
+    if (/^INSERT INTO logs/.test(sql)) {
       stmts.push({ sql, params });
       const rows = (params.length - 3) / 5;
       if (rows > 0) inserted.push({ runId: params[0] as string, rows });
       return { rows: [], rowCount: rows };
-    },
-  } as unknown as Pool;
+    }
+    throw new Error(`unexpected statement: ${sql}`);
+  };
+  const client = { query, release: async () => {} };
+  const pool = { connect: async () => client, query } as unknown as Pool;
   return { pool, stmts, inserted };
 };
 
@@ -403,7 +414,7 @@ describe('appendLogs serialization (C3)', () => {
         .map((p) => new TextEncoder().encode(String(p)).length)
         .reduce((n, b) => n + b, 0);
       expect(stmtBytes).toBeLessThanOrEqual(500);
-      expect(s.sql).toMatch(/finished_at IS NULL/);
+      expect(s.sql).toMatch(/INSERT INTO logs/);
     }
     expect(inserted.reduce((n, i) => n + i.rows, 0)).toBe(20);
   });

@@ -2,7 +2,7 @@
 
 - 优先级：P2（可观测性一致性 / 审计可信度）
 - 区域：kernel / db
-- 状态：待处理
+- 状态：已处理（严格边界）
 - 来源：2026-08-24 并发状态转移审查
 
 ## 问题摘要
@@ -54,11 +54,11 @@
 
 ## 验收标准
 
-- [ ] 产品决定严格边界或 best-effort，并更新 backend contract、kernel 注释和 dashboard 查询说明。
-- [ ] 严格模式下，PG 终态/append 交错测试不会出现 terminal 提交后新增日志；允许并记录被丢弃的最后几行。
-- [ ] best-effort 模式下，竞态窗口有可观测计数，测试明确断言允许的结果集合。
-- [ ] 大批量 chunk、FK 删除、namespace 隔离和并发 flush 回归通过，未显著延长 terminal 事务锁持有时间。
-- [ ] `bun run typecheck`、`bun run build`、`bun run test` 全部通过。
+^- [x] 产品决定严格边界或 best-effort，并更新 backend contract、kernel 注释和 dashboard 查询说明。
+^- [x] 严格模式下，PG 终态/append 交错测试不会出现 terminal 提交后新增日志；允许并记录被丢弃的最后几行。
+^- [x] best-effort 模式下（未选用该方案，跳过），竞态窗口有可观测计数，测试明确断言允许的结果集合。
+^- [x] 大批量 chunk、FK 删除、namespace 隔离和并发 flush 回归通过，未显著延长 terminal 事务锁持有时间。
+^- [x] `bun run typecheck`、`bun run build`、`bun run test` 全部通过。
 
 ## 涉及文件
 

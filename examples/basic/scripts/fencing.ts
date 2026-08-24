@@ -304,14 +304,15 @@ async function main(s: Scenario): Promise<void> {
       ...staleCreds,    }),
   );
 
-  /* -- logs: no fencing, but still bounded by the run's lifetime (C8) -------
+  /* -- logs: no fencing, but strictly bounded by the run's lifetime (p2-40) -
    * appendLogs deliberately takes no token — a superseded executor's last
-   * flush is still worth keeping — so the only thing between A's late flush
-   * and a history that continues past the run's own finished_at is the
-   * INSERT's own `WHERE EXISTS (... finished_at IS NULL)`. That guard, the
-   * VALUES sub-select it hangs off and the per-column casts are SQL, and a
-   * stubbed pool would accept a statement Postgres rejects — so the statement
-   * gets exercised here, against a real database. -------------------------- */
+   * flush is still worth keeping — but each chunk now locks the run row
+   * (`SELECT finished_at ... FOR UPDATE`) in a short transaction and inserts
+   * only under a NULL finished_at, so nothing can land after the run's own
+   * finished_at. The lock SELECT, the VALUES sub-select the INSERT hangs off
+   * and the per-column casts are SQL, and a stubbed pool would accept a
+   * statement Postgres rejects — so the statement gets exercised here,
+   * against a real database. --------------------------------------------- */
   const countLogs = async (id: string): Promise<number> =>
     (await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM logs WHERE run_id = $1`, [id]))
       .rows[0]!.n;

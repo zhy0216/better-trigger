@@ -294,7 +294,7 @@ SELECT q.id AS queue_id, q.run_id,
 | `POST /runs/:id/batch-trigger` | `{ seq, label?, items:[{taskId,payload,options?}], workerId }` → `{ runIds: string[] }`(server 创建 N 子 run + 写 step 行 kind='batch-trigger' output={runIds},**同事务幂等**:若 step 行已存在直接返回其 output) |
 | `POST /runs/:id/complete` | `{ output, workerId }` → `{ ok:true }`(终态;若有父在等,回填并唤醒) |
 | `POST /runs/:id/fail` | `{ error:{message,stack?,name?}, stepSeq?, retry?, abort?, workerId }` → `{ ok:true, willRetry:boolean, nextAttemptAt? }` |
-| `POST /runs/:id/logs` | `{ logs: [{ts, level:'debug'\|'info'\|'warn'\|'error', message, data?, stepSeq?}] }` → `{ ok:true }`(尽力而为、不 fencing;run 不存在或已终态则静默写 0 行,不报错) |
+| `POST /runs/:id/logs` | `{ logs: [{ts, level:'debug'\|'info'\|'warn'\|'error', message, data?, stepSeq?}] }` → `{ ok:true }`(**不 fencing、不报错,但边界严格**,p2-40:每个 chunk 在短事务里先对 runs 行 `SELECT finished_at … FOR UPDATE`,锁下判定,仅当 `finished_at IS NULL` 才插入——与 complete/fail/cancel 线性化,`finished_at` 之后不会提交任何新日志;run 不存在或拿到锁时已终态(含终态竞态/迟到 flush)→ 该 chunk 及之后所有 chunk 丢弃、写 0 行,整个 flush 经 kernel logger 记一条 `[runs:logs]` warn,区分「run 不存在」与「已终态」) |
 
 `TaskManifest = { id, name?, filePath?, cron?: { pattern, timezone? }, retry?: RetryPolicy, concurrencyLimit?, description? }`
 
