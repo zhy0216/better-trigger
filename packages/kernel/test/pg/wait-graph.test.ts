@@ -23,14 +23,51 @@
    ============================================================================= */
 import { expect, it } from 'vitest';
 import type { Pool } from 'pg';
+import type { Namespace } from '@better-trigger/core';
 import { describePg, withPg, type PgContext } from './helpers';
-import { createKernel, KernelError, RunNotRunningError, type KernelLogger } from '../../src/index';
+import { createKernel, KernelError, RunNotRunningError, type Kernel, type KernelLogger } from '../../src/index';
 
 const NS = { projectId: 'default', env: 'prod' };
 const TASK_A = 'wait-graph-a';
 const TASK_B = 'wait-graph-b';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Claim exactly one run with bounded retry — trigger stamps available_at
+ *  from the host clock while the claim predicate compares against the
+ *  database's now(), so a sub-millisecond skew between the two can make a
+ *  freshly created run briefly invisible to claim and `claimRuns(...)[0]!`
+ *  throw a TypeError on a perfectly healthy run. Retrying a short window
+ *  absorbs the skew without weakening any race under test. */
+async function claimOne(
+  kernel: Kernel,
+  args: {
+    workerId: string;
+    namespaces: Namespace[];
+    taskIds: string[];
+    leaseMs: number;
+    timeoutMs?: number;
+  },
+): Promise<{ id: string; fencingToken: number }> {
+  const timeout = args.timeoutMs ?? 200;
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const claimed = await kernel.claimRuns({
+      workerId: args.workerId,
+      namespaces: args.namespaces,
+      taskIds: args.taskIds,
+      limit: 1,
+      leaseMs: args.leaseMs,
+    });
+    if (claimed[0]) return { id: claimed[0].id, fencingToken: claimed[0].fencingToken };
+    if (Date.now() > deadline) {
+      throw new Error(
+        `claimOne: no run claimed for tasks [${args.taskIds.join(', ')}] within ${timeout}ms`,
+      );
+    }
+    await sleep(10);
+  }
+}
 
 /** Register both tasks; every scenario starts with this. */
 async function register(ctx: PgContext): Promise<string> {
@@ -53,22 +90,15 @@ interface Claim {
 }
 
 /** Trigger `taskId` and claim its single queued run (each scenario keeps the
- *  queue drained, so limit 1 is deterministic). */
+ *  queue drained, so limit 1 is deterministic; the bounded retry absorbs the
+ *  host-clock vs db-clock available_at skew on the fresh trigger). */
 async function triggerAndClaim(
   ctx: PgContext,
   workerId: string,
   taskId: string,
 ): Promise<Claim> {
   await ctx.kernel.trigger({ taskId, payload: {}, namespace: NS });
-  const claimed = await ctx.kernel.claimRuns({
-    workerId,
-    namespaces: [NS],
-    taskIds: [taskId],
-    limit: 1,
-    leaseMs: 60_000,
-  });
-  expect(claimed).toHaveLength(1);
-  return { id: claimed[0]!.id, fencingToken: claimed[0]!.fencingToken };
+  return claimOne(ctx.kernel, { workerId, namespaces: [NS], taskIds: [taskId], leaseMs: 60_000 });
 }
 
 /** The p1-37 invariant pair: no pending wait on a terminal child, and no
@@ -296,13 +326,12 @@ describePg('wait-graph invariants (p1-37)', () => {
       expect((dup as { code?: string }).code).toBe('23505');
 
       // The single child resolving still wakes the parent.
-      const child = (await ctx.kernel.claimRuns({
+      const child = await claimOne(ctx.kernel, {
         workerId,
         namespaces: [NS],
         taskIds: [TASK_B],
-        limit: 1,
         leaseMs: 60_000,
-      }))[0]!;
+      });
       expect(child.id).toBe(childRunId);
       await kernel.completeRun({
         runId: child.id,
@@ -386,6 +415,12 @@ describePg('wait-graph invariants (p1-37)', () => {
         expect(settled).toBe('done');
         expect(res.childRunId).toBe(winnerChildId);
       } finally {
+        // Close any still-open tx FIRST, then clear the replica role, then
+        // hand the connection back: ROLLBACK would undo a RESET issued inside
+        // the open tx, so ordering matters — a leaked replica role would
+        // silently disable FK enforcement for later tests on this connection.
+        await raw.query('ROLLBACK').catch(() => {});
+        await raw.query(`RESET session_replication_role`).catch(() => {});
         raw.release();
       }
 
@@ -629,13 +664,12 @@ describePg('wait-graph invariants (p1-37)', () => {
 
         // Claim the child so its terminal write is a REAL transaction (queue →
         // child run row → parent rows) racing the parent-side op below.
-        const child = (await kernel.claimRuns({
+        const child = await claimOne(kernel, {
           workerId,
           namespaces: [NS],
           taskIds: [TASK_B],
-          limit: 1,
           leaseMs: 60_000,
-        }))[0]!;
+        });
         expect(child.id).toBe(attach.childRunId);
 
         // EVERY round is a true concurrent interleave, fired together:
@@ -704,13 +738,13 @@ describePg('wait-graph invariants (p1-37)', () => {
         if (parentRow.rows[0]!.status === 'queued') {
           // The child's terminal tx won and re-enqueued the parent: claim and
           // complete it.
-          const woken = (await kernel.claimRuns({
+          const woken = await claimOne(kernel, {
             workerId,
             namespaces: [NS],
             taskIds: [TASK_A],
-            limit: 1,
             leaseMs: 60_000,
-          }))[0]!;
+            timeoutMs: 2_000,
+          });
           expect(woken.id).toBe(parent.id);
           await kernel.completeRun({
             runId: parent.id,
@@ -747,13 +781,12 @@ describePg('wait-graph invariants (p1-37)', () => {
       expect(b).not.toBe(a.id);
 
       // B's own step waits on task A → ANOTHER fresh child, never A.
-      const bClaim = (await kernel.claimRuns({
+      const bClaim = await claimOne(kernel, {
         workerId,
         namespaces: [NS],
         taskIds: [TASK_B],
-        limit: 1,
         leaseMs: 60_000,
-      }))[0]!;
+      });
       const waitB = await kernel.waitForChildRun({
         runId: b,
         namespace: NS,
@@ -775,13 +808,12 @@ describePg('wait-graph invariants (p1-37)', () => {
       expect(selfRef.rows[0]!.n).toBe(0);
 
       // Unwind the chain: complete A2 → wakes B → complete B → wakes A.
-      const a2Claim = (await kernel.claimRuns({
+      const a2Claim = await claimOne(kernel, {
         workerId,
         namespaces: [NS],
         taskIds: [TASK_A],
-        limit: 1,
         leaseMs: 60_000,
-      }))[0]!;
+      });
       expect(a2Claim.id).toBe(a2);
       await kernel.completeRun({
         runId: a2,
@@ -791,13 +823,12 @@ describePg('wait-graph invariants (p1-37)', () => {
         namespace: NS,
       });
 
-      const bAgain = (await kernel.claimRuns({
+      const bAgain = await claimOne(kernel, {
         workerId,
         namespaces: [NS],
         taskIds: [TASK_B],
-        limit: 1,
         leaseMs: 60_000,
-      }))[0]!;
+      });
       expect(bAgain.id).toBe(b);
       await kernel.completeRun({
         runId: b,
@@ -807,13 +838,12 @@ describePg('wait-graph invariants (p1-37)', () => {
         namespace: NS,
       });
 
-      const aAgain = (await kernel.claimRuns({
+      const aAgain = await claimOne(kernel, {
         workerId,
         namespaces: [NS],
         taskIds: [TASK_A],
-        limit: 1,
         leaseMs: 60_000,
-      }))[0]!;
+      });
       expect(aAgain.id).toBe(a.id);
       await kernel.completeRun({
         runId: a.id,

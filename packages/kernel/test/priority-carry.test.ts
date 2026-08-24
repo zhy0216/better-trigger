@@ -122,6 +122,11 @@ describe('scanWaits re-enqueues a resumed run at its own priority', () => {
         if (/FROM runs WHERE id = \$1/.test(sql)) {
           return { rows: [runRow({ id: 'run_1', status: 'waiting', priority })] };
         }
+        // The p2-39 expected-state flip: a live server answers 1 affected row
+        // for a run that is 'waiting' — without it the resume stops here.
+        if (/UPDATE runs SET status = 'queued'/.test(sql)) {
+          return { rows: [{ id: 'run_1' }], rowCount: 1 };
+        }
         if (/FROM waits WHERE id = \$1/.test(sql)) return { rows: [{ id: 1 }] };
         return { rows: [] };
       },

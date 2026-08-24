@@ -91,7 +91,7 @@ function stubPool(rows: CandidateRow[], steps: unknown[] = []) {
       stmts.push({ sql, params });
       if (/FROM queue q/.test(sql)) return { rows };
       if (/FROM run_steps/.test(sql)) return { rows: steps };
-      if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '42' }] };
+      if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '42' }], rowCount: 1 };
       return { rows: [] };
     },
     release: () => {},

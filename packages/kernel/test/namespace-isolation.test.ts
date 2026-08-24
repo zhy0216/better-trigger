@@ -127,7 +127,7 @@ function claimPool(candidateRows: unknown[]) {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
       if (/FROM queue q/.test(sql)) return { rows: candidateRows };
-      if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '1' }] };
+      if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '1' }], rowCount: 1 };
       if (/count\(\*\)/.test(sql)) return { rows: [{ n: '1' }] };
       return { rows: [] };
     },

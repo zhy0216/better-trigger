@@ -218,7 +218,7 @@ export function createKernel(opts: KernelOptions): Kernel {
     deregisterWorker: (args) => deregisterWorker(pool, args),
     heartbeat: (args) => heartbeat(pool, args),
     releaseClaims: (args) => releaseClaims(pool, args),
-    claimRuns: (args) => claimRuns(pool, args),
+    claimRuns: (args) => claimRuns(pool, { ...args, logger: args.logger ?? logger }),
     reportStep: (args) => reportStep(pool, args),
     suspendRun: (args) => suspendRun(pool, args),
     waitForChildRun: (args) => waitForChildRun(pool, args, waitGraph),

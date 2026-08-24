@@ -100,6 +100,15 @@ function stubPool(opts: StubOptions = {}) {
         };
       }
 
+      // The timer resume's expected-old-state flip (p2-39): a live server
+      // answers 1 row for a run that is 'waiting' and 0 for anything else —
+      // the 0-row answer is the stale branch (wait canceled, run untouched).
+      if (/UPDATE runs SET status = 'queued'/.test(text)) {
+        const runId = String(params?.[0]);
+        const known = due.some((d) => d.runId === runId);
+        return { rows: known ? [{ id: runId }] : [], rowCount: known ? 1 : 0 };
+      }
+
       // Canonical position 3 — the wait row, re-checked under its own lock.
       // The namespace predicate sits BEFORE the row-lock clause (the lock
       // clause must be last — a C2 regression once put `AND project_id` after

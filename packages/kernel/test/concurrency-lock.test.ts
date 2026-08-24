@@ -54,7 +54,7 @@ function stubPool(rows: unknown[], running: number) {
       stmts.push({ sql, params });
       if (/FROM queue q/.test(sql)) return { rows };
       if (/count\(\*\)/.test(sql)) return { rows: [{ n: String(running) }] };
-      if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '1' }] };
+      if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '1' }], rowCount: 1 };
       return { rows: [] };
     },
     release: () => {},

@@ -15,6 +15,7 @@ import {
   type Namespace,
   type StepSnapshot,
 } from '@better-trigger/core';
+import type { KernelLogger } from './kernel';
 import { notifyWork } from './notify';
 
 export interface EnqueueArgs {
@@ -201,6 +202,13 @@ export interface ClaimRunsArgs {
    * rows to detect overflow without a second count.
    */
   maxSteps?: number;
+  /**
+   * Sink for stale-candidate diagnostics (p2-39): a candidate whose runs row
+   * is not 'queued' anymore is skipped, and the skip is worth saying out loud —
+   * such a row can only exist if some path desynced queue from runs. Defaults
+   * to console.
+   */
+  logger?: KernelLogger;
 }
 
 /**
@@ -230,6 +238,13 @@ export interface ClaimRunsArgs {
 export const CONCURRENCY_LOCK_CLASS = 0x62_74_63_63; // 'btcc'
 
 /**
+ * Terminal run statuses — one-way states no recovery/claim path may ever
+ * transition a run out of (p2-39). A queue row left behind by one of these
+ * (or by a 'waiting' run) is residue, deleted under the lock already held.
+ */
+export const TERMINAL_STATUSES = ['completed', 'failed', 'canceled'];
+
+/**
  * Size of the candidate window the claim transaction locks, derived from the
  * caller's `limit` (todos/02-performance.md PF3).
  *
@@ -256,12 +271,14 @@ export function claimWindow(limit: number): number {
  *
  * Phase 1 — the claim transaction:
  *   SELECT a claimWindow(remaining)-wide candidate set FOR UPDATE SKIP LOCKED
- *   (available + unclaimed, by priority, task set filtered in SQL), for each
- *   candidate skip if the concurrency limit is hit, otherwise claim it: take
- *   the lease on the queue row (locked_by/locked_at + lease_until = now() +
- *   leaseMs), then flip the run to running and bump runs.fencing_token —
- *   queue row locked before the runs row, the canonical kernel lock order
- *   (see runs.ts header). COMMIT.
+ *   (available + unclaimed + runs.status 'queued', by priority, task set
+ *   filtered in SQL), for each candidate skip if the concurrency limit is hit,
+ *   otherwise claim it: flip the run to running (guarded by status 'queued')
+ *   and bump runs.fencing_token, then take the lease on the queue row
+ *   (locked_by/locked_at + lease_until = now() + leaseMs) — the queue row was
+ *   locked by the scan before the runs row, the canonical kernel lock order
+ *   (see runs.ts header). A 0-row flip is a stale candidate and skips the
+ *   lease and ledger entirely (p2-39). COMMIT.
  *
  * The candidate scan runs ONCE PER NAMESPACE (p1-08). One scan over the whole
  * `namespaces` list used to compile to `(project_id, env) IN (VALUES …)`: with
@@ -324,6 +341,7 @@ export function claimWindow(limit: number): number {
 export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<ClaimedRun[]> {
   if (args.taskIds.length === 0 || args.limit <= 0) return [];
   assertNamespaces(args.namespaces);
+  const logger: KernelLogger = args.logger ?? console;
 
   const codeVersions = args.codeVersions ?? [];
   const pinned = args.codeVersions !== undefined;
@@ -357,9 +375,12 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
 
     // The candidate scan runs once per namespace (p1-08). `JOIN runs` is an
     // inner join, so a queue row whose run vanished is simply not a candidate
-    // (it was skipped by the old per-row read too). `LEFT JOIN tasks` because a
-    // run may reference a task row that was never registered — that means "no
-    // concurrency limit", not "not claimable".
+    // (it was skipped by the old per-row read too). `r.status = 'queued'` is
+    // the claimability predicate itself (p2-39): a queue row can only ever be
+    // claimed while its run is still queued — a terminal/desynced run's
+    // leftover row is invisible here, never resurrected. `LEFT JOIN tasks`
+    // because a run may reference a task row that was never registered — that
+    // means "no concurrency limit", not "not claimable".
     //
     // Pinned, the task filter becomes a join against the (id, version) pairs
     // this worker serves rather than an id-only `= ANY`, so the predicate is
@@ -419,6 +440,7 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
                LEFT JOIN tasks t ON t.id = r.task_id
                               AND t.project_id = r.project_id AND t.env = r.env
               WHERE q.available_at <= now() AND q.locked_by IS NULL
+                AND r.status = 'queued'
                 AND ${qPredicate}
                 AND ${rPredicate}
                 AND (r.code_version IS NULL OR r.code_version = s.code_version)
@@ -435,6 +457,7 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
                LEFT JOIN tasks t ON t.id = r.task_id
                               AND t.project_id = r.project_id AND t.env = r.env
               WHERE q.available_at <= now() AND q.locked_by IS NULL
+                AND r.status = 'queued'
                 AND ${qPredicate}
                 AND ${rPredicate}
                 AND r.task_id = ANY($1::text[])
@@ -476,11 +499,64 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
           if (running >= limit) continue; // leave it in the queue
         }
 
-        // Claim it: take the lease on the (already SKIP LOCKED-held) queue row,
-        // then bump the run's fencing token while flipping it to running. The
-        // returned token is the claim's write credential — any later claim
-        // invalidates it, and it survives suspend/resume because it lives on
-        // runs, not on the delete-and-reinserted queue row.
+        // Claim it: flip the run to running FIRST, guarded by the expected old
+        // state (p2-39) — the queue row is already held (SKIP LOCKED, since the
+        // scan), which is what serializes against every other path, so the
+        // `status = 'queued'` predicate is belt-and-braces; a 0-row flip means
+        // the candidate went stale (a terminal/desynced run with a leftover
+        // queue row), and the claim must stop there: no lease, no ledger, no
+        // fencing bump. The returned token is the claim's write credential —
+        // any later claim invalidates it, and it survives suspend/resume
+        // because it lives on runs, not on the delete-and-reinserted queue row.
+        const tokenRes = await client.query<{ fencing_token: string }>(
+          `UPDATE runs
+              SET status = 'running',
+                  started_at = COALESCE(started_at, now()),
+                  updated_at = now(),
+                  fencing_token = fencing_token + 1
+            WHERE id = $1 AND project_id = $2 AND env = $3 AND status = 'queued'
+            RETURNING fencing_token`,
+          [cand.run_id, cand.project_id, cand.env],
+        );
+        if (tokenRes.rowCount !== 1) {
+          // The row exists but is not 'queued' anymore — a stale queue row
+          // pointing at a run that already moved on (p2-39 §2). The queue row
+          // is already held (position 1, taken by the candidate scan), so a
+          // plain read of the run's status is race-free against every kernel
+          // path: they all take the run's queue row before touching the run.
+          // A terminal or 'waiting' run must carry no queue row — nothing will
+          // ever pick this row up again — so delete it right here, under the
+          // lock already held (no new lock, canonical order untouched). A
+          // 'running' or 'queued' run means the flip was resolved elsewhere
+          // (a live-claim race): its row is either someone's live claim or a
+          // row another claim will retake — leave it alone. A missing run row
+          // makes the queue row a ghost — delete it too (the reaper's rule).
+          const st = await client.query<{ status: string }>(
+            `SELECT status FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
+            [cand.run_id, cand.project_id, cand.env],
+          );
+          const oldStatus = st.rows[0]?.status ?? 'missing';
+          const removable =
+            TERMINAL_STATUSES.includes(oldStatus) ||
+            oldStatus === 'waiting' ||
+            oldStatus === 'missing';
+          if (removable) {
+            await client.query(
+              `DELETE FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3`,
+              [cand.run_id, cand.project_id, cand.env],
+            );
+          }
+          logger.warn(
+            `[queue:claim] candidate queue row ${cand.queue_id} for run ${cand.run_id} ` +
+              `is stale (runs.status '${oldStatus}', not 'queued') — claim skipped, run untouched` +
+              (removable ? ', stale queue row deleted (source: claim)' : ''),
+          );
+          continue;
+        }
+        const fencingToken = Number(tokenRes.rows[0]!.fencing_token);
+
+        // The lease, on the row the scan already holds (canonical position 1
+        // was taken at scan time; this is a write, not a new lock).
         await client.query(
           `UPDATE queue
               SET locked_by = $1,
@@ -489,18 +565,6 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
             WHERE id = $3 AND project_id = $4 AND env = $5`,
           [args.workerId, String(args.leaseMs), cand.queue_id, cand.project_id, cand.env],
         );
-
-        const tokenRes = await client.query<{ fencing_token: string }>(
-          `UPDATE runs
-              SET status = 'running',
-                  started_at = COALESCE(started_at, now()),
-                  updated_at = now(),
-                  fencing_token = fencing_token + 1
-            WHERE id = $1 AND project_id = $2 AND env = $3
-            RETURNING fencing_token`,
-          [cand.run_id, cand.project_id, cand.env],
-        );
-        const fencingToken = Number(tokenRes.rows[0]?.fencing_token ?? 0);
 
         pending.push({
           runId: cand.run_id,

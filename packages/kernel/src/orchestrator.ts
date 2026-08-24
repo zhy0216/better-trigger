@@ -535,6 +535,44 @@ export function startOrchestrator(
           return;
         }
 
+        // Timer resume with the expected-old-state predicate (p2-39): a due
+        // timer wait may only flip a run that is actually 'waiting'. The run
+        // row is held above, so the predicate is belt-and-braces; the affected
+        // row count is what must decide — a 0-row flip means the wait is stale
+        // (the run went terminal/canceled/desynced on some other path), and
+        // the run must NOT be resurrected: retire the wait, write nothing to
+        // the ledger, enqueue nothing, notify nobody.
+        const flip = await client.query(
+          `UPDATE runs SET status = 'queued', updated_at = now()
+            WHERE id = $1 AND project_id = $2 AND env = $3 AND status = 'waiting'`,
+          [w.run_id, wNs.projectId, wNs.env],
+        );
+        if (flip.rowCount !== 1) {
+          await client.query(
+            `UPDATE waits SET status = 'canceled' WHERE id = $1
+               AND project_id = $2 AND env = $3`,
+            [w.id, wNs.projectId, wNs.env],
+          );
+          // The run's queue row (position 1 — held since the top of this tx)
+          // is stale too when the run is terminal: a terminal run must carry
+          // no queue row, and this is the one path that holds the row while
+          // knowing the run is terminal, so delete it in the SAME lock order
+          // instead of leaving inert garbage behind.
+          const terminal = ['completed', 'failed', 'canceled'].includes(run.status);
+          if (terminal) {
+            await client.query(
+              `DELETE FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3`,
+              [w.run_id, wNs.projectId, wNs.env],
+            );
+          }
+          logger.warn(
+            `[orchestrator:waits] stale timer wait ${w.id} on run ${w.run_id} ` +
+              `(runs.status '${run.status}', not 'waiting') — wait canceled, ` +
+              `${terminal ? 'stale queue row deleted, ' : ''}run untouched`,
+          );
+          return;
+        }
+
         await client.query(
           `UPDATE waits SET status = 'completed' WHERE id = $1
              AND project_id = $2 AND env = $3`,
@@ -565,11 +603,6 @@ export function startOrchestrator(
         // loop error counter/log surface it, instead of silently desyncing
         // the ledger.
         if (!outcome.ok) throw new KernelError(outcome.code, outcome.message);
-        await client.query(
-          `UPDATE runs SET status = 'queued', updated_at = now()
-            WHERE id = $1 AND project_id = $2 AND env = $3`,
-          [w.run_id, wNs.projectId, wNs.env],
-        );
         // Re-enqueue through the shared enqueue() (p2-30), NOT a hand-rolled
         // INSERT: "put a run back in the queue" is one concept, one SQL shape.
         // Priority comes off the runs row, not a literal: suspendRun deleted the
@@ -743,9 +776,46 @@ export function startOrchestrator(
         // (canonical order; see runs.ts header).
         const run = await lockRunRow(client, q.run_id, qNs);
         if (!run) {
+          // A leased queue row whose run does not exist anymore — nothing to
+          // requeue, nothing to fail; the row itself is the stale part (p2-39
+          // §2: queue rows without a corresponding run are deleted, and the
+          // deletion is worth saying out loud).
           await client.query(
             `DELETE FROM queue WHERE id = $1 AND project_id = $2 AND env = $3`,
             [q.id, qNs.projectId, qNs.env],
+          );
+          logger.warn(
+            `[orchestrator:reaper] stale queue row ${q.id} for missing run ${q.run_id} ` +
+              `— queue row deleted`,
+          );
+          continue;
+        }
+        // Expected-old-state guard (p2-39): an expired lease belongs to a run
+        // this reaper (or a dead worker) was EXECUTING — 'running'. A stale
+        // lease on anything else is a desynced row the public API can never
+        // commit, and neither branch below may transition it: a terminal run
+        // keeps its state and only its leftover queue row goes; a
+        // 'queued'/'waiting' run just has the stale claim cleared (no recovery
+        // spent, no status touched).
+        if (run.status !== 'running') {
+          if (['completed', 'failed', 'canceled'].includes(run.status)) {
+            await client.query(
+              `DELETE FROM queue WHERE id = $1 AND project_id = $2 AND env = $3`,
+              [q.id, qNs.projectId, qNs.env],
+            );
+          } else {
+            await client.query(
+              `UPDATE queue
+                  SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = now()
+                WHERE id = $1 AND project_id = $2 AND env = $3`,
+              [q.id, qNs.projectId, qNs.env],
+            );
+          }
+          logger.warn(
+            `[orchestrator:reaper] stale lease on queue row ${q.id} for run ${q.run_id} ` +
+              `(runs.status '${run.status}', not 'running') — ` +
+              `queue row ${['completed', 'failed', 'canceled'].includes(run.status) ? 'deleted' : 'released'}, ` +
+              `run untouched`,
           );
           continue;
         }
@@ -770,10 +840,12 @@ export function startOrchestrator(
           failed += 1;
           failedTerminal.push({ runId: q.run_id, qNs, hasParent: run.parent_run_id !== null });
         } else {
+          // `AND status = 'running'` is belt-and-braces on the guard above
+          // (the row is held, so no one else can move it in between).
           await client.query(
             `UPDATE runs
                 SET status = 'queued', recoveries = recoveries + 1, updated_at = now()
-              WHERE id = $1 AND project_id = $2 AND env = $3`,
+              WHERE id = $1 AND project_id = $2 AND env = $3 AND status = 'running'`,
             [q.run_id, qNs.projectId, qNs.env],
           );
           // Release the claim. runs.fencing_token is deliberately untouched —

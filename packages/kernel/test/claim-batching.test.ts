@@ -72,7 +72,7 @@ function stubPool(rows: CandidateRow[], opts: { steps?: unknown[]; running?: num
       stmts.push({ sql, params });
       if (/FROM queue q/.test(sql)) return { rows };
       if (/FROM run_steps/.test(sql)) return { rows: opts.steps ?? [] };
-      if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '42' }] };
+      if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '42' }], rowCount: 1 };
       if (/count\(\*\)/.test(sql)) return { rows: [{ n: String(opts.running ?? 0) }] };
       return { rows: [] };
     },
@@ -133,14 +133,16 @@ describe('claimRuns candidate fan-out', () => {
 
     await claimRuns(pool, { ...ARGS, limit: 1 });
 
-    // BEGIN, candidates, UPDATE queue, UPDATE runs, COMMIT — then the run_steps
+    // BEGIN, candidates, UPDATE runs, UPDATE queue, COMMIT — then the run_steps
     // snapshot read AFTER the claim transaction (p1-07: the ledger must not keep
-    // the claim window's FOR UPDATE SKIP LOCKED rows held).
+    // the claim window's FOR UPDATE SKIP LOCKED rows held). The runs flip comes
+    // before the lease since p2-39: the claim must see the status guard win (or
+    // lose) before it commits to the queue row.
     expect(stmts.map((s) => s.sql.trim().split(/\s+/).slice(0, 2).join(' '))).toEqual([
       'BEGIN',
       'SELECT q.id',
-      'UPDATE queue',
       'UPDATE runs',
+      'UPDATE queue',
       'COMMIT',
       'SELECT seq,',
     ]);
