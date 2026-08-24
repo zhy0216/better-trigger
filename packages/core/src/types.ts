@@ -208,6 +208,27 @@ export interface CreatedRun {
   idempotent: boolean;
 }
 
+/**
+ * Options for a manual retry (POST /runs/:id/retry, kernel.retryRun).
+ */
+export interface RetryRunOptions {
+  /**
+   * Request-level idempotency token, scoped to (project_id, env, source run
+   * id, operationKey): repeated sends of the SAME retry intent under the same
+   * key — a re-send while the request is still pending, a proxy replaying the
+   * identical request bytes — return the first call's new run instead of
+   * minting one retry run per delivery. Dedup holds per caller: each
+   * client/dashboard replica mints its own key, so two concurrent dashboards
+   * are two operations (cross-client dedup needs server-side coordination and
+   * is outside this protocol). A different key is a different operation and
+   * creates its own run; no key keeps the legacy semantics (every call is a
+   * fresh retry, nothing recorded). The key space is independent of
+   * TriggerOptions.idempotencyKey — a retry operation is identified by its
+   * source run, never by the task (p2-38).
+   */
+  operationKey?: string;
+}
+
 /** Full run record (camelCase, dates as ISO-8601 strings). */
 export interface RunRecord {
   id: string;

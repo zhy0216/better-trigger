@@ -9,6 +9,7 @@ import { STATUS_META } from '../../components/status-meta';
 import { ErrorState, LoadingState } from '../../components/Layout';
 import { useRun, api } from '../../api/hooks';
 import { relativeFuture, type AdaptedRunDetail } from '../../api/adapter';
+import { createRetryIntentKey } from './retryIntentKey';
 import type { Span, Trace, LogLine, VizStyle } from '../../types';
 
 const KIND_ICON: Record<string, string> = { task: 'bolt', http: 'globe', query: 'db', fn: 'fn' };
@@ -36,6 +37,17 @@ function RunHeader({ trace, runStatus, onRetried }: { trace: Trace; runStatus: s
   // frame; on failure it rolls back (buttons re-enable) and surfaces the error.
   const [pending, setPending] = React.useState<'retry' | 'cancel' | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
+  // p2-38 repair: one Idempotency-Key per retry INTENT, not per click event.
+  // current() mints on the first click of an intent and returns the SAME key
+  // for every re-send of that intent (the second click of a double-click
+  // racing the pending disabled state, a re-send while the request is still
+  // in flight), so the server's replay path hands back the one run this
+  // intent already created. clear() in the request's finally ends the intent
+  // on settle (success OR failure, whether or not a response made it back) —
+  // the NEXT click is a new intent with a fresh key. Two dashboard tabs each
+  // hold their own holder by design: cross-client dedup needs server-side
+  // coordination and is outside this protocol (docs/backend-contract.md §3.7).
+  const retryIntentKey = React.useMemo(() => createRetryIntentKey(), []);
   const runAction = async (kind: 'retry' | 'cancel') => {
     setActionError(null);
     setPending(kind);
@@ -44,7 +56,8 @@ function RunHeader({ trace, runStatus, onRetried }: { trace: Trace; runStatus: s
         // retryRun mints a NEW run (id changes) — navigate to it, or the
         // poll would keep watching the old failed run forever and repeat
         // clicks would silently spawn N runs.
-        const { runId: newRunId } = await api.retryRun(trace.runId);
+        const operationKey = retryIntentKey.current();
+        const { runId: newRunId } = await api.retryRun(trace.runId, { operationKey });
         onRetried?.(newRunId);
       } else {
         // Cancel keeps the same run: the 2s useRun poll picks up 'canceled'.
@@ -54,6 +67,7 @@ function RunHeader({ trace, runStatus, onRetried }: { trace: Trace; runStatus: s
       setActionError(e instanceof Error ? e.message : 'request failed');
     } finally {
       setPending(null);
+      if (kind === 'retry') retryIntentKey.clear();
     }
   };
   return (

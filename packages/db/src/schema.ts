@@ -150,6 +150,53 @@ export const runs = pgTable(
 );
 
 /* ---------------------------------------------------------------------------
+ * run_retry_operations — request-level idempotency record for manual retries
+ * (p2-38). PK/unique is (project_id, env, source_run_id, operation_key):
+ * repeated sends of the SAME retry intent under the same key — a re-send
+ * while the request is still pending, a proxy replaying the identical request
+ * bytes, the second click of a double-click sharing one key — resolve to the
+ * SAME new run, while a different operation key stays a different,
+ * independent retry. Dedup holds per caller: each client/dashboard replica
+ * mints its own key, so cross-client dedup is a server-coordination concern
+ * outside this table. Deliberately NOT the trigger idempotency index
+ * (project_id, env, task_id, idempotency_key): a retry operation identifies
+ * itself by the SOURCE run, never by the task, so the two key spaces cannot
+ * collide. Rows are created only when the caller supplies an operation key —
+ * the legacy no-key retry records nothing.
+ *
+ * Retention follows the runs on both ends (CASCADE): once either the source or
+ * the retry run is pruned, the mapping is meaningless — a replayed key would
+ * otherwise hand back a dead run id, or answer for a source the retry already
+ * 404s on. There is deliberately NO independent TTL or sweeper for this
+ * table: the row count is bounded by "explicit retry intents per source run"
+ * (each keyed retry is one row; keyless retries record nothing), and each
+ * row's life ends exactly with its runs at either end — i.e. the kernel's
+ * runs prune (retention, todos/02-performance.md PF6) is the only cleanup
+ * this table ever needs. The operation row and its run are inserted in ONE
+ * transaction, so no reader can ever observe the row before its retry run
+ * exists.
+ * ------------------------------------------------------------------------- */
+export const runRetryOperations = pgTable(
+  'run_retry_operations',
+  {
+    projectId: text('project_id').notNull().default('default'),
+    env: text('env').notNull().default('prod'),
+    sourceRunId: text('source_run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    operationKey: text('operation_key').notNull(),
+    /** The new run this operation created (trigger_type='retry'). NOT NULL:
+     *  the row is written after its run in the same tx, and CASCADE removes it
+     *  with the run — a committed row always answers with a live run id. */
+    retryRunId: text('retry_run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.projectId, t.env, t.sourceRunId, t.operationKey] })],
+);
+
+/* ---------------------------------------------------------------------------
  * run_steps — composite PK (run_id, seq)
  * ------------------------------------------------------------------------- */
 export const runSteps = pgTable(
@@ -408,6 +455,7 @@ export const workers = pgTable('workers', {
 export type DbRun = typeof runs.$inferSelect;
 export type DbRunInsert = typeof runs.$inferInsert;
 export type DbRunStep = typeof runSteps.$inferSelect;
+export type DbRunRetryOperation = typeof runRetryOperations.$inferSelect;
 export type DbQueue = typeof queue.$inferSelect;
 export type DbWait = typeof waits.$inferSelect;
 export type DbSchedule = typeof schedules.$inferSelect;

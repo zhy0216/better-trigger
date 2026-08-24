@@ -9,7 +9,9 @@
    LOCK ORDER (canonical — every multi-row kernel tx acquires in this order):
      1. queue row  — SELECT ... FROM queue WHERE run_id = $1 FOR UPDATE (0/1 rows)
      2. runs row   — SELECT ... FROM runs  WHERE id     = $1 FOR UPDATE
-     3. dependent rows of that run (waits / run_steps)
+     3. dependent rows of that run (waits / run_steps; a manual retry with an
+        operation key also locks the source's run_retry_operations row here —
+        position 3+, same-key writers already serialized at position 2, p2-38)
    A tx that touches two runs orders them child before parent
    (wakeParentIfWaiting runs inside the child's terminal tx and re-acquires
    1→2→3 for the parent); parent_run_id chains are acyclic, so cross-run
@@ -78,6 +80,7 @@ import {
   type LogRecord,
   type Namespace,
   type RetryPolicy,
+  type RetryRunOptions,
   type RunDetailResult,
   type RunRecord,
   type RunStatus,
@@ -453,6 +456,30 @@ export async function tryLockRunRow(
     [id, namespace.projectId, namespace.env],
   );
   return res.rows[0] ?? null;
+}
+
+/** The name pg reports for run_retry_operations' PK unique violation. Migration
+ *  0015 declares it as "run_retry_operations_..._operation_key_pk", but pg
+ *  truncates identifiers to 63 bytes (NAMEDATALEN-1), so the live constraint
+ *  name — what `err.constraint` actually carries — drops the "_pk" suffix.
+ *  This is the ONLY unique violation retryRun's read-back may answer; every
+ *  other 23505 — another table's unique index, or a future unique index added
+ *  to this table — must surface as an error, not be silently re-read as if a
+ *  retry operation had raced. */
+const RETRY_OPERATION_UNIQUE_CONSTRAINT =
+  'run_retry_operations_project_id_env_source_run_id_operation_key';
+
+/**
+ * True when the error is the pg unique-violation (SQLSTATE 23505) of
+ * run_retry_operations' own PK. Anything else is NOT a lost retry-operation
+ * race and is left for the caller to see.
+ */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' && err !== null &&
+    (err as { code?: unknown }).code === '23505' &&
+    (err as { constraint?: unknown }).constraint === RETRY_OPERATION_UNIQUE_CONSTRAINT
+  );
 }
 
 /** Canonical lock position 1: the run's queue row, 0 or 1 rows (see header). */
@@ -1886,42 +1913,108 @@ export async function retryRun(
   pool: Pool,
   runId: string,
   namespace: Namespace,
+  opts?: RetryRunOptions,
 ): Promise<{ runId: string }> {
   assertNamespace(namespace);
-  return withTx(pool, async (client) => {
-    // Reads the (terminal) source run without locking and only inserts fresh
-    // rows via createRunIn — no existing-row locks, so trivially order-safe.
-    // Scoped to the given namespace: a retry can only ever re-run a run inside
-    // it, and the new run inherits that namespace (C2).
-    const run = await getRunRow(client, runId, namespace);
-    if (!run) throw new KernelError('not_found', `run ${runId} not found`);
-    if (!['failed', 'canceled'].includes(run.status)) {
-      throw new KernelError('conflict', `run ${runId} is ${run.status}, not retryable`);
-    }
-    const created = await createRunIn(client, {
-      taskId: run.task_id,
-      payload: run.payload,
-      // Carry the source run's scheduling config over: a retry of an urgent,
-      // separately-throttled run must not silently land at priority 0 in the
-      // task's default concurrency bucket. priority comes off the runs row
-      // (the queue row is long gone — the source run is terminal), and a NULL
-      // concurrency_key means "the task has no limit", which createRunIn
-      // re-derives from the task anyway.
-      options: {
-        priority: run.priority,
-        ...(run.concurrency_key !== null ? { concurrencyKey: run.concurrency_key } : {}),
-      },
-      // NOT carried over: idempotencyKey — reusing it would make the retry
-      // collide with the very run it is retrying and hand back its id.
-      // requireTask: a task that is no longer registered must 404 here, not
-      // enqueue a dead run nobody can ever claim.
-      triggerType: 'retry',
-      namespace,
-      requireTask: true,
+  const operationKey = opts?.operationKey;
+  try {
+    return await withTx(pool, async (client) => {
+      // Canonical lock order (see file header): the (usually absent) source
+      // queue row first, then the source runs row. Locking the runs row is the
+      // serialization point for concurrent retries of the same source AND for
+      // a cancel/complete racing in — the status read below is decided at the
+      // lock, so a completed/running run can never be retried off a stale
+      // read. (Locking alone cannot recognize a replayed request minutes
+      // later — that is what the operation record below is for, p2-38.)
+      await lockQueueRow(client, runId, namespace);
+      const run = await lockRunRow(client, runId, namespace);
+      if (!run) throw new KernelError('not_found', `run ${runId} not found`);
+      if (!['failed', 'canceled'].includes(run.status)) {
+        throw new KernelError('conflict', `run ${runId} is ${run.status}, not retryable`);
+      }
+      if (operationKey) {
+        const existing = await client.query<{ retry_run_id: string }>(
+          `SELECT retry_run_id FROM run_retry_operations
+            WHERE project_id = $1 AND env = $2 AND source_run_id = $3 AND operation_key = $4
+            FOR UPDATE`,
+          [namespace.projectId, namespace.env, runId, operationKey],
+        );
+        // Idempotent replay: this operation already created its run (and
+        // enqueued it) — hand the same id back and create nothing. The FOR
+        // UPDATE here is belt-and-braces: same-key concurrent retries already
+        // serialized on the source runs row above.
+        if (existing.rows[0]) return { runId: existing.rows[0].retry_run_id };
+      }
+      const created = await createRunIn(client, {
+        taskId: run.task_id,
+        payload: run.payload,
+        // Carry the source run's scheduling config over: a retry of an urgent,
+        // separately-throttled run must not silently land at priority 0 in the
+        // task's default concurrency bucket. priority comes off the runs row
+        // (the queue row is long gone — the source run is terminal), and a NULL
+        // concurrency_key means "the task has no limit", which createRunIn
+        // re-derives from the task anyway.
+        options: {
+          priority: run.priority,
+          ...(run.concurrency_key !== null ? { concurrencyKey: run.concurrency_key } : {}),
+        },
+        // NOT carried over: idempotencyKey — reusing it would make the retry
+        // collide with the very run it is retrying and hand back its id.
+        // requireTask: a task that is no longer registered must 404 here, not
+        // enqueue a dead run nobody can ever claim.
+        triggerType: 'retry',
+        namespace,
+        requireTask: true,
+      });
+      if (operationKey) {
+        // The operation record is written after its run — the FK to runs is
+        // not deferrable, and the run id only exists once createRunIn minted
+        // it. Same-key writers cannot actually reach this INSERT concurrently:
+        // validating the FK holds a KEY SHARE lock on the SOURCE runs row,
+        // which conflicts with the FOR UPDATE taken at canonical position 2 —
+        // so a second same-key writer blocks there and, once the first
+        // commits, takes the committed-row replay branch above. The unique
+        // index is therefore defense-in-depth, NOT the main race path: it can
+        // only fire for a write that bypassed the FK entirely
+        // (session_replication_role = replica — what the pg test suite uses
+        // to exercise this branch) or a future schema change. If it does
+        // fire, the loser rolls the whole tx back — the just-created run
+        // included, so no unrecorded retry run survives — and the catch below
+        // re-reads the winner's row.
+        await client.query(
+          `INSERT INTO run_retry_operations
+             (project_id, env, source_run_id, operation_key, retry_run_id)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [namespace.projectId, namespace.env, runId, operationKey, created.runId],
+        );
+      }
+      await notifyWork(client);
+      return { runId: created.runId };
     });
-    await notifyWork(client);
-    return { runId: created.runId };
-  });
+  } catch (err) {
+    if (operationKey && isUniqueViolation(err)) {
+      // Defense-in-depth path (see the INSERT comment above): the violating
+      // insert only surfaced once the winner committed, so its row is visible
+      // to this fresh read outside the aborted transaction. Rows are 1:1 with
+      // committed runs, so answering with it cannot return a run this loser
+      // would otherwise have had to create.
+      const winner = await pool.query<{ retry_run_id: string }>(
+        `SELECT retry_run_id FROM run_retry_operations
+          WHERE project_id = $1 AND env = $2 AND source_run_id = $3 AND operation_key = $4`,
+        [namespace.projectId, namespace.env, runId, operationKey],
+      );
+      if (winner.rows[0]) return { runId: winner.rows[0].retry_run_id };
+      // The winner's row vanished between the violation and the read-back
+      // (its run was pruned). Do not leak the raw pg error — the caller gets
+      // a stable conflict carrying the original message instead of a 500.
+      const cause = err instanceof Error ? err.message : String(err);
+      throw new KernelError(
+        'conflict',
+        `retry operation conflicted and its winner row is gone (${cause})`,
+      );
+    }
+    throw err;
+  }
 }
 
 /* ---------------------------------------------------------------------------

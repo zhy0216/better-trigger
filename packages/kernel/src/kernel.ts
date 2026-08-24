@@ -12,6 +12,7 @@ import type {
   CreatedRun,
   LogEntry,
   Namespace,
+  RetryRunOptions,
   RunDetailResult,
   RunRecord,
   TriggerItem,
@@ -123,8 +124,13 @@ export interface Kernel {
   batchTrigger(items: TriggerItem[], namespace: Namespace): Promise<{ runIds: string[] }>;
   /** Cancel a non-terminal run (terminal → no-op). Wakes a waiting parent. */
   cancelRun(runId: string, namespace: Namespace): Promise<void>;
-  /** Re-run a failed/canceled run as a NEW run (triggerType 'retry'). */
-  retryRun(runId: string, namespace: Namespace): Promise<{ runId: string }>;
+  /**
+   * Re-run a failed/canceled run as a NEW run (triggerType 'retry'). With
+   * `opts.operationKey` the call is idempotent per (namespace, source run,
+   * key) — a replayed request returns the FIRST call's new run id instead of
+   * creating another (p2-38); without a key every call is a fresh retry.
+   */
+  retryRun(runId: string, namespace: Namespace, opts?: RetryRunOptions): Promise<{ runId: string }>;
   /** Full run record. */
   getRun(runId: string, namespace: Namespace): Promise<RunRecord>;
   /** Run + steps + waits + logs (logs capped at 1000). */
@@ -203,7 +209,7 @@ export function createKernel(opts: KernelOptions): Kernel {
     trigger: (args) => trigger(pool, args),
     batchTrigger: (items, namespace) => batchTrigger(pool, items, namespace),
     cancelRun: (runId, namespace) => cancelRun(pool, runId, namespace),
-    retryRun: (runId, namespace) => retryRun(pool, runId, namespace),
+    retryRun: (runId, namespace, opts) => retryRun(pool, runId, namespace, opts),
     getRun: (runId, namespace) => getRunRecord(pool, runId, namespace),
     getRunDetail: (runId, namespace) => getRunDetail(pool, runId, namespace),
     waitForResult: (runId, namespace, o) => waitForResult(pool, runId, namespace, o),

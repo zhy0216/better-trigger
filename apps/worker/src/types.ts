@@ -12,6 +12,7 @@
 import type {
   CreatedRun,
   LogRecord,
+  RetryRunOptions as RetryRunOptionsModel,
   RunDetailResult,
   RunRecord,
   RunStepRecord,
@@ -123,6 +124,14 @@ export type RunStepRow = RunStepRecord;
 export type WaitRow = WaitRecord;
 export type LogRow = LogRecord;
 export type RunDetailResponse = RunDetailResult;
+
+/**
+ * POST /api/v1/runs/:id/retry — the `Idempotency-Key` request header becomes
+ * `operationKey`; scoped to (project_id, env, source run id, key), so a
+ * replayed request returns the first call's new run (p2-38). Absent → legacy
+ * semantics, every call is a fresh retry.
+ */
+export type RetryRunOptions = RetryRunOptionsModel;
 
 /** POST /api/v1/runs/:id/retry */
 export interface RetryRunResponse {

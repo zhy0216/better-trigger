@@ -271,7 +271,8 @@ describe('notify sources — work notifications', () => {
   it('retryRun sends work for the freshly-created run', async () => {
     const { pool, notified, texts } = stubPool({
       handlers: [
-        () => ({ rows: [runRow({ status: 'failed' })] }), // source run read
+        () => ({ rows: [] }), // queue row lock (terminal source → no queue row)
+        () => ({ rows: [runRow({ status: 'failed' })] }), // source run read (FOR UPDATE)
         () => ({ rows: [TASK_ROW] }), // task config
         (_, params) => ({ rows: [{ id: String(params?.[0]) }] }), // INSERT runs
         () => ({ rows: [] }), // enqueue

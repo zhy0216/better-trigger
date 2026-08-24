@@ -87,11 +87,13 @@ interface RequestOptions {
   method?: string;
   body?: unknown;
   signal?: AbortSignal;
+  /** Extra request headers, merged under the defaults (auth, content-type). */
+  headers?: Record<string, string>;
 }
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, signal } = opts;
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...(opts.headers ?? {}) };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   const res = await fetch(API_BASE_URL + PREFIX + path, {
@@ -229,9 +231,24 @@ export const api = {
       signal,
     });
   },
-  retryRun(runId: string, signal?: AbortSignal): Promise<{ runId: string }> {
+  /**
+   * Re-run a failed/canceled run as a NEW run. `opts.operationKey` is sent as
+   * the Idempotency-Key header (p2-38): repeated sends of the SAME intent
+   * under the same key — a re-send while the request is still pending, a
+   * proxy replaying the identical request bytes — return the FIRST call's new
+   * run id instead of creating one run per delivery. Key reuse is the
+   * caller's contract: the dashboard holds one key for the lifetime of an
+   * in-flight retry intent and clears it when the request settles, so a fresh
+   * click is a fresh intent with a fresh key. Absent → legacy semantics.
+   */
+  retryRun(
+    runId: string,
+    opts?: { operationKey?: string },
+    signal?: AbortSignal,
+  ): Promise<{ runId: string }> {
     return request('/runs/' + encodeURIComponent(runId) + '/retry?projectId=' + PROJECT_ID, {
       method: 'POST',
+      headers: opts?.operationKey ? { 'Idempotency-Key': opts.operationKey } : undefined,
       signal,
     });
   },

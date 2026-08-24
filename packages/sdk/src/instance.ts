@@ -12,6 +12,7 @@
 import type {
   CreatedRun,
   Namespace,
+  RetryRunOptions,
   RunDetailResult,
   RunRecord,
   RunStatus,
@@ -105,9 +106,13 @@ export interface BetterTrigger {
   cancelRun(runId: string, namespace?: Namespace): Promise<void>;
   /**
    * Re-run a failed/canceled run as a NEW run. `namespace` scopes the request;
-   * absent → server default (default/prod).
+   * absent → server default (default/prod). `opts.operationKey` makes the call
+   * idempotent (sent as the Idempotency-Key header, p2-38): re-sending the
+   * same key — a timeout replay, a proxy retry — returns the FIRST call's new
+   * run id instead of creating one run per delivery. Absent → legacy
+   * semantics, every call is a fresh retry.
    */
-  retryRun(runId: string, namespace?: Namespace): Promise<{ runId: string }>;
+  retryRun(runId: string, namespace?: Namespace, opts?: RetryRunOptions): Promise<{ runId: string }>;
   /**
    * Full run record. `namespace` scopes the request; absent → server default
    * (default/prod).
@@ -342,10 +347,13 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
       });
     },
 
-    retryRun(runId, namespace) {
+    retryRun(runId, namespace, opts) {
       return http.request<{ runId: string }>(
         `/runs/${encodeURIComponent(runId)}/retry${nsQuery(namespace)}`,
-        { method: 'POST' },
+        {
+          method: 'POST',
+          headers: opts?.operationKey ? { 'Idempotency-Key': opts.operationKey } : undefined,
+        },
       );
     },
 

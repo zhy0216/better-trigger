@@ -28,8 +28,8 @@ function makeApp() {
     cancelRun: async (_id: string, namespace: unknown) => {
       calls.push(namespace);
     },
-    retryRun: async (_id: string, namespace: unknown) => {
-      calls.push(namespace);
+    retryRun: async (_id: string, namespace: unknown, opts: unknown) => {
+      calls.push({ namespace, opts });
       return { runId: 'run_9' };
     },
     getRun: async (_id: string, namespace: unknown) => {
@@ -136,7 +136,7 @@ describe('runs routes take ?projectId=&env=', () => {
     expect(calls[0]).toEqual(NS);
 
     await app.fetch(post('/runs/run_1/retry', {}, '?projectId=acme&env=staging'));
-    expect(calls[1]).toEqual(NS);
+    expect(calls[1]).toEqual({ namespace: NS, opts: { operationKey: undefined } });
 
     await app.fetch(get('/runs/run_1/record', '?projectId=acme&env=staging'));
     expect(calls[2]).toEqual(NS);
@@ -153,5 +153,81 @@ describe('runs routes take ?projectId=&env=', () => {
     const res = await app.fetch(post('/runs/run_1/cancel', {}, '?env=a:b'));
     expect(res.status).toBe(400);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('POST /runs/:id/retry idempotency header', () => {
+  it('passes the Idempotency-Key header through as the operation key', async () => {
+    const { app, calls } = makeApp();
+    const res = await app.fetch(
+      new Request('http://localhost:4848/api/v1/runs/run_1/retry?projectId=acme&env=staging', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': 'op-42' },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(calls[0]).toEqual({
+      namespace: { projectId: 'acme', env: 'staging' },
+      opts: { operationKey: 'op-42' },
+    });
+  });
+
+  it('normalizes an empty header to an absent key (legacy semantics)', async () => {
+    const { app, calls } = makeApp();
+    const res = await app.fetch(
+      new Request('http://localhost:4848/api/v1/runs/run_1/retry', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': '' },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(calls[0]).toEqual({
+      namespace: { projectId: 'default', env: 'prod' },
+      opts: { operationKey: undefined },
+    });
+  });
+
+  it('normalizes a whitespace-only key to an absent key (legacy semantics)', async () => {
+    const { app, calls } = makeApp();
+    const res = await app.fetch(
+      new Request('http://localhost:4848/api/v1/runs/run_1/retry', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': '   \t  ' },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(calls[0]).toEqual({
+      namespace: { projectId: 'default', env: 'prod' },
+      opts: { operationKey: undefined },
+    });
+  });
+
+  it('refuses a key over 200 chars with 400 bad_request before the kernel is called', async () => {
+    const { app, calls } = makeApp();
+    const res = await app.fetch(
+      new Request('http://localhost:4848/api/v1/runs/run_1/retry', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': 'k'.repeat(201) },
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('bad_request');
+    expect(calls).toHaveLength(0); // nothing reached the kernel
+  });
+
+  it('accepts a key at the 200-char boundary and trims surrounding whitespace', async () => {
+    const { app, calls } = makeApp();
+    const key = 'k'.repeat(200);
+    const res = await app.fetch(
+      new Request('http://localhost:4848/api/v1/runs/run_1/retry', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': `  ${key}  ` },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(calls[0]).toEqual({
+      namespace: { projectId: 'default', env: 'prod' },
+      opts: { operationKey: key },
+    });
   });
 });

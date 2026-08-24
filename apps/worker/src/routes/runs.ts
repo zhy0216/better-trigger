@@ -6,7 +6,7 @@
    /runs/:id detail view lives in routes/dashboard.ts.
    ============================================================================= */
 import { Hono } from 'hono';
-import type { Kernel } from '@better-trigger/kernel';
+import { KernelError, type Kernel } from '@better-trigger/kernel';
 import type { OkResponse, RetryRunResponse } from '../types';
 import { ResultWaitAbortedError, type WaiterRegistry } from '../waiters';
 import { namespaceFromQuery } from '../namespace';
@@ -34,7 +34,26 @@ export function runRoutes(deps: { kernel: Kernel; waiters?: WaiterRegistry }): H
   /* --------------------------------------------------------- retry */
   app.post('/runs/:id/retry', async (c) => {
     const id = c.req.param('id');
-    const { runId } = await kernel.retryRun(id, namespaceFromQuery(c));
+    // Request-level idempotency (p2-38): the Idempotency-Key header scopes the
+    // operation to (project_id, env, source_run_id, operation_key) — repeated
+    // sends of the same intent under the same key return the FIRST call's new
+    // run id instead of creating one run per delivery. Absent (or blank) →
+    // legacy semantics: every call is a fresh retry, nothing recorded.
+    const rawKey = c.req.header('Idempotency-Key');
+    // p2-38 repair: the header is validated, not trusted. A whitespace-only
+    // key counts as no key (legacy semantics). An over-long key is refused
+    // with a clean 400 instead of being written: keys are client-minted
+    // opaque tokens (a UUID is 36 chars), so 200 chars is far past anything
+    // legitimate while staying well under the btree index entry ceiling —
+    // an unbounded key could otherwise blow the INSERT with pg's
+    // "index row size exceeds maximum" and surface as a raw 500.
+    const operationKey = rawKey?.trim();
+    if (operationKey && operationKey.length > 200) {
+      throw new KernelError('bad_request', 'Idempotency-Key must be at most 200 characters');
+    }
+    const { runId } = await kernel.retryRun(id, namespaceFromQuery(c), {
+      operationKey: operationKey || undefined,
+    });
     const res: RetryRunResponse = { runId };
     return c.json(res);
   });

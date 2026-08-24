@@ -74,6 +74,8 @@ export interface RequestOptions {
   signal?: AbortSignal;
   /** Overrides the client-level timeout for this request. */
   timeoutMs?: number;
+  /** Extra request headers, merged over the defaults (auth, content-type). */
+  headers?: Record<string, string>;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -138,7 +140,7 @@ export class HttpClient {
     const onAbort = () => controller.abort(signal?.reason);
     signal?.addEventListener('abort', onAbort, { once: true });
 
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...(opts.headers ?? {}) };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
 
