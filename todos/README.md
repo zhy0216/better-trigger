@@ -1,99 +1,28 @@
-# better-trigger TODOs — 第四轮(2026-08-12 审查)
+# better-trigger TODOs — 并发状态转移专项（2026-08-24）
 
-上一轮(01-correctness / 02-performance / 03-operability)已全部完成并归档到 `todos/done/`。
+本轮条目来自对 kernel / db 在并发条件下的任务状态转移审查。每个问题一个文件；文件内保留现状证据、影响、不变量、实现方案和验收标准。条目目前都只是待办，不代表修复已经落地。
 
-本轮来自 2026-08-12 的全库四方向审查(kernel+db、worker daemon、sdk+core、web+测试+CI),完整审查报告存于 GitMemo「better-trigger 第四轮审查改进点」。**每个问题一个文件**,文件内含现状证据(file:line)、影响、实现方案与验收标准。编号与审查报告对齐(01–21 为报告正文条目,22–36 为 P2/测试盲区)。
-
-## 状态:待办
+## 状态：待办
 
 ## 优先级与执行顺序
 
-按下表顺序执行(P0 → 测试基建 → P1 按子系统 → P2)。「依赖」列标注的前置文件先做。
+按 `finish-todo` 规则从高到低串行处理；同一文件完成独立实现、对抗式复核和仓库级校验后，才可以归档到 `todos/done/` 并创建该文件对应的 commit。
 
 | # | 文件 | 一句话 | 依赖 |
 |---|------|--------|------|
-| 1 | [p0-01-fingerprint-drift-bypass.md](./done/p0-01-fingerprint-drift-bypass.md) ✅ | fingerprint 校验被 kind/label 漂移绕过,lenient 下旧输出喂给新代码 | — |
-| 2 | [p0-02-dashboard-poll-self-abort.md](./done/p0-02-dashboard-poll-self-abort.md) ✅ | dashboard 轮询每 2s abort 上一请求,慢响应永远完成不了 | — |
-| 3 | [p0-03-sdk-result-retry.md](./done/p0-03-sdk-result-retry.md) ✅ | `handle.result()` 无重试,daemon 滚动重启拒绝所有等待者 | — |
-| 4 | [p1-22-kernel-pg-correctness-suite.md](./done/p1-22-kernel-pg-correctness-suite.md) ✅ | 真 PG correctness suite(先立测试床,后续 kernel 修复直接落用例) | — |
-| 5 | [p1-04-triggerandwait-require-task.md](./done/p1-04-triggerandwait-require-task.md) ✅ | `triggerAndWait` 打错 task id → 父 run 永久 waiting | p1-22 |
-| 6 | [p1-05-orphan-wait-nulls-order.md](./done/p1-05-orphan-wait-nulls-order.md) ✅ | 孤儿 wait 排序方向反了(ASC 默认 NULLS LAST) | p1-22 |
-| 7 | [p1-06-waits-run-id-index.md](./done/p1-06-waits-run-id-index.md) ✅ | waits 缺 run_id 索引;唤醒查询不带 namespace 谓词 | p1-22 |
-| 8 | [p1-07-claim-ledger-unbounded.md](./done/p1-07-claim-ledger-unbounded.md) ✅ | claim 在持锁事务内无界读取整个 run_steps 账本 | — |
-| 9 | [p1-08-multi-namespace-plans.md](./done/p1-08-multi-namespace-plans.md) ✅ | ≥2 namespace 时 `IN (VALUES)` 让热路径索引全部失效 | p1-22 |
-| 10 | [p1-09-cron-clock-skew.md](./done/p1-09-cron-clock-skew.md) ✅ | cron 用 daemon 时钟算、DB 时钟比 → 偏移时重复触发 | p1-22 |
-| 11 | [p1-10-concurrency-work-notify.md](./done/p1-10-concurrency-work-notify.md) ✅ | 并发受限任务完成不发 work 通知,下一个 run 白等退避 | — |
-| 12 | [p1-11-pool-sizing-loop-stall.md](./done/p1-11-pool-sizing-loop-stall.md) ✅ | 连接池无 sizing/超时;orchestrator 循环可永久停摆且零指标 | — |
-| 13 | [p1-12-shutdown-races-deadline.md](./done/p1-12-shutdown-races-deadline.md) ✅ | drain 期间领新 run;shutdown 无兜底;信号 handler 装太晚 | — |
-| 14 | [p1-21-compose-stop-grace.md](./done/p1-21-compose-stop-grace.md) ✅ | compose 缺 stop_grace_period,10s SIGKILL 对 30s drain | p1-12 |
-| 15 | [p1-13-unhandled-rejection-policy.md](./done/p1-13-unhandled-rejection-policy.md) ✅ | 用户 task 的 unhandledRejection 直接杀 daemon | — |
-| 16 | [p1-14-read-endpoints-limits.md](./done/p1-14-read-endpoints-limits.md) ✅ | 读端点零限流;长轮询不感知断连 | — |
-| 17 | [p1-15-batchtrigger-namespace-options.md](./done/p1-15-batchtrigger-namespace-options.md) ✅ | batchTrigger 的 per-item env/projectId 静默丢弃 | — |
-| 18 | [p1-16-lazy-async-hooks.md](./done/p1-16-lazy-async-hooks.md) ✅ | eager import node:async_hooks,edge/浏览器加载即炸 | — |
-| 19 | [p1-17-client-timeout-registry.md](./done/p1-17-client-timeout-registry.md) ✅ | 超时误报"daemon 没起";预中止 signal 失效;registry 无校验 | p1-16 |
-| 20 | [p1-18-dashboard-routing.md](./done/p1-18-dashboard-routing.md) ✅ | dashboard 无 URL 路由,deep-link fallback 无消费者 | — |
-| 21 | [p1-19-security-headers-postmessage.md](./done/p1-19-security-headers-postmessage.md) ✅ | 静态资源零安全头;postMessage 无 origin 校验 | — |
-| 22 | [p1-20-connection-state-key-prompt.md](./done/p1-20-connection-state-key-prompt.md) ✅ | connection 全局竞写频闪;key 被拒无反馈 | — |
-| 23 | [p2-23-result-typing-timeout.md](./done/p2-23-result-typing-timeout.md) ✅ | result() 无泛型;30s 超时静默返回非终态 | p0-03 |
-| 24 | [p2-24-retry-policy-undefined.md](./done/p2-24-retry-policy-undefined.md) ✅ | 显式 undefined 覆盖 retry 默认值 → NOT NULL 500 | — |
-| 25 | [p2-25-dead-sdk-surface.md](./done/p2-25-dead-sdk-surface.md) ✅ | pollMs 死参数、core 幽灵 RunHandle、过时注释 | — |
-| 26 | [p2-28-namespace-sweep-marker.md](./done/p2-28-namespace-sweep-marker.md) ✅ | namespace sweep 的 marker 可被 SELECT 列表满足 | p1-06 |
-| 27 | [p2-29-drop-unused-queue-index.md](./done/p2-29-drop-unused-queue-index.md) ✅ | 删除无查询使用的 queue_available_priority_idx | — |
-| 28 | [p2-30-unify-reenqueue.md](./done/p2-30-unify-reenqueue.md) ✅ | scanWaits 开码 re-enqueue 与 enqueue() 语义分叉 | — |
-| 29 | [p2-31-keyless-rate-limit-bucket.md](./done/p2-31-keyless-rate-limit-bucket.md) ✅ | 无 key 时 per-key 限流坍缩成单一 anon 桶 | p1-14 |
-| 30 | [p2-32-route-validation-consistency.md](./done/p2-32-route-validation-consistency.md) ✅ | intQuery/clampQuery 两套校验;/runs?status=垃圾 返回空页 | — |
-| 31 | [p2-33-runs-list-filters-actions.md](./done/p2-33-runs-list-filters-actions.md) ✅ | 搜索假空态;cancel/retry 已实现无 UI | p1-18 |
-| 32 | [p2-34-web-test-infra.md](./done/p2-34-web-test-infra.md) ✅ | web 的 vitest 未声明依赖、无配置、jsdom 靠 docblock | — |
-| 33 | [p2-35-acceptance-ports-timeouts.md](./done/p2-35-acceptance-ports-timeouts.md) ✅ | 验收场景端口冲突;无 per-harness 超时 | — |
-| 34 | [p2-36-sdk-instance-tests.md](./done/p2-36-sdk-instance-tests.md) ✅ | instance.ts 324 行零单测;registry 跨副本无测试 | p0-03, p1-17 |
-| 35 | [p2-26-env-single-source.md](./done/p2-26-env-single-source.md) ✅ | env 旋钮单一来源表(收口本轮新增的全部 env) | p1-07, p1-11, p1-13, p1-14 |
-| 36 | [p2-27-docs-drift-sweep.md](./done/p2-27-docs-drift-sweep.md) ✅ | 文档漂移清扫(数量、僵尸变量、web README、ctx 承诺) | 建议收尾做 |
+| 1 | [p1-37-triggerandwait-wait-graph.md](./p1-37-triggerandwait-wait-graph.md) | `triggerAndWait` 的全局幂等键可把父 run 接到已终态/自身/环上的 child，造成永久 waiting 或只唤醒一个 waiter | — |
+| 2 | [p2-38-retry-idempotency-race.md](./p2-38-retry-idempotency-race.md) | 并发或重放 `/retry` 请求会创建多个语义相同的新 run | — |
+| 3 | [p2-39-stale-state-transition-guards.md](./p2-39-stale-state-transition-guards.md) | claim / timer resume 对目标状态缺少防御性谓词，陈旧 queue/wait 行可能复活终态 run | — |
+| 4 | [p2-40-log-terminal-boundary.md](./p2-40-log-terminal-boundary.md) | `appendLogs` 的快照检查与终态提交之间存在窗口，日志可在终态提交后才落库 | — |
+| 5 | [p2-41-suspend-work-notify.md](./p2-41-suspend-work-notify.md) | suspend 释放并发槽后不发 `work` 通知，其他 run 只能等退避轮询 | — |
 
-依赖说明:「p1-22」依赖指该文件的真 PG 验收用例落进 correctness suite(先做 p1-22 则直接加用例;若顺序颠倒,按 finish-todo 的 blocked-on 规则回填)。p2-26 与 p2-27 是收口清扫,放在最后避免被中途改动再次漂移。
+## 执行约定
 
-## 与 roadmap 的关系
+- 一次只推进一个文件；不可把未完成条目移动到 `todos/done/`。
+- 每个条目下面的“实现方案”是实现 agent 的边界，不等于本轮已经修改源代码。
+- `p2-39` 明确标为防御性 hardening：当前正常锁序下尚未证明会从干净状态稳定复现，必须先用故障注入/陈旧行测试确认边界，再决定是否扩大改动。
+- `p2-40` 是“严格日志时间线”与“best effort 低锁开销”之间的产品取舍；实现前需按条目中的推荐默认值做决定。
 
-- p1-22 交付 `docs/architecture.md` P2 里 "vitest + 真 PG correctness suite" 的主体;fault-injection harness 与 LISTEN/NOTIFY 专项仍留在 roadmap P2。
-- 本轮全部是既有代码的缺陷/风险修复,不包含 roadmap P3–P6 的新功能(events、agent 原语、plugins 等)。P3 建议在 P0 与 kernel 组(p1-04…10)落地后再启动:signal 内核的不变量正需要 p1-22 的测试床来验收。
+## 基线校验
 
-## 归档
-
-- [done/01-correctness.md](./done/01-correctness.md) ✅(C1–C5)
-- [done/02-performance.md](./done/02-performance.md) ✅(PF1–PF5)
-- [done/03-operability.md](./done/03-operability.md) ✅(O1–O6)
-- [done/p0-01-fingerprint-drift-bypass.md](./done/p0-01-fingerprint-drift-bypass.md) ✅(kind/label 漂移一律硬失败)
-- [done/p0-02-dashboard-poll-self-abort.md](./done/p0-02-dashboard-poll-self-abort.md) ✅(usePoll 改为自我重排 setTimeout,不再 abort in-flight)
-- [done/p0-03-sdk-result-retry.md](./done/p0-03-sdk-result-retry.md) ✅(result() 预算内重试瞬态 5xx/网络错误,waiter 关停映射 503)
-- [done/p1-22-kernel-pg-correctness-suite.md](./done/p1-22-kernel-pg-correctness-suite.md) ✅(test/pg 真 PG 套件,fencing/suspend/cancel/幂等/索引计划)
-- [done/p1-04-triggerandwait-require-task.md](./done/p1-04-triggerandwait-require-task.md) ✅(waitForChildRun/retryRun requireTask,task_not_found → AbortError,RunCtx.triggerAndWait)
-- [done/p1-05-orphan-wait-nulls-order.md](./done/p1-05-orphan-wait-nulls-order.md) ✅(孤儿扫描独立 LIMIT,timer 积压不再挤占孤儿恢复)
-- [done/p1-06-waits-run-id-index.md](./done/p1-06-waits-run-id-index.md) ✅(waits_run_idx 迁移,wakeParentIfWaiting 带 namespace 谓词)
-- [done/p1-07-claim-ledger-unbounded.md](./done/p1-07-claim-ledger-unbounded.md) ✅(账本读取移出 claim 事务,BETTER_TRIGGER_MAX_STEPS 上限 + stepsTruncated)
-- [done/p1-08-multi-namespace-plans.md](./done/p1-08-multi-namespace-plans.md) ✅(热路径逐 namespace 扫描,single-ns 平铺等值,双 namespace Index Scan)
-- [done/p1-09-cron-clock-skew.md](./done/p1-09-cron-clock-skew.md) ✅(nextCronAt 以 DB 时钟为基准,写回 GREATEST 钳制 + NULL 守卫)
-- [done/p1-10-concurrency-work-notify.md](./done/p1-10-concurrency-work-notify.md) ✅(complete/failTerminal/cancel 带 concurrency_key 时发 work 通知)
-- [done/p1-11-pool-sizing-loop-stall.md](./done/p1-11-pool-sizing-loop-stall.md) ✅(业务池 sizing/超时,checkout 计数,loopLastSuccess 健康 gauge,loop-hang 自愈)
-- [done/p1-12-shutdown-races-deadline.md](./done/p1-12-shutdown-races-deadline.md) ✅(drain 不领新 run,shutdown 兜底 + 二次信号,handler 提前到模块加载)
-- [done/p1-21-compose-stop-grace.md](./done/p1-21-compose-stop-grace.md) ✅(worker stop_grace_period 40s > drain 30s)
-- [done/p1-13-unhandled-rejection-policy.md](./done/p1-13-unhandled-rejection-policy.md) ✅(unhandledRejection 非致命,日志 + 计数,BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION 门控)
-- [done/p1-14-read-endpoints-limits.md](./done/p1-14-read-endpoints-limits.md) ✅(读桶限流,长轮询断连即释放 waiter + 499)
-- [done/p1-15-batchtrigger-namespace-options.md](./done/p1-15-batchtrigger-namespace-options.md) ✅(batchTrigger 批级 options 带 namespace,per-item env/projectId 收窄为类型错误)
-- [done/p1-16-lazy-async-hooks.md](./done/p1-16-lazy-async-hooks.md) ✅(AsyncLocalStorage 惰性加载,edge/browser 可 import,Node ESM 异步兜底)
-- [done/p1-17-client-timeout-registry.md](./done/p1-17-client-timeout-registry.md) ✅(超时 code 'timeout' + idempotencyKey 引导,signal 穿透,registry adopt 校验)
-- [done/p1-18-dashboard-routing.md](./done/p1-18-dashboard-routing.md) ✅(history.pushState/popstate 路由,deep-link /runs/:id 直达 detail)
-- [done/p1-19-security-headers-postmessage.md](./done/p1-19-security-headers-postmessage.md) ✅(X-Frame-Options/CSP frame-ancestors/nosniff/no-referrer,移除无 origin 校验的 postMessage)
-- [done/p1-20-connection-state-key-prompt.md](./done/p1-20-connection-state-key-prompt.md) ✅(connection keyed 聚合,key 被拒变体提示 + token 保留,界面英文统一)
-- [done/p2-23-result-typing-timeout.md](./done/p2-23-result-typing-timeout.md) ✅(WaitResult/RunHandle 泛型,throwOnTimeout → ResultTimeoutError,in-run waiter 同步)
-- [done/p2-24-retry-policy-undefined.md](./done/p2-24-retry-policy-undefined.md) ✅(resolveRetryPolicy 逐字段 ?? 合并,显式 undefined 不再覆盖默认)
-- [done/p2-25-dead-sdk-surface.md](./done/p2-25-dead-sdk-surface.md) ✅(pollMs deprecated,删 core 幽灵 RunHandle,修注释)
-- [done/p2-28-namespace-sweep-marker.md](./done/p2-28-namespace-sweep-marker.md) ✅(marker 只看谓词区,SELECT 列表不再满足;p1-06 语句已合规)
-- [done/p2-29-drop-unused-queue-index.md](./done/p2-29-drop-unused-queue-index.md) ✅(0013 DROP queue_available_priority_idx,queue_concurrency_idx 保留并注理由)
-- [done/p2-30-unify-reenqueue.md](./done/p2-30-unify-reenqueue.md) ✅(scanWaits 改走 enqueue(preserveSurvivor),kernel 只剩一处 INSERT INTO queue)
-- [done/p2-31-keyless-rate-limit-bucket.md](./done/p2-31-keyless-rate-limit-bucket.md) ✅(无 key 按来源地址分桶,桶表基数上限,global 桶永不被驱逐)
-- [done/p2-32-route-validation-consistency.md](./done/p2-32-route-validation-consistency.md) ✅(clampQuery 删除,query 校验统一到 intQuery,/runs?status 非法 → 400)
-- [done/p2-33-runs-list-filters-actions.md](./done/p2-33-runs-list-filters-actions.md) ✅(搜索服务端 taskId,补 waiting/canceled chips,RunHeader retry/cancel + 新 run 导航)
-- [done/p2-34-web-test-infra.md](./done/p2-34-web-test-infra.md) ✅(vitest 显式依赖,vite.config test 环境 jsdom,删 docblock)
-- [done/p2-35-acceptance-ports-timeouts.md](./done/p2-35-acceptance-ports-timeouts.md) ✅(4 场景走 freePort,per-harness 超时 + 点名,补 3 个 script)
-- [done/p2-36-sdk-instance-tests.md](./done/p2-36-sdk-instance-tests.md) ✅(instance/registry 跨副本/client invalid_json/duration 上界 + 重复单位/schema 测试)
-- [done/p2-26-env-single-source.md](./done/p2-26-env-single-source.md) ✅(env-registry 单一来源,--help 按类渲染,防漂移测试,.env.example 网络姿态补齐)
-- [done/p2-27-docs-drift-sweep.md](./done/p2-27-docs-drift-sweep.md) ✅(acceptance 数量动态、backend-contract 僵尸清除、web README 对齐、ctx 承诺修正)
+本轮审查前使用真 PostgreSQL 运行 kernel 套件：`packages/kernel` 下 37 个 test file、269 个测试通过。新增回归用例应落进同一套测试床，不以临时脚本替代正式验收。
