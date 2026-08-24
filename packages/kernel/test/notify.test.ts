@@ -13,8 +13,11 @@
    way a live server would deliver them.
 
    The statement is asserted to be the LAST one in the tx: NOTIFY is delivered
-   at COMMIT, so a notify issued before the remaining mutations would land
-   even when those later statements rolled back.
+   at COMMIT, so placing it before any remaining mutation would risk waking
+   claim loops off a transaction that then failed part-way — the wake must only
+   ever accompany a fully-succeeded state transition (a rolled-back tx never
+   delivers its notifications, but a notify issued early could still mislead a
+   reader of the statement order; asserting last keeps the intent explicit).
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
@@ -26,6 +29,7 @@ import {
   createRun,
   failRun,
   retryRun,
+  suspendRun,
   trigger,
 } from '../src/runs';
 import { NOTIFY_CHANNEL } from '../src/notify';
@@ -476,6 +480,86 @@ describe('notify sources — concurrency-slot release wakes waiting runs', () =>
     expectTerminal(notified);
     expect(notified.map((c) => c.payload)).not.toContainEqual({ type: 'work' });
     expectNotifyIsLastStatement(texts);
+  });
+});
+
+describe('notify sources — suspend releases a concurrency slot (p2-41)', () => {
+  const FUTURE_RESUME_AT = () => new Date(Date.now() + 60_000).toISOString();
+  /** Statements the non-immediate suspend path issues after the fenced head. */
+  const SUSPEND_TAIL: Handler[] = [
+    () => ({ rows: [] }), // INSERT INTO waits
+    () => ({ rowCount: 1 }), // UPDATE runs → waiting
+    () => ({ rowCount: 1 }), // DELETE queue
+  ];
+
+  it('non-immediate suspend of a concurrency-keyed run sends work as the last statement', async () => {
+    const { pool, notified, texts } = stubPool({
+      handlers: [
+        () => ({ rows: [{ locked_by: 'w1' }] }), // queue row lock
+        () => ({ rows: [runRow({ concurrency_key: 'user-42' })] }), // runs row lock
+        ...SUSPEND_TAIL,
+      ],
+    });
+    const res = await suspendRun(pool, {
+      runId: 'run_1',
+      namespace: DEFAULT_NAMESPACE,
+      seq: 0,
+      kind: 'duration',
+      resumeAt: FUTURE_RESUME_AT(),
+      fingerprint: 'fp1',
+      workerId: 'w1',
+      fencingToken: 1,
+    });
+    expect(res).toEqual({ resumed: false });
+    expectWork(notified);
+    expect(notified[0]!.channel).toBe(NOTIFY_CHANNEL);
+    expect(notified[0]!.text).toBe(`SELECT pg_notify($1, $2)`);
+    expectNotifyIsLastStatement(texts);
+  });
+
+  it('suspend of a run WITHOUT a concurrency_key sends no work notification', async () => {
+    const { pool, notified, texts } = stubPool({
+      handlers: [
+        ...FENCED_HEAD,
+        ...SUSPEND_TAIL,
+      ],
+    });
+    const res = await suspendRun(pool, {
+      runId: 'run_1',
+      namespace: DEFAULT_NAMESPACE,
+      seq: 0,
+      kind: 'duration',
+      resumeAt: FUTURE_RESUME_AT(),
+      workerId: 'w1',
+      fencingToken: 1,
+    });
+    expect(res).toEqual({ resumed: false });
+    expect(notified).toEqual([]);
+    expect(texts[texts.length - 1]).toBe('COMMIT');
+    expect(texts.some((t) => t.includes('pg_notify'))).toBe(false);
+  });
+
+  it('already-due suspend (resumed:true) sends nothing — the claim and slot were kept', async () => {
+    const { pool, notified, texts } = stubPool({
+      handlers: [
+        ...FENCED_HEAD,
+        () => ({ rows: [], rowCount: 1 }), // upsertStep (wait step, completed)
+      ],
+    });
+    const res = await suspendRun(pool, {
+      runId: 'run_1',
+      namespace: DEFAULT_NAMESPACE,
+      seq: 0,
+      kind: 'duration',
+      resumeAt: new Date(Date.now() - 60_000).toISOString(),
+      fingerprint: 'fp1',
+      workerId: 'w1',
+      fencingToken: 1,
+    });
+    expect(res).toEqual({ resumed: true });
+    expect(notified).toEqual([]);
+    expect(texts[texts.length - 1]).toBe('COMMIT');
+    expect(texts.some((t) => t.includes('pg_notify'))).toBe(false);
   });
 });
 

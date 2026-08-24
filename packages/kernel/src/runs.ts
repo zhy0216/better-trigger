@@ -1227,7 +1227,9 @@ export interface SuspendRunArgs {
  * If resumeAt is already past, synchronously complete the wait (write the step
  * row) and keep the run running with its claim held → { resumed: true }.
  * Otherwise insert a pending wait, flip the run to 'waiting' and drop the
- * queue row → { resumed: false }.
+ * queue row → { resumed: false }. The non-immediate path releases the run's
+ * concurrency slot (p2-41) and notifies the claim loops when the run carried a
+ * concurrency_key — see the notifyWork call below.
  */
 export async function suspendRun(
   pool: Pool,
@@ -1235,7 +1237,7 @@ export async function suspendRun(
 ): Promise<{ resumed: boolean }> {
   assertNamespace(args.namespace);
   return withTx(pool, async (client) => {
-    await assertOwnedRunning(
+    const run = await assertOwnedRunning(
       client,
       args.runId,
       args.workerId,
@@ -1265,6 +1267,10 @@ export async function suspendRun(
         fingerprint: args.fingerprint,
       });
       if (!outcome.ok) throw new KernelError(outcome.code, outcome.message);
+      // The claim (queue row + lease) is kept and no slot was released — the
+      // 'waiting' flip below never ran, so nothing became claimable: no `work`
+      // notification (the non-immediate path below sends one, this path must
+      // not — p2-41).
       return { resumed: true };
     }
 
@@ -1287,6 +1293,18 @@ export async function suspendRun(
       [args.runId, args.namespace.projectId, args.namespace.env],
     );
     await removeFromQueue(client, args.runId, args.namespace);
+    // The suspend released this run's concurrency slot: the flip to 'waiting'
+    // took it out of claimRuns' running-count, so a queued run sharing its
+    // concurrency_key is now claimable — and the worker that will claim it may
+    // be parked in the claim loop's idle backoff. The `work` notification
+    // (p2-41; the tx's LAST statement, delivered only at COMMIT) wakes that
+    // loop immediately instead of at the next 300ms→2s poll. Same rule as the
+    // terminal paths (completeRun/failRun/cancelRun: `run.concurrency_key` →
+    // notifyWork): a run with no concurrency_key never gated another run, so
+    // it notifies nothing and the notification stays a slot-release wake, not
+    // a per-suspend ping. The already-due early return above never reaches
+    // this point (no slot was released there).
+    if (run.concurrency_key !== null) await notifyWork(client);
     return { resumed: false };
   });
 }

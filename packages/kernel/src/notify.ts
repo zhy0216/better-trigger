@@ -10,14 +10,25 @@
    Two payload shapes, deliberately minimal (PF2 §4 — ids/namespace only,
    never business payload):
 
-     - { type: 'work' }            — something became claimable. No run id on
-       purpose: the receiver's job is just "go claim", and the claim scan's
-       SKIP LOCKED is namespace-safe by itself, so there is nothing to filter.
+     - { type: 'work' }            — something became claimable. Three sources:
+       (1) a fresh enqueue (trigger / batch / retry / child fan-out / cron),
+       (2) a waiting run re-enqueued by its wait resolving (orchestrator
+       resume, parent wakeup), and (3) a concurrency slot released by a
+       run that stopped counting as 'running' — the terminal paths
+       (complete/fail/cancel of a concurrency-keyed run) and the
+       non-immediate suspend path (p2-41). No run id on purpose: the
+       receiver's job is just "go claim", and the claim scan's SKIP LOCKED
+       is namespace-safe by itself, so there is nothing to filter.
        Aggregate-safe too: a 500-item batch sends one notification, which is
        also what keeps the payload far under pg's 8000-byte NOTIFY cap.
 
      - { type: 'terminal', runId, projectId, env } — a run reached a terminal
        state. Waiters match on runId; listeners filter on the namespace pair.
+
+   A slot release MUST notify exactly like an enqueue does: the claim loop a
+   queued run is waiting on parks in its idle backoff, and it only wakes
+   early when the `work` notification resolves the sleep. Skip it and the
+   released slot stays invisible until the next poll.
 
    Notifications are a latency optimization ONLY. Every consumer keeps its
    polling fallback (claim idle backoff, the wait-due scan, the waiter

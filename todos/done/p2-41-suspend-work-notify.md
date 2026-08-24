@@ -2,7 +2,7 @@
 
 - 优先级：P2（并发调度延迟）
 - 区域：kernel / worker runtime
-- 状态：待处理
+- 状态：已处理
 - 来源：2026-08-24 并发状态转移审查
 
 ## 问题摘要
@@ -54,11 +54,11 @@
 
 ## 验收标准
 
-- [ ] 非立即到期的 suspend 成功提交后，符合条件的 worker 能被 `work` 通知唤醒；后继 run 不再被迫等待完整 idle backoff。
-- [ ] `resumeAt` 已到期的同步路径不产生多余通知。
-- [ ] suspend 事务回滚时监听器看不到依赖该事务的 `work` 通知，现有 polling fallback 仍工作。
-- [ ] 并发 limit=1 的 PG/worker harness 测试给出通知前后延迟证据，并确认不改变状态机结果。
-- [ ] `bun run typecheck`、`bun run build`、`bun run test` 全部通过。
+- [x] 非立即到期的 suspend 成功提交后，符合条件的 worker 能被 `work` 通知唤醒；后继 run 不再被迫等待完整 idle backoff。
+- [x] `resumeAt` 已到期的同步路径不产生多余通知。
+- [x] suspend 事务回滚时监听器看不到依赖该事务的 `work` 通知，现有 polling fallback 仍工作。
+- [x] 并发 limit=1 的 PG/worker harness 测试给出通知前后延迟证据，并确认不改变状态机结果。（落地方案：kernel 真 PG + 同频道 LISTEN 给出通知边界延迟证据 <500ms；worker 侧唤醒链路由既有 worker notify 测试覆盖，未起双 worker harness——条目 §3 允许的降级）
+- [x] `bun run typecheck`、`bun run build`、`bun run test` 全部通过。
 
 ## 涉及文件
 
