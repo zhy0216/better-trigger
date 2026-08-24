@@ -105,7 +105,13 @@ export interface TaskManifest {
 export interface TriggerOptions {
   /** Delay before the run becomes available: ms number or duration string ("10m"). */
   delay?: string | number;
-  /** Unique per task; re-triggering with the same key returns the existing run. */
+  /**
+   * Unique per task; re-triggering with the same key returns the existing run.
+   * Global idempotency only — NOT accepted by triggerAndWait (the kernel
+   * refuses it with bad_request): a durable child wait derives its identity
+   * from the parent's step `(parent run id, step_seq)`, so each new parent
+   * step always creates a new child (p1-37).
+   */
   idempotencyKey?: string;
   /** Higher-priority runs are claimed first. Default 0. */
   priority?: number;

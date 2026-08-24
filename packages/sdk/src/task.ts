@@ -102,6 +102,11 @@ export interface TaskHandle<TPayload, TOutput> {
   /**
    * Trigger a child run and durably wait for it. MUST be called inside a task.
    * Never throws on child failure — inspect `result.ok` / use unwrapResult().
+   *
+   * `options.idempotencyKey` is NOT accepted here (the kernel refuses it with
+   * bad_request): the child's identity is this call's durable step, so every
+   * execution of this call site creates its own child — global idempotency
+   * belongs on `trigger()`.
    */
   triggerAndWait(payload: TPayload, options?: TriggerOptions): Promise<TaskRunResult<TOutput>>;
 }

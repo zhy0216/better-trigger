@@ -70,6 +70,37 @@ export interface KernelLogger {
   error(...args: unknown[]): void;
 }
 
+/**
+ * Wait-graph invariant counters (p1-37). The three conditions these observe
+ * can never be true in a healthy engine, so any nonzero reading is the canary
+ * for a lost parent wake:
+ *
+ *   - waitingWithoutPendingWait — PER-TICK GAUGE: runs the wait-due scanner's
+ *     most recent pass found 'waiting' with no pending wait that could ever
+ *     resolve them (a level, not a total — a persistent violation reads as
+ *     the same number every tick; the scanner also logs the transition);
+ *   - terminalChildPendingWait — PER-TICK GAUGE: pending 'run' waits the most
+ *     recent pass found pointing at a child that already reached a terminal
+ *     state, i.e. the child's terminal tx missed the wake (same gauge
+ *     semantics as waitingWithoutPendingWait; logged on transition too);
+ *   - cycleRejected — MONOTONIC counter: an attach-time cycle defense fired.
+ *     Reserved for a real graph refusal (the defensive fresh-child-id
+ *     collision); a bad idempotencyKey on triggerAndWait is a plain parameter
+ *     error and does NOT count.
+ *
+ * Owned by createKernel and handed to the run paths and the orchestrator, so
+ * hosts can export it the same way they export the orchestrator counters.
+ */
+export interface WaitGraphCounters {
+  waitingWithoutPendingWait: number;
+  terminalChildPendingWait: number;
+  cycleRejected: number;
+}
+
+export function createWaitGraphCounters(): WaitGraphCounters {
+  return { waitingWithoutPendingWait: 0, terminalChildPendingWait: 0, cycleRejected: 0 };
+}
+
 export interface KernelOptions {
   /** The pg Pool to run against. Owned by the caller. */
   pool: Pool;
@@ -124,7 +155,12 @@ export interface Kernel {
   reportStep(args: ReportStepArgs): Promise<void>;
   /** Suspend on wait.for/wait.until; resumed:true if already due (fenced). */
   suspendRun(args: SuspendRunArgs): Promise<{ resumed: boolean }>;
-  /** triggerAndWait: create child + suspend parent until it finishes (fenced). */
+  /**
+   * triggerAndWait: create child + suspend parent until it finishes (fenced).
+   * Global `options.idempotencyKey` is refused (bad_request) — the child's
+   * identity is the parent's durable step `(run_id, step_seq)`, so a new
+   * parent step always creates a new child (p1-37).
+   */
   waitForChildRun(args: WaitForChildRunArgs): Promise<{ childRunId: string }>;
   /** Durable batchTrigger step: create children, record step row (fenced). */
   batchTriggerChild(args: BatchTriggerChildArgs): Promise<{ runIds: string[] }>;
@@ -150,11 +186,18 @@ export interface Kernel {
    *  nothing. This is what `better-trigger-worker prune` and the GC loop both
    *  call. */
   prune(args: PruneArgs): Promise<PruneResult>;
+
+  /* -------------------------------------------------------- observability */
+  /** Wait-graph invariant counters (p1-37), live for the lifetime of this
+   *  kernel. Read, never written, by whoever exports metrics — see
+   *  WaitGraphCounters. */
+  waitGraph: WaitGraphCounters;
 }
 
 export function createKernel(opts: KernelOptions): Kernel {
   const { pool } = opts;
   const logger: KernelLogger = opts.logger ?? console;
+  const waitGraph = createWaitGraphCounters();
 
   return {
     trigger: (args) => trigger(pool, args),
@@ -172,13 +215,14 @@ export function createKernel(opts: KernelOptions): Kernel {
     claimRuns: (args) => claimRuns(pool, args),
     reportStep: (args) => reportStep(pool, args),
     suspendRun: (args) => suspendRun(pool, args),
-    waitForChildRun: (args) => waitForChildRun(pool, args),
+    waitForChildRun: (args) => waitForChildRun(pool, args, waitGraph),
     batchTriggerChild: (args) => batchTriggerChild(pool, args),
     completeRun: (args) => completeRun(pool, args),
     failRun: (args) => failRun(pool, args),
     appendLogs: (runId, namespace, entries) => appendLogs(pool, runId, namespace, entries),
 
-    startOrchestrator: (o) => startOrchestrator(pool, logger, o),
+    startOrchestrator: (o) => startOrchestrator(pool, logger, o, waitGraph),
     prune: (args) => prune(pool, args),
+    waitGraph,
   };
 }

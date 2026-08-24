@@ -89,13 +89,20 @@ function isAbandonment(err: unknown): boolean {
  * non-retryably instead of burning attempts on a value that can never be
  * stored. This also covers `task_not_found`: a typo'd child task id resolves
  * to the same missing task on every retry, so retrying can never fix it.
+ *
+ * `bad_request` is in the same family: every bad_request raised inside a task
+ * comes from caller-shaped input that replay re-produces verbatim —
+ * triggerAndWait's refused idempotencyKey, batchTrigger's items/size caps, an
+ * empty taskId — so a retry fails identically. It must abort deterministically
+ * instead of spending the run's retry attempts.
  */
 function isUnfixableKernelError(err: unknown): err is KernelError {
   return (
     err instanceof KernelError &&
     (err.code === 'serialization_error' ||
       err.code === 'payload_too_large' ||
-      err.code === 'task_not_found')
+      err.code === 'task_not_found' ||
+      err.code === 'bad_request')
   );
 }
 

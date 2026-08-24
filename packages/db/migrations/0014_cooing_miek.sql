@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "waits_pending_step_uniq" ON "waits" USING btree ("project_id","env","run_id","step_seq","kind") WHERE "waits"."status" = 'pending';

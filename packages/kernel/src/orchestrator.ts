@@ -46,7 +46,7 @@ import {
   assertNamespace,
   type Namespace,
 } from '@better-trigger/core';
-import type { KernelLogger } from './kernel';
+import type { KernelLogger, WaitGraphCounters } from './kernel';
 import { prune } from './prune';
 import {
   enqueue,
@@ -239,6 +239,7 @@ export function startOrchestrator(
   pool: Pool,
   logger: KernelLogger,
   opts: OrchestratorOptions = {},
+  waitGraph?: WaitGraphCounters,
 ): OrchestratorHandle {
   const timerIntervalMs = opts.timerIntervalMs ?? 1_000;
   const cronIntervalMs = opts.cronIntervalMs ?? 1_000;
@@ -277,6 +278,35 @@ export function startOrchestrator(
     stranded: false,
   };
   const counters = createOrchestratorCounters();
+  // p1-37: the wait-graph invariant counters live on the kernel handle
+  // (createKernel owns and exposes them); a caller that bypassed createKernel
+  // still gets the violation LOGS below, just not the counts.
+  const waitGraphCounters: WaitGraphCounters = waitGraph ?? {
+    waitingWithoutPendingWait: 0,
+    terminalChildPendingWait: 0,
+    cycleRejected: 0,
+  };
+  // Violations are persistent conditions by nature, so the scanner logs
+  // TRANSITIONS (like the stranded loop), not a line per tick; the counters
+  // above are per-tick gauges ("how many right now") — see the fold site
+  // below. Starts at the all-clear signature so the first clean tick does not
+  // log a phantom "recovery".
+  let lastWaitGraphSignature = '0/0';
+  const logWaitGraphViolations = (noWaitRuns: number, stuckWaits: number): void => {
+    const signature = `${noWaitRuns}/${stuckWaits}`;
+    if (signature === lastWaitGraphSignature) return;
+    lastWaitGraphSignature = signature;
+    if (noWaitRuns === 0 && stuckWaits === 0) {
+      logger.warn(`[orchestrator:wait-graph] no wait-graph violations remain`);
+      return;
+    }
+    const parts: string[] = [];
+    if (noWaitRuns > 0) parts.push(`${noWaitRuns}+ 'waiting' run(s) with no pending wait`);
+    if (stuckWaits > 0) parts.push(`${stuckWaits}+ pending wait(s) on an already-terminal child`);
+    logger.error(
+      `[orchestrator:wait-graph] ${parts.join('; ')} — a parent wake was lost (p1-37)`,
+    );
+  };
   let stopped = false;
 
   function loop(
@@ -350,6 +380,10 @@ export function startOrchestrator(
       child_run_id: string | null;
     };
     const due = { rows: [] as WaitRow[] };
+    // p1-37 wait-graph invariant tallies, accumulated across namespaces and
+    // folded into the shared counters + transition log after the loop.
+    let noWaitRuns = 0;
+    let stuckWaits = 0;
     for (const ns of namespaces) {
       const timerParams: unknown[] = [];
       const timerPredicate = nsPredicateFor('waits', ns, timerParams);
@@ -378,7 +412,56 @@ export function startOrchestrator(
         orphanParams,
       );
       due.rows.push(...timerRows.rows, ...orphanRows.rows);
+
+      // p1-37 wait-graph invariant scans (read-only, no locks — phase 1 only).
+      // Both conditions are impossible in a healthy system: a 'waiting' run
+      // always has a pending wait (suspendRun / waitForChildRun write the pair
+      // in ONE tx), and a pending 'run' wait is always resolved by the child's
+      // terminal tx before that tx commits. Finding either means a wake was
+      // lost — count it and say it out loud rather than let the parent wait
+      // forever in silence. Independent LIMITs so neither class can crowd the
+      // other out of the window (same reasoning as the timer/orphan split).
+      const noWaitParams: unknown[] = [];
+      const noWaitPredicate = nsPredicateFor('r', ns, noWaitParams);
+      const noWaitRows = await pool.query<{ id: string }>(
+        `SELECT r.id FROM runs r
+          WHERE r.status = 'waiting'
+            AND ${noWaitPredicate}
+            AND NOT EXISTS (
+              SELECT 1 FROM waits w
+               WHERE w.run_id = r.id AND w.project_id = r.project_id AND w.env = r.env
+                 AND w.status = 'pending'
+            )
+          LIMIT 10`,
+        noWaitParams,
+      );
+      noWaitRuns += noWaitRows.rows.length;
+
+      const stuckParams: unknown[] = [];
+      const stuckPredicate = nsPredicateFor('w', ns, stuckParams);
+      const stuckRows = await pool.query<{ id: number }>(
+        `SELECT w.id FROM waits w
+          WHERE w.kind = 'run' AND w.status = 'pending' AND w.child_run_id IS NOT NULL
+            AND ${stuckPredicate}
+            AND EXISTS (
+              SELECT 1 FROM runs c
+               WHERE c.id = w.child_run_id
+                 AND c.status IN ('completed','failed','canceled')
+            )
+          LIMIT 10`,
+        stuckParams,
+      );
+      stuckWaits += stuckRows.rows.length;
     }
+
+    // Fold the tallies into the shared counters as PER-TICK GAUGES (p1-37):
+    // each tick ASSIGNS the violation count it just observed. A persistent
+    // stuck row must read as a stable level (1 row = 1, tick after tick), not
+    // as a rate climbing by one every second — the transition LOG below is
+    // what makes a newly-stuck row stand out, not a counter that only grows.
+    waitGraphCounters.waitingWithoutPendingWait = noWaitRuns;
+    waitGraphCounters.terminalChildPendingWait = stuckWaits;
+    logWaitGraphViolations(noWaitRuns, stuckWaits);
 
     // Phase 2 — one short tx per wait, acquiring the canonical lock order
     // (queue → runs → wait row; see runs.ts header) and re-checking the wait

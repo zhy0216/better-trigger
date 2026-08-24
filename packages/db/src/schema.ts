@@ -300,6 +300,16 @@ export const waits = pgTable(
     // such query degenerates to a full table scan over time). Namespace prefix
     // first (C2); the step_seq tail covers the child-wait probe.
     index('waits_run_idx').on(t.projectId, t.env, t.runId, t.stepSeq),
+    // Pending-step uniqueness (p1-37): a durable step can have AT MOST ONE live
+    // wait. Backs waitForChildRun's ON CONFLICT DO NOTHING — a concurrent
+    // replay of the same (run, step_seq) loses the insert race and re-reads the
+    // winner's wait/step instead of duplicating the parent→child edge.
+    // status='pending' is the predicate: completed/canceled rows are history
+    // (the step ledger replays those), and a retried step may legitimately
+    // re-suspend under a fresh pending row once the old one is resolved.
+    uniqueIndex('waits_pending_step_uniq')
+      .on(t.projectId, t.env, t.runId, t.stepSeq, t.kind)
+      .where(sql`${t.status} = 'pending'`),
     // C5: closed enums (WaitKind / 'pending'|'completed'|'canceled' in core).
     check('waits_kind_check', sql`${t.kind} IN ('duration','until','run')`),
     check('waits_status_check', sql`${t.status} IN ('pending','completed','canceled')`),

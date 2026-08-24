@@ -206,7 +206,10 @@ describe('wakeParentIfWaiting re-enqueues the parent at its own priority', () =>
           return { rows: [{ id: 5, run_id: 'run_parent', project_id: 'default', env: 'prod', step_seq: 2 }] };
         }
         if (/FROM waits WHERE id = \$1/.test(sql)) return { rows: [{ id: 5 }] };
-        return { rows: [] };
+        // Everything else is an UPDATE/DELETE the wake ignores — rowCount 1 so
+        // the p1-37 `AND status = 'waiting'` flip (which checks affected rows)
+        // proceeds to the re-enqueue this file exists to pin.
+        return { rows: [], rowCount: 1 };
       },
       release: () => {},
     } as unknown as PoolClient;

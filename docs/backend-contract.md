@@ -192,8 +192,9 @@ queue 是规范锁序的 1 号位(见 §3.2),先拿它再拿 runs,才能避免�
 - 若 resumeAt 已过期(如 `wait.for("0s")`),server 直接同步走恢复路径并返回 `{resumed: true}`,SDK **不挂起继续执行**(写 step 行,seq 照常消耗)。
 
 ### 3.3 triggerAndWait(父子)
-- SDK `POST /runs/:id/wait-for-run {seq, taskId, payload, options}`;server 单事务:创建子 run(`trigger_type='subtask'`, `parent_run_id`)+ 入队、插 `waits` 行(kind='run', child_run_id)、父 `status='waiting'`、删父 queue 行 → 返回 `{childRunId}`;SDK 抛 SuspendSignal。
-- 子 run 到达终态(completed/failed/canceled)时,server(在 complete/fail/cancel 处理内):找 `waits WHERE child_run_id=? AND status='pending'` → completed,写父 `run_steps` 行(kind='trigger-and-wait',status='completed',output={id, ok, output?, error?}),父重新入队。
+- **不是 HTTP 端点**(worker 与 kernel 同进程直连,见文首「传输层已被取代」):task 内 `handle.triggerAndWait(...)` → 进程内 executor → kernel `waitForChildRun`,与 suspend 走同一进程内通道。kernel 单事务:创建子 run(`trigger_type='subtask'`, `parent_run_id`)+ 入队、插 `waits` 行(kind='run', child_run_id)、父 `status='waiting'`、删父 queue 行、`notifyWork` → 返回 `{childRunId}`;executor 收到后抛 SuspendSignal。
+- **`options.idempotencyKey` 不受支持**:传了就抛 `KernelError('bad_request')`(p1-37)。这不是普通 HTTP 400,而是**非重试性**失败:任务内所有 `bad_request` 都来自参数校验(triggerAndWait 的 key、batchTrigger 的 items/条数、空 taskId 等),重放必然同错,executor 的 `isUnfixableKernelError` 把它与 `serialization_error`/`payload_too_large`/`task_not_found` 归为一类,直接 `AbortError` 终态失败,**不烧 retry attempts**。等待边的幂等身份是父的 durable step `(parent_run_id, step_seq)` —— `waits` 表上有部分唯一索引 `waits_pending_step_uniq (project_id, env, run_id, step_seq, kind) WHERE status='pending'`,每次新的父 step 都创建新 child,因此自环/跨父共享 child 从结构上无法形成(环检测只留防御分支:新 child id 与父 id 碰撞——公开 API 下不可能——以 `conflict` 拒绝而不是落库成环);普通 `trigger` 的全局幂等(`runs_task_idempotency_uniq`)不受影响。重放时同一 step 先读已完成 step 行、再读 pending wait 行,返回同一个 childRunId;并发重放抢唯一索引,输家整个事务回滚(不留下无 wait 的孤儿 child)后重读胜者已提交的 wait/step。
+- 子 run 到达终态(completed/failed/canceled)时,server(在 complete/fail/cancel 处理内):找 `waits WHERE child_run_id=? AND status='pending' ORDER BY id ASC` → **逐个**完成所有匹配的 pending waiter(不只 rows[0]),每个 waiter 按规范锁序 queue→runs→wait 依次上锁、写父 `run_steps` 行(kind='trigger-and-wait',status='completed',output={id, ok, output?, error?})、父重新入队。**终态唤醒不依赖 `runs.parent_run_id` 是否为空** —— 是否存在 waiter 只看该 child 上的 pending 'run' waits(无 waiter 时该探测是索引级空查询)。父 `waiting→queued` 的 UPDATE 带 `AND status='waiting'` 谓词并检查 affected rows,已被 cancel/终态的父不会被复活。
 - SDK 重放命中后返回 `TaskRunResult = { id, ok: boolean, output?, error? }`(**不自动抛错**,用户自行检查;`unwrap()` 辅助函数提供)。
 
 ### 3.4 重试与失败
@@ -287,7 +288,6 @@ SELECT q.id AS queue_id, q.run_id,
 | `GET /dequeue?workerId=&timeoutMs=` | → `{ run: null }` 或 `{ run: { id, taskId, payload, attempt, maxAttempts, codeVersion, env, steps: StepSnapshot[] } }` |
 | `POST /runs/:id/steps` | `{ seq, kind, label, status:'completed'\|'failed', output?, error?, attempt, startedAt, finishedAt, workerId }` → `{ ok:true }`;run 非 running → 409 `{code:'run_not_running'}` |
 | `POST /runs/:id/suspend` | `{ seq, label?, kind:'duration'\|'until', resumeAt, workerId }` → `{ ok:true, resumed:false }` 或 `{ ok:true, resumed:true }`(已到期,见 3.2) |
-| `POST /runs/:id/wait-for-run` | `{ seq, label?, taskId, payload, options?, workerId }` → `{ childRunId }` |
 | `POST /runs/:id/batch-trigger` | `{ seq, label?, items:[{taskId,payload,options?}], workerId }` → `{ runIds: string[] }`(server 创建 N 子 run + 写 step 行 kind='batch-trigger' output={runIds},**同事务幂等**:若 step 行已存在直接返回其 output) |
 | `POST /runs/:id/complete` | `{ output, workerId }` → `{ ok:true }`(终态;若有父在等,回填并唤醒) |
 | `POST /runs/:id/fail` | `{ error:{message,stack?,name?}, stepSeq?, retry?, abort?, workerId }` → `{ ok:true, willRetry:boolean, nextAttemptAt? }` |

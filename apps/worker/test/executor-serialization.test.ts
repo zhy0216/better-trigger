@@ -159,6 +159,35 @@ describe('executor serialization (C3)', () => {
     expect(calls.waitForChildRun).toHaveLength(1); // task_not_found fingerprints fine; the kernel refused it
   });
 
+  it('a refused idempotencyKey on triggerAndWait (bad_request) fails the parent as AbortError (non-retryable)', async () => {
+    const calls = { waitForChildRun: [] as unknown[] };
+    const kernel = {
+      waitForChildRun: async (input: unknown) => {
+        calls.waitForChildRun.push(input);
+        throw new KernelError(
+          'bad_request',
+          'idempotencyKey is not supported on triggerAndWait: the child\'s identity is the parent\'s durable step',
+        );
+      },
+      reportStep: async () => {},
+      appendLogs: async () => {},
+    } as unknown as Kernel;
+    const ex = new Executor(kernel, plainTask, claimed(), 'w1', null);
+
+    let caught: unknown;
+    try {
+      await ex.triggerAndWait('child', { n: 1 }, 'wait-child', { idempotencyKey: 'k-any' });
+    } catch (err) {
+      caught = err;
+    }
+    // Deterministic refusal, not a retryable step failure: replay re-produces
+    // the same bad_request, so the attempt budget is not spent on it.
+    expect(isAbortError(caught)).toBe(true);
+    expect(caught).not.toBeInstanceOf(KernelError);
+    expect((caught as AbortError).message).toContain('idempotencyKey');
+    expect(calls.waitForChildRun).toHaveLength(1);
+  });
+
   it('a claim that truncated the ledger at BETTER_TRIGGER_MAX_STEPS fails the run non-retryably without executing', async () => {
     const { kernel, calls } = fakeKernel();
     let ran = 0;

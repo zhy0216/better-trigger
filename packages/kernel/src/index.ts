@@ -5,7 +5,7 @@
    `pg` out of application processes.
    ============================================================================= */
 export { createKernel } from './kernel';
-export type { Kernel, KernelLogger, KernelOptions } from './kernel';
+export type { Kernel, KernelLogger, KernelOptions, WaitGraphCounters } from './kernel';
 
 export { fnSourceHash, stepFingerprint } from './fingerprint';
 export type { StepFingerprintArgs } from './fingerprint';

@@ -290,6 +290,8 @@ describe('notify sources — terminal notifications', () => {
         ...FENCED_HEAD,
         () => ({ rowCount: 1 }), // UPDATE runs → completed
         () => ({ rowCount: 1 }), // DELETE queue
+        // wakeParentIfWaiting's pending-wait lookup (p1-37: unconditional) → no waiter
+        () => ({ rows: [] }),
       ],
     });
     await completeRun(pool, {
@@ -337,6 +339,8 @@ describe('notify sources — terminal notifications', () => {
         () => ({ rowCount: 1 }), // UPDATE runs → failed
         () => ({ rowCount: 1 }), // DELETE queue
         () => ({ rowCount: 1 }), // UPDATE waits → canceled
+        // wakeParentIfWaiting's pending-wait lookup (p1-37: unconditional) → no waiter
+        () => ({ rows: [] }),
       ],
     });
     const res = await failRun(pool, {
@@ -359,6 +363,8 @@ describe('notify sources — terminal notifications', () => {
         () => ({ rowCount: 1 }), // UPDATE runs → canceled
         () => ({ rowCount: 1 }), // DELETE queue
         () => ({ rowCount: 1 }), // UPDATE waits → canceled
+        // wakeParentIfWaiting's pending-wait lookup (p1-37: unconditional) → no waiter
+        () => ({ rows: [] }),
       ],
     });
     await cancelRun(terminal.pool, 'run_1', DEFAULT_NAMESPACE);
@@ -384,6 +390,8 @@ describe('notify sources — concurrency-slot release wakes waiting runs', () =>
         () => ({ rows: [runRow({ concurrency_key: 'user-42' })] }),
         () => ({ rowCount: 1 }), // UPDATE runs → completed
         () => ({ rowCount: 1 }), // DELETE queue
+        // wakeParentIfWaiting's pending-wait lookup (p1-37: unconditional) → no waiter
+        () => ({ rows: [] }),
       ],
     });
     await completeRun(pool, {
@@ -408,6 +416,8 @@ describe('notify sources — concurrency-slot release wakes waiting runs', () =>
         () => ({ rowCount: 1 }), // UPDATE runs → failed
         () => ({ rowCount: 1 }), // DELETE queue
         () => ({ rowCount: 1 }), // UPDATE waits → canceled
+        // wakeParentIfWaiting's pending-wait lookup (p1-37: unconditional) → no waiter
+        () => ({ rows: [] }),
       ],
     });
     const res = await failRun(pool, {
@@ -433,6 +443,8 @@ describe('notify sources — concurrency-slot release wakes waiting runs', () =>
         () => ({ rowCount: 1 }), // UPDATE runs → canceled
         () => ({ rowCount: 1 }), // DELETE queue
         () => ({ rowCount: 1 }), // UPDATE waits → canceled
+        // wakeParentIfWaiting's pending-wait lookup (p1-37: unconditional) → no waiter
+        () => ({ rows: [] }),
       ],
     });
     await cancelRun(pool, 'run_1', DEFAULT_NAMESPACE);
@@ -449,6 +461,8 @@ describe('notify sources — concurrency-slot release wakes waiting runs', () =>
         ...FENCED_HEAD,
         () => ({ rowCount: 1 }), // UPDATE runs → completed
         () => ({ rowCount: 1 }), // DELETE queue
+        // wakeParentIfWaiting's pending-wait lookup (p1-37: unconditional) → no waiter
+        () => ({ rows: [] }),
       ],
     });
     await completeRun(pool, {

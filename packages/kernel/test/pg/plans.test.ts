@@ -130,10 +130,12 @@ const RUNS_SQL = `SELECT id, task_id, status, attempt, max_attempts,
 
 /** The child-completion parent-wake probe — runs.ts wakeParentIfWaiting,
  *  verbatim. child_run_id + the child's namespace (default, prod) bind the
- *  leading columns of waits_child_run_idx. */
+ *  leading columns of waits_child_run_idx; ORDER BY id gives the stable
+ *  waiter order the wake walks (the sort runs over the tiny waiter set). */
 const WAKE_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerprint FROM waits
       WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'
-        AND project_id = $2 AND env = $3`;
+        AND project_id = $2 AND env = $3
+      ORDER BY id ASC`;
 
 /** The cancel-cleanup scan — runs.ts cancelRun's `UPDATE waits SET
  *  status='canceled' WHERE run_id=$1 AND status='pending' AND project_id=$2
@@ -204,7 +206,7 @@ async function seedClaimBacklog(
 async function seedWaits(pool: Parameters<typeof assertIndexScan>[0], n: number, runs: number) {
   await pool.query(
     `INSERT INTO waits (run_id, step_seq, kind, resume_at, status, project_id, env)
-       SELECT 'run-' || (g % $2::int), g % 100,
+       SELECT 'run-' || (g % $2::int), g,
               CASE WHEN g % 10 = 0 THEN 'run' ELSE 'duration' END,
               CASE WHEN g % 10 = 0 THEN NULL ELSE now() - interval '1 minute' END,
               CASE WHEN g % 4 = 0 THEN 'completed' ELSE 'pending' END,
@@ -228,7 +230,7 @@ async function seedScatteredWaits(
 ) {
   await pool.query(
     `INSERT INTO waits (run_id, step_seq, kind, resume_at, status, project_id, env, child_run_id)
-       SELECT CASE WHEN g = $3::int THEN 'run-0' ELSE 'run-' || (g % $2::int) END, g % 100,
+       SELECT CASE WHEN g = $3::int THEN 'run-0' ELSE 'run-' || (g % $2::int) END, g,
               CASE WHEN g = $3::int THEN 'run'
                    WHEN g % 7 = 0 THEN 'run'
                    WHEN g % 2 = 0 THEN 'duration'

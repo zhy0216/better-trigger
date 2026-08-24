@@ -95,6 +95,7 @@ import {
 } from '@better-trigger/core';
 import { stepFingerprint } from './fingerprint';
 import { runId as genRunId } from './ids';
+import type { WaitGraphCounters } from './kernel';
 import { notifyTerminal, notifyWork } from './notify';
 import { enqueue, enqueueMany, removeFromQueue } from './queue';
 
@@ -1272,77 +1273,178 @@ export interface WaitForChildRunArgs {
 export async function waitForChildRun(
   pool: Pool,
   args: WaitForChildRunArgs,
+  waitGraph?: WaitGraphCounters,
 ): Promise<{ childRunId: string }> {
   assertNamespace(args.namespace);
-  return withTx(pool, async (client) => {
-    const parent = await assertOwnedRunning(
-      client,
-      args.runId,
-      args.workerId,
-      args.fencingToken,
-      args.namespace,
+  // The durable wait carries no GLOBAL idempotency key (p1-37): the child's
+  // identity is the parent's durable step — (parent run id, step_seq), the pair
+  // the pending-wait unique index enforces. Accepting the ordinary trigger key
+  // here would let several parents (or the parent itself — a self-loop) attach
+  // to one shared child, which the wait graph cannot represent: the wake would
+  // resolve at most one waiter and a global-key conflict returns no status, so
+  // a parent could park on an already-terminal child forever. Reject up front,
+  // before any tx: every new parent step creates a fresh child, so self/mutual
+  // cycles are structurally unformable.
+  //
+  // NOTE this is a plain parameter error, NOT a cycle refusal — no graph edge
+  // was ever in danger of forming, so it must not touch waitGraph.cycleRejected
+  // (that counter is reserved for a real attach-time cycle defense firing, i.e.
+  // the defensive id-collision refusal below).
+  if (args.options?.idempotencyKey != null) {
+    throw new KernelError(
+      'bad_request',
+      `idempotencyKey is not supported on triggerAndWait: the child's identity is ` +
+        `the parent's durable step (a new parent run or step always creates a new ` +
+        `child) — use trigger() when global idempotency is required`,
     );
-
-    // Idempotent on replay: a completed wait step at this seq means the child
-    // already ran; the SDK should normally hit the snapshot, but guard anyway.
-    const existingStep = await client.query<{ output: unknown }>(
-      `SELECT output FROM run_steps
-        WHERE run_id = $1 AND project_id = $2 AND env = $3 AND seq = $4 AND status = 'completed'`,
-      [args.runId, args.namespace.projectId, args.namespace.env, args.seq],
-    );
-    if (existingStep.rows[0]) {
-      const out = existingStep.rows[0].output as { id?: string } | null;
-      if (out?.id) return { childRunId: out.id };
-    }
-    // Or a pending wait already created the child.
-    const existingWait = await client.query<{ child_run_id: string | null }>(
-      `SELECT child_run_id FROM waits
-        WHERE run_id = $1 AND project_id = $2 AND env = $3
-          AND step_seq = $4 AND kind = 'run' AND status = 'pending'`,
-      [args.runId, args.namespace.projectId, args.namespace.env, args.seq],
-    );
-    if (existingWait.rows[0]?.child_run_id) {
-      return { childRunId: existingWait.rows[0].child_run_id };
-    }
-
-    // requireTask: a typo'd taskId must fail HERE with TaskNotFoundError — the
-    // parent run is suspended to 'waiting' right below, so an unregistered task
-    // would otherwise strand it forever with a child run nobody claims.
-    const child = await createRunIn(client, {
-      taskId: args.taskId,
-      payload: args.payload,
-      options: args.options,
-      triggerType: 'subtask',
-      parentRunId: args.runId,
-      namespace: { projectId: parent.project_id, env: parent.env },
-      requireTask: true,
-    });
-
-    await client.query(
-      `INSERT INTO waits (run_id, project_id, env, step_seq, kind, child_run_id, fingerprint, status, created_at)
-       VALUES ($1,$2,$3,$4,'run',$5,$6,'pending', now())`,
-      [
+  }
+  try {
+    return await withTx(pool, async (client) => {
+      const parent = await assertOwnedRunning(
+        client,
         args.runId,
-        args.namespace.projectId,
-        args.namespace.env,
-        args.seq,
-        child.runId,
-        args.fingerprint ?? null,
-      ],
-    );
-    await client.query(
-      `UPDATE runs SET status = 'waiting', updated_at = now()
-        WHERE id = $1 AND project_id = $2 AND env = $3`,
-      [args.runId, args.namespace.projectId, args.namespace.env],
-    );
-    await removeFromQueue(client, args.runId, args.namespace);
+        args.workerId,
+        args.fencingToken,
+        args.namespace,
+      );
 
-    // The child is new executable work — wake the claim loops from the
-    // parent's tx. The idempotent early returns above never reach this point.
-    await notifyWork(client);
+      // Idempotent on replay: a completed wait step at this seq means the child
+      // already ran (the SDK should normally hit the snapshot, but guard
+      // anyway), or a pending wait from an earlier pass already created it.
+      const existing = await readExistingChildRunId(client, args);
+      if (existing) return { childRunId: existing };
 
-    return { childRunId: child.runId };
-  });
+      // requireTask: a typo'd taskId must fail HERE with TaskNotFoundError — the
+      // parent run is suspended to 'waiting' right below, so an unregistered task
+      // would otherwise strand it forever with a child run nobody claims.
+      const child = await createRunIn(client, {
+        taskId: args.taskId,
+        payload: args.payload,
+        options: args.options,
+        triggerType: 'subtask',
+        parentRunId: args.runId,
+        namespace: { projectId: parent.project_id, env: parent.env },
+        requireTask: true,
+      });
+
+      // Graph invariant (defensive, p1-37): the child is a fresh run id, so a
+      // self-loop could only form via an id collision. Under the no-global-key
+      // contract the public API can never build a cycle; this turns the
+      // impossible case into a loud refusal instead of a database-level cycle.
+      if (child.runId === args.runId) {
+        if (waitGraph) waitGraph.cycleRejected += 1;
+        throw new KernelError(
+          'conflict',
+          `child run id ${child.runId} collides with parent run id — the wait graph would self-loop`,
+        );
+      }
+
+      // The wait INSERT is the same-step serialization point: the pending-step
+      // unique index (project_id, env, run_id, step_seq, kind) WHERE
+      // status='pending' absorbs a concurrent replay of THIS step. ON CONFLICT
+      // DO NOTHING blocks until the winner's tx settles — a committed winner
+      // yields no row, and the loser must roll back (the child created above
+      // would otherwise be an unawaited orphan run) and re-read the winner's
+      // committed wait/step instead of duplicating the parent→child edge.
+      const inserted = await client.query(
+        `INSERT INTO waits (run_id, project_id, env, step_seq, kind, child_run_id, fingerprint, status, created_at)
+         VALUES ($1,$2,$3,$4,'run',$5,$6,'pending', now())
+         ON CONFLICT (project_id, env, run_id, step_seq, kind) WHERE status = 'pending' DO NOTHING
+         RETURNING id`,
+        [
+          args.runId,
+          args.namespace.projectId,
+          args.namespace.env,
+          args.seq,
+          child.runId,
+          args.fingerprint ?? null,
+        ],
+      );
+      if (inserted.rows.length === 0) {
+        throw new PendingWaitConflictError(args.runId, args.seq);
+      }
+      await client.query(
+        `UPDATE runs SET status = 'waiting', updated_at = now()
+          WHERE id = $1 AND project_id = $2 AND env = $3`,
+        [args.runId, args.namespace.projectId, args.namespace.env],
+      );
+      await removeFromQueue(client, args.runId, args.namespace);
+
+      // The child is new executable work — wake the claim loops from the
+      // parent's tx. The idempotent early returns above never reach this point.
+      await notifyWork(client);
+
+      return { childRunId: child.runId };
+    });
+  } catch (err) {
+    if (!(err instanceof PendingWaitConflictError)) throw err;
+    // Lost the same-(parent, step) race and rolled back (child included). The
+    // winner is COMMITTED — the conflict only resolves at the winner's COMMIT —
+    // so the pending wait, or the completed step row if the child has already
+    // gone terminal in between, is now visible. Read-only pass, deliberately
+    // WITHOUT fencing: the winner suspended the parent to 'waiting', so
+    // assertOwnedRunning would refuse; the rows read are this run's own
+    // durable state, keyed on (run, seq, kind).
+    return await withTx(pool, async (client) => {
+      const existing = await readExistingChildRunId(client, args);
+      if (existing === null) {
+        // Defensive: the winner committed, so one of the two reads above must
+        // have seen it. A vanish here means the rows were deleted by hand.
+        throw new Error(
+          `waitForChildRun: no wait or step row for run ${args.runId} seq ${args.seq} ` +
+            `after a same-step conflict (rows deleted?)`,
+        );
+      }
+      return { childRunId: existing };
+    });
+  }
+}
+
+/**
+ * The replay/idempotency read shared by waitForChildRun's first pass and its
+ * post-conflict re-read: the completed step row's recorded child id, then the
+ * pending wait's child id. Null when this (run, seq) has neither yet.
+ */
+async function readExistingChildRunId(
+  client: PoolClient,
+  args: WaitForChildRunArgs,
+): Promise<string | null> {
+  const existingStep = await client.query<{ output: unknown }>(
+    `SELECT output FROM run_steps
+      WHERE run_id = $1 AND project_id = $2 AND env = $3 AND seq = $4 AND status = 'completed'`,
+    [args.runId, args.namespace.projectId, args.namespace.env, args.seq],
+  );
+  if (existingStep.rows[0]) {
+    const out = existingStep.rows[0].output as { id?: string } | null;
+    if (out?.id) return out.id;
+  }
+  // Or a pending wait already created the child.
+  const existingWait = await client.query<{ child_run_id: string | null }>(
+    `SELECT child_run_id FROM waits
+      WHERE run_id = $1 AND project_id = $2 AND env = $3
+        AND step_seq = $4 AND kind = 'run' AND status = 'pending'`,
+    [args.runId, args.namespace.projectId, args.namespace.env, args.seq],
+  );
+  if (existingWait.rows[0]?.child_run_id) {
+    return existingWait.rows[0].child_run_id;
+  }
+  return null;
+}
+
+/**
+ * Internal sentinel: the wait INSERT lost the pending-step unique race to a
+ * concurrent replay of the SAME (run, step_seq). Never crosses the API
+ * boundary — waitForChildRun catches it, rolls the whole tx back (the child
+ * run created this pass included) and re-reads the winner's committed rows.
+ */
+class PendingWaitConflictError extends Error {
+  constructor(
+    runId: string,
+    stepSeq: number,
+  ) {
+    super(`concurrent waitForChildRun replay at run ${runId} step ${stepSeq}`);
+    this.name = 'PendingWaitConflictError';
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1448,12 +1550,20 @@ export async function batchTriggerChild(
  * ------------------------------------------------------------------------- */
 
 /**
- * If `childRunId` is awaited by a pending 'run' wait, fill the parent step row
- * with { id, ok, output?, error? } and re-enqueue the parent. Runs inside the
- * caller's transaction (which holds the CHILD's locks — the parent's rows are
- * re-acquired here in canonical order: queue → runs → wait row).
+ * If `childRunId` is awaited by pending 'run' waits, fill each parent step row
+ * with { id, ok, output?, error? } and re-enqueue the parent. ALL pending
+ * waiters are processed (p1-37), in stable `id ASC` order — a child shared by
+ * several parents must resolve every one of them, not a luck-of-the-plan row.
+ * Runs inside the caller's transaction (which holds the CHILD's locks — each
+ * parent's rows are re-acquired here in canonical order: queue → runs → wait
+ * row). Parent sets are disjoint (a run has at most one pending run-wait), so
+ * two child-terminal txs walking their waiters cannot deadlock.
  *
- * `namespace` is the CHILD's namespace; the wait row lives in the same one
+ * Each parent's queued-transition carries the expected-status predicate and
+ * checks the affected-row count: a parent that is already cancel/terminal when
+ * its row is reached must NOT be resurrected to 'queued'.
+ *
+ * `namespace` is the CHILD's namespace; the wait rows live in the same one
  * because children inherit their parent's namespace (C2). The predicate lets
  * `waits_child_run_idx` (project_id, env, child_run_id) bind its leading
  * columns instead of full-scanning waits on every child completion.
@@ -1464,8 +1574,8 @@ export async function wakeParentIfWaiting(
   namespace: Namespace,
   result: { ok: boolean; output?: unknown; error?: SerializedError },
 ): Promise<void> {
-  // Locate the parent's pending wait WITHOUT locking it — the wait row may
-  // only be locked after the parent's queue + runs rows (lock order 1→2→3).
+  // Locate the parents' pending waits WITHOUT locking them — each wait row may
+  // only be locked after its parent's queue + runs rows (lock order 1→2→3).
   // fingerprint rides along: the executor computed it (taskId + payload +
   // options, C1) when the wait was created, and the step row must carry that
   // exact value so the parent's replay matches it. project_id/env ride along
@@ -1480,33 +1590,9 @@ export async function wakeParentIfWaiting(
   }>(
     `SELECT id, run_id, project_id, env, step_seq, fingerprint FROM waits
       WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'
-        AND project_id = $2 AND env = $3`,
+        AND project_id = $2 AND env = $3
+      ORDER BY id ASC`,
     [childRunId, namespace.projectId, namespace.env],
-  );
-  const wait = waitRes.rows[0];
-  if (!wait) return;
-
-  const parentNs: Namespace = { projectId: wait.project_id, env: wait.env };
-  // Parent rows in canonical order: queue row (absent while the parent is
-  // waiting → 0 rows, still ordered), runs row, then the wait row — re-checked
-  // under its lock since it was located with a plain read above.
-  await lockQueueRow(client, wait.run_id, parentNs);
-  const parent = await lockRunRow(client, wait.run_id, parentNs);
-  const lockedWait = await client.query<{ id: number }>(
-    // Row-lock clause LAST (same C2 regression as the orchestrator's wait
-    // lock once had: `AND project_id` after `FOR UPDATE` is a 42601 syntax
-    // error on every Postgres and silently breaks child completion).
-    `SELECT id FROM waits WHERE id = $1 AND status = 'pending'
-       AND project_id = $2 AND env = $3
-     FOR UPDATE`,
-    [wait.id, parentNs.projectId, parentNs.env],
-  );
-  if (!lockedWait.rows[0]) return; // canceled/completed while ordering locks
-
-  await client.query(
-    `UPDATE waits SET status = 'completed' WHERE id = $1
-       AND project_id = $2 AND env = $3`,
-    [wait.id, parentNs.projectId, parentNs.env],
   );
 
   const stepOutput: { id: string; ok: boolean; output?: unknown; error?: SerializedError } =
@@ -1514,51 +1600,81 @@ export async function wakeParentIfWaiting(
   if (result.output !== undefined) stepOutput.output = result.output;
   if (result.error !== undefined) stepOutput.error = result.error;
 
-  // upsertStep applies the C1 immutability rule like any other step write: a
-  // completed row is never overwritten — an equal (or NULL-compatible)
-  // fingerprint is an idempotent no-op, a differing one rejects the write.
-  const outcome = await upsertStep(client, {
-    runId: wait.run_id,
-    namespace: parentNs,
-    seq: wait.step_seq,
-    kind: 'trigger-and-wait',
-    label: undefined, // the ledger row stores NULL (upsertStep binds ?? null)
-    status: 'completed',
-    output: stepOutput,
-    attempt: 1,
-    startedAt: new Date().toISOString(),
-    finishedAt: new Date().toISOString(),
-    fingerprint: wait.fingerprint ?? undefined,
-  });
-  if (!outcome.ok) {
-    // Defensive: completeRun caps the child output against the tighter of the
-    // two output caps, so a child result that fits runs.output always fits the
-    // parent's step row. If that invariant ever breaks, the child's terminal
-    // tx must NOT commit: a parent whose wait resolved to an unrecordable step
-    // row would replay into a duplicate child. Throwing rolls the child's
-    // completion back (it stays 'running' for the lease reaper).
-    throw new KernelError(outcome.code, outcome.message);
-  }
-
-  // Re-enqueue the parent.
-  if (parent && parent.status === 'waiting') {
-    await client.query(
-      `UPDATE runs SET status = 'queued', updated_at = now()
-        WHERE id = $1 AND project_id = $2 AND env = $3`,
-      [wait.run_id, parentNs.projectId, parentNs.env],
+  for (const wait of waitRes.rows) {
+    const parentNs: Namespace = { projectId: wait.project_id, env: wait.env };
+    // Parent rows in canonical order: queue row (absent while the parent is
+    // waiting → 0 rows, still ordered), runs row, then the wait row — re-checked
+    // under its lock since it was located with a plain read above.
+    await lockQueueRow(client, wait.run_id, parentNs);
+    const parent = await lockRunRow(client, wait.run_id, parentNs);
+    const lockedWait = await client.query<{ id: number }>(
+      // Row-lock clause LAST (same C2 regression as the orchestrator's wait
+      // lock once had: `AND project_id` after `FOR UPDATE` is a 42601 syntax
+      // error on every Postgres and silently breaks child completion).
+      `SELECT id FROM waits WHERE id = $1 AND status = 'pending'
+         AND project_id = $2 AND env = $3
+       FOR UPDATE`,
+      [wait.id, parentNs.projectId, parentNs.env],
     );
-    // Same reason as the timer-wait resume in the orchestrator: waitForChildRun
-    // deleted the parent's queue row, and enqueue() defaults an omitted priority
-    // to 0 *and* writes it over any surviving row (priority = EXCLUDED.priority),
-    // so leaving it out demotes a high-priority parent every time a child
-    // finishes (todos/01-correctness.md C7).
-    await enqueue(client, {
+    if (!lockedWait.rows[0]) continue; // canceled/completed while ordering locks
+
+    await client.query(
+      `UPDATE waits SET status = 'completed' WHERE id = $1
+         AND project_id = $2 AND env = $3`,
+      [wait.id, parentNs.projectId, parentNs.env],
+    );
+
+    // upsertStep applies the C1 immutability rule like any other step write: a
+    // completed row is never overwritten — an equal (or NULL-compatible)
+    // fingerprint is an idempotent no-op, a differing one rejects the write.
+    const outcome = await upsertStep(client, {
       runId: wait.run_id,
-      availableAt: new Date(),
-      priority: parent.priority,
-      concurrencyKey: parent.concurrency_key,
       namespace: parentNs,
+      seq: wait.step_seq,
+      kind: 'trigger-and-wait',
+      label: undefined, // the ledger row stores NULL (upsertStep binds ?? null)
+      status: 'completed',
+      output: stepOutput,
+      attempt: 1,
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      fingerprint: wait.fingerprint ?? undefined,
     });
+    if (!outcome.ok) {
+      // Defensive: completeRun caps the child output against the tighter of the
+      // two output caps, so a child result that fits runs.output always fits the
+      // parent's step row. If that invariant ever breaks, the child's terminal
+      // tx must NOT commit: a parent whose wait resolved to an unrecordable step
+      // row would replay into a duplicate child. Throwing rolls the child's
+      // completion back (it stays 'running' for the lease reaper).
+      throw new KernelError(outcome.code, outcome.message);
+    }
+
+    // Re-enqueue the parent — only if it is actually 'waiting' (p1-37): the
+    // runs row above is locked, so this predicate is belt-and-braces, and the
+    // affected-row count keeps a parent that went cancel/terminal on some
+    // other path from being resurrected to 'queued'.
+    if (parent && parent.status === 'waiting') {
+      const flipped = await client.query(
+        `UPDATE runs SET status = 'queued', updated_at = now()
+          WHERE id = $1 AND project_id = $2 AND env = $3 AND status = 'waiting'`,
+        [wait.run_id, parentNs.projectId, parentNs.env],
+      );
+      if (flipped.rowCount === 1) {
+        // Same reason as the timer-wait resume in the orchestrator: waitForChildRun
+        // deleted the parent's queue row, and enqueue() defaults an omitted priority
+        // to 0 *and* writes it over any surviving row (priority = EXCLUDED.priority),
+        // so leaving it out demotes a high-priority parent every time a child
+        // finishes (todos/01-correctness.md C7).
+        await enqueue(client, {
+          runId: wait.run_id,
+          availableAt: new Date(),
+          priority: parent.priority,
+          concurrencyKey: parent.concurrency_key,
+          namespace: parentNs,
+        });
+      }
+    }
   }
 }
 
@@ -1586,14 +1702,18 @@ export async function terminalFail(
        AND project_id = $2 AND env = $3`,
     [run.id, ns.projectId, ns.env],
   );
-  if (run.parent_run_id) {
-    await wakeParentIfWaiting(
-      client,
-      run.id,
-      { projectId: run.project_id, env: run.env },
-      { ok: false, error },
-    );
-  }
+  // Unconditional (p1-37): whether a waiter exists is decided by the pending
+  // 'run' waits ON this run, never by this run's own parent_run_id — a child
+  // created without a global idempotency key still has a parent_run_id, but a
+  // waiter could also exist without one (or vice versa), so the terminal
+  // result event must not be gated on the lineage column. The probe is an
+  // indexed no-op when nobody waits.
+  await wakeParentIfWaiting(
+    client,
+    run.id,
+    { projectId: run.project_id, env: run.env },
+    { ok: false, error },
+  );
 }
 
 export interface CompleteRunArgs {
@@ -1635,12 +1755,13 @@ export async function completeRun(pool: Pool, args: CompleteRunArgs): Promise<vo
       [args.runId, serialized.json, args.namespace.projectId, args.namespace.env],
     );
     await removeFromQueue(client, args.runId, args.namespace);
-    if (run.parent_run_id) {
-      await wakeParentIfWaiting(client, args.runId, args.namespace, {
-        ok: true,
-        output: args.output,
-      });
-    }
+    // Unconditional (p1-37): pending 'run' waits on this run are the only
+    // evidence of a waiter — parent_run_id is lineage, not a waiter registry
+    // (see terminalFail for the full reasoning).
+    await wakeParentIfWaiting(client, args.runId, args.namespace, {
+      ok: true,
+      output: args.output,
+    });
     // Terminal: result waiters wake. If a parent was woken inside the same tx,
     // it may also be claimable again — the extra `work` notification is
     // harmless when it was not (the claim scan just comes back empty).
@@ -1745,12 +1866,12 @@ export async function cancelRun(
          AND project_id = $2 AND env = $3`,
       [runId, namespace.projectId, namespace.env],
     );
-    if (run.parent_run_id) {
-      await wakeParentIfWaiting(client, runId, namespace, {
-        ok: false,
-        error: { message: 'child canceled' },
-      });
-    }
+    // Unconditional (p1-37) — pending 'run' waits on this run decide whether a
+    // parent wakes, never parent_run_id (see terminalFail).
+    await wakeParentIfWaiting(client, runId, namespace, {
+      ok: false,
+      error: { message: 'child canceled' },
+    });
     // Terminal: wake result waiters (and the claim loops if a parent may have
     // been re-enqueued — harmless when it was not). Canceling a run also
     // releases its concurrency slot, so a run waiting on that concurrency limit
