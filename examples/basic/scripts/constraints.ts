@@ -384,16 +384,22 @@ async function main(s: Scenario): Promise<void> {
     }
     // Undo the schema effects of the migrations younger than 0011 so the
     // re-migrate re-applies them cleanly: 0012's CREATE INDEX needs waits_run_idx
-    // gone, and 0013's DROP INDEX needs queue_available_priority_idx to exist
-    // first (the pre-0013 shape this fixture rebuilds). De-journal 0011+0012+0013.
+    // gone, 0013's DROP INDEX needs queue_available_priority_idx to exist first
+    // (the pre-0013 shape this fixture rebuilds), and 0014/0015's unique index
+    // and retry-operations table must go or their CREATE statements fail on the
+    // re-migrate. De-journal 0011..0015: the migrator skips everything at or
+    // below the newest remaining journal row's created_at, so leaving any of
+    // 0014/0015 journaled would silently skip 0011's cleanups as well.
     await s.pool.query(`DROP INDEX IF EXISTS waits_run_idx`);
+    await s.pool.query(`DROP INDEX IF EXISTS waits_pending_step_uniq`);
+    await s.pool.query(`DROP TABLE IF EXISTS run_retry_operations`);
     await s.pool.query(
       `CREATE INDEX "queue_available_priority_idx" ON "queue"
          USING btree ("project_id", "env", "available_at", "priority" DESC NULLS LAST)`,
     );
     await s.pool.query(
       `DELETE FROM drizzle.__drizzle_migrations WHERE hash IN (
-         SELECT hash FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 3)`,
+         SELECT hash FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 5)`,
     );
     // Orphan queue row + orphan wait (run_id and child_run_id variants) +
     // orphan parent_run_id + orphan schedule, all pointing at 'run_gone'.

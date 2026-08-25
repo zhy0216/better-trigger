@@ -151,11 +151,17 @@ async function main(s: Scenario): Promise<void> {
 
     const migrationsDir = fileURLToPath(new URL('../../../packages/db/migrations', import.meta.url));
     // Re-running 0011 means making it (and everything younger) the newest
-    // migration again: de-journal 0011/0012/0013 and undo their schema effects
-    // so the re-migrate re-applies them cleanly — 0012's CREATE INDEX needs
-    // waits_run_idx gone, and 0013's DROP INDEX needs queue_available_priority_idx
-    // to exist first (it is the pre-0013 shape the fixture rebuilds).
+    // migration again: de-journal 0011..0015 and undo their schema effects so
+    // the re-migrate re-applies them cleanly — 0012's CREATE INDEX needs
+    // waits_run_idx gone, 0013's DROP INDEX needs queue_available_priority_idx
+    // to exist first (it is the pre-0013 shape the fixture rebuilds), and
+    // 0014/0015's unique index and retry-operations table must go or their
+    // CREATE statements fail on the re-migrate. (The migrator skips everything
+    // at or below the newest remaining journal row's created_at, so leaving
+    // 0014/0015 journaled would silently skip 0011's cleanups as well.)
     await s.pool.query(`DROP INDEX IF EXISTS waits_run_idx`);
+    await s.pool.query(`DROP INDEX IF EXISTS waits_pending_step_uniq`);
+    await s.pool.query(`DROP TABLE IF EXISTS run_retry_operations`);
     await s.pool.query(
       `CREATE INDEX "queue_available_priority_idx" ON "queue"
          USING btree ("project_id", "env", "available_at", "priority" DESC NULLS LAST)`,
@@ -164,6 +170,8 @@ async function main(s: Scenario): Promise<void> {
       '0011_thick_rage.sql',
       '0012_massive_punisher.sql',
       '0013_cool_nomad.sql',
+      '0014_cooing_miek.sql',
+      '0015_cynical_millenium_guard.sql',
     ]) {
       const sql = readFileSync(`${migrationsDir}/${file}`, 'utf8');
       const hash = createHash('sha256').update(sql).digest('hex');
