@@ -192,50 +192,69 @@ export async function startWorkerRuntime(
 
   /* ---- heartbeat loop --------------------------------------------------- */
   const heartbeatMs = Math.max(MIN_HEARTBEAT_MS, Math.floor(leaseMs / 3));
-  // The tick currently in flight, so shutdown can wait it out: clearInterval
+  // The tick currently in flight, so shutdown can wait it out: clearTimeout
   // stops future ticks but cannot cancel one already awaiting Postgres.
   let heartbeatTick: Promise<void> = Promise.resolve();
-  const heartbeatTimer = setInterval(() => {
-    heartbeatTick = (async () => {
-      try {
-        const res = await kernel.heartbeat({
-          workerId,
-          runIds: [...inFlight.keys()],
-          leaseMs,
-          namespaces: options.namespaces,
-        });
-        counters.consecutiveHeartbeatErrors = 0;
-        for (const runId of res.cancelRunIds) {
-          inFlight.get(runId)?.markCanceled();
-        }
-        // C2 (todos/01-correctness.md): a run we asked to renew and no longer
-        // hold the claim on has been reaped away and is (or is about to be)
-        // running somewhere else. Nothing this executor produces from here on
-        // can be written — fencing rejects it — so abort ctx.signal instead of
-        // letting a 5-minute LLM step burn its tokens for a result that lands
-        // in the bin. The run itself is left alone: the new owner owns it now,
-        // and the executor unwinds as 'abandoned' at its next step boundary.
-        for (const runId of res.lostRunIds) {
-          inFlight.get(runId)?.markLost();
-        }
-      } catch (err) {
-        // Still best-effort — the lease reaper protects correctness, so this
-        // must not take the loop down. But a heartbeat that keeps missing means
-        // every lease this worker holds is drifting towards being reaped out
-        // from under it, and that is not something to find out from the run
-        // table hours later.
-        counters.heartbeatErrors += 1;
-        counters.consecutiveHeartbeatErrors += 1;
-        log.warn(
-          `heartbeat:${errorKey(err)}`,
-          `heartbeat failed ${counters.consecutiveHeartbeatErrors}x in a row ` +
-            `(worker=${workerId}, in-flight=${inFlight.size}); leases are not being renewed`,
-          err,
-        );
+  // Heartbeats run one-at-a-time on a setTimeout chain: a tick that overruns
+  // heartbeatMs does not overlap the next one (setInterval would), and a late
+  // timer callback can be turned off with a single flag. The flag is
+  // deliberately NOT the shared `stopping` flag — the heartbeat must keep
+  // renewing leases throughout the drain, so it only flips after the drain.
+  let heartbeatStopped = false;
+  let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function heartbeatOnce(): Promise<void> {
+    try {
+      const res = await kernel.heartbeat({
+        workerId,
+        runIds: [...inFlight.keys()],
+        leaseMs,
+        namespaces: options.namespaces,
+      });
+      counters.consecutiveHeartbeatErrors = 0;
+      for (const runId of res.cancelRunIds) {
+        inFlight.get(runId)?.markCanceled();
       }
-    })();
-  }, heartbeatMs);
-  (heartbeatTimer as { unref?: () => void }).unref?.();
+      // C2 (todos/01-correctness.md): a run we asked to renew and no longer
+      // hold the claim on has been reaped away and is (or is about to be)
+      // running somewhere else. Nothing this executor produces from here on
+      // can be written — fencing rejects it — so abort ctx.signal instead of
+      // letting a 5-minute LLM step burn its tokens for a result that lands
+      // in the bin. The run itself is left alone: the new owner owns it now,
+      // and the executor unwinds as 'abandoned' at its next step boundary.
+      for (const runId of res.lostRunIds) {
+        inFlight.get(runId)?.markLost();
+      }
+    } catch (err) {
+      // Still best-effort — the lease reaper protects correctness, so this
+      // must not take the loop down. But a heartbeat that keeps missing means
+      // every lease this worker holds is drifting towards being reaped out
+      // from under it, and that is not something to find out from the run
+      // table hours later.
+      counters.heartbeatErrors += 1;
+      counters.consecutiveHeartbeatErrors += 1;
+      log.warn(
+        `heartbeat:${errorKey(err)}`,
+        `heartbeat failed ${counters.consecutiveHeartbeatErrors}x in a row ` +
+          `(worker=${workerId}, in-flight=${inFlight.size}); leases are not being renewed`,
+        err,
+      );
+    }
+  }
+
+  function scheduleHeartbeat(): void {
+    if (heartbeatStopped) return;
+    const timer = setTimeout(() => {
+      heartbeatTimer = null;
+      if (heartbeatStopped) return;
+      heartbeatTick = heartbeatOnce().finally(() => {
+        if (!heartbeatStopped) scheduleHeartbeat();
+      });
+    }, heartbeatMs);
+    heartbeatTimer = timer;
+    (timer as { unref?: () => void }).unref?.();
+  }
+  scheduleHeartbeat();
 
   /* ---- one claim-and-execute loop (a single concurrency slot) ----------- */
   async function claimLoop(slot: number): Promise<void> {
@@ -362,13 +381,16 @@ export async function startWorkerRuntime(
       // SHUTDOWN_DRAIN_MS. The heartbeat stays alive during the drain so
       // leases keep renewing while runs finish.
       await Promise.race([loopsDone, sleep(SHUTDOWN_DRAIN_MS)]);
-      clearInterval(heartbeatTimer);
-      // clearInterval only stops *future* ticks. A tick already in flight still
-      // has its `UPDATE workers SET last_heartbeat_at = now(), status = 'online'`
-      // to commit, and if that lands after deregisterWorker the row comes back
+      heartbeatStopped = true;
+      if (heartbeatTimer) clearTimeout(heartbeatTimer);
+      // heartbeatStopped + clearTimeout stop *future* ticks: a late timer
+      // callback reads the flag and returns, and an in-flight tick's `finally`
+      // no longer reschedules. A tick already in flight still has its
+      // `UPDATE workers SET last_heartbeat_at = now(), status = 'online'` to
+      // commit, and if that lands after deregisterWorker the row comes back
       // online until the offline marker corrects it two minutes later — the very
-      // symptom C3 is about. The IIFE swallows its own errors, so this cannot
-      // reject.
+      // symptom C3 is about. heartbeatOnce swallows its own errors, so this
+      // cannot reject.
       await heartbeatTick;
       orchestrator.stop();
       // Only now, with the heartbeat stopped: it would otherwise renew the very

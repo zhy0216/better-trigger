@@ -245,8 +245,8 @@ describe('startWorkerRuntime().stop() hand-back (C3)', () => {
   });
 
   it('waits out a heartbeat already in flight before handing back', async () => {
-    // clearInterval stops the next tick, not the one currently awaiting
-    // Postgres. That tick's second statement is
+    // The stop flag / clearTimeout stops the next tick, not the one currently
+    // awaiting Postgres. That tick's second statement is
     // `UPDATE workers SET last_heartbeat_at = now(), status = 'online'`, so if
     // it commits after deregisterWorker the row is online again until the
     // offline marker corrects it minutes later — C3's third symptom, reappearing
@@ -316,6 +316,76 @@ describe('startWorkerRuntime().stop() hand-back (C3)', () => {
     expect(calls.deregisterWorker).toHaveLength(1);
     // Both failures are reported rather than swallowed into silence.
     expect(warnings).toHaveLength(2);
+  });
+});
+
+describe('heartbeat re-entrancy (p1-04)', () => {
+  it('does not overlap a slow tick with the next one', async () => {
+    const { kernel, order, firstHeartbeatStarted, releaseHeartbeat } = fakeKernel({
+      gateHeartbeat: true,
+    });
+    let started!: () => void;
+    const stepStarted = new Promise<void>((r) => {
+      started = r;
+    });
+
+    const handle = await startWorkerRuntime(
+      { kernel },
+      // leaseMs/3 floors at MIN_HEARTBEAT_MS, so this beats every 500ms.
+      { tasks: [blockingTask(() => started())], concurrency: 1, leaseMs: 1_500, namespaces: [DEFAULT_NAMESPACE] },
+    );
+    await stepStarted;
+    await firstHeartbeatStarted;
+    expect(order.at(-1)).toBe('heartbeat:start');
+
+    // The first tick is held open on the gate. The old setInterval fired a fresh
+    // tick every heartbeatMs regardless of the one still in flight, so 1_200ms
+    // (well past two 500ms intervals) stacked 2+ starts. The setTimeout chain
+    // only schedules the next tick from this one's finally, so there can be
+    // only one start here.
+    await sleep(1_200);
+    expect(order.filter((o) => o === 'heartbeat:start')).toHaveLength(1);
+
+    releaseHeartbeat();
+    await handle.stop();
+    // The held tick finishes exactly once; no overlapped tick is left dangling.
+    expect(order.filter((o) => o === 'heartbeat:end')).toHaveLength(1);
+  });
+
+  it('does not write after stop() resolves', async () => {
+    // stop() must leave the worker row (and lease) alone after it returns: with
+    // the old setInterval a tick could be scheduled after clearInterval and its
+    // `UPDATE workers SET ..., status = 'online'` land post-deregister. Hold the
+    // one tick in flight across stop(), then prove the trace is frozen.
+    const { kernel, order, firstHeartbeatStarted, releaseHeartbeat } = fakeKernel({
+      gateHeartbeat: true,
+    });
+    let started!: () => void;
+    const stepStarted = new Promise<void>((r) => {
+      started = r;
+    });
+
+    const handle = await startWorkerRuntime(
+      { kernel },
+      { tasks: [blockingTask(() => started())], concurrency: 1, leaseMs: 1_500, namespaces: [DEFAULT_NAMESPACE] },
+    );
+    await stepStarted;
+    await firstHeartbeatStarted;
+
+    // Gated: the tick is in flight at stop(), so stop() parks on it until we let
+    // go — a fact, not a race won against the drain.
+    const stopped = handle.stop();
+    const releasedAt = sleep(300).then(releaseHeartbeat);
+    await Promise.all([stopped, releasedAt]);
+
+    // stop() resolved — nothing may touch the heartbeat path again. Two whole
+    // intervals later the trace must be unchanged (the old setInterval would
+    // fire twice in this window).
+    const heartbeatEvents = () => order.filter((o) => o.startsWith('heartbeat:')).length;
+    const frozenAt = heartbeatEvents();
+    await sleep(2 * 500);
+    expect(heartbeatEvents()).toBe(frozenAt);
+    expect(order.filter((o) => o === 'heartbeat:start')).toHaveLength(1);
   });
 });
 
