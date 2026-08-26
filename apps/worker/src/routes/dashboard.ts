@@ -467,7 +467,7 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
       [id, ns.projectId, ns.env],
     );
     const sched = existing.rows[0];
-    if (!sched) return c.json({ error: { code: 'not_found', message: 'schedule not found' } }, 404);
+    if (!sched) throw new KernelError('not_found', 'schedule not found');
 
     const nextRunAt = enabled
       ? nextCronAt(sched.cron_pattern, sched.cron_tz ?? undefined)

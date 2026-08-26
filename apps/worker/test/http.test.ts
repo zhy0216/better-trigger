@@ -250,4 +250,28 @@ describe('GET /runs query params', () => {
     expect(opts.timeoutMs).toBe(5_000);
     expect(opts.pollMs).toBe(250);
   });
+
+  it('clamps out-of-range integers to the bounds, not to the fallback', async () => {
+    const { app, calls } = makeApp();
+    // `?timeoutMs=-5` is out of range, not garbage: it clamps to the min
+    // rather than answering the fallback.
+    const res = await app.fetch(get('/runs/run_1/result?timeoutMs=-5&pollMs=10'));
+    expect(res.status).toBe(200);
+    const args = calls.waitForResult[0] as unknown[];
+    const opts = args[2] as { timeoutMs: number; pollMs: number };
+    expect(opts.timeoutMs).toBe(0);
+    expect(opts.pollMs).toBe(50);
+
+    // Above the max caps at the max, never an error.
+    const high = makeApp();
+    expect(
+      (await high.app.fetch(get('/runs/run_1/result?timeoutMs=99999999&pollMs=99999999'))).status,
+    ).toBe(200);
+    const highOpts = (high.calls.waitForResult[0] as unknown[])[2] as {
+      timeoutMs: number;
+      pollMs: number;
+    };
+    expect(highOpts.timeoutMs).toBe(30_000);
+    expect(highOpts.pollMs).toBe(5_000);
+  });
 });

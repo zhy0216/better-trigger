@@ -199,4 +199,11 @@ export function formatCrashContext(
 export interface ExecutorDiagnostics {
   log: ThrottledLogger;
   counters: WorkerCounters;
+  /**
+   * The claim-time step cap this run was claimed with (options.maxSteps, env
+   * BETTER_TRIGGER_MAX_STEPS). Only the stepsTruncated failure message reads
+   * it, so it names the cap that actually applied rather than re-reading the
+   * env (which embedded hosts never set). Undefined → the p1-07 default.
+   */
+  maxSteps?: number;
 }

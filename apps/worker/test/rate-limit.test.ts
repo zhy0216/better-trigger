@@ -135,6 +135,8 @@ describe('endpointOf', () => {
     ['GET', '/api/v1/runs', 'read'],
     ['GET', '/api/v1/tasks', 'read'],
     ['GET', '/api/v1/schedules', 'read'],
+    ['PATCH', '/api/v1/schedules/sched_1', 'schedule'],
+    ['PATCH', '/api/v1/schedules', 'read'],
     ['GET', '/api/v1/workers', 'read'],
     ['GET', '/api/v1/metrics', 'read'],
     ['GET', '/api/v1/health', null],
@@ -219,7 +221,27 @@ describe('per-endpoint rate limit (defaults)', () => {
     expect(body.error.message).toContain('trigger');
   });
 
-  it("does not let one endpoint's bucket leak into another", async () => {
+  it('buckets PATCH /schedules/:id in its own write bucket, not the read bucket', async () => {
+    // One write token per key; the read buckets stay at their loose defaults,
+    // so a second PATCH must 429 on the WRITE bucket — classified as a read it
+    // would pass (200/s) and land in the route (a 404 on the stub pool here).
+    perKeyOnly();
+    const app = makeApp();
+    const patchSched = () =>
+      new Request('http://localhost:4848/api/v1/schedules/sched_1', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: true }),
+      });
+    await app.fetch(patchSched()); // consumes the single schedule token
+    const res = await app.fetch(patchSched());
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('rate_limited');
+    expect(body.error.message).toContain('schedule');
+  });
+
+  it('does not let one endpoint\'s bucket leak into another', async () => {
     perKeyOnly();
     const app = makeApp();
     await app.fetch(post('/api/v1/trigger', { taskId: 't', payload: null }));

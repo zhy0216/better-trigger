@@ -19,11 +19,16 @@ import type { WorkerHandle } from './runtime';
 /** Pieces to hand back on the way out, in the order they are created. */
 interface Daemon {
   server: { close(): void } | null;
+  /** The in-process waiter registry (PF2). Stopped right after the server:
+   *  it is what rejects pending /result long-polls with the shutdown error,
+   *  and server.close() only stops NEW requests — the long-polls already
+   *  accepted would otherwise sit out the whole worker drain (30s) before
+   *  they are refused. */
+  waiters: { stop(): void } | null;
   worker: WorkerHandle | null;
   stopOrchestrator: (() => void) | null;
-  /** The dedicated LISTEN connection + waiter registry (PF2). Stopped before
-   *  the pool: it is an independent pg.Client, which pool.end() does not
-   *  close. */
+  /** The dedicated LISTEN connection (PF2). Stopped before the pool: it is
+   *  an independent pg.Client, which pool.end() does not close. */
   notify: { stop(): Promise<void> } | null;
   pool: { end(): Promise<void> } | null;
   /** PF4: the dedicated health/metrics probe pool, ended after the business
@@ -32,6 +37,7 @@ interface Daemon {
 }
 export const daemon: Daemon = {
   server: null,
+  waiters: null,
   worker: null,
   stopOrchestrator: null,
   notify: null,
@@ -119,6 +125,15 @@ async function runHandoff(): Promise<void> {
     } catch (err) {
       handoffStepFailed('server', err);
       steps.push('server(failed)');
+    }
+  }
+  if (daemon.waiters) {
+    try {
+      daemon.waiters.stop();
+      steps.push('waiters');
+    } catch (err) {
+      handoffStepFailed('waiters', err);
+      steps.push('waiters(failed)');
     }
   }
   if (daemon.worker) {

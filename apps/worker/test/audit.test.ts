@@ -19,7 +19,7 @@ import type { AuditEntry } from '../src/audit';
 
 const SECRET_PAYLOAD = 'super-secret-token-value-12345';
 
-const makeApp = (overrides: Partial<Kernel> = {}) => {
+const makeApp = (overrides: Partial<Kernel> = {}, poolOverride?: Pool) => {
   const kernel = {
     trigger: async () => ({ runId: 'run_1', idempotent: false }),
     batchTrigger: async () => ({ runIds: ['run_1', 'run_2'] }),
@@ -27,7 +27,7 @@ const makeApp = (overrides: Partial<Kernel> = {}) => {
     retryRun: async () => ({ runId: 'run_2' }),
     ...overrides,
   } as unknown as Kernel;
-  const pool = { query: async () => ({ rows: [] }) } as unknown as Pool;
+  const pool = poolOverride ?? ({ query: async () => ({ rows: [] }) } as unknown as Pool);
   return createApp({ kernel, pool });
 };
 
@@ -137,6 +137,30 @@ describe('audit — accepted requests', () => {
     expect(line.endpoint).toBe('retry');
     expect(line.runIds).toEqual(['run_42', 'run_2']); // acted on, then created
     expect(line.taskIds).toBeNull();
+  });
+
+  it('records a schedules PATCH with endpoint schedule and the schedule id', async () => {
+    // The schedules lookup needs a row so the PATCH gets past its 404.
+    const pool = {
+      query: async (sql: string) =>
+        /FROM schedules/.test(sql)
+          ? { rows: [{ cron_pattern: '0 * * * *', cron_tz: null }] }
+          : { rows: [] },
+    } as unknown as Pool;
+    const app = makeApp({}, pool);
+    await app.fetch(
+      new Request('http://localhost:4848/api/v1/schedules/sched_9?env=prod', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: true }),
+      }),
+    );
+    const line = lastAuditLine();
+    expect(line.method).toBe('PATCH');
+    expect(line.endpoint).toBe('schedule');
+    expect(line.scheduleIds).toEqual(['sched_9']);
+    expect(line.taskIds).toBeNull();
+    expect(line.runIds).toBeNull();
   });
 
   it('does not touch key or caller fields when no key is configured', async () => {

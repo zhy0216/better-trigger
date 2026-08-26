@@ -220,7 +220,14 @@ export function authMiddleware(): MiddlewareHandler<{ Variables: AppVariables }>
     if (path === '/api/v1/health') return next();
 
     const header = c.req.header('Authorization') ?? '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    // RFC 7235: the auth scheme is case-insensitive, so `bearer` / `BEARER`
+    // must be accepted too. The token is everything after the first space,
+    // taken verbatim — the key itself stays case-sensitive.
+    const space = header.indexOf(' ');
+    const token =
+      space !== -1 && header.slice(0, space).toLowerCase() === 'bearer'
+        ? header.slice(space + 1)
+        : '';
     const matched = matchApiKey(token, entries);
     if (matched === null) {
       return c.json(

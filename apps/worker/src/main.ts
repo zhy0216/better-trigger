@@ -265,13 +265,16 @@ async function main(): Promise<void> {
       if (serving) void waiters.resolve(payload.runId);
     },
   });
-  // Both fast-path resources stop together, before the pool: the LISTEN
-  // client is an independent connection pool.end() does not close, and the
+  // The waiter registry stops FIRST, right after server.close(): it is what
+  // rejects pending /result long-polls, and close() only stops NEW requests —
+  // the clients already long-polling must not wait out the whole worker drain.
+  // The LISTEN client stops with daemon.notify, still before the pool: it is
+  // an independent pg.Client connection pool.end() does not close, and the
   // registry's poll timer must not keep querying after the pool is gone.
+  daemon.waiters = waiters;
   daemon.notify = {
     stop: async () => {
       await notifyListener.stop();
-      waiters.stop(); // rejects every pending /result waiter (shutdown error)
     },
   };
 

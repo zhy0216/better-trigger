@@ -1,9 +1,10 @@
 /* =============================================================================
    @better-trigger/worker — rate limiting (O6, todos/03-operability.md).
 
-   Two rate-limit classes. The WRITE class covers the four endpoints that
+   Two rate-limit classes. The WRITE class covers the endpoints that
    create or control runs — POST /trigger, /batch-trigger, /runs/:id/cancel,
-   /runs/:id/retry — token-bucket limited so that a hostile or
+   /runs/:id/retry, and PATCH /schedules/:id (a control-plane write: enabling
+   a schedule can launch a run) — token-bucket limited so that a hostile or
    misconfigured client cannot create runs without bound. The READ class
    covers everything else under /api/v1/ — GET /runs/:id/record,
    /runs/:id/result, /runs, /tasks, /schedules, /workers, /metrics, and any
@@ -72,17 +73,18 @@ import { isInternalRequest } from './internal-request';
 import { remoteAddressOf, type AppVariables } from './middleware';
 
 /** The run-affecting endpoints the rate limit guards. */
-export type RateLimitedEndpoint = 'trigger' | 'batch-trigger' | 'retry' | 'cancel';
+export type RateLimitedEndpoint = 'trigger' | 'batch-trigger' | 'retry' | 'cancel' | 'schedule';
 
 /** Classify a request into its rate-limited endpoint, 'read' for the loose
  *  read bucket, or null for the exempt surface.
- *  The four write endpoints keep their existing (POST-only) classification.
- *  Everything else under /api/v1/ — GET /runs/:id/record, /runs/:id/result,
- *  /runs, /tasks, /schedules, /workers, /metrics and any unknown path, on
- *  any method — is a read: each one can hit the DB per request, so they all
- *  share the read bucket. /health and OPTIONS preflights stay exempt, and
- *  the dashboard's static assets never reach here (they live outside
- *  /api/v1/). */
+ *  The write endpoints keep their existing (POST-only) classification, plus
+ *  PATCH /schedules/:id — a control-plane write, since enabling a schedule
+ *  can launch a run. Everything else under /api/v1/ — GET /runs/:id/record,
+ *  /runs/:id/result, /runs, /tasks, /schedules, /workers, /metrics and any
+ *  unknown path, on any method — is a read: each one can hit the DB per
+ *  request, so they all share the read bucket. /health and OPTIONS
+ *  preflights stay exempt, and the dashboard's static assets never reach
+ *  here (they live outside /api/v1/). */
 export function endpointOf(method: string, path: string): RateLimitedEndpoint | 'read' | null {
   if (method === 'POST') {
     if (path === '/api/v1/trigger') return 'trigger';
@@ -90,6 +92,7 @@ export function endpointOf(method: string, path: string): RateLimitedEndpoint | 
     const match = /^\/api\/v1\/runs\/[^/]+\/(cancel|retry)$/.exec(path);
     if (match !== null) return match[1] as RateLimitedEndpoint;
   }
+  if (method === 'PATCH' && /^\/api\/v1\/schedules\/[^/]+$/.test(path)) return 'schedule';
   if (method === 'OPTIONS' || path === '/api/v1/health') return null;
   if (path.startsWith('/api/v1/')) return 'read';
   return null;

@@ -327,13 +327,20 @@ export async function startWorkerRuntime(
       const def = taskById.get(run.taskId);
       if (!def) {
         // Should not happen (the claim filters by this worker's task ids);
-        // skip safely — the lease reaper recovers the abandoned claim.
+        // hand the lease straight back so another worker can pick the run up
+        // at once instead of waiting out the lease reaper.
+        await kernel.releaseClaims({
+          workerId,
+          namespaces: options.namespaces,
+          runIds: [run.id],
+        }).catch(() => {});
         continue;
       }
 
       const executor = new Executor(kernel, toExecutorTask(def), run, workerId, {
         log,
         counters,
+        maxSteps: options.maxSteps,
       });
       inFlight.set(run.id, executor);
       try {

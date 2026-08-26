@@ -17,7 +17,8 @@
      X-Forwarded-For is NOT trusted: it is spoofable, and behind a reverse
      proxy the socket is the proxy's anyway (see README "Network exposure").
    - `taskIds` come from the request body (trigger / batch-trigger only),
-     `runIds` from the response body or the path. Neither ever contains the
+     `runIds` from the response body or the path, `scheduleIds` from the
+     path (PATCH /schedules/:id). Neither ever contains the
      payload: the payload is the one thing an audit line must not carry, so
      it is never read (the request body is read via a pre-next clone — the
      tee branch stays readable after the route consumed the stream — and the
@@ -61,7 +62,7 @@ export interface AuditEntry {
   requestId: string;
   method: string;
   path: string;
-  /** One of the four run-affecting endpoints, or null for reads/dashboard. */
+  /** One of the run-affecting write endpoints, or null for reads/dashboard. */
   endpoint: RateLimitedEndpoint | null;
   /** sha256 fingerprint of the API key that authenticated the request, or
    *  null when no key is configured. */
@@ -75,6 +76,8 @@ export interface AuditEntry {
   /** Run ids this request acted on (cancel/retry path) or created
    *  (response body), capped. */
   runIds: string[] | null;
+  /** Schedule id this request acted on (PATCH /schedules/:id path). */
+  scheduleIds: string[] | null;
   status: number;
   result: 'accepted' | 'rejected';
   /** Error code from the response envelope on a rejection, else null. */
@@ -116,7 +119,7 @@ async function buildEntry(
   // endpointOf also classifies reads as 'read' (so the rate limiter can bucket
   // them); the audit line's endpoint field keeps meaning "the run-affecting
   // write endpoint" — reads stay null, and nothing on a read is parsed for
-  // task/run ids (that parsing is for the four write endpoints' id lists).
+  // task/run ids (that parsing is for the write endpoints' id lists).
   const classified = endpointOf(method, path);
   const endpoint: RateLimitedEndpoint | null = classified === 'read' ? null : classified;
   const status = c.res.status;
@@ -124,10 +127,12 @@ async function buildEntry(
   let reason: string | null = null;
   let taskIds: string[] | null = null;
   let runIds: string[] | null = null;
+  let scheduleIds: string[] | null = null;
   if (accepted) {
     if (endpoint !== null) {
       taskIds = await taskIdsFromBody(c, endpoint, bodyClone);
       runIds = await runIdsFromResponse(c, endpoint);
+      scheduleIds = scheduleIdsFromPath(endpoint, path);
     }
   } else {
     // Every rejection carries its reason, whatever endpoint was asked for:
@@ -146,6 +151,7 @@ async function buildEntry(
     caller: remoteAddressOf(c) ?? 'unknown',
     taskIds,
     runIds,
+    scheduleIds,
     status,
     result: accepted ? 'accepted' : 'rejected',
     reason,
@@ -192,6 +198,8 @@ async function runIdsFromResponse(
     const id = runIdFromPath(c.req.path);
     return id !== null ? [id] : null;
   }
+  // schedule ids live on the path, not in the response's id list.
+  if (endpoint === 'schedule') return null;
   const resBody = await jsonBodyOf(c.res);
   if (resBody === null) return endpoint === 'retry' ? runIdFromPathList(c.req.path) : null;
   const obj = resBody as { runId?: unknown; runIds?: unknown };
@@ -220,6 +228,13 @@ function runIdFromPath(path: string): string | null {
 function runIdFromPathList(path: string): string[] | null {
   const id = runIdFromPath(path);
   return id !== null ? [id] : null;
+}
+
+/** The schedule id a PATCH /schedules/:id request acted on. */
+function scheduleIdsFromPath(endpoint: RateLimitedEndpoint, path: string): string[] | null {
+  if (endpoint !== 'schedule') return null;
+  const match = /^\/api\/v1\/schedules\/([^/]+)$/.exec(path);
+  return match !== null ? [match[1]] : null;
 }
 
 /** The error code from a rejection envelope, or null if it is not JSON. */

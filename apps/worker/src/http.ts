@@ -90,7 +90,12 @@ export function intQuery(
   if (raw === undefined || raw === '') return bounds.fallback;
   const n = Number(raw);
   if (!Number.isSafeInteger(n) || n < bounds.min) {
-    if (opts.onInvalid === 'clamp') return Math.max(bounds.min, Math.min(bounds.max, bounds.fallback));
+    if (opts.onInvalid === 'clamp') {
+      // Tolerated, not refused: a below-min integer clamps up to min (the
+      // above-max case is capped by the Math.min below either way), and only
+      // garbage that parses to no integer keeps the fallback.
+      return Number.isSafeInteger(n) ? bounds.min : bounds.fallback;
+    }
     throw new KernelError('bad_request', `${name} must be an integer >= ${bounds.min}`);
   }
   return Math.min(n, bounds.max);

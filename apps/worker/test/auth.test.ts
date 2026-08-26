@@ -76,6 +76,14 @@ describe('bearer auth', () => {
     expect(res.status).toBe(200);
   });
 
+  it('accepts the scheme in any case (RFC 7235)', async () => {
+    const app = makeApp();
+    for (const scheme of ['Bearer', 'bearer', 'BEARER', 'bEaReR']) {
+      const res = await app.fetch(trigger(`${scheme} ${KEY}`));
+      expect(res.status, scheme).toBe(200);
+    }
+  });
+
   it('rejects near-misses of every shape', async () => {
     const app = makeApp();
     const wrong = [
@@ -84,7 +92,6 @@ describe('bearer auth', () => {
       `Bearer ${KEY.slice(0, 10)}`, // a correct prefix — the timing attack's prize
       `Bearer ${KEY}x`, // correct key plus a byte
       `Bearer ${KEY.toUpperCase()}`, // case
-      `bearer ${KEY}`, // scheme is case-sensitive here
       `Basic ${KEY}`,
       KEY, // no scheme at all
       'Bearer ',
