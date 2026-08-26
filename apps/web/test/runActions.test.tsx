@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunView } from '../src/features/run/RunView';
 import { createRetryIntentKey } from '../src/features/run/retryIntentKey';
 import { setApiKey } from '../src/api/client';
-import { resetConnection } from '../src/api/hooks';
+import { resetConnection, getConnection } from '../src/api/hooks';
 import type { RunDetailResponse, ServerRunStatus } from '../src/api/client';
 
 // Base timestamps relative to the REAL clock: a running run has no finishedAt,
@@ -215,6 +215,27 @@ describe('RunHeader retry', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy());
     expect(screen.queryByRole('button', { name: /cancel/i })).toBeNull();
   });
+
+  it('a 401 on a control action feeds the connection registry, not just the inline error (C3)', async () => {
+    // The failed run is terminal, so C1 already paused its poll and withdrew the
+    // poll's registry entry — the only thing that can flip the connection to
+    // 'unauthorized' is the action's recordConnectionError call.
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const u = String(input);
+      if (u.includes('/retry')) {
+        return Promise.resolve(json({ error: { code: 'unauthorized', message: 'bad key' } }, 401));
+      }
+      return Promise.resolve(json(detail('r1', 'failed'), 200));
+    });
+    render(<RunView runId="r1" />);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+    expect(screen.getByText('bad key')).toBeTruthy();
+    expect(getConnection()).toBe('unauthorized');
+  });
 });
 
 describe('RunHeader cancel', () => {
@@ -263,5 +284,26 @@ describe('RunHeader cancel', () => {
     expect(screen.getByRole('button', { name: /cancel/i })).toBeTruthy();
     expect((screen.getByRole('button', { name: /cancel/i }) as HTMLButtonElement).disabled).toBe(false);
     expect(cancels).toBe(1);
+  });
+
+  it('a non-401 control failure does not flip the connection to down (C3)', async () => {
+    // Only a 401 means the credential is bad; a 409/network failure is a
+    // run-state or transport problem. It surfaces inline but must not push the
+    // healthy poll's 'live' state to 'down' via the connection registry.
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const u = String(input);
+      if (u.includes('/cancel')) {
+        return Promise.resolve(json({ error: { code: 'conflict', message: 'run is not terminal' } }, 409));
+      }
+      return Promise.resolve(json(detail('r1', 'running'), 200));
+    });
+    render(<RunView runId="r1" />);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /cancel/i })).toBeTruthy());
+    await waitFor(() => expect(getConnection()).toBe('live'));
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+
+    expect(getConnection()).toBe('live');
   });
 });

@@ -7,7 +7,8 @@ import React from 'react';
 import { Icon, Badge, Button, StatusBadge, StatusDot } from '../../components/primitives';
 import { STATUS_META } from '../../components/status-meta';
 import { ErrorState, LoadingState } from '../../components/Layout';
-import { useRun, api } from '../../api/hooks';
+import { useRun, api, recordConnectionError } from '../../api/hooks';
+import { ApiError } from '../../api/client';
 import { relativeFuture, type AdaptedRunDetail } from '../../api/adapter';
 import { createRetryIntentKey } from './retryIntentKey';
 import type { Span, Trace, LogLine, VizStyle } from '../../types';
@@ -65,6 +66,11 @@ function RunHeader({ trace, runStatus, env, onRetried }: { trace: Trace; runStat
       }
     } catch (e) {
       setActionError(e instanceof Error ? e.message : 'request failed');
+      // C3: only a 401 means the credential is bad; a 404/409/network failure is
+      // a transient run-state or transport problem and must not flip the whole
+      // dashboard to "offline". Feed just the auth rejection into the shared
+      // connection registry so the key prompt takes over.
+      if (e instanceof ApiError && e.status === 401) recordConnectionError(e);
     } finally {
       setPending(null);
       if (kind === 'retry') retryIntentKey.clear();
@@ -305,10 +311,11 @@ const LOG_TONE: Record<string, string> = {
 
 interface LogEntry { spanId: string; lvl: string; msg: string; ms: number; label: string }
 
-function LogStream({ trace, logs, t, selectedId, scoped, setScoped, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs }: {
+function LogStream({ trace, logs, t, selectedId, scoped, setScoped, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs, loadOlderLogsError }: {
   trace: Trace; logs: Record<string, LogLine[]>; t: number; selectedId: string; scoped: boolean; setScoped: React.Dispatch<React.SetStateAction<boolean>>;
   /** PF3 logs paging: fetch the next older page and append it to the stream. */
   onLoadOlderLogs: () => Promise<boolean>; loadingOlderLogs: boolean; hasOlderLogs: boolean;
+  loadOlderLogsError: string | null;
 }) {
   const lines = React.useMemo<LogEntry[]>(() => {
     const out: LogEntry[] = [];
@@ -339,6 +346,9 @@ function LogStream({ trace, logs, t, selectedId, scoped, setScoped, onLoadOlderL
             <Icon name="chevronUp" size={12} /> {loadingOlderLogs ? 'Loading…' : 'Load older logs'}
           </button>
         )}
+        {loadOlderLogsError && (
+          <span role="alert" style={{ fontSize: 11, color: 'var(--red-text)' }}>Load failed — retry</span>
+        )}
         <button onClick={() => setScoped((v) => !v)}
           style={{
             display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--border)',
@@ -367,7 +377,7 @@ interface WakeInfo {
 }
 
 export function RunView({ vizStyle = 'waterfall', runId = null, env = 'prod', onBack, onRetried }: { vizStyle?: VizStyle; runId?: string | null; env?: string; onBack?: () => void; onRetried?: (newRunId: string) => void }) {
-  const { data: detail, error, loadOlderLogs, loadingOlderLogs, hasOlderLogs } = useRun(runId, env);
+  const { data: detail, error, loadOlderLogs, loadingOlderLogs, hasOlderLogs, loadOlderLogsError } = useRun(runId, env);
 
   let body: React.ReactNode;
   if (!runId) {
@@ -385,7 +395,7 @@ export function RunView({ vizStyle = 'waterfall', runId = null, env = 'prod', on
   } else {
     body = (
       <RunDetail key={runId} detail={detail} vizStyle={vizStyle} env={env} onRetried={onRetried}
-        onLoadOlderLogs={loadOlderLogs} loadingOlderLogs={loadingOlderLogs} hasOlderLogs={hasOlderLogs} />
+        onLoadOlderLogs={loadOlderLogs} loadingOlderLogs={loadingOlderLogs} hasOlderLogs={hasOlderLogs} loadOlderLogsError={loadOlderLogsError} />
     );
   }
 
@@ -406,9 +416,9 @@ export function RunView({ vizStyle = 'waterfall', runId = null, env = 'prod', on
   );
 }
 
-function RunDetail({ detail, vizStyle, env, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs, onRetried }: {
+function RunDetail({ detail, vizStyle, env, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs, loadOlderLogsError, onRetried }: {
   detail: AdaptedRunDetail; vizStyle: VizStyle; env: string;
-  onLoadOlderLogs: () => Promise<boolean>; loadingOlderLogs: boolean; hasOlderLogs: boolean;
+  onLoadOlderLogs: () => Promise<boolean>; loadingOlderLogs: boolean; hasOlderLogs: boolean; loadOlderLogsError: string | null;
   onRetried?: (newRunId: string) => void;
 }) {
   const trace = detail.trace;
@@ -437,7 +447,7 @@ function RunDetail({ detail, vizStyle, env, onLoadOlderLogs, loadingOlderLogs, h
             </div>
           </div>
           <LogStream trace={trace} logs={logs} t={t} selectedId={selected?.id ?? ''} scoped={scoped} setScoped={setScoped}
-            onLoadOlderLogs={onLoadOlderLogs} loadingOlderLogs={loadingOlderLogs} hasOlderLogs={hasOlderLogs} />
+            onLoadOlderLogs={onLoadOlderLogs} loadingOlderLogs={loadingOlderLogs} hasOlderLogs={hasOlderLogs} loadOlderLogsError={loadOlderLogsError} />
         </div>
         <Inspector span={selected} t={t} trace={trace} wake={wake} />
       </div>

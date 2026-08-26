@@ -37,7 +37,7 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
   // `live` gates polling — Paused stops requests and holds current data,
   // resuming refreshes immediately.
   // PF3: loadMore consumes the server's nextCursor (older pages append).
-  const { data: source, error, loadMore, loadingMore, hasMore } = useRuns(
+  const { data: source, error, loadMore, loadingMore, hasMore, loadMoreError } = useRuns(
     env,
     { status: FILTER_TO_SERVER[filter], taskId: q || undefined },
     live,
@@ -120,6 +120,11 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
               }}>
               {loadingMore ? 'Loading…' : 'Load more'}
             </button>
+            {loadMoreError && (
+              <div role="alert" style={{ marginTop: 8, fontSize: 12, color: 'var(--red-text)', textAlign: 'center' }}>
+                Load failed — retry
+              </div>
+            )}
           </div>
         )}
       </Card>

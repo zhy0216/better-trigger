@@ -203,10 +203,16 @@ function usePoll<T>(
     let mounted = true;
     let controller: AbortController | null = null;
     let timer: ReturnType<typeof setTimeout>;
+    // Guards a visibility-triggered refresh from overlapping the in-flight
+    // poll: the self-rescheduling setTimeout chain never overlaps by design, but
+    // visibilitychange fires run() directly from an event handler.
+    let inFlight = false;
 
     // Self-rescheduling setTimeout: the next poll only starts once this one
     // settles, so a slow response is never interrupted and never overlaps.
     const run = async () => {
+      if (inFlight) return;
+      inFlight = true;
       controller = new AbortController();
       try {
         const out = await fetcherRef.current(controller.signal);
@@ -225,16 +231,28 @@ function usePoll<T>(
         setLoading(false);
         reportOutcome(id, classifyConnectionError(e) === 'unauthorized' ? 'unauthorized' : 'error');
       } finally {
-        if (mounted) timer = setTimeout(run, POLL_MS);
+        inFlight = false;
+        // Pause while the tab is hidden: only a visible page schedules the next
+        // tick, so background tabs stop polling. Returning to visibility fires
+        // onVisibility() to refresh immediately.
+        if (mounted && !document.hidden) timer = setTimeout(run, POLL_MS);
       }
     };
 
+    const onVisibility = () => {
+      clearTimeout(timer);
+      if (document.hidden) return;
+      void run();
+    };
+
+    document.addEventListener('visibilitychange', onVisibility);
     void run();
 
     return () => {
       mounted = false;
       controller?.abort();
       clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
       unregisterConnection(id);
     };
   }, [queryKey, enabled, apiKeyVersion]);
@@ -259,6 +277,9 @@ export interface RunsResult extends PollResult<Run[]> {
   loadingMore: boolean;
   /** False once the server reported no further pages — all runs loaded. */
   hasMore: boolean;
+  /** Non-empty when the last loadMore request failed (distinct from
+   *  "no more pages": hasMore stays true, the user can hit Load more again). */
+  loadMoreError: string | null;
 }
 
 /**
@@ -297,6 +318,7 @@ export function useRuns(
   // The head poll must never touch it (see the loadMore comment below).
   const [tailCursor, setTailCursor] = React.useState<string | null | undefined>(undefined);
   const [loadingMore, setLoadingMore] = React.useState(false);
+  const [loadMoreError, setLoadMoreError] = React.useState<string | null>(null);
 
   // The polled head's own keyset. It only answers "are there more runs at
   // all" BEFORE paging has started — once the user has loaded an older page,
@@ -313,6 +335,7 @@ export function useRuns(
     setTail([]);
     setTailCursor(undefined);
     setLoadingMore(false);
+    setLoadMoreError(null);
   }, [queryKey]);
 
   const loadMore = React.useCallback(async (): Promise<boolean> => {
@@ -321,13 +344,15 @@ export function useRuns(
     const cursor = tailCursor ?? base.data?.nextCursor ?? null;
     if (cursor === null) return false; // the head page itself was the last page
     setLoadingMore(true);
+    setLoadMoreError(null);
     try {
       const res = await api.runs({ env, status, taskId, limit: pageLimit, cursor });
       setTail((prev) => appendTailPage(prev, adaptRuns(res.runs)));
       // Only the user's own paging advances the tail cursor.
       setTailCursor(res.nextCursor);
       return res.nextCursor !== null;
-    } catch {
+    } catch (e) {
+      setLoadMoreError(e instanceof Error ? e.message || 'request failed' : 'request failed');
       return false;
     } finally {
       setLoadingMore(false);
@@ -345,6 +370,7 @@ export function useRuns(
     loadMore,
     loadingMore,
     hasMore,
+    loadMoreError,
   };
 }
 
@@ -356,6 +382,9 @@ export interface RunDetailResult extends PollResult<AdaptedRunDetail> {
   loadingOlderLogs: boolean;
   /** False once the server reported no older logs — all logs loaded. */
   hasOlderLogs: boolean;
+  /** Non-empty when the last loadOlderLogs request failed (distinct from
+   *  "no older logs": hasOlderLogs stays true, the user can retry). */
+  loadOlderLogsError: string | null;
 }
 
 /**
@@ -366,10 +395,22 @@ export interface RunDetailResult extends PollResult<AdaptedRunDetail> {
  * — a head that slides forward between polls must not duplicate a line.
  */
 export function useRun(runId: string | null, env: string = 'prod'): RunDetailResult {
+  // C1: a terminal run never mutates in place — a retry mints a NEW id. Flip
+  // this once the detail reports completed/failed/canceled and pause the poll
+  // (the held terminal frame stays on screen). A runId/env change re-arms it:
+  // the next run may still be in flight and must resume polling.
+  const [terminal, setTerminal] = React.useState(false);
+
   const base = usePoll<RunDetailResponse>(
     pollKey('run', runId, env),
-    async (signal) => api.run(runId!, env, undefined, signal),
-    runId !== null,
+    async (signal) => {
+      const res = await api.run(runId!, env, undefined, signal);
+      if (res.run.status === 'completed' || res.run.status === 'failed' || res.run.status === 'canceled') {
+        setTerminal(true);
+      }
+      return res;
+    },
+    runId !== null && !terminal,
   );
 
   const [olderLogs, setOlderLogs] = React.useState<RunLog[]>([]);
@@ -379,6 +420,7 @@ export function useRun(runId: string | null, env: string = 'prod'): RunDetailRes
   //   number     the last loaded page's cursor
   const [olderCursor, setOlderCursor] = React.useState<number | null | undefined>(undefined);
   const [loadingOlderLogs, setLoadingOlderLogs] = React.useState(false);
+  const [loadOlderLogsError, setLoadOlderLogsError] = React.useState<string | null>(null);
 
   // A runId/env change invalidates loaded pages (RunDetail is keyed by runId,
   // so this is belt-and-braces for the same effect).
@@ -386,6 +428,8 @@ export function useRun(runId: string | null, env: string = 'prod'): RunDetailRes
     setOlderLogs([]);
     setOlderCursor(undefined);
     setLoadingOlderLogs(false);
+    setLoadOlderLogsError(null);
+    setTerminal(false);
   }, [runId, env]);
 
   const loadOlderLogs = React.useCallback(async (): Promise<boolean> => {
@@ -394,6 +438,7 @@ export function useRun(runId: string | null, env: string = 'prod'): RunDetailRes
     const cursor = olderCursor ?? base.data?.logsNextCursor ?? null;
     if (cursor === null) return false; // the head page itself has no older logs
     setLoadingOlderLogs(true);
+    setLoadOlderLogsError(null);
     try {
       const res = await api.run(runId, env, { logsBefore: cursor });
       // Append the older page; the head may have slid forward between polls,
@@ -404,7 +449,8 @@ export function useRun(runId: string | null, env: string = 'prod'): RunDetailRes
       });
       setOlderCursor(res.logsNextCursor);
       return res.logsNextCursor !== null;
-    } catch {
+    } catch (e) {
+      setLoadOlderLogsError(e instanceof Error ? e.message || 'request failed' : 'request failed');
       return false;
     } finally {
       setLoadingOlderLogs(false);
@@ -428,6 +474,7 @@ export function useRun(runId: string | null, env: string = 'prod'): RunDetailRes
     loadOlderLogs,
     loadingOlderLogs,
     hasOlderLogs,
+    loadOlderLogsError,
   };
 }
 

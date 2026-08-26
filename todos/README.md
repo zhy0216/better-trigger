@@ -15,7 +15,7 @@
 | 3 | [p1-03-embedded-rate-limit.md](./done/p1-03-embedded-rate-limit.md) ✅ | embedded 进程内 fetch 也过 rateLimitMiddleware，高吞吐 embedded 应用会对自己返回 429 | — |
 | 4 | [p1-04-heartbeat-reentrancy.md](./done/p1-04-heartbeat-reentrancy.md) ✅ | heartbeat 的 `setInterval` 无重入保护，慢 tick 会并发；stop() 后仍可能把 workers 行重新点亮 | — |
 | 5 | [p1-05-sdk-waitforresult-signature.md](./done/p1-05-sdk-waitforresult-signature.md) ✅ | SDK `waitForResult` 签名与文档/兄弟方法不一致；README 漏 namespace 列与 `retryRun.operationKey` | — |
-| 6 | [p1-06-dashboard-terminal-polling.md](./p1-06-dashboard-terminal-polling.md) | 终态 run 永久 2s 轮询、不感知页面可见性；loadMore 吞错、动作 401 不进连接注册表 | — |
+| 6 | [p1-06-dashboard-terminal-polling.md](./done/p1-06-dashboard-terminal-polling.md) ✅ | 终态 run 永久 2s 轮询、不感知页面可见性；loadMore 吞错、动作 401 不进连接注册表 | — |
 | 7 | [p1-07-schema-drift-guard.md](./p1-07-schema-drift-guard.md) | schema.ts 自称 single source of truth 但只对 migration 成立；kernel 手写行类型/约束名无编译期保护 | — |
 | 8 | [p1-08-ci-release-node-matrix.md](./p1-08-ci-release-node-matrix.md) | 无 release workflow、CI 无 Node 矩阵、publint/attw 未覆盖 kernel/db、残留 `.next` 输出、TS 未使用变量无人查 | — |
 | 9 | [p2-09-refactor-monoliths.md](./p2-09-refactor-monoliths.md) | kernel `runs.ts`(2577) / `claimRuns`(315) / `scanWaits`(290) / worker `main.ts`(1246) 拆分，executor 重复模板抽取 | — |

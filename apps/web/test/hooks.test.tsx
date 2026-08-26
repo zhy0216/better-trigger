@@ -15,7 +15,7 @@ import { act, cleanup, render, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setApiKey } from '../src/api/client';
 import { getConnection, resetConnection, useRun, useRuns, useSchedules, useTasks } from '../src/api/hooks';
-import type { RunDetailResponse, RunLog, RunsResponse, RunSummary } from '../src/api/client';
+import type { RunDetailResponse, RunLog, RunsResponse, RunSummary, ServerRunStatus } from '../src/api/client';
 
 const run = (id: string): RunSummary => ({
   id,
@@ -58,6 +58,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
 });
 
 describe('usePoll (via useRuns)', () => {
@@ -151,6 +152,31 @@ describe('usePoll (via useRuns)', () => {
     unmount();
     expect(captured?.aborted).toBe(true);
   });
+
+  it('pauses polling while the page is hidden and refreshes immediately on visibility (C2)', async () => {
+    fetchMock.mockImplementation(() => res(page(['a0'], null)));
+    // Hidden before the first fetch settles → its `finally` never schedules the
+    // next tick, so a hidden tab stops polling (only the initial fetch runs).
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    const { result } = renderHook(() => useRuns('prod'));
+
+    await flush();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    // Still hidden: no further polls were scheduled.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // The tab becomes visible again → an immediate catch-up request.
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.current.data?.map((r) => r.id)).toEqual(['a0']);
+  });
 });
 
 describe('useRuns pagination (loadMore)', () => {
@@ -221,6 +247,26 @@ describe('useRuns pagination (loadMore)', () => {
     // New query: head only for staging (the stub answers the same page).
     expect(result.current.data?.map((r) => r.id)).toEqual(['a1', 'a0']);
     expect(result.current.hasMore).toBe(true); // paging re-armed
+  });
+
+  it('distinguishes a failed loadMore from an exhausted list (C3)', async () => {
+    fetchMock
+      .mockResolvedValueOnce(res(page(['a1', 'a0'], 'c1')))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    const { result } = renderHook(() => useRuns('prod'));
+
+    await flush();
+    expect(result.current.loadMoreError).toBeNull();
+
+    let more: boolean | undefined;
+    await act(async () => {
+      more = await result.current.loadMore();
+    });
+    expect(more).toBe(false);
+    expect(result.current.loadMoreError).toBe('Failed to fetch');
+    // A failed request must not read as "no more": paging stays re-armed so a
+    // re-click can retry.
+    expect(result.current.hasMore).toBe(true);
   });
 });
 
@@ -301,46 +347,46 @@ describe('connection aggregation — one flaky poll must not flip the dot', () =
   });
 });
 
+const log = (id: number): RunLog => ({
+  id,
+  stepSeq: null,
+  level: 'info',
+  message: `line ${id}`,
+  data: null,
+  ts: new Date(1_000_000_000_000 + id).toISOString(),
+});
+
+const detail = (ids: number[], logsNextCursor: number | null, status: ServerRunStatus = 'completed'): RunDetailResponse => ({
+  run: {
+    id: 'r1',
+    taskId: 't',
+    status,
+    trigger: 'api',
+    codeVersion: 'v',
+    projectId: 'default',
+    env: 'prod',
+    attempt: 1,
+    maxAttempts: 1,
+    durationMs: null,
+    createdAt: '2026-08-11T10:00:00Z',
+    startedAt: '2026-08-11T10:00:00Z',
+    finishedAt: '2026-08-11T10:00:01Z',
+    payload: null,
+    output: null,
+    error: null,
+    parentRunId: null,
+    idempotencyKey: null,
+    queuedAt: '2026-08-11T10:00:00Z',
+  },
+  steps: [],
+  stepsTruncated: false,
+  waits: [],
+  waitsTruncated: false,
+  logs: ids.map(log),
+  logsNextCursor,
+});
+
 describe('useRun logs pagination (loadOlderLogs)', () => {
-  const log = (id: number): RunLog => ({
-    id,
-    stepSeq: null,
-    level: 'info',
-    message: `line ${id}`,
-    data: null,
-    ts: new Date(1_000_000_000_000 + id).toISOString(),
-  });
-
-  const detail = (ids: number[], logsNextCursor: number | null): RunDetailResponse => ({
-    run: {
-      id: 'r1',
-      taskId: 't',
-      status: 'completed',
-      trigger: 'api',
-      codeVersion: 'v',
-      projectId: 'default',
-      env: 'prod',
-      attempt: 1,
-      maxAttempts: 1,
-      durationMs: null,
-      createdAt: '2026-08-11T10:00:00Z',
-      startedAt: '2026-08-11T10:00:00Z',
-      finishedAt: '2026-08-11T10:00:01Z',
-      payload: null,
-      output: null,
-      error: null,
-      parentRunId: null,
-      idempotencyKey: null,
-      queuedAt: '2026-08-11T10:00:00Z',
-    },
-    steps: [],
-    stepsTruncated: false,
-    waits: [],
-    waitsTruncated: false,
-    logs: ids.map(log),
-    logsNextCursor,
-  });
-
   it('appends the older page via logsBefore, dedupes the overlap, and exhausts', async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const u = String(input);
@@ -382,5 +428,70 @@ describe('useRun logs pagination (loadOlderLogs)', () => {
     });
     expect(more).toBe(false);
     expect(fetchMock.mock.calls.length).toBe(callsBefore);
+  });
+
+  it('distinguishes a failed loadOlderLogs from exhausted logs (C3)', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const u = String(input);
+      if (u.includes('logsBefore=')) return Promise.reject(new TypeError('Failed to fetch'));
+      return Promise.resolve(
+        new Response(JSON.stringify(detail([201], 201)), { status: 200 }),
+      );
+    });
+    const { result } = renderHook(() => useRun('r1'));
+
+    await flush();
+    expect(result.current.loadOlderLogsError).toBeNull();
+
+    let more: boolean | undefined;
+    await act(async () => {
+      more = await result.current.loadOlderLogs();
+    });
+    expect(more).toBe(false);
+    expect(result.current.loadOlderLogsError).toBe('Failed to fetch');
+    expect(result.current.hasOlderLogs).toBe(true); // a failure ≠ than "no more"
+  });
+});
+
+describe('useRun stops polling on a terminal run (C1)', () => {
+  it('pauses once terminal, keeps the frame, and re-arms on a new runId', async () => {
+    let status: ServerRunStatus = 'running';
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify(detail([201], null, status)), { status: 200 })),
+    );
+    const { result, rerender } = renderHook(({ runId }: { runId: string }) => useRun(runId), {
+      initialProps: { runId: 'r1' },
+    });
+
+    await flush();
+    expect(result.current.data?.status).toBe('running');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Still running → the poll keeps going.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // The run completes on the next tick → terminal status flips the pause.
+    status = 'completed';
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(result.current.data?.status).toBe('success');
+    const callsAtTerminal = fetchMock.mock.calls.length;
+
+    // Terminal: no further requests, but the completed frame stays in view.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    expect(fetchMock.mock.calls.length).toBe(callsAtTerminal);
+    expect(result.current.data?.status).toBe('success');
+
+    // A new runId yields a different run (possibly still in flight) → re-arm.
+    status = 'running';
+    rerender({ runId: 'r2' });
+    await flush();
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAtTerminal);
   });
 });
