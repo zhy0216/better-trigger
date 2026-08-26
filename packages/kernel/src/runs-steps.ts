@@ -443,7 +443,8 @@ export async function waitForChildRun(
       if (existing === null) {
         // Defensive: the winner committed, so one of the two reads above must
         // have seen it. A vanish here means the rows were deleted by hand.
-        throw new Error(
+        throw new KernelError(
+          'internal',
           `waitForChildRun: no wait or step row for run ${args.runId} seq ${args.seq} ` +
             `after a same-step conflict (rows deleted?)`,
         );

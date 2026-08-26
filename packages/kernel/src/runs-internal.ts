@@ -346,13 +346,25 @@ export function serializeErrorForStorage(error: SerializedError): string {
  * Small helpers
  * ------------------------------------------------------------------------- */
 
+export interface WithTxOptions {
+  /**
+   * Isolation level for the transaction. Omitted → a plain BEGIN, i.e. the
+   * server default ('read committed'). `repeatable read` is what getRunDetail
+   * uses so its four reads share one snapshot (PF3).
+   */
+  isolation?: 'read committed' | 'repeatable read';
+}
+
 export async function withTx<T>(
   pool: Pool,
   fn: (c: PoolClient) => Promise<T>,
+  options: WithTxOptions = {},
 ): Promise<T> {
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    await client.query(
+      options.isolation ? `BEGIN ISOLATION LEVEL ${options.isolation.toUpperCase()}` : 'BEGIN',
+    );
     const out = await fn(client);
     await client.query('COMMIT');
     return out;

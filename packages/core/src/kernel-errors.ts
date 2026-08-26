@@ -32,6 +32,14 @@ export type KernelErrorCode =
   | 'payload_too_large'
   | 'conflict'
   /**
+   * Defensive invariant violation / an internal branch that should never
+   * happen in a healthy system (e.g. a DO NOTHING conflict with no surviving
+   * row to read back). Hosts deliberately leave this code OUT of their HTTP
+   * mapping tables, so it falls through to the generic 500 internal_error
+   * handling rather than any 400-class status.
+   */
+  | 'internal'
+  /**
    * The host refused the request for hitting a rate limit — per API key or per
    * endpoint — on one of the run-affecting routes (trigger / batch-trigger /
    * retry / cancel), HTTP 429. Raised by the worker's rate-limit middleware;

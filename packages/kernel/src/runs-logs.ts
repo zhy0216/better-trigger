@@ -125,7 +125,10 @@ function shrinkRowForBatch(row: PreparedLogRow, maxBytes: number): PreparedLogRo
  *   - a chunk that gets the lock after the terminal commit sees
  *     finished_at IS NOT NULL (or the run gone) and drops itself — 0 rows,
  *     no error, one `[runs:logs]` warn distinguishing "run does not exist"
- *     from "already terminal (late flush / terminal race)".
+ *     from "already terminal (late flush / terminal race)";
+ *   - a line that cannot fit the batch cap even after shrinkRowForBatch is
+ *     dropped before any chunk is built, counted under the same warn as a
+ *     third verdict ("over-cap line"), never silently.
  * There is no "statement snapshot passed the liveness test, then the FK check
  * waited for the terminal tx and inserted anyway" window left: the INSERT no
  * longer carries a `WHERE EXISTS (...)` guard, and the FK's key-share check is
@@ -161,6 +164,7 @@ export async function appendLogs(
   // the run, so a run that goes terminal mid-flush simply stops absorbing the
   // remaining chunks.
   const maxBatchBytes = logBatchMaxBytes();
+  let oversizeLines = 0;
   const rows: PreparedLogRow[] = [];
   for (const e of entries) {
     let row = prepareLogRow(e);
@@ -169,8 +173,11 @@ export async function appendLogs(
     }
     // Under an operator-tuned cap smaller than the smallest possible line the
     // line cannot be written at all; drop it rather than emit an oversized
-    // INSERT (a 1-byte cap cannot be honored any other way).
+    // INSERT (a 1-byte cap cannot be honored any other way). The drop is
+    // counted and said out loud like the missing/terminal drops below — a
+    // silent loss here would read as "logs are fine" under a mis-set cap.
     if (preparedRowBytes(row) <= maxBatchBytes) rows.push(row);
+    else oversizeLines += 1;
   }
   const chunks: PreparedLogRow[][] = [];
   let current: PreparedLogRow[] = [];
@@ -189,8 +196,8 @@ export async function appendLogs(
   }
   if (current.length > 0) chunks.push(current);
 
-  let droppedKind: 'missing' | 'terminal' | null = null;
-  let droppedLines = 0;
+  let missingLines = 0;
+  let terminalLines = 0;
 
   for (const chunk of chunks) {
     const values: string[] = [];
@@ -220,16 +227,14 @@ export async function appendLogs(
         // no home). finished_at can never go back to NULL and a missing run
         // never reappears, so every remaining chunk drops too; the single
         // warn at the end reports the whole flush.
-        if (droppedKind === null) droppedKind = 'missing';
-        droppedLines += chunk.length;
+        missingLines += chunk.length;
         return;
       }
       if (locked.rows[0].finished_at !== null) {
         // Terminal: this chunk raced a complete/fail/cancel and lost (or the
         // flush is simply late). Strict boundary — the lines are dropped, and
         // the run's history ends at finished_at.
-        if (droppedKind === null) droppedKind = 'terminal';
-        droppedLines += chunk.length;
+        terminalLines += chunk.length;
         return;
       }
       // No EXISTS guard anymore: the lock above IS the liveness decision, so
@@ -245,17 +250,37 @@ export async function appendLogs(
     });
   }
 
-  if (droppedKind !== null) {
+  // One warn per flush, first verdict wins. Over-cap lines were dropped during
+  // preparation, before any chunk ran, so they name the verdict when they
+  // exist; otherwise the chunk loop's missing/terminal verdicts apply. In
+  // practice a flush hits exactly one of the three.
+  const dropped =
+    oversizeLines > 0
+      ? ({ kind: 'oversize', lines: oversizeLines } as const)
+      : missingLines > 0
+        ? ({ kind: 'missing', lines: missingLines } as const)
+        : terminalLines > 0
+          ? ({ kind: 'terminal', lines: terminalLines } as const)
+          : null;
+
+  if (dropped !== null) {
     // Observable, never fatal: logs are the best-effort data plane, but the
     // boundary is strict, so the drop is recorded once per flush with the
-    // verdict that caused it (run absent vs terminal race), not retried.
+    // verdict that caused it (run absent vs terminal race vs an over-cap
+    // line), not retried.
     const who = `run ${runId} (${namespace.projectId}/${namespace.env})`;
-    if (droppedKind === 'missing') {
-      logger.warn(`[runs:logs] dropped ${droppedLines} log line(s): ${who} does not exist`);
+    if (dropped.kind === 'missing') {
+      logger.warn(`[runs:logs] dropped ${dropped.lines} log line(s): ${who} does not exist`);
+    } else if (dropped.kind === 'terminal') {
+      logger.warn(
+        `[runs:logs] dropped ${dropped.lines} log line(s): ${who} already terminal ` +
+          `— lines past the terminal boundary (late flush or terminal race)`,
+      );
     } else {
       logger.warn(
-        `[runs:logs] dropped ${droppedLines} log line(s): ${who} already terminal ` +
-          `— lines past the terminal boundary (late flush or terminal race)`,
+        `[runs:logs] dropped ${dropped.lines} log line(s): each exceeds the log batch cap ` +
+          `even after truncation — check BETTER_TRIGGER_LOG_BATCH_MAX_BYTES ` +
+          `(an operator-tuned cap smaller than one line cannot be honored)`,
       );
     }
   }

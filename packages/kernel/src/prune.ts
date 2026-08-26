@@ -30,6 +30,13 @@
    the cascade a single enormous statement. Batches let the daemon's other
    loops interleave, and an interrupted prune has simply pruned less.
 
+   Candidate-scan trade-off (p2-10 C6): the candidate predicate orders and
+   filters on `COALESCE(finished_at, updated_at)`, which no index can serve —
+   every batch filters + sorts over the terminal rows. Pruning is a
+   low-frequency housekeeping path, so that is accepted today; if it ever is
+   not, a partial index `(project_id, env, finished_at) WHERE status IN
+   (terminal)` makes the scan index-bound.
+
    `dryRun` reports exactly what a real run would remove and issues no DELETE
    at all — the counting path is a separate, read-only set of queries, so the
    flag cannot be defeated by a code path that deletes first and counts after.
@@ -40,10 +47,7 @@ import {
   type Namespace,
 } from '@better-trigger/core';
 import { withTx } from './runs';
-import { assertNamespaces, namespacePredicate } from './queue';
-
-/** Run states that are over. Anything else is live work, whatever its age. */
-const TERMINAL_STATUSES: string[] = ['completed', 'failed', 'canceled'];
+import { assertNamespaces, namespacePredicate, TERMINAL_STATUSES } from './queue';
 
 /** Runs deleted per transaction. See the header for why this is batched. */
 export const PRUNE_BATCH = 500;

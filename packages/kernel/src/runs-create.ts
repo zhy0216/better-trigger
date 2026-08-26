@@ -177,7 +177,7 @@ export async function createRunIn(
       return { runId: existing.rows[0].id, idempotent: true };
     }
     // Defensive: a DO NOTHING with no surviving row should not happen.
-    throw new Error('failed to create run');
+    throw new KernelError('internal', 'failed to create run');
   }
 
   await enqueue(client, {
@@ -510,7 +510,7 @@ export async function createRunsInBatch(
       const existingId = existingByIdKey.get(`${r.taskId}\u0000${r.idempotencyKey}`);
       if (!existingId) {
         // Defensive: a DO NOTHING with no surviving row should not happen.
-        throw new Error('failed to create run');
+        throw new KernelError('internal', 'failed to create run');
       }
       runIds.push(existingId);
     }

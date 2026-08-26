@@ -16,11 +16,16 @@
    alive) and the INSERT records every statement it is handed; no Postgres.
    ============================================================================= */
 import type { Pool } from 'pg';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { LogEntry } from '@better-trigger/core';
 import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { appendLogs } from '../src/runs';
 import type { KernelLogger } from '../src/kernel';
+
+afterEach(() => {
+  // The over-cap test tunes this env; keep it from leaking across suites.
+  delete process.env.BETTER_TRIGGER_LOG_BATCH_MAX_BYTES;
+});
 
 interface Stmt {
   sql: string;
@@ -210,5 +215,23 @@ describe('appendLogs', () => {
     const { pool, stmts } = makePool();
     await appendLogs(pool, 'run_1', DEFAULT_NAMESPACE, []);
     expect(stmts).toEqual([]);
+  });
+
+  it('drops — with a warn, never silently — a line that cannot fit the batch cap even after truncation', async () => {
+    // A cap smaller than the smallest possible line: even shrinkRowForBatch's
+    // degraded row (data omitted + message trimmed to the ellipsis) exceeds
+    // it, so the line cannot be written at all.
+    process.env.BETTER_TRIGGER_LOG_BATCH_MAX_BYTES = '80';
+    const { pool, stmts, inserted, warns, logger } = makePool();
+    await appendLogs(pool, 'run_1', DEFAULT_NAMESPACE, entries(1), logger);
+
+    expect(inserted).toEqual([]);
+    // Nothing left to chunk — no transaction is opened at all.
+    expect(stmts).toEqual([]);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toMatch(
+      /\[runs:logs\] dropped 1 log line\(s\): each exceeds the log batch cap/,
+    );
+    expect(warns[0]).toMatch(/BETTER_TRIGGER_LOG_BATCH_MAX_BYTES/);
   });
 });

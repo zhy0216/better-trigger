@@ -124,8 +124,19 @@ export async function enqueueMany(client: PoolClient, args: EnqueueArgs[]): Prom
   // truth); `preserveSurvivor` only reschedules the survivor and keeps ITS
   // priority/concurrency_key (the wait-resume case — a queue row that survived
   // the suspend knows better than the resume).
-  const allPreserve = args.every((a) => a.preserveSurvivor);
-  const conflict = allPreserve
+  const hasPreserve = args.some((a) => a.preserveSurvivor);
+  const hasOverwrite = args.some((a) => !a.preserveSurvivor);
+  if (hasPreserve && hasOverwrite) {
+    // One statement carries ONE conflict semantics: mixing the two here used
+    // to route every row through a single branch, silently giving half the
+    // batch the wrong meaning. Refuse up front instead (p2-10 C2).
+    throw new KernelError(
+      'bad_request',
+      'enqueueMany: cannot mix preserve and overwrite conflict semantics in one batch — ' +
+        'make every item preserveSurvivor, or none (split the batch to use both)',
+    );
+  }
+  const conflict = hasPreserve
     ? `ON CONFLICT (run_id) DO UPDATE
          SET available_at = EXCLUDED.available_at,
              locked_by = NULL, locked_at = NULL, lease_until = NULL`
@@ -668,6 +679,9 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
 
   const client = await pool.connect();
   try {
+    // Hand-written tx, not withTx: phase 2 (readLedger) must run AFTER this tx
+    // commits (p1-07) — withTx's callback IS the transaction, so it has no
+    // post-commit phase to hang the ledger read on.
     await client.query('BEGIN');
 
     const pending: PendingClaim[] = [];
@@ -927,6 +941,10 @@ export async function releaseClaims(
   assertNamespaces(args.namespaces);
   const client = await pool.connect();
   try {
+    // Hand-written tx, not withTx: this is the one scan that deliberately
+    // BLOCKS on queue rows (no SKIP LOCKED — see above), and its N locks must
+    // live until the release COMMITs. withTx would wrap this identically; the
+    // explicit BEGIN/COMMIT keeps that held-lock span visible beside the scan.
     await client.query('BEGIN');
 
     // Canonical lock position 1. Deliberately NOT `SKIP LOCKED`: a row of ours

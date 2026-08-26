@@ -52,6 +52,7 @@ import {
   enqueue,
   nsPredicateFor,
   scanStrandedRuns,
+  TERMINAL_STATUSES,
   type StrandedScan,
 } from './queue';
 import {
@@ -157,6 +158,8 @@ export interface OrchestratorOptions {
    * Namespaces this daemon serves. Every loop (wait scan, cron scan, reaper,
    * stranded scan, retention GC) filters its SQL on these pairs — a daemon
    * configured for staging never resumes prod waits or fires prod crons (C2).
+   * The worker offline marker is the one loop that does not: heartbeats are a
+   * database-wide liveness fact (see markOfflineWorkers).
    * Absent ⇒ [DEFAULT_NAMESPACE] ('default'/'prod'), resolved once here, at
    * this boundary.
    */
@@ -354,6 +357,10 @@ async function scanNoWaitRuns(
   return noWaitRuns;
 }
 
+/** queue.ts's TERMINAL_STATUSES rendered for a SQL IN list — the member set
+ *  stays single-sourced even inside a literal query (p2-10 C4). */
+const TERMINAL_STATUS_SQL = TERMINAL_STATUSES.map((s) => `'${s}'`).join(', ');
+
 async function scanStuckWaits(
   pool: Pool,
   namespaces: readonly Namespace[],
@@ -369,7 +376,7 @@ async function scanStuckWaits(
           AND EXISTS (
             SELECT 1 FROM runs c
              WHERE c.id = w.child_run_id
-               AND c.status IN ('completed','failed','canceled')
+               AND c.status IN (${TERMINAL_STATUS_SQL})
           )
         LIMIT 10`,
       stuckParams,
@@ -474,7 +481,7 @@ async function resumeOneWait(pool: Pool, logger: KernelLogger, w: WaitRow): Prom
       // no queue row, and this is the one path that holds the row while
       // knowing the run is terminal, so delete it in the SAME lock order
       // instead of leaving inert garbage behind.
-      const terminal = ['completed', 'failed', 'canceled'].includes(run.status);
+      const terminal = TERMINAL_STATUSES.includes(run.status);
       if (terminal) {
         await client.query(
           `DELETE FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3`,
@@ -670,6 +677,11 @@ export function startOrchestrator(
   async function scanCron(): Promise<void> {
     const client = await pool.connect();
     try {
+      // Hand-written tx, not withTx: the tick IS one transaction — the due
+      // scan's FOR UPDATE SKIP LOCKED schedule rows stay held through every
+      // per-schedule createRunIn + next_run_at update. (Nothing follows
+      // COMMIT, so withTx could express it; the explicit pair keeps the lock
+      // span visible next to the scan.)
       await client.query('BEGIN');
       // Namespace-scoped: a staging daemon fires only staging schedules, and
       // the schedule's project_id rides along so the run is created in the
@@ -766,6 +778,10 @@ export function startOrchestrator(
     // for the per-run `terminal` notifications sent before COMMIT.
     const failedTerminal: Array<{ runId: string; qNs: Namespace; hasParent: boolean }> = [];
     try {
+      // Hand-written tx, not withTx: the requeued/failed tallies are folded
+      // into the shared counters only AFTER COMMIT (a tx that rolled back
+      // recovered nothing, so its counts must not be reported) — withTx's
+      // callback ends before COMMIT and has no post-commit phase for the fold.
       await client.query('BEGIN');
       // `lease_until IS NOT NULL` is redundant against `<= now()`, and not
       // load-bearing for the plan: PG derives it from the comparison itself
@@ -835,7 +851,7 @@ export function startOrchestrator(
         // 'queued'/'waiting' run just has the stale claim cleared (no recovery
         // spent, no status touched).
         if (run.status !== 'running') {
-          if (['completed', 'failed', 'canceled'].includes(run.status)) {
+          if (TERMINAL_STATUSES.includes(run.status)) {
             await client.query(
               `DELETE FROM queue WHERE id = $1 AND project_id = $2 AND env = $3`,
               [q.id, qNs.projectId, qNs.env],
@@ -851,7 +867,7 @@ export function startOrchestrator(
           logger.warn(
             `[orchestrator:reaper] stale lease on queue row ${q.id} for run ${q.run_id} ` +
               `(runs.status '${run.status}', not 'running') — ` +
-              `queue row ${['completed', 'failed', 'canceled'].includes(run.status) ? 'deleted' : 'released'}, ` +
+              `queue row ${TERMINAL_STATUSES.includes(run.status) ? 'deleted' : 'released'}, ` +
               `run untouched`,
           );
           continue;
@@ -916,6 +932,13 @@ export function startOrchestrator(
   }
 
   /* ---------------------------------------------------------------- workers */
+  // Deliberately NOT namespace-filtered — the one loop that ignores the
+  // `namespaces` option, by design: a worker's heartbeat is a database-wide
+  // liveness fact (the row says whether the PROCESS is alive, whatever
+  // namespaces it serves), so scoping this to the daemon's own namespaces
+  // would leave other daemons' rows 'online' forever. (pruneWorkers IS
+  // namespace-scoped on the same table — deleting a row is a namespace
+  // decision, marking offline is not.)
   async function markOfflineWorkers(): Promise<void> {
     await pool.query(
       `UPDATE workers

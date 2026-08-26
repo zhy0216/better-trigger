@@ -20,6 +20,8 @@ import {
   type WaitRecord,
   type WaitResult,
 } from '@better-trigger/core';
+import { TERMINAL_STATUSES } from './queue';
+import { withTx } from './runs-internal';
 
 /* Run-detail read caps (PF3): steps/waits and the logs page are bounded so a
    very long agent run cannot produce an unbounded detail JSON. Logs are paged
@@ -124,10 +126,11 @@ function detailLimit(name: string, v: number | undefined, fallback: number): num
 
 /**
  * Run + steps + waits + logs from ONE snapshot. All four reads run in a single
- * REPEATABLE READ transaction (a dedicated connection from the pool, released
- * on every path), so a run changing mid-read cannot produce a detail whose
- * parts disagree: the run status, ledger and logs all reflect the same point
- * in time (PF3, todos/02-performance.md).
+ * REPEATABLE READ transaction (withTx's isolation option — a dedicated
+ * connection from the pool, released on every path), so a run changing
+ * mid-read cannot produce a detail whose parts disagree: the run status,
+ * ledger and logs all reflect the same point in time (PF3,
+ * todos/02-performance.md).
  *
  * Logs come back as the NEWEST page (default 200 lines) in ascending id order
  * (chronological display); `logsNextCursor` carries the oldest line's id when
@@ -151,23 +154,19 @@ export async function getRunDetail(
     throw new KernelError('bad_request', 'logsBefore must be a positive integer');
   }
 
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
-    const detail = await readRunDetail(client, runId, namespace, {
-      logsLimit,
-      logsBefore,
-      stepsLimit,
-      waitsLimit,
-    });
-    await client.query('COMMIT');
-    return detail;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
+  // REPEATABLE READ so the four reads share one snapshot — the reason withTx
+  // gained its isolation option (the one hand-written BEGIN it replaced).
+  return withTx(
+    pool,
+    (client) =>
+      readRunDetail(client, runId, namespace, {
+        logsLimit,
+        logsBefore,
+        stepsLimit,
+        waitsLimit,
+      }),
+    { isolation: 'repeatable read' },
+  );
 }
 
 /** The four reads of getRunDetail, executed on an already-open tx client. */
@@ -299,7 +298,7 @@ export async function waitForResult(
     const row = res.rows[0];
     if (!row) throw new KernelError('not_found', `run ${runId} not found`);
     const status = row.status as RunStatus;
-    if (status === 'completed' || status === 'failed' || status === 'canceled') {
+    if (TERMINAL_STATUSES.includes(status)) {
       return {
         status,
         output: row.output ?? undefined,

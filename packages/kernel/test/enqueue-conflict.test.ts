@@ -12,7 +12,7 @@
 import type { PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import { enqueue } from '../src/queue';
+import { enqueue, enqueueMany } from '../src/queue';
 
 const stmt = (preserveSurvivor: boolean): string => {
   let sql = '';
@@ -50,5 +50,30 @@ describe('enqueue conflict semantics (p2-30)', () => {
     // It still reschedules and clears a stale claim.
     expect(sql).toMatch(/available_at\s*=\s*EXCLUDED\.available_at/);
     expect(sql).toMatch(/locked_by\s*=\s*NULL/);
+  });
+
+  it('refuses a mixed batch — preserve and overwrite semantics cannot share one statement', async () => {
+    let queried = 0;
+    const client = {
+      query: async () => {
+        queried += 1;
+        return { rowCount: 1 };
+      },
+    } as unknown as PoolClient;
+    const mk = (preserveSurvivor: boolean) => ({
+      runId: preserveSurvivor ? 'run_p' : 'run_o',
+      availableAt: new Date('2026-01-01T00:00:00Z'),
+      priority: 1,
+      concurrencyKey: null,
+      namespace: DEFAULT_NAMESPACE,
+      preserveSurvivor,
+    });
+
+    await expect(enqueueMany(client, [mk(false), mk(true)])).rejects.toMatchObject({
+      code: 'bad_request',
+      message: expect.stringMatching(/mix/i),
+    });
+    // Refused before any SQL: the whole batch is rejected, not half-applied.
+    expect(queried).toBe(0);
   });
 });

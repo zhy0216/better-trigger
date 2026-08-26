@@ -72,6 +72,11 @@ export async function registerWorker(
 
   const client = await pool.connect();
   try {
+    // Hand-written tx, not withTx: one registration is one all-or-nothing tx
+    // (worker row + every task upsert + schedule sync across all namespaces),
+    // and nothing follows COMMIT — withTx would wrap this identically, so the
+    // explicit BEGIN/COMMIT only makes the atomicity boundary visible at both
+    // ends of the per-namespace loop.
     await client.query('BEGIN');
 
     // Insert worker row. The namespaces column is the worker's claim scope;

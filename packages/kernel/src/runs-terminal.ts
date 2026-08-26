@@ -12,7 +12,7 @@ import {
   type SerializedError,
 } from '@better-trigger/core';
 import { notifyTerminal, notifyWork } from './notify';
-import { enqueue, removeFromQueue } from './queue';
+import { enqueue, removeFromQueue, TERMINAL_STATUSES } from './queue';
 import { createRunIn } from './runs-create';
 import {
   assertOwnedRunning,
@@ -335,7 +335,7 @@ export async function cancelRun(
     await lockQueueRow(client, runId, namespace);
     const run = await lockRunRow(client, runId, namespace);
     if (!run) throw new KernelError('not_found', `run ${runId} not found`);
-    if (['completed', 'failed', 'canceled'].includes(run.status)) {
+    if (TERMINAL_STATUSES.includes(run.status)) {
       // Already terminal — treat cancel as a no-op success.
       return;
     }

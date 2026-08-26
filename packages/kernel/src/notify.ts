@@ -42,7 +42,7 @@
 import type { PoolClient } from 'pg';
 import type { Namespace } from '@better-trigger/core';
 
-/** The single channel every daemon LISTENs on (PF2 §通道). */
+/** The single channel every daemon LISTENs on (PF2 §channel). */
 export const NOTIFY_CHANNEL = 'bt';
 
 /** `work` payload — a bare marker, no run id (see file header). */
@@ -60,7 +60,7 @@ export function notifyWork(client: PoolClient): Promise<unknown> {
  * Send the `terminal` notification for `runId` on the caller's transaction
  * connection (last statement of the tx — delivered at COMMIT). The namespace
  * rides along so listeners can drop notifications for scopes they do not
- * serve (PF2 §跨 daemon).
+ * serve (PF2 §cross-daemon).
  */
 export function notifyTerminal(
   client: PoolClient,

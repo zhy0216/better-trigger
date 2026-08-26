@@ -112,13 +112,16 @@ describe('HttpClient — error mapping', () => {
   ] as const;
 
   // The list above restates client.ts's KERNEL_CODES, which restates core's
-  // KernelErrorCode. Pin them together at the type level so adding a code to
-  // core and forgetting the SDK fails typecheck instead of silently mapping to
-  // HttpError.
+  // KernelErrorCode — minus 'internal'. That code is kernel-internal: the
+  // daemon converts it into a redacted 500 `internal_error` envelope before it
+  // ever reaches a wire, so the SDK deliberately leaves it unmapped (it must
+  // surface as HttpError, never KernelError). Pin the two at the type level so
+  // adding a wire-relevant code to core and forgetting the SDK fails typecheck
+  // instead of silently mapping to HttpError.
   it('covers the KernelErrorCode union exactly', () => {
     type Listed = (typeof kernelCodes)[number][0];
     type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
-    const exhaustive: Exact<Listed, KernelErrorCode> = true;
+    const exhaustive: Exact<Listed, Exclude<KernelErrorCode, 'internal'>> = true;
     expect(exhaustive).toBe(true);
   });
 
