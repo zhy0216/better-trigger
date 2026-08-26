@@ -481,7 +481,7 @@ export async function tryLockRunRow(
  *  other 23505 — another table's unique index, or a future unique index added
  *  to this table — must surface as an error, not be silently re-read as if a
  *  retry operation had raced. */
-const RETRY_OPERATION_UNIQUE_CONSTRAINT =
+export const RETRY_OPERATION_UNIQUE_CONSTRAINT =
   'run_retry_operations_project_id_env_source_run_id_operation_key';
 
 /**

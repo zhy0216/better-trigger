@@ -42,6 +42,8 @@
 
 - 留一行 `-- no-op` 注释，或删除并 renumber（需同步 journal 与 check-drift，风险评估后选保守方案：加注释）。
 
+**核查（2026-08-26）**：这 8 个文件当前均含单条真实 DDL（0004=ADD priority、0005=queue_lease_until_idx、0006=queue_claimable_idx、0008/0009=ADD fingerprint、0012=waits_run_idx、0013=DROP INDEX、0014=waits_pending_step_uniq，非空），无需要处理的空 migration；结论：C2 无需改动。
+
 ## 验收标准
 
 - [ ] 漂移探针测试在真 PG 下通过，且能在 schema 改动时失败。

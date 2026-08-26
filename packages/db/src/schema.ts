@@ -452,6 +452,13 @@ export const workers = pgTable('workers', {
 (t) => [check('workers_status_check', sql`${t.status} IN ('online','offline')`)],
 );
 
+/* ---------------------------------------------------------------------------
+ * $inferSelect convenience types — INTERNAL to this package only. They are
+ * kept for schema-internal / migration reference; the kernel hand-writes its
+ * own row types (RunRow & co) on purpose (raw SQL with precise semantics), so
+ * these exports are NOT a public contract and currently have no consumers.
+ * Do not import them from other packages. (p1-07, todos/p1-07-schema-drift-guard.md)
+ * ------------------------------------------------------------------------- */
 export type DbRun = typeof runs.$inferSelect;
 export type DbRunInsert = typeof runs.$inferInsert;
 export type DbRunStep = typeof runSteps.$inferSelect;
