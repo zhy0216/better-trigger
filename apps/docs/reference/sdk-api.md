@@ -90,7 +90,7 @@ functions and browsers included (`node:async_hooks` loads lazily).
 | `retryRun(runId)` | Re-run a failed/canceled run as a **new** run → `{ runId }` |
 | `getRun(runId)` | Full run record |
 | `getRunDetail(runId, opts?)` | `{ run, steps, waits, logs, … }` one snapshot; newest 200 logs, `opts.logsBefore` pages older |
-| `waitForResult(runId, opts?)` | Wait for terminal state → `{ status, output?, error? }` |
+| `waitForResult(runId, namespace?, opts?)` | Wait for terminal state → `{ status, output?, error? }` |
 | `health()` | Daemon liveness → `{ ok, version }` |
 | `setDefault()` | Make this instance the module-level default |
 | `url` | The base URL this instance talks to |

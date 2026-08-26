@@ -130,11 +130,11 @@ const trigger = betterTrigger({
 | --- | --- |
 | `trigger(taskOrId, payload, opts?)` | Enqueue one run. → `RunHandle` |
 | `batchTrigger(items, opts?)` | Enqueue many runs in one all-or-nothing transaction, all in the namespace `opts` (env/projectId) names. → `RunHandle[]` |
-| `cancelRun(runId)` | Cancel a non-terminal run (terminal → no-op). |
-| `retryRun(runId)` | Re-run a failed/canceled run as a **new** run. → `{ runId }` |
-| `getRun(runId)` | Full run record. |
-| `getRunDetail(runId, opts?)` | `{ run, steps, stepsTruncated, waits, waitsTruncated, logs, logsNextCursor }` — one snapshot; newest 200 logs by default, `opts.logsBefore` pages older logs. |
-| `waitForResult(runId, opts?)` | Wait for a terminal state. → `{ status, output?, error? }` Transient 5xx / network errors are retried automatically within the timeout budget (jittered backoff); if the budget runs out the last error is thrown. 4xx and kernel errors fail immediately. On timeout (default 30s) the latest non-terminal status is returned — pass `throwOnTimeout: true` to throw `ResultTimeoutError` (with the latest status) instead. |
+| `cancelRun(runId, namespace?)` | Cancel a non-terminal run (terminal → no-op). `namespace` names the `(projectId, env)` scope; absent → default/prod. |
+| `retryRun(runId, namespace?, opts?)` | Re-run a failed/canceled run as a **new** run. → `{ runId }`. `namespace` names the `(projectId, env)` scope; absent → default/prod. `opts.operationKey` makes the call idempotent (sent as the `Idempotency-Key` header): re-sending the same key — a timeout replay, a proxy retry — returns the first call's new run id instead of minting one run per delivery; absent → legacy semantics, every call is a fresh retry. |
+| `getRun(runId, namespace?)` | Full run record. `namespace` names the `(projectId, env)` scope; absent → default/prod. |
+| `getRunDetail(runId, namespace?, opts?)` | `{ run, steps, stepsTruncated, waits, waitsTruncated, logs, logsNextCursor }` — one snapshot; newest 200 logs by default, `opts.logsBefore` pages older logs. `namespace` names the `(projectId, env)` scope; absent → default/prod. |
+| `waitForResult(runId, namespace?, opts?)` | Wait for a terminal state. → `{ status, output?, error? }` `namespace` scopes the poll `(projectId, env)`; absent → default/prod. Transient 5xx / network errors are retried automatically within the timeout budget (jittered backoff); if the budget runs out the last error is thrown. 4xx and kernel errors fail immediately. On timeout (default 30s) the latest non-terminal status is returned — pass `throwOnTimeout: true` to throw `ResultTimeoutError` (with the latest status) instead. |
 | `health()` | Daemon liveness probe. → `{ ok, version }` |
 | `setDefault()` | Make this instance the module-level default. |
 | `url` | The base URL this instance talks to. |

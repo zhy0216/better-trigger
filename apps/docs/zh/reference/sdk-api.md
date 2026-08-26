@@ -83,7 +83,7 @@ const trigger = betterTrigger({
 | `retryRun(runId)` | 把 failed/canceled 的 run 作为**新** run 重跑 → `{ runId }` |
 | `getRun(runId)` | 完整 run 记录 |
 | `getRunDetail(runId, opts?)` | `{ run, steps, waits, logs, … }` 一个快照；默认最新 200 条日志，`opts.logsBefore` 翻更早的页 |
-| `waitForResult(runId, opts?)` | 等待终态 → `{ status, output?, error? }` |
+| `waitForResult(runId, namespace?, opts?)` | 等待终态 → `{ status, output?, error? }` |
 | `health()` | daemon 存活探针 → `{ ok, version }` |
 | `setDefault()` | 把本实例设为模块级默认 |
 | `url` | 本实例对话的 base URL |

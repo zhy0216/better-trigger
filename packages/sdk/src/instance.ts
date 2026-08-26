@@ -138,9 +138,10 @@ export interface BetterTrigger {
    * minted with, so callers only need this when polling a run id they got out
    * of band.
    */
+  waitForResult<T = unknown>(runId: string, opts?: WaitForResultOptions): Promise<WaitResult<T>>;
   waitForResult<T = unknown>(
     runId: string,
-    namespace: Namespace | undefined,
+    namespace?: Namespace,
     opts?: WaitForResultOptions,
   ): Promise<WaitResult<T>>;
   /** Daemon liveness probe. */
@@ -162,11 +163,7 @@ const TERMINAL: readonly RunStatus[] = ['completed', 'failed', 'canceled'];
 
 /** Anything able to poll a run to a terminal state. */
 export interface RunResultResolver {
-  waitForResult(
-    runId: string,
-    namespace: Namespace | undefined,
-    opts?: WaitForResultOptions,
-  ): Promise<WaitResult>;
+  waitForResult(runId: string, namespace?: Namespace, opts?: WaitForResultOptions): Promise<WaitResult>;
 }
 
 /**
@@ -270,6 +267,21 @@ function nsFromOptions(options: TriggerOptions | undefined): Namespace {
 function nsQuery(namespace: Namespace | undefined): string {
   if (namespace === undefined) return '';
   return `?${new URLSearchParams({ projectId: namespace.projectId, env: namespace.env })}`;
+}
+
+/**
+ * Distinguish a `Namespace` (`{ projectId: string; env: string }`) from the
+ * `WaitForResultOptions` shape (`{ timeoutMs?, pollMs?, signal?,
+ * throwOnTimeout? }`) — the two object shapes `waitForResult` overloads accept
+ * as their second argument. Only a Namespace carries string `projectId`/`env`.
+ */
+function isNamespace(a: unknown): a is Namespace {
+  return (
+    typeof a === 'object' &&
+    a !== null &&
+    typeof (a as Namespace).projectId === 'string' &&
+    typeof (a as Namespace).env === 'string'
+  );
 }
 
 /* ---------------------------------------------------------------------------
@@ -384,9 +396,13 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
      */
     async waitForResult<T = unknown>(
       runId: string,
-      namespace: Namespace | undefined,
-      opts?: WaitForResultOptions,
+      a?: Namespace | WaitForResultOptions,
+      b?: WaitForResultOptions,
     ) {
+      const namespace = isNamespace(a) ? a : undefined;
+      // `a` occupies the namespace slot when it is a Namespace or undefined
+      // (opts then lives in `b`); otherwise the two-arg form placed opts in `a`.
+      const opts = isNamespace(a) || a === undefined ? b : a;
       const timeoutMs = opts?.timeoutMs ?? 30_000;
       const deadline = Date.now() + timeoutMs;
       const pollMs = opts?.pollMs;

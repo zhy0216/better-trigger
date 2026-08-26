@@ -583,6 +583,47 @@ describe('waitForResult — namespace + pollMs propagation (p2-36)', () => {
   });
 });
 
+describe('waitForResult — overloads (p1-05)', () => {
+  it('accepts the two-arg (runId, opts) form the README documents', async () => {
+    const { fetch, calls } = scriptedFetch([terminalResponse('completed', { ok: 1 })]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    await trigger.waitForResult('run_1', { timeoutMs: 300 });
+
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.has('projectId')).toBe(false);
+    expect(url.searchParams.has('env')).toBe(false);
+    // The query carries the *slice* remaining (min(budget, MAX_LONGPOLL_MS)),
+    // not the raw timeoutMs; it must be positive and no larger than the 300ms
+    // budget, but the exact value races the clock across a ms boundary.
+    const slice = Number(url.searchParams.get('timeoutMs'));
+    expect(slice).toBeGreaterThan(0);
+    expect(slice).toBeLessThanOrEqual(300);
+  });
+
+  it('accepts the three-arg (runId, namespace, opts) form and sends the namespace', async () => {
+    const { fetch, calls } = scriptedFetch([terminalResponse('completed', { ok: 1 })]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    const result = await trigger.waitForResult(
+      'run_1',
+      { projectId: 'default', env: 'prod' },
+      { timeoutMs: 300 },
+    );
+
+    expect(result).toEqual({ status: 'completed', output: { ok: 1 } });
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.get('projectId')).toBe('default');
+    expect(url.searchParams.get('env')).toBe('prod');
+  });
+
+  it('accepts the one-arg (runId) form', async () => {
+    const { fetch, calls } = scriptedFetch([terminalResponse('completed', { ok: 1 })]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    await trigger.waitForResult('run_1');
+
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe('trigger() — concurrency-key derivation (p2-36)', () => {
   const created = () =>
     new Response(JSON.stringify({ runId: 'run_1', idempotent: false }), {
