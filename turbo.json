@@ -4,7 +4,7 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+      "outputs": ["dist/**"]
     },
     // Package-specific override: the worker embeds apps/web's dist into its own
     // (scripts/copy-public.mjs), so its build depends on web's build AND output
@@ -13,7 +13,7 @@
     // every package's build would depend on web and the graph would cycle.
     "@better-trigger/worker#build": {
       "dependsOn": ["^build", "@better-trigger/web#build"],
-      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+      "outputs": ["dist/**"]
     },
     // The VitePress site outputs under .vitepress/dist, not dist/ — declare it
     // so turbo can cache the docs build like any other.

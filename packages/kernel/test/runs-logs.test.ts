@@ -30,8 +30,6 @@ interface Stmt {
 /** 5 bind params per log row, plus the shared run id at $1 (+ ns at $2/$3). */
 const PARAMS_PER_ROW = 5;
 
-const LOCK_SELECT = 'SELECT finished_at FROM runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE';
-
 /**
  * A pool that plays the statements appendLogs issues. `finished` stands for
  * the run's finished_at being set; `missing` for the run not existing at all.

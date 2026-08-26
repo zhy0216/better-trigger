@@ -16,7 +16,7 @@
    replay branch handles them. The unique-index branch is defense-in-depth,
    exercised by deliberately bypassing the FK via session_replication_role.
    ============================================================================= */
-import { describe, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import type { Namespace } from '@better-trigger/core';
 import type { Kernel } from '../../src/index';
 import { describePg, withPg } from './helpers';

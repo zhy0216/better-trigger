@@ -941,7 +941,7 @@ async function createRunsInBatch(
 
   const rowStart = 1;
   const rowValues = resolved
-    .map((r, i) => {
+    .map((_, i) => {
       const b = rowStart + i * 13;
       return `($${b},$${b + 1},$${b + 2},$${b + 3},'queued',$${b + 4},$${b + 5},$${b + 6},` +
         `$${b + 7},$${b + 8},$${b + 9},1,$${b + 10},0,$${b + 11},$${b + 12}, now(), now(), now())`;

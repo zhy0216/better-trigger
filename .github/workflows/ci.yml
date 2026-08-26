@@ -175,10 +175,83 @@ jobs:
             }
             for (const [name, spec] of Object.entries(worker.dependencies)) {
               if (!name.startsWith("@better-trigger/")) continue;
-              if (!/^\d+\.\d+\.\d+$/.test(spec)) throw new Error("unrewritten workspace dep " + name + "=" + spec);
+              if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(spec)) throw new Error("unrewritten workspace dep " + name + "=" + spec);
               if (versions[name] !== spec) throw new Error(name + "@" + spec + " not in this pack set " + JSON.stringify(versions));
             }
           ' "$pack_dir" "$check_dir"
 
       - name: Acceptance harnesses
         run: bun run test:acceptance
+
+  # Edge-import matrix: the SDK's engines field promises Node >= 18 and
+  # src/als.ts exists (three-tier lazy loading) precisely to smooth over
+  # Node version differences — but the main job only ever runs the tarball
+  # smoke on the runner's unpinned Node. This job pins Node 18/20/22 and
+  # imports every published entrypoint, ESM and CJS, on each: the dual
+  # package/exports fallback paths get exercised the way consumers hit them.
+  node-smoke:
+    name: node-smoke (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # setup-node BEFORE setup-bun so `node`/`npm` resolve to the matrix
+      # version; bun is only used to build and pack.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        env:
+          BT_GIT_SHA: ${{ github.sha }}
+        run: bun run build
+
+      # Lean version of the main job's O4 smoke: pack all five tarballs
+      # (bun pm pack rewrites workspace:* to exact versions), install them
+      # from a clean temp dir, then assert every published entry resolves
+      # and exports under the MATRIX Node — not bun. No --help / stale-dist
+      # checks here; those stay in the main job.
+      - name: Pack + edge-import smoke
+        run: |
+          set -euo pipefail
+          pack_dir=$(mktemp -d)
+          for pkg in packages/core packages/kernel packages/db packages/sdk apps/worker; do
+            (cd "$pkg" && bun pm pack --destination "$pack_dir" --quiet)
+          done
+          install_dir=$(mktemp -d)
+          (
+            cd "$install_dir"
+            npm init -y >/dev/null 2>&1
+            npm install --no-audit --no-fund "$pack_dir"/*.tgz
+          )
+          # SDK entry, both module systems.
+          (cd "$install_dir" && node -e \
+            "const bt = require('better-trigger'); if (typeof bt.task !== 'function') process.exit(1)")
+          (cd "$install_dir" && node --input-type=module -e \
+            "import('better-trigger').then((m) => { if (typeof m.task !== 'function') process.exit(1) })")
+          # Embedded worker subpath, both module systems (resolution and
+          # export shape only — starting it would need Postgres).
+          (cd "$install_dir" && node -e \
+            "const e = require('@better-trigger/worker/embedded'); if (typeof e.createEmbeddedRuntime !== 'function') process.exit(1)")
+          (cd "$install_dir" && node --input-type=module -e \
+            "import('@better-trigger/worker/embedded').then((m) => { if (typeof m.createEmbeddedRuntime !== 'function') process.exit(1) })")
+          # core / db / kernel entrypoints, require + import once each.
+          for pkg in @better-trigger/core @better-trigger/db @better-trigger/kernel; do
+            (cd "$install_dir" && node -e \
+              "if (typeof require('$pkg') !== 'object') process.exit(1)")
+            (cd "$install_dir" && node --input-type=module -e \
+              "import('$pkg').then((m) => { if (typeof m !== 'object') process.exit(1) })")
+          done

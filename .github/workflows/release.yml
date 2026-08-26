@@ -1,0 +1,224 @@
+# =============================================================================
+# Release — version bump, npm publish in the fixed dependency order, then
+# commit + tag. Manual only (workflow_dispatch): publishing is the one CI
+# step that cannot be undone, and a release is a human decision.
+#
+# The publish order is load-bearing: each package depends on the earlier
+# ones, and the registry cannot resolve a dependent before its dep exists.
+#
+#   core → db → kernel → sdk → worker   (worker ships last)
+#
+# Requires the NPM_TOKEN repository secret (an npm automation access token
+# with publish rights). The final push uses the workflow's GITHUB_TOKEN
+# (permissions: contents: write below); if `main` is branch-protected that
+# push is rejected and the tag must be pushed manually — every publish has
+# already succeeded at that point, so nothing gets re-run.
+# =============================================================================
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Version bump for the five publishable packages: `patch` | `minor` |
+          `major` (from each package's current version) or an explicit
+          semver such as `0.2.0` (sets every package to exactly that
+          version). Pre-releases work via semver, e.g. `0.2.0-beta.1`.
+          RETRY NOTE: npm refuses to overwrite a published version. If a
+          previous attempt failed AFTER some packages published, re-run with
+          a NEW explicit version (e.g. 0.1.2) — do not reuse the same input.
+        required: true
+        default: patch
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      # Node is only for npm (version bump + publish); builds and tests run
+      # under bun, like the main CI job.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # ------------------------------------------------------------------
+      # Pre-release gate: the CI sequence minus the acceptance harnesses
+      # (no Postgres in this workflow). Everything must be green on the
+      # exact tree that is about to be published.
+      # ------------------------------------------------------------------
+      - name: Lint
+        run: bun run lint
+
+      - name: Dependency guard
+        run: bun run check:deps
+
+      - name: Migration drift
+        run: bun run check:drift
+
+      - name: Build
+        env:
+          BT_GIT_SHA: ${{ github.sha }}
+        run: bun run build
+
+      - name: Package exports
+        run: bun run check:exports
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun run test
+
+      # O4 smoke on the CURRENT versions — the same core assertions as the
+      # main CI job's pack step: the registry artifact must work outside the
+      # workspace, the worker must ship the dashboard, and the packed dist
+      # must carry the manifest version.
+      - name: Pack + clean-install smoke (O4)
+        run: |
+          set -euo pipefail
+          pack_dir=$(mktemp -d)
+          for pkg in packages/core packages/kernel packages/db packages/sdk apps/worker; do
+            (cd "$pkg" && bun pm pack --destination "$pack_dir" --quiet)
+          done
+          install_dir=$(mktemp -d)
+          (
+            cd "$install_dir"
+            npm init -y >/dev/null 2>&1
+            npm install --no-audit --no-fund "$pack_dir"/*.tgz
+          )
+          check_dir=$(mktemp -d)
+          tar -xzf "$pack_dir"/better-trigger-worker-*.tgz -C "$check_dir"
+          test -f "$check_dir/package/dist/public/index.html"
+          "$install_dir/node_modules/.bin/better-trigger-worker" --help |
+            grep -q -- '--tasks'
+          (cd "$install_dir" && node -e \
+            "const bt = require('better-trigger'); if (typeof bt.task !== 'function') process.exit(1)")
+          (cd "$install_dir" && node --input-type=module -e \
+            "import('better-trigger').then((m) => { if (typeof m.task !== 'function') process.exit(1) })")
+          (cd "$install_dir" && node -e \
+            "const e = require('@better-trigger/worker/embedded'); if (typeof e.createEmbeddedRuntime !== 'function') process.exit(1)")
+          (cd "$install_dir" && node --input-type=module -e \
+            "import('@better-trigger/worker/embedded').then((m) => { if (typeof m.createEmbeddedRuntime !== 'function') process.exit(1) })")
+          ver=$(node -e \
+            "console.log(JSON.parse(require('fs').readFileSync('$check_dir/package/package.json','utf8')).version)")
+          grep -rqF "\"$ver\"" "$check_dir/package/dist" || {
+            echo "dist does not carry the packed version $ver (stale dist?)"
+            exit 1
+          }
+
+      # ------------------------------------------------------------------
+      # Version bump. The five publishable packages move together; the root
+      # (private) and the private apps stay untouched. The script ALSO syncs
+      # the new versions into bun.lock — `bun pm pack` rewrites workspace:*
+      # deps from the LOCKFILE's workspace versions, so bumping package.json
+      # alone would pack manifests that depend on the previous, unpublished
+      # versions. No git tag here — the tag is created only after every
+      # publish has succeeded.
+      # ------------------------------------------------------------------
+      - name: Bump versions (package.json + bun.lock)
+        run: node scripts/bump-versions.mjs ${{ inputs.version }}
+
+      # Rebuild AFTER the bump: the worker build stamps the package version
+      # into dist/ (scripts/write-build-info.mjs), and the O4 smoke above
+      # proves the shipped dist must carry the manifest version — a pack
+      # made from the pre-bump dist would ship "new manifest + stale dist".
+      - name: Rebuild with bumped version
+        env:
+          BT_GIT_SHA: ${{ github.sha }}
+        run: bun run build
+
+      # Pack with `bun pm pack`: it rewrites workspace:* deps to exact
+      # versions (npm pack/publish do NOT — publishing straight from the
+      # package dirs would ship uninstallable manifests). These tarballs are
+      # the exact publish artifacts.
+      - name: Pack release tarballs
+        run: |
+          pack_dir=$(mktemp -d)
+          for pkg in packages/core packages/db packages/kernel packages/sdk apps/worker; do
+            (cd "$pkg" && bun pm pack --destination "$pack_dir" --quiet)
+          done
+          echo "PACK_DIR=$pack_dir" >> "$GITHUB_ENV"
+
+      # Post-bump consistency gate, the half the pre-bump O4 smoke cannot
+      # prove: the BUMPED tarballs must depend on the versions in this pack
+      # set (a lockfile that drifted would leave deps pinned to the previous
+      # version), and they must install cleanly from a temp dir.
+      - name: Post-bump pack consistency
+        run: |
+          set -euo pipefail
+          install_dir=$(mktemp -d)
+          (
+            cd "$install_dir"
+            npm init -y >/dev/null 2>&1
+            npm install --no-audit --no-fund "$PACK_DIR"/*.tgz
+          )
+          (cd "$install_dir" && node -e \
+            "const bt = require('better-trigger'); if (typeof bt.task !== 'function') process.exit(1)")
+          node -e '
+            const fs = require("fs"), cp = require("child_process"), path = require("path");
+            const packDir = process.env.PACK_DIR;
+            const versions = {};
+            for (const f of fs.readdirSync(packDir)) {
+              if (!f.endsWith(".tgz")) continue;
+              const p = JSON.parse(cp.execSync("tar -xzOf " + JSON.stringify(path.join(packDir, f)) + " package/package.json").toString());
+              versions[p.name] = p.version;
+            }
+            const workerTgz = fs.readdirSync(packDir).find((f) => f.startsWith("better-trigger-worker-"));
+            if (workerTgz === undefined) throw new Error("no worker tarball in pack set");
+            const manifest = JSON.parse(cp.execSync(
+              "tar -xzOf " + JSON.stringify(path.join(packDir, workerTgz)) + " package/package.json",
+            ).toString());
+            for (const [name, spec] of Object.entries(manifest.dependencies)) {
+              if (!name.startsWith("@better-trigger/")) continue;
+              if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(spec)) throw new Error("unrewritten workspace dep " + name + "=" + spec);
+              if (versions[name] !== spec) throw new Error(name + "@" + spec + " not in this pack set " + JSON.stringify(versions));
+            }
+          '
+
+      # Publish in the fixed dependency order. If any publish fails the
+      # workflow stops here: no commit, no tag. Retry with a NEW explicit
+      # version (npm refuses to overwrite a published version).
+      - name: Publish to npm (core → db → kernel → sdk → worker)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # 1. core
+          npm publish --access public "$PACK_DIR"/better-trigger-core-*.tgz
+          # 2. db
+          npm publish --access public "$PACK_DIR"/better-trigger-db-*.tgz
+          # 3. kernel
+          npm publish --access public "$PACK_DIR"/better-trigger-kernel-*.tgz
+          # 4. sdk (name on the registry is `better-trigger`)
+          npm publish --access public "$PACK_DIR"/better-trigger-[0-9]*.tgz
+          # 5. worker — last: depends on every package above
+          npm publish --access public "$PACK_DIR"/better-trigger-worker-*.tgz
+
+      # Only after every publish succeeded: record the bump. The committed
+      # apps/worker/src/generated/build-info.ts was rewritten by the
+      # post-bump rebuild and carries the new version, so it is part of
+      # this commit.
+      - name: Commit, tag and push
+        run: |
+          ver=$(node -p "require('./packages/core/package.json').version")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "release: v$ver"
+          git tag "v$ver"
+          git push origin "HEAD:${{ github.ref_name }}"
+          git push origin "v$ver"

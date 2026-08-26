@@ -154,7 +154,7 @@ async function buildEntry(
 
 /** The task ids a trigger/batch-trigger request names, from the cloned body. */
 async function taskIdsFromBody(
-  c: Context<{ Variables: AppVariables }>,
+  _c: Context<{ Variables: AppVariables }>,
   endpoint: RateLimitedEndpoint,
   bodyClone: Request | null,
 ): Promise<string[] | null> {
