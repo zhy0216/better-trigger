@@ -266,6 +266,316 @@ export function claimWindow(limit: number): number {
   return Math.max(limit * 2, 10);
 }
 
+interface PendingClaim {
+  runId: string;
+  taskId: string;
+  payload: unknown;
+  attempt: number;
+  maxAttempts: number;
+  codeVersion: string | null;
+  projectId: string;
+  env: string;
+  fencingToken: number;
+}
+
+type Candidate = {
+  queue_id: number;
+  run_id: string;
+  task_id: string;
+  payload: unknown;
+  attempt: number;
+  max_attempts: number;
+  code_version: string | null;
+  project_id: string;
+  env: string;
+  concurrency_key: string | null;
+  concurrency_limit: number | null;
+};
+
+async function scanCandidates(
+  client: PoolClient,
+  args: ClaimRunsArgs,
+  pinned: boolean,
+  codeVersions: string[],
+  pending: PendingClaim[],
+  logger: KernelLogger,
+): Promise<void> {
+  // The candidate scan runs once per namespace (p1-08). `JOIN runs` is an
+  // inner join, so a queue row whose run vanished is simply not a candidate
+  // (it was skipped by the old per-row read too). `r.status = 'queued'` is
+  // the claimability predicate itself (p2-39): a queue row can only ever be
+  // claimed while its run is still queued — a terminal/desynced run's
+  // leftover row is invisible here, never resurrected. `LEFT JOIN tasks`
+  // because a run may reference a task row that was never registered — that
+  // means "no concurrency limit", not "not claimable".
+  //
+  // Pinned, the task filter becomes a join against the (id, version) pairs
+  // this worker serves rather than an id-only `= ANY`, so the predicate is
+  // per task: task A can be at v2 here while task B is still at v1. Filtering
+  // in SQL and not in the loop is what keeps the window honest — a window
+  // full of other-version rows would otherwise report "nothing to claim"
+  // while claimable runs sat one row further down. Locking is unchanged:
+  // `FOR UPDATE OF q` still names the queue row and nothing else, and the CTE
+  // is a values list, not a lockable relation.
+  //
+  // Each namespace's scan puts its predicate on `q` (constant equalities —
+  // `queue_claimable_idx` binds on its (project_id, env) leading columns) and
+  // repeats the equality against `r` so the semantics are explicit, not
+  // smuggled through the join's `r.project_id = q.project_id AND r.env =
+  // q.env`. Params are numbered in ONE array, in SQL order: the task ids /
+  // window / code versions come first (their $n are written literally in the
+  // SQL below), and nsPredicateFor() numbers the namespace pair from the next
+  // free slot — a fresh array here would restart at $1 and collide with the
+  // literal placeholders above it. The `r`-side equality references the SAME
+  // pair. The limit is shared round-robin: once a namespace's claims fill it,
+  // scanning stops and later namespaces never get a scan.
+  for (const ns of args.namespaces) {
+    const remaining = args.limit - pending.length;
+    if (remaining <= 0) break;
+
+    const params: unknown[] = pinned
+      ? [args.taskIds, claimWindow(remaining), codeVersions]
+      : [args.taskIds, claimWindow(remaining)];
+    const qPredicate = nsPredicateFor('q', ns, params);
+    const rStart = params.length - 1;
+    const rPredicate = `r.project_id = $${rStart}::text AND r.env = $${rStart + 1}::text`;
+    const candidates = await client.query<Candidate>(
+      pinned
+        ? `WITH serving(task_id, code_version) AS (
+             SELECT DISTINCT * FROM unnest($1::text[], $3::text[])
+           )
+           SELECT q.id AS queue_id, q.run_id,
+                  r.task_id, r.payload, r.attempt, r.max_attempts,
+                  r.code_version, r.project_id, r.env, r.concurrency_key,
+                  t.concurrency_limit
+             FROM queue q
+             JOIN runs r ON r.id = q.run_id
+                        AND r.project_id = q.project_id AND r.env = q.env
+             JOIN serving s ON s.task_id = r.task_id
+             LEFT JOIN tasks t ON t.id = r.task_id
+                            AND t.project_id = r.project_id AND t.env = r.env
+            WHERE q.available_at <= now() AND q.locked_by IS NULL
+              AND r.status = 'queued'
+              AND ${qPredicate}
+              AND ${rPredicate}
+              AND (r.code_version IS NULL OR r.code_version = s.code_version)
+            ORDER BY q.priority DESC, q.id ASC
+            LIMIT $2
+            FOR UPDATE OF q SKIP LOCKED`
+        : `SELECT q.id AS queue_id, q.run_id,
+                  r.task_id, r.payload, r.attempt, r.max_attempts,
+                  r.code_version, r.project_id, r.env, r.concurrency_key,
+                  t.concurrency_limit
+             FROM queue q
+             JOIN runs r ON r.id = q.run_id
+                        AND r.project_id = q.project_id AND r.env = q.env
+             LEFT JOIN tasks t ON t.id = r.task_id
+                            AND t.project_id = r.project_id AND t.env = r.env
+            WHERE q.available_at <= now() AND q.locked_by IS NULL
+              AND r.status = 'queued'
+              AND ${qPredicate}
+              AND ${rPredicate}
+              AND r.task_id = ANY($1::text[])
+            ORDER BY q.priority DESC, q.id ASC
+            LIMIT $2
+            FOR UPDATE OF q SKIP LOCKED`,
+      params,
+    );
+
+    for (const cand of candidates.rows) {
+      if (pending.length >= args.limit) break;
+      const claim = await tryClaimOne(client, args, cand, logger);
+      if (claim !== null) pending.push(claim);
+    }
+  }
+}
+
+async function tryClaimOne(
+  client: PoolClient,
+  args: ClaimRunsArgs,
+  cand: Candidate,
+  logger: KernelLogger,
+): Promise<PendingClaim | null> {
+  // Concurrency limit: the task's limit came back with the candidate; if set,
+  // count running runs sharing the same concurrency_key (redundantly stored
+  // on runs). The lock key and the count are both namespace-scoped, so
+  // prod and staging throttle independently (C2).
+  const limit = cand.concurrency_limit;
+  if (limit != null && limit > 0) {
+    const key = cand.concurrency_key ?? cand.task_id;
+    // Serialize concurrent claims sharing this key: SKIP LOCKED does not
+    // serialize two workers picking different queue rows of the same key, so
+    // the count-then-flip below could race and overshoot the limit. Take a
+    // tx-level advisory lock on the key first; it releases at COMMIT/ROLLBACK
+    // and must be held while we count (same transaction). Two-argument form
+    // so the key sits in better-trigger's own lock space — see
+    // CONCURRENCY_LOCK_CLASS above.
+    await client.query(
+      `SELECT pg_advisory_xact_lock($1::int4, hashtext($2))`,
+      [CONCURRENCY_LOCK_CLASS, `bt:cc:${cand.project_id}:${cand.env}:${key}`],
+    );
+    const countRes = await client.query<{ n: string }>(
+      `SELECT count(*)::text AS n
+         FROM runs
+        WHERE status = 'running' AND concurrency_key = $1
+          AND project_id = $2 AND env = $3`,
+      [key, cand.project_id, cand.env],
+    );
+    const running = Number(countRes.rows[0]?.n ?? '0');
+    if (running >= limit) return null; // leave it in the queue
+  }
+
+  // Claim it: flip the run to running FIRST, guarded by the expected old
+  // state (p2-39) — the queue row is already held (SKIP LOCKED, since the
+  // scan), which is what serializes against every other path, so the
+  // `status = 'queued'` predicate is belt-and-braces; a 0-row flip means
+  // the candidate went stale (a terminal/desynced run with a leftover
+  // queue row), and the claim must stop there: no lease, no ledger, no
+  // fencing bump. The returned token is the claim's write credential —
+  // any later claim invalidates it, and it survives suspend/resume
+  // because it lives on runs, not on the delete-and-reinserted queue row.
+  const tokenRes = await client.query<{ fencing_token: string }>(
+    `UPDATE runs
+        SET status = 'running',
+            started_at = COALESCE(started_at, now()),
+            updated_at = now(),
+            fencing_token = fencing_token + 1
+      WHERE id = $1 AND project_id = $2 AND env = $3 AND status = 'queued'
+      RETURNING fencing_token`,
+    [cand.run_id, cand.project_id, cand.env],
+  );
+  if (tokenRes.rowCount !== 1) {
+    // The row exists but is not 'queued' anymore — a stale queue row
+    // pointing at a run that already moved on (p2-39 §2). The queue row
+    // is already held (position 1, taken by the candidate scan), so a
+    // plain read of the run's status is race-free against every kernel
+    // path: they all take the run's queue row before touching the run.
+    // A terminal or 'waiting' run must carry no queue row — nothing will
+    // ever pick this row up again — so delete it right here, under the
+    // lock already held (no new lock, canonical order untouched). A
+    // 'running' or 'queued' run means the flip was resolved elsewhere
+    // (a live-claim race): its row is either someone's live claim or a
+    // row another claim will retake — leave it alone. A missing run row
+    // makes the queue row a ghost — delete it too (the reaper's rule).
+    const st = await client.query<{ status: string }>(
+      `SELECT status FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
+      [cand.run_id, cand.project_id, cand.env],
+    );
+    const oldStatus = st.rows[0]?.status ?? 'missing';
+    const removable =
+      TERMINAL_STATUSES.includes(oldStatus) ||
+      oldStatus === 'waiting' ||
+      oldStatus === 'missing';
+    if (removable) {
+      await client.query(
+        `DELETE FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3`,
+        [cand.run_id, cand.project_id, cand.env],
+      );
+    }
+    logger.warn(
+      `[queue:claim] candidate queue row ${cand.queue_id} for run ${cand.run_id} ` +
+        `is stale (runs.status '${oldStatus}', not 'queued') — claim skipped, run untouched` +
+        (removable ? ', stale queue row deleted (source: claim)' : ''),
+    );
+    return null;
+  }
+  const fencingToken = Number(tokenRes.rows[0]!.fencing_token);
+
+  // The lease, on the row the scan already holds (canonical position 1
+  // was taken at scan time; this is a write, not a new lock).
+  await client.query(
+    `UPDATE queue
+        SET locked_by = $1,
+            locked_at = now(),
+            lease_until = now() + ($2::text || ' milliseconds')::interval
+      WHERE id = $3 AND project_id = $4 AND env = $5`,
+    [args.workerId, String(args.leaseMs), cand.queue_id, cand.project_id, cand.env],
+  );
+
+  return {
+    runId: cand.run_id,
+    taskId: cand.task_id,
+    payload: cand.payload,
+    attempt: cand.attempt,
+    maxAttempts: cand.max_attempts,
+    codeVersion: cand.code_version,
+    projectId: cand.project_id,
+    env: cand.env,
+    fencingToken,
+  };
+}
+
+async function readLedger(
+  client: PoolClient,
+  args: ClaimRunsArgs,
+  pending: readonly PendingClaim[],
+): Promise<ClaimedRun[]> {
+  // Phase 2 (p1-07): read each claimed run's step ledger OUTSIDE the
+  // transaction, so the claim window's FOR UPDATE SKIP LOCKED rows were all
+  // released the moment COMMIT ran — a fat ledger can no longer stall peer
+  // workers while it materializes. The claim already holds the lease and the
+  // bumped fencing token, and run_steps is append-only for a claimed run
+  // (stale-fencing writes are rejected), so there is no torn state to read.
+  // With a cap set, read maxSteps + 1 rows: overflow is then visible without
+  // a second count, and the run is claimed but flagged stepsTruncated.
+  const cap = args.maxSteps ?? 0;
+  const stepsSql =
+    cap > 0
+      ? `SELECT seq, kind, label, status, output, error, fingerprint
+           FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
+           ORDER BY seq ASC
+           LIMIT $4`
+      : `SELECT seq, kind, label, status, output, error, fingerprint
+           FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
+           ORDER BY seq ASC`;
+  const claimed: ClaimedRun[] = [];
+  for (const p of pending) {
+    const stepsParams: unknown[] = [p.runId, p.projectId, p.env];
+    if (cap > 0) stepsParams.push(cap + 1);
+    const stepsRes = await client.query<{
+      seq: number;
+      kind: string;
+      label: string | null;
+      status: string;
+      output: unknown;
+      error: unknown;
+      fingerprint: string | null;
+    }>(stepsSql, stepsParams);
+    const steps: StepSnapshot[] = stepsRes.rows.map((s) => ({
+      seq: s.seq,
+      kind: s.kind as StepSnapshot['kind'],
+      label: s.label,
+      status: s.status as StepSnapshot['status'],
+      output: s.output ?? undefined,
+      error: (s.error as StepSnapshot['error']) ?? undefined,
+      fingerprint: s.fingerprint ?? null,
+    }));
+
+    const run: ClaimedRun = {
+      id: p.runId,
+      taskId: p.taskId,
+      payload: p.payload,
+      attempt: p.attempt,
+      maxAttempts: p.maxAttempts,
+      codeVersion: p.codeVersion,
+      projectId: p.projectId,
+      env: p.env,
+      steps,
+      fencingToken: p.fencingToken,
+    };
+    if (cap > 0 && steps.length > cap) {
+      // Overflow: the worker must fail this run non-retryably rather than
+      // replay a ledger it could not fully see. Keep only the cap's worth of
+      // rows so the shape stays valid (they will not be executed).
+      run.stepsTruncated = true;
+      run.steps = steps.slice(0, cap);
+    }
+    claimed.push(run);
+  }
+
+  return claimed;
+}
+
 /**
  * Claim up to `limit` runs for the given worker, in two phases:
  *
@@ -360,292 +670,13 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
   try {
     await client.query('BEGIN');
 
-    interface PendingClaim {
-      runId: string;
-      taskId: string;
-      payload: unknown;
-      attempt: number;
-      maxAttempts: number;
-      codeVersion: string | null;
-      projectId: string;
-      env: string;
-      fencingToken: number;
-    }
     const pending: PendingClaim[] = [];
 
-    // The candidate scan runs once per namespace (p1-08). `JOIN runs` is an
-    // inner join, so a queue row whose run vanished is simply not a candidate
-    // (it was skipped by the old per-row read too). `r.status = 'queued'` is
-    // the claimability predicate itself (p2-39): a queue row can only ever be
-    // claimed while its run is still queued — a terminal/desynced run's
-    // leftover row is invisible here, never resurrected. `LEFT JOIN tasks`
-    // because a run may reference a task row that was never registered — that
-    // means "no concurrency limit", not "not claimable".
-    //
-    // Pinned, the task filter becomes a join against the (id, version) pairs
-    // this worker serves rather than an id-only `= ANY`, so the predicate is
-    // per task: task A can be at v2 here while task B is still at v1. Filtering
-    // in SQL and not in the loop is what keeps the window honest — a window
-    // full of other-version rows would otherwise report "nothing to claim"
-    // while claimable runs sat one row further down. Locking is unchanged:
-    // `FOR UPDATE OF q` still names the queue row and nothing else, and the CTE
-    // is a values list, not a lockable relation.
-    //
-    // Each namespace's scan puts its predicate on `q` (constant equalities —
-    // `queue_claimable_idx` binds on its (project_id, env) leading columns) and
-    // repeats the equality against `r` so the semantics are explicit, not
-    // smuggled through the join's `r.project_id = q.project_id AND r.env =
-    // q.env`. Params are numbered in ONE array, in SQL order: the task ids /
-    // window / code versions come first (their $n are written literally in the
-    // SQL below), and nsPredicateFor() numbers the namespace pair from the next
-    // free slot — a fresh array here would restart at $1 and collide with the
-    // literal placeholders above it. The `r`-side equality references the SAME
-    // pair. The limit is shared round-robin: once a namespace's claims fill it,
-    // scanning stops and later namespaces never get a scan.
-    for (const ns of args.namespaces) {
-      const remaining = args.limit - pending.length;
-      if (remaining <= 0) break;
-
-      const params: unknown[] = pinned
-        ? [args.taskIds, claimWindow(remaining), codeVersions]
-        : [args.taskIds, claimWindow(remaining)];
-      const qPredicate = nsPredicateFor('q', ns, params);
-      const rStart = params.length - 1;
-      const rPredicate = `r.project_id = $${rStart}::text AND r.env = $${rStart + 1}::text`;
-      const candidates = await client.query<{
-        queue_id: number;
-        run_id: string;
-        task_id: string;
-        payload: unknown;
-        attempt: number;
-        max_attempts: number;
-        code_version: string | null;
-        project_id: string;
-        env: string;
-        concurrency_key: string | null;
-        concurrency_limit: number | null;
-      }>(
-        pinned
-          ? `WITH serving(task_id, code_version) AS (
-               SELECT DISTINCT * FROM unnest($1::text[], $3::text[])
-             )
-             SELECT q.id AS queue_id, q.run_id,
-                    r.task_id, r.payload, r.attempt, r.max_attempts,
-                    r.code_version, r.project_id, r.env, r.concurrency_key,
-                    t.concurrency_limit
-               FROM queue q
-               JOIN runs r ON r.id = q.run_id
-                          AND r.project_id = q.project_id AND r.env = q.env
-               JOIN serving s ON s.task_id = r.task_id
-               LEFT JOIN tasks t ON t.id = r.task_id
-                              AND t.project_id = r.project_id AND t.env = r.env
-              WHERE q.available_at <= now() AND q.locked_by IS NULL
-                AND r.status = 'queued'
-                AND ${qPredicate}
-                AND ${rPredicate}
-                AND (r.code_version IS NULL OR r.code_version = s.code_version)
-              ORDER BY q.priority DESC, q.id ASC
-              LIMIT $2
-              FOR UPDATE OF q SKIP LOCKED`
-          : `SELECT q.id AS queue_id, q.run_id,
-                    r.task_id, r.payload, r.attempt, r.max_attempts,
-                    r.code_version, r.project_id, r.env, r.concurrency_key,
-                    t.concurrency_limit
-               FROM queue q
-               JOIN runs r ON r.id = q.run_id
-                          AND r.project_id = q.project_id AND r.env = q.env
-               LEFT JOIN tasks t ON t.id = r.task_id
-                              AND t.project_id = r.project_id AND t.env = r.env
-              WHERE q.available_at <= now() AND q.locked_by IS NULL
-                AND r.status = 'queued'
-                AND ${qPredicate}
-                AND ${rPredicate}
-                AND r.task_id = ANY($1::text[])
-              ORDER BY q.priority DESC, q.id ASC
-              LIMIT $2
-              FOR UPDATE OF q SKIP LOCKED`,
-        params,
-      );
-
-      for (const cand of candidates.rows) {
-        if (pending.length >= args.limit) break;
-
-        // Concurrency limit: the task's limit came back with the candidate; if set,
-        // count running runs sharing the same concurrency_key (redundantly stored
-        // on runs). The lock key and the count are both namespace-scoped, so
-        // prod and staging throttle independently (C2).
-        const limit = cand.concurrency_limit;
-        if (limit != null && limit > 0) {
-          const key = cand.concurrency_key ?? cand.task_id;
-          // Serialize concurrent claims sharing this key: SKIP LOCKED does not
-          // serialize two workers picking different queue rows of the same key, so
-          // the count-then-flip below could race and overshoot the limit. Take a
-          // tx-level advisory lock on the key first; it releases at COMMIT/ROLLBACK
-          // and must be held while we count (same transaction). Two-argument form
-          // so the key sits in better-trigger's own lock space — see
-          // CONCURRENCY_LOCK_CLASS above.
-          await client.query(
-            `SELECT pg_advisory_xact_lock($1::int4, hashtext($2))`,
-            [CONCURRENCY_LOCK_CLASS, `bt:cc:${cand.project_id}:${cand.env}:${key}`],
-          );
-          const countRes = await client.query<{ n: string }>(
-            `SELECT count(*)::text AS n
-               FROM runs
-              WHERE status = 'running' AND concurrency_key = $1
-                AND project_id = $2 AND env = $3`,
-            [key, cand.project_id, cand.env],
-          );
-          const running = Number(countRes.rows[0]?.n ?? '0');
-          if (running >= limit) continue; // leave it in the queue
-        }
-
-        // Claim it: flip the run to running FIRST, guarded by the expected old
-        // state (p2-39) — the queue row is already held (SKIP LOCKED, since the
-        // scan), which is what serializes against every other path, so the
-        // `status = 'queued'` predicate is belt-and-braces; a 0-row flip means
-        // the candidate went stale (a terminal/desynced run with a leftover
-        // queue row), and the claim must stop there: no lease, no ledger, no
-        // fencing bump. The returned token is the claim's write credential —
-        // any later claim invalidates it, and it survives suspend/resume
-        // because it lives on runs, not on the delete-and-reinserted queue row.
-        const tokenRes = await client.query<{ fencing_token: string }>(
-          `UPDATE runs
-              SET status = 'running',
-                  started_at = COALESCE(started_at, now()),
-                  updated_at = now(),
-                  fencing_token = fencing_token + 1
-            WHERE id = $1 AND project_id = $2 AND env = $3 AND status = 'queued'
-            RETURNING fencing_token`,
-          [cand.run_id, cand.project_id, cand.env],
-        );
-        if (tokenRes.rowCount !== 1) {
-          // The row exists but is not 'queued' anymore — a stale queue row
-          // pointing at a run that already moved on (p2-39 §2). The queue row
-          // is already held (position 1, taken by the candidate scan), so a
-          // plain read of the run's status is race-free against every kernel
-          // path: they all take the run's queue row before touching the run.
-          // A terminal or 'waiting' run must carry no queue row — nothing will
-          // ever pick this row up again — so delete it right here, under the
-          // lock already held (no new lock, canonical order untouched). A
-          // 'running' or 'queued' run means the flip was resolved elsewhere
-          // (a live-claim race): its row is either someone's live claim or a
-          // row another claim will retake — leave it alone. A missing run row
-          // makes the queue row a ghost — delete it too (the reaper's rule).
-          const st = await client.query<{ status: string }>(
-            `SELECT status FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
-            [cand.run_id, cand.project_id, cand.env],
-          );
-          const oldStatus = st.rows[0]?.status ?? 'missing';
-          const removable =
-            TERMINAL_STATUSES.includes(oldStatus) ||
-            oldStatus === 'waiting' ||
-            oldStatus === 'missing';
-          if (removable) {
-            await client.query(
-              `DELETE FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3`,
-              [cand.run_id, cand.project_id, cand.env],
-            );
-          }
-          logger.warn(
-            `[queue:claim] candidate queue row ${cand.queue_id} for run ${cand.run_id} ` +
-              `is stale (runs.status '${oldStatus}', not 'queued') — claim skipped, run untouched` +
-              (removable ? ', stale queue row deleted (source: claim)' : ''),
-          );
-          continue;
-        }
-        const fencingToken = Number(tokenRes.rows[0]!.fencing_token);
-
-        // The lease, on the row the scan already holds (canonical position 1
-        // was taken at scan time; this is a write, not a new lock).
-        await client.query(
-          `UPDATE queue
-              SET locked_by = $1,
-                  locked_at = now(),
-                  lease_until = now() + ($2::text || ' milliseconds')::interval
-            WHERE id = $3 AND project_id = $4 AND env = $5`,
-          [args.workerId, String(args.leaseMs), cand.queue_id, cand.project_id, cand.env],
-        );
-
-        pending.push({
-          runId: cand.run_id,
-          taskId: cand.task_id,
-          payload: cand.payload,
-          attempt: cand.attempt,
-          maxAttempts: cand.max_attempts,
-          codeVersion: cand.code_version,
-          projectId: cand.project_id,
-          env: cand.env,
-          fencingToken,
-        });
-      }
-    }
+    await scanCandidates(client, args, pinned, codeVersions, pending, logger);
 
     await client.query('COMMIT');
 
-    // Phase 2 (p1-07): read each claimed run's step ledger OUTSIDE the
-    // transaction, so the claim window's FOR UPDATE SKIP LOCKED rows were all
-    // released the moment COMMIT ran — a fat ledger can no longer stall peer
-    // workers while it materializes. The claim already holds the lease and the
-    // bumped fencing token, and run_steps is append-only for a claimed run
-    // (stale-fencing writes are rejected), so there is no torn state to read.
-    // With a cap set, read maxSteps + 1 rows: overflow is then visible without
-    // a second count, and the run is claimed but flagged stepsTruncated.
-    const cap = args.maxSteps ?? 0;
-    const stepsSql =
-      cap > 0
-        ? `SELECT seq, kind, label, status, output, error, fingerprint
-             FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
-             ORDER BY seq ASC
-             LIMIT $4`
-        : `SELECT seq, kind, label, status, output, error, fingerprint
-             FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
-             ORDER BY seq ASC`;
-    const claimed: ClaimedRun[] = [];
-    for (const p of pending) {
-      const stepsParams: unknown[] = [p.runId, p.projectId, p.env];
-      if (cap > 0) stepsParams.push(cap + 1);
-      const stepsRes = await client.query<{
-        seq: number;
-        kind: string;
-        label: string | null;
-        status: string;
-        output: unknown;
-        error: unknown;
-        fingerprint: string | null;
-      }>(stepsSql, stepsParams);
-      const steps: StepSnapshot[] = stepsRes.rows.map((s) => ({
-        seq: s.seq,
-        kind: s.kind as StepSnapshot['kind'],
-        label: s.label,
-        status: s.status as StepSnapshot['status'],
-        output: s.output ?? undefined,
-        error: (s.error as StepSnapshot['error']) ?? undefined,
-        fingerprint: s.fingerprint ?? null,
-      }));
-
-      const run: ClaimedRun = {
-        id: p.runId,
-        taskId: p.taskId,
-        payload: p.payload,
-        attempt: p.attempt,
-        maxAttempts: p.maxAttempts,
-        codeVersion: p.codeVersion,
-        projectId: p.projectId,
-        env: p.env,
-        steps,
-        fencingToken: p.fencingToken,
-      };
-      if (cap > 0 && steps.length > cap) {
-        // Overflow: the worker must fail this run non-retryably rather than
-        // replay a ledger it could not fully see. Keep only the cap's worth of
-        // rows so the shape stays valid (they will not be executed).
-        run.stepsTruncated = true;
-        run.steps = steps.slice(0, cap);
-      }
-      claimed.push(run);
-    }
-
-    return claimed;
+    return readLedger(client, args, pending);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;

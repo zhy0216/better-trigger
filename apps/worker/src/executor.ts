@@ -475,8 +475,10 @@ export class Executor implements RunExecutor {
       // unambiguous corruption: the recorded row is a different primitive shape
       // and must never be replayed as this call site. Unconditional in both
       // modes — retrying would only replay the same misaligned ledger.
-      throw new AbortError(
-        `replay drift at seq ${seq}: kind '${snap.kind}' → '${expectedKind}' — the ` +
+      throw this.replayDriftError(
+        seq,
+        'drift',
+        `: kind '${snap.kind}' → '${expectedKind}' — the ` +
           `recorded row is a different primitive shape and must never be replayed ` +
           `as this call site. task "${this.task.id}"'s run ${this.run.id} is failed ` +
           `non-retryably: retrying would only replay the same misaligned ledger. ` +
@@ -496,8 +498,10 @@ export class Executor implements RunExecutor {
           this.onReplayDrift(seq, `label "${snap.label}" → "${expectedLabel}"`);
         } else {
           const what = `${expectedKind} "${snap.label}" → "${expectedLabel}"`;
-          throw new AbortError(
-            `replay fingerprint mismatch at seq ${seq} (${what}): the recorded output ` +
+          throw this.replayDriftError(
+            seq,
+            'fingerprint mismatch',
+            ` (${what}): the recorded output ` +
               `belongs to the old label "${snap.label}", and its code or inputs changed ` +
               `after it was recorded — recorded "${snap.fingerprint}", that label ` +
               `computes "${oldLabelFp}" today — so the recorded output is no longer ` +
@@ -518,8 +522,10 @@ export class Executor implements RunExecutor {
           expectedKind === 'step' && expectedLabel
             ? `step "${expectedLabel}"`
             : `${expectedKind}${expectedLabel ? ` "${expectedLabel}"` : ''}`;
-        throw new AbortError(
-          `replay fingerprint mismatch at seq ${seq} (${what}): recorded "${stored}", ` +
+        throw this.replayDriftError(
+          seq,
+          'fingerprint mismatch',
+          ` (${what}): recorded "${stored}", ` +
             `this call site computes "${expectedFingerprint}" — the step's code or its ` +
             `inputs changed after it was recorded, so the recorded output is no longer ` +
             `this code's result. task "${this.task.id}"'s run ${this.run.id} is failed ` +
@@ -585,6 +591,20 @@ export class Executor implements RunExecutor {
   }
 
   /**
+   * Every "the ledger and this call site disagree" failure throws through this
+   * one factory so the four variants share their shape while each message text
+   * stays byte-identical. `what` is the drift category ("drift" for the
+   * `replay drift at seq N:` forms, "fingerprint mismatch" for the
+   * `replay fingerprint mismatch at seq N (…)` forms), and `detail` carries
+   * its own separator — ": kind … —" for the drift forms, " (…) :" for the
+   * fingerprint forms — because the two heads punctuate differently and the
+   * text is frozen.
+   */
+  private replayDriftError(seq: number, what: string, detail: string): AbortError {
+    return new AbortError(`replay ${what} at seq ${seq}${detail}`);
+  }
+
+  /**
    * Snapshot row and call site disagree at the same seq. Strict → non-retryable
    * AbortError (retrying replays the same mismatched ledger, so a backoff loop
    * would only delay the same wrong answer). Lenient → warn and carry on.
@@ -592,8 +612,10 @@ export class Executor implements RunExecutor {
   private onReplayDrift(seq: number, detail: string): void {
     const summary = `replay drift at seq ${seq}: ${detail}`;
     if (this.task.replay === 'strict') {
-      throw new AbortError(
-        `${summary} — the recorded ledger no longer matches this task's code ` +
+      throw this.replayDriftError(
+        seq,
+        'drift',
+        `: ${detail} — the recorded ledger no longer matches this task's code ` +
           `(a durable primitive was inserted, removed or reordered). ` +
           `task "${this.task.id}" declares replay:'strict', so run ${this.run.id} is failed ` +
           `instead of replaying a foreign step row. Retry it under a new task id, ` +
@@ -687,6 +709,19 @@ export class Executor implements RunExecutor {
     }
   }
 
+  /**
+   * The preamble every durable primitive opens with: guard against a swallowed
+   * control-flow signal, an abandoned attempt and nesting inside a step fn,
+   * then take this primitive's replay position. Returns the seq the caller
+   * records the primitive under.
+   */
+  private async beginPrimitive(what: string): Promise<number> {
+    await this.assertSignalNotSwallowed(what);
+    if (this.abandoned) throw this.endExecution();
+    this.assertNotNested(what);
+    return this.nextSeq();
+  }
+
   /* ---- ctx.step -------------------------------------------------------- */
 
   private async doStep<T>(
@@ -694,10 +729,7 @@ export class Executor implements RunExecutor {
     fn: () => T | Promise<T>,
     opts?: StepOptions,
   ): Promise<T> {
-    await this.assertSignalNotSwallowed(`ctx.step("${label}")`);
-    if (this.abandoned) throw this.endExecution();
-    this.assertNotNested(`ctx.step("${label}")`);
-    const seq = this.nextSeq();
+    const seq = await this.beginPrimitive(`ctx.step("${label}")`);
     // fn source hash is the persistable stand-in for the fn itself (its output
     // semantics): an edited step body must not replay its old result.
     const input = {
@@ -850,10 +882,7 @@ export class Executor implements RunExecutor {
     declared: { duration: string | number } | { until: string },
   ): Promise<void> {
     const what = `ctx.wait.${kind === 'duration' ? 'for' : 'until'}()`;
-    await this.assertSignalNotSwallowed(what);
-    if (this.abandoned) throw this.endExecution();
-    this.assertNotNested(what);
-    const seq = this.nextSeq();
+    const seq = await this.beginPrimitive(what);
 
     // Fingerprint of the DECLARED wait — passed to suspendRun so the waits row
     // and the completed step row carry it, and recomputed identically on replay.
@@ -895,10 +924,7 @@ export class Executor implements RunExecutor {
     label: string,
     options?: TriggerOptions,
   ): Promise<TaskRunResult<TOutput>> {
-    await this.assertSignalNotSwallowed(`triggerAndWait("${taskId}")`);
-    if (this.abandoned) throw this.endExecution();
-    this.assertNotNested(`triggerAndWait("${taskId}")`);
-    const seq = this.nextSeq();
+    const seq = await this.beginPrimitive(`triggerAndWait("${taskId}")`);
 
     // Label stays NULL in the ledger row and out of the fingerprint (the row
     // never stores it); kind + taskId + payload + options + code version is
@@ -943,10 +969,7 @@ export class Executor implements RunExecutor {
     items: TriggerItem[],
     label: string,
   ): Promise<string[]> {
-    await this.assertSignalNotSwallowed(`trigger/batchTrigger (${label})`);
-    if (this.abandoned) throw this.endExecution();
-    this.assertNotNested(`trigger/batchTrigger (${label})`);
-    const seq = this.nextSeq();
+    const seq = await this.beginPrimitive(`trigger/batchTrigger (${label})`);
 
     // Same items + label the kernel's batchTriggerChild fingerprints the row
     // with — a changed fan-out must not replay the old run ids.
@@ -990,10 +1013,7 @@ export class Executor implements RunExecutor {
   private async doDeterministic(
     kind: 'now' | 'random' | 'uuid',
   ): Promise<Date | number | string> {
-    await this.assertSignalNotSwallowed(`ctx.${kind}()`);
-    if (this.abandoned) throw this.endExecution();
-    this.assertNotNested(`ctx.${kind}()`);
-    const seq = this.nextSeq();
+    const seq = await this.beginPrimitive(`ctx.${kind}()`);
 
     const fp = this.fingerprint(kind, null, {});
     const hit = this.cached(seq, kind, null, fp, {});
