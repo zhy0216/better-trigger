@@ -11,7 +11,7 @@
 | # | 文件 | 一句话 | 依赖 |
 |---|------|--------|------|
 | 1 | [p0-01-concurrency-env-validation.md](./done/p0-01-concurrency-env-validation.md) ✅ | `BETTER_TRIGGER_CONCURRENCY` env 用裸 `Number()`，拼错值 → NaN → daemon 正常启动但永不领取任务 | — |
-| 2 | [p0-02-dashboard-env-propagation.md](./p0-02-dashboard-env-propagation.md) | Dashboard EnvSwitcher 只对 `/runs` 列表生效，详情/Cancel/Retry/tasks/schedules/workers 不带 env，非 prod run 全部 404 或静默显示 prod 数据 | — |
+| 2 | [p0-02-dashboard-env-propagation.md](./done/p0-02-dashboard-env-propagation.md) ✅ | Dashboard EnvSwitcher 只对 `/runs` 列表生效，详情/Cancel/Retry/tasks/schedules/workers 不带 env，非 prod run 全部 404 或静默显示 prod 数据 | — |
 | 3 | [p1-03-embedded-rate-limit.md](./p1-03-embedded-rate-limit.md) | embedded 进程内 fetch 也过 rateLimitMiddleware，高吞吐 embedded 应用会对自己返回 429 | — |
 | 4 | [p1-04-heartbeat-reentrancy.md](./p1-04-heartbeat-reentrancy.md) | heartbeat 的 `setInterval` 无重入保护，慢 tick 会并发；stop() 后仍可能把 workers 行重新点亮 | — |
 | 5 | [p1-05-sdk-waitforresult-signature.md](./p1-05-sdk-waitforresult-signature.md) | SDK `waitForResult` 签名与文档/兄弟方法不一致；README 漏 namespace 列与 `retryRun.operationKey` | — |

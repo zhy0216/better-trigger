@@ -7,10 +7,10 @@ import { Page, Card, Metric, ErrorState, LoadingState } from '../components/Layo
 import { useTasks, useSchedules, useWorkers } from '../api/hooks';
 import type { Route } from '../types';
 
-export function TasksDashboard({ setRoute }: { onOpenRun?: (runId?: string) => void; setRoute: (r: Route) => void }) {
-  const { data: tasks, error } = useTasks();
-  const { data: schedules } = useSchedules();
-  const { data: workers } = useWorkers();
+export function TasksDashboard({ setRoute, env = 'prod' }: { onOpenRun?: (runId?: string) => void; setRoute: (r: Route) => void; env?: string }) {
+  const { data: tasks, error } = useTasks(env);
+  const { data: schedules } = useSchedules(env);
+  const { data: workers } = useWorkers(env);
   if (!tasks) return <Page>{error ? <ErrorState message={error} /> : <LoadingState />}</Page>;
   const totalRuns = tasks.reduce((a, t) => a + t.runs24h, 0);
   const avgSuccess = tasks.length ? (tasks.reduce((a, t) => a + t.success, 0) / tasks.length).toFixed(1) : '0.0';

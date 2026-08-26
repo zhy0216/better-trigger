@@ -21,7 +21,7 @@ function fmtMs(ms: number): string {
 }
 
 // ---- the trace header ----
-function RunHeader({ trace, runStatus, onRetried }: { trace: Trace; runStatus: string; onRetried?: (newRunId: string) => void }) {
+function RunHeader({ trace, runStatus, env, onRetried }: { trace: Trace; runStatus: string; env: string; onRetried?: (newRunId: string) => void }) {
   const Meta = ({ icon, label, value, mono }: { icon: string; label: string; value: React.ReactNode; mono?: boolean }) => (
     <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
       <Icon name={icon} size={14} style={{ color: 'var(--fg-subtle)' }} />
@@ -57,11 +57,11 @@ function RunHeader({ trace, runStatus, onRetried }: { trace: Trace; runStatus: s
         // poll would keep watching the old failed run forever and repeat
         // clicks would silently spawn N runs.
         const operationKey = retryIntentKey.current();
-        const { runId: newRunId } = await api.retryRun(trace.runId, { operationKey });
+        const { runId: newRunId } = await api.retryRun(trace.runId, env, { operationKey });
         onRetried?.(newRunId);
       } else {
         // Cancel keeps the same run: the 2s useRun poll picks up 'canceled'.
-        await api.cancelRun(trace.runId);
+        await api.cancelRun(trace.runId, env);
       }
     } catch (e) {
       setActionError(e instanceof Error ? e.message : 'request failed');
@@ -366,8 +366,8 @@ interface WakeInfo {
   waits: Array<{ kind: string; resumeAt: string | null; childRunId: string | null }>;
 }
 
-export function RunView({ vizStyle = 'waterfall', runId = null, onBack, onRetried }: { vizStyle?: VizStyle; runId?: string | null; onBack?: () => void; onRetried?: (newRunId: string) => void }) {
-  const { data: detail, error, loadOlderLogs, loadingOlderLogs, hasOlderLogs } = useRun(runId);
+export function RunView({ vizStyle = 'waterfall', runId = null, env = 'prod', onBack, onRetried }: { vizStyle?: VizStyle; runId?: string | null; env?: string; onBack?: () => void; onRetried?: (newRunId: string) => void }) {
+  const { data: detail, error, loadOlderLogs, loadingOlderLogs, hasOlderLogs } = useRun(runId, env);
 
   let body: React.ReactNode;
   if (!runId) {
@@ -384,7 +384,7 @@ export function RunView({ vizStyle = 'waterfall', runId = null, onBack, onRetrie
     body = <div style={{ flex: 1, overflowY: 'auto' }}>{error ? <ErrorState message={error} /> : <LoadingState />}</div>;
   } else {
     body = (
-      <RunDetail key={runId} detail={detail} vizStyle={vizStyle} onRetried={onRetried}
+      <RunDetail key={runId} detail={detail} vizStyle={vizStyle} env={env} onRetried={onRetried}
         onLoadOlderLogs={loadOlderLogs} loadingOlderLogs={loadingOlderLogs} hasOlderLogs={hasOlderLogs} />
     );
   }
@@ -406,8 +406,8 @@ export function RunView({ vizStyle = 'waterfall', runId = null, onBack, onRetrie
   );
 }
 
-function RunDetail({ detail, vizStyle, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs, onRetried }: {
-  detail: AdaptedRunDetail; vizStyle: VizStyle;
+function RunDetail({ detail, vizStyle, env, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs, onRetried }: {
+  detail: AdaptedRunDetail; vizStyle: VizStyle; env: string;
   onLoadOlderLogs: () => Promise<boolean>; loadingOlderLogs: boolean; hasOlderLogs: boolean;
   onRetried?: (newRunId: string) => void;
 }) {
@@ -424,7 +424,7 @@ function RunDetail({ detail, vizStyle, onLoadOlderLogs, loadingOlderLogs, hasOld
 
   return (
     <>
-      <RunHeader trace={trace} runStatus={detail.status} onRetried={onRetried} />
+      <RunHeader trace={trace} runStatus={detail.status} env={env} onRetried={onRetried} />
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, position: 'relative', background: 'var(--surface)' }}>
           <div style={{ flex: 1, overflowY: 'auto', position: 'relative' }}>

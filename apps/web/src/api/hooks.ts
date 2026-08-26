@@ -244,10 +244,10 @@ function usePoll<T>(
 
 /* ---- public hooks -------------------------------------------------------- */
 
-export function useTasks(): PollResult<Task[]> {
+export function useTasks(env: string = 'prod'): PollResult<Task[]> {
   return usePoll<Task[]>(
-    'tasks',
-    async (signal) => adaptTasks((await api.tasks(signal)).tasks),
+    pollKey('tasks', env),
+    async (signal) => adaptTasks((await api.tasks(env, signal)).tasks),
   );
 }
 
@@ -365,10 +365,10 @@ export interface RunDetailResult extends PollResult<AdaptedRunDetail> {
  * (keyed off their own cursors), and the combined stream is deduped by log id
  * — a head that slides forward between polls must not duplicate a line.
  */
-export function useRun(runId: string | null): RunDetailResult {
+export function useRun(runId: string | null, env: string = 'prod'): RunDetailResult {
   const base = usePoll<RunDetailResponse>(
-    pollKey('run', runId),
-    async (signal) => api.run(runId!, undefined, signal),
+    pollKey('run', runId, env),
+    async (signal) => api.run(runId!, env, undefined, signal),
     runId !== null,
   );
 
@@ -380,13 +380,13 @@ export function useRun(runId: string | null): RunDetailResult {
   const [olderCursor, setOlderCursor] = React.useState<number | null | undefined>(undefined);
   const [loadingOlderLogs, setLoadingOlderLogs] = React.useState(false);
 
-  // A runId change invalidates loaded pages (RunDetail is keyed by runId, so
-  // this is belt-and-braces for the same effect).
+  // A runId/env change invalidates loaded pages (RunDetail is keyed by runId,
+  // so this is belt-and-braces for the same effect).
   React.useEffect(() => {
     setOlderLogs([]);
     setOlderCursor(undefined);
     setLoadingOlderLogs(false);
-  }, [runId]);
+  }, [runId, env]);
 
   const loadOlderLogs = React.useCallback(async (): Promise<boolean> => {
     if (runId == null || loadingOlderLogs) return false;
@@ -395,7 +395,7 @@ export function useRun(runId: string | null): RunDetailResult {
     if (cursor === null) return false; // the head page itself has no older logs
     setLoadingOlderLogs(true);
     try {
-      const res = await api.run(runId, { logsBefore: cursor });
+      const res = await api.run(runId, env, { logsBefore: cursor });
       // Append the older page; the head may have slid forward between polls,
       // so rows the newer pages already carry are dropped (dedupe by log id).
       setOlderLogs((prev) => {
@@ -409,7 +409,7 @@ export function useRun(runId: string | null): RunDetailResult {
     } finally {
       setLoadingOlderLogs(false);
     }
-  }, [runId, loadingOlderLogs, olderCursor, base.data?.logsNextCursor]);
+  }, [runId, env, loadingOlderLogs, olderCursor, base.data?.logsNextCursor]);
 
   const data = React.useMemo<AdaptedRunDetail | null>(() => {
     if (base.data === null) return null;
@@ -431,17 +431,17 @@ export function useRun(runId: string | null): RunDetailResult {
   };
 }
 
-export function useSchedules(): PollResult<Schedule[]> {
+export function useSchedules(env: string = 'prod'): PollResult<Schedule[]> {
   return usePoll<Schedule[]>(
-    'schedules',
-    async (signal) => adaptSchedules((await api.schedules(signal)).schedules),
+    pollKey('schedules', env),
+    async (signal) => adaptSchedules((await api.schedules(env, signal)).schedules),
   );
 }
 
-export function useWorkers(): PollResult<WorkerSummary[]> {
+export function useWorkers(env: string = 'prod'): PollResult<WorkerSummary[]> {
   return usePoll<WorkerSummary[]>(
-    'workers',
-    async (signal) => (await api.workers(signal)).workers,
+    pollKey('workers', env),
+    async (signal) => (await api.workers(env, signal)).workers,
   );
 }
 

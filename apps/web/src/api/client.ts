@@ -180,53 +180,68 @@ export interface RunFilters {
  */
 const PROJECT_ID = 'default';
 
-function nsQuery(params: URLSearchParams): void {
+function nsQuery(params: URLSearchParams, env: string = 'prod'): void {
   params.set('projectId', PROJECT_ID);
+  params.set('env', env);
 }
 
 export const api = {
   health(signal?: AbortSignal): Promise<{ ok: boolean; version: string }> {
     return request('/health', { signal });
   },
-  tasks(signal?: AbortSignal): Promise<TasksResponse> {
+  tasks(env: string = 'prod', signal?: AbortSignal): Promise<TasksResponse> {
     const qs = new URLSearchParams();
-    nsQuery(qs);
+    nsQuery(qs, env);
     return request('/tasks?' + qs, { signal });
   },
   runs(filters: RunFilters = {}, signal?: AbortSignal): Promise<RunsResponse> {
     const qs = new URLSearchParams();
-    // 'prod' is the default env on the server; staging/dev narrow it.
-    if (filters.env && filters.env !== 'all') qs.set('env', filters.env);
     if (filters.taskId) qs.set('taskId', filters.taskId);
     if (filters.status && filters.status !== 'all') qs.set('status', filters.status);
     if (filters.limit) qs.set('limit', String(filters.limit));
     if (filters.cursor) qs.set('cursor', filters.cursor);
-    nsQuery(qs);
+    // 'all' means "no env narrowing" (default prod) — the switcher only ever
+    // sends a concrete env, but this keeps the legacy call shape harmless.
+    nsQuery(qs, filters.env && filters.env !== 'all' ? filters.env : 'prod');
     const q = qs.toString();
     return request('/runs' + (q ? '?' + q : ''), { signal });
   },
-  run(runId: string, opts: { logsBefore?: number } = {}, signal?: AbortSignal): Promise<RunDetailResponse> {
-    const qs = new URLSearchParams({ projectId: PROJECT_ID });
+  run(
+    runId: string,
+    env: string = 'prod',
+    opts: { logsBefore?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<RunDetailResponse> {
+    const qs = new URLSearchParams();
+    nsQuery(qs, env);
     // PF3 logs paging: pass the previous page's logsNextCursor to fetch the
     // older page (a long run's log tail is reached by walking the chain).
     if (opts.logsBefore != null) qs.set('logsBefore', String(opts.logsBefore));
     return request('/runs/' + encodeURIComponent(runId) + '?' + qs, { signal });
   },
-  schedules(signal?: AbortSignal): Promise<SchedulesResponse> {
-    return request('/schedules?projectId=' + PROJECT_ID, { signal });
+  schedules(env: string = 'prod', signal?: AbortSignal): Promise<SchedulesResponse> {
+    const qs = new URLSearchParams();
+    nsQuery(qs, env);
+    return request('/schedules?' + qs, { signal });
   },
-  setScheduleEnabled(id: string, enabled: boolean, signal?: AbortSignal): Promise<unknown> {
-    return request('/schedules/' + encodeURIComponent(id) + '?projectId=' + PROJECT_ID, {
+  setScheduleEnabled(id: string, enabled: boolean, env: string = 'prod', signal?: AbortSignal): Promise<unknown> {
+    const qs = new URLSearchParams();
+    nsQuery(qs, env);
+    return request('/schedules/' + encodeURIComponent(id) + '?' + qs, {
       method: 'PATCH',
       body: { enabled },
       signal,
     });
   },
-  workers(signal?: AbortSignal): Promise<WorkersResponse> {
-    return request('/workers?projectId=' + PROJECT_ID, { signal });
+  workers(env: string = 'prod', signal?: AbortSignal): Promise<WorkersResponse> {
+    const qs = new URLSearchParams();
+    nsQuery(qs, env);
+    return request('/workers?' + qs, { signal });
   },
-  cancelRun(runId: string, signal?: AbortSignal): Promise<unknown> {
-    return request('/runs/' + encodeURIComponent(runId) + '/cancel?projectId=' + PROJECT_ID, {
+  cancelRun(runId: string, env: string = 'prod', signal?: AbortSignal): Promise<unknown> {
+    const qs = new URLSearchParams();
+    nsQuery(qs, env);
+    return request('/runs/' + encodeURIComponent(runId) + '/cancel?' + qs, {
       method: 'POST',
       signal,
     });
@@ -243,10 +258,13 @@ export const api = {
    */
   retryRun(
     runId: string,
+    env: string = 'prod',
     opts?: { operationKey?: string },
     signal?: AbortSignal,
   ): Promise<{ runId: string }> {
-    return request('/runs/' + encodeURIComponent(runId) + '/retry?projectId=' + PROJECT_ID, {
+    const qs = new URLSearchParams();
+    nsQuery(qs, env);
+    return request('/runs/' + encodeURIComponent(runId) + '/retry?' + qs, {
       method: 'POST',
       headers: opts?.operationKey ? { 'Idempotency-Key': opts.operationKey } : undefined,
       signal,

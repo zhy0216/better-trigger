@@ -7,8 +7,8 @@ import { Page, Card, SectionHead, ErrorState, LoadingState } from '../components
 import { useSchedules, api } from '../api/hooks';
 import type { Schedule } from '../types';
 
-export function Schedules() {
-  const { data, error } = useSchedules();
+export function Schedules({ env = 'prod' }: { env?: string }) {
+  const { data, error } = useSchedules(env);
   // local override layer: optimistic toggles applied on top of polled data,
   // so the switch stays responsive between 2s refreshes.
   const [overrides, setOverrides] = React.useState<Record<string, boolean>>({});
@@ -18,7 +18,7 @@ export function Schedules() {
     if (!cur) return;
     const next = !cur.enabled;
     setOverrides((o) => ({ ...o, [id]: next }));
-    api.setScheduleEnabled(id, next).catch(() => {
+    api.setScheduleEnabled(id, next, env).catch(() => {
       // revert optimistic change on failure
       setOverrides((o) => ({ ...o, [id]: cur.enabled }));
     });
