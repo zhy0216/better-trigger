@@ -46,6 +46,7 @@ import {
   type RunResultResolver,
 } from 'better-trigger/internal';
 import { createApp } from './app';
+import { markInternalRequest } from './internal-request';
 import {
   createNotifyCounters,
   type WorkerLogger,
@@ -372,7 +373,12 @@ export async function createEmbeddedRuntime(
 
     const inProcessFetch: typeof globalThis.fetch = async (input, init) => {
       if (stopping) return stoppedResponse();
-      return app.fetch(new Request(input, init));
+      const req = new Request(input, init);
+      // This dispatch is in-process and trusted; mark it so the shared Hono
+      // rate limiter skips it (the client must not 429 itself). The host may
+      // still mount `app` externally — those unmarked requests stay limited.
+      markInternalRequest(req);
+      return app.fetch(req);
     };
 
     previousDefault = getDefaultInstance();

@@ -17,6 +17,7 @@ import type { Pool } from 'pg';
 import type { Kernel } from '@better-trigger/kernel';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
+import { markInternalRequest } from '../src/internal-request';
 import {
   endpointOf,
   rateLimitConfigFromEnv,
@@ -179,6 +180,28 @@ describe('real concurrency', () => {
     );
     expect(results.filter((r) => r.status === 200)).toHaveLength(3);
     expect(results.filter((r) => r.status === 429)).toHaveLength(2);
+  });
+});
+
+describe('internal-request exemption (P1-03)', () => {
+  it('a marked in-process request bypasses the limiter; an unmarked one still draws the bucket', async () => {
+    perKeyOnly();
+    const app = makeApp();
+    const markedPost = () => {
+      const req = post('/api/v1/trigger', { taskId: 't', payload: null });
+      markInternalRequest(req);
+      return req;
+    };
+    // Marked requests consume no tokens, so they never 429 regardless of count.
+    expect((await app.fetch(markedPost())).status).toBe(200);
+    expect((await app.fetch(markedPost())).status).toBe(200);
+    // An unmarked request is unaffected: first consumes the single token, next 429s.
+    expect((await app.fetch(post('/api/v1/trigger', { taskId: 't', payload: null }))).status).toBe(
+      200,
+    );
+    expect((await app.fetch(post('/api/v1/trigger', { taskId: 't', payload: null }))).status).toBe(
+      429,
+    );
   });
 });
 

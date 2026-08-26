@@ -51,6 +51,16 @@
    429 `{ error: { code: 'rate_limited', message } }` via app.onError, and
    the audit middleware records it with reason 'rate_limited'.
 
+   In-process embedded dispatches are exempt: the embedded runtime's fetch
+   adapter marks its `Request` via `markInternalRequest` (internal-request.ts,
+   a module-private WeakSet no network request can carry), and the middleware
+   short-circuits on `isInternalRequest(c.req.raw)` before classifying the
+   endpoint. The trust is narrow — only the exact Request the embedded adapter
+   constructs — so the limiter still guards everything a host mounts `app`
+   against; audit (outermost) and auth are untouched and still run for those
+   calls. This is the P1-03 trade-off: trusted same-process traffic is not
+   self-throttled, the external network surface is unchanged.
+
    A concurrency cap (max in-flight creations) was deliberately NOT added:
    a token bucket already bounds the creation rate, which is what the
    acceptance criterion ("cannot create runs without bound") asks for, and
@@ -58,6 +68,7 @@
    ============================================================================= */
 import type { MiddlewareHandler } from 'hono';
 import { KernelError } from '@better-trigger/kernel';
+import { isInternalRequest } from './internal-request';
 import { remoteAddressOf, type AppVariables } from './middleware';
 
 /** The run-affecting endpoints the rate limit guards. */
@@ -191,6 +202,11 @@ export class TokenBuckets {
 export function rateLimitMiddleware(now?: () => number): MiddlewareHandler<{ Variables: AppVariables }> {
   const buckets = new TokenBuckets(now);
   return async (c, next) => {
+    // In-process embedded dispatches carry a WeakSet marker (internal-request.ts)
+    // that only this process could have written; they skip the limiter outright,
+    // while the host-mounted external surface (unmarked) still draws buckets.
+    // Audit/auth already ran in the outer layers and are unaffected.
+    if (isInternalRequest(c.req.raw)) return next();
     const endpoint = endpointOf(c.req.method, c.req.path);
     if (endpoint === null) return next();
     const cfg = rateLimitConfigFromEnv();

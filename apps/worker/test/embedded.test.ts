@@ -102,6 +102,13 @@ let runtime: EmbeddedRuntime | null;
 let pool: FakePool;
 let kernel: Kernel;
 
+const RATE_ENVS = [
+  'BETTER_TRIGGER_RATE_LIMIT_RPS',
+  'BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS',
+  'BETTER_TRIGGER_RATE_LIMIT_BURST',
+] as const;
+const savedRateEnv: Record<string, string | undefined> = {};
+
 beforeEach(() => {
   runtime = null;
   pool = fakePool();
@@ -116,6 +123,10 @@ beforeEach(() => {
   setResultResolver(null);
   delete process.env.BETTER_TRIGGER_API_KEY;
   delete process.env.BETTER_TRIGGER_API_KEYS;
+  for (const k of RATE_ENVS) {
+    savedRateEnv[k] = process.env[k];
+    delete process.env[k];
+  }
 });
 
 afterEach(async () => {
@@ -123,6 +134,10 @@ afterEach(async () => {
   runtime = null;
   setDefaultInstance(null);
   setResultResolver(null);
+  for (const k of RATE_ENVS) {
+    if (savedRateEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedRateEnv[k];
+  }
 });
 
 describe('createEmbeddedRuntime', () => {
@@ -269,5 +284,49 @@ describe('createEmbeddedRuntime', () => {
       notifications: false,
     });
     expect(runtime.pool).toBe(nextPool);
+  });
+
+  it('does not rate-limit its own in-process client even far past the default burst', async () => {
+    // Defaults: anon write bucket is 50 rps / burst 200. Without the
+    // internal-request exemption, the 200+ concurrent triggers past the burst
+    // would draw the shared anon bucket and answer 429 (P1-03).
+    runtime = await createEmbeddedRuntime({
+      databaseUrl: 'postgres://embedded.test/db',
+      tasks: [sendEmail],
+      concurrency: 1,
+      notifications: false,
+    });
+
+    const handles = await Promise.all(
+      Array.from({ length: 250 }, () =>
+        runtime!.client.trigger(sendEmail, { to: 'bulk@example.com' }),
+      ),
+    );
+    expect(handles.every((h) => h.id === 'run_embedded')).toBe(true);
+  });
+
+  it('still rate-limits an unmarked host-mounted fetch on the same app', async () => {
+    // The embedded `app` may be mounted externally; that surface must stay
+    // limited. An unmarked Request (never passed through the in-process fetch
+    // adapter) still draws the write bucket and 429s past the burst.
+    process.env.BETTER_TRIGGER_RATE_LIMIT_RPS = '1';
+    process.env.BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS = '0';
+    process.env.BETTER_TRIGGER_RATE_LIMIT_BURST = '1';
+    runtime = await createEmbeddedRuntime({
+      databaseUrl: 'postgres://embedded.test/db',
+      tasks: [sendEmail],
+      concurrency: 1,
+      notifications: false,
+    });
+
+    const unmarked = () =>
+      new Request('http://better-trigger.internal/api/v1/trigger', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId: 'send-email', payload: { to: 'a@example.com' } }),
+      });
+
+    expect((await runtime!.app.fetch(unmarked())).status).toBe(200);
+    expect((await runtime!.app.fetch(unmarked())).status).toBe(429);
   });
 });
