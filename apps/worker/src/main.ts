@@ -288,6 +288,23 @@ function requireInt(flag: string, raw: string): number {
 }
 
 /**
+ * An integer read from the environment, positive and required. PORT and
+ * BETTER_TRIGGER_CONCURRENCY both feed places where a garbage value would
+ * otherwise be silent: concurrency lands in `Array.from({ length })` (NaN → 0
+ * claim loops → a daemon that serves the API but never picks up a task), and
+ * the port would blow up later inside listen() instead of at parse time. A
+ * typo'd or fractional value therefore fails here, naming the variable.
+ */
+function parsePositiveIntEnv(name: string, raw: string | undefined, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`${name} must be a positive integer, got "${raw}"`);
+  }
+  return n;
+}
+
+/**
  * BETTER_TRIGGER_MAX_STEPS: cap on a run's replayed step ledger. Unset → the
  * 10000 default; 0 means unlimited (the pre-p1-07 behaviour). Negative or
  * unparseable is a startup error on purpose — a typo'd cap must not silently
@@ -379,7 +396,7 @@ function parseNamespaces(flag: string, raw: string): Namespace[] {
 function parseArgs(argv: string[]): Options {
   const opts: Options = {
     tasks: [],
-    port: Number(process.env.PORT ?? 4848),
+    port: parsePositiveIntEnv('PORT', process.env.PORT, 4848),
     // Loopback by default: a local runtime should not answer the subnet.
     host: process.env.BETTER_TRIGGER_HOST || '127.0.0.1',
     allowUnauthenticated: envFlag(process.env.BETTER_TRIGGER_ALLOW_UNAUTHENTICATED),
@@ -387,7 +404,11 @@ function parseArgs(argv: string[]): Options {
     // BETTER_TRIGGER_CORS_ORIGIN is read by the middleware itself (an embedded
     // createApp() has no CLI), so seeding it here would list it twice.
     corsOrigins: [],
-    concurrency: Number(process.env.BETTER_TRIGGER_CONCURRENCY ?? 5),
+    concurrency: parsePositiveIntEnv(
+      'BETTER_TRIGGER_CONCURRENCY',
+      process.env.BETTER_TRIGGER_CONCURRENCY,
+      5,
+    ),
     databaseUrl: process.env.DATABASE_URL,
     migrate: true,
     serve: true,
