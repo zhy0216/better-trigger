@@ -21,7 +21,7 @@
 | 9 | [p2-09-refactor-monoliths.md](./done/p2-09-refactor-monoliths.md) ✅ | kernel `runs.ts`(2577) / `claimRuns`(315) / `scanWaits`(290) / worker `main.ts`(1246) 拆分，executor 重复模板抽取 | — |
 | 10 | [p2-10-kernel-low-hanging.md](./done/p2-10-kernel-low-hanging.md) ✅ | kernel 低挂果：appendLogs 静默丢弃、enqueueMany 陷阱、裸 Error→500、TERMINAL_STATUSES 重复、withTx 样板、prune 索引、注释漂移 | — |
 | 11 | [p2-11-worker-low-hanging.md](./done/p2-11-worker-low-hanging.md) ✅ | worker 低挂果：未知 task 租约滞留、stepsTruncated 读 env、AbortError 模板重复、intQuery clamp、PATCH /schedules 限流/审计、Bearer 大小写、handoff 顺序 | — |
-| 12 | [p2-12-sdk-web-toolchain-low-hanging.md](./p2-12-sdk-web-toolchain-low-hanging.md) | sdk/web/toolchain 低挂果：SDK_VERSION 硬编码、batchTrigger env 剥离、retry sleep 不感知 AbortSignal、timeoutMs 校验、useTweaks 死代码、VITE_BT_API_URL 注释 | — |
+| 12 | [p2-12-sdk-web-toolchain-low-hanging.md](./done/p2-12-sdk-web-toolchain-low-hanging.md) ✅ | sdk/web/toolchain 低挂果：SDK_VERSION 硬编码、batchTrigger env 剥离、retry sleep 不感知 AbortSignal、timeoutMs 校验、useTweaks 死代码、VITE_BT_API_URL 注释 | — |
 
 ## 执行约定
 

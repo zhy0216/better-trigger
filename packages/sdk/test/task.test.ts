@@ -339,4 +339,33 @@ describe('durable in-run trigger — namespace warning (p1-15)', () => {
     expect(triggerAndWait).toHaveBeenCalledTimes(1);
     expect(triggerAndWait.mock.calls[0]?.[3]).toEqual({});
   });
+
+  it('batchTrigger strips per-item env/projectId from the durable step items', async () => {
+    // BatchItemOptions Omits env/projectId at the type level (p1-15), but a
+    // non-typed caller's pair must not ride into the durable step fingerprint
+    // either — replay drift for a value that is ignored anyway.
+    const durableBatchTrigger = vi.fn(async (_items: TriggerItem[]) => ['run_1', 'run_2', 'run_3']);
+    const executor: RunExecutor = {
+      namespace: { projectId: 'default', env: 'prod' },
+      durableBatchTrigger,
+      triggerAndWait: vi.fn(),
+    };
+    const items = [
+      { payload: { n: 1 }, options: { env: 'staging' } },
+      { payload: { n: 2 }, options: { projectId: 'acme' } },
+      { payload: { n: 3 }, options: { concurrencyKey: 'k3' } },
+    ] as unknown as Parameters<typeof handle.batchTrigger>[0];
+
+    await executorStorage()!.run(executor, async () => {
+      await handle.batchTrigger(items);
+    });
+
+    expect(durableBatchTrigger).toHaveBeenCalledTimes(1);
+    const stepItems = durableBatchTrigger.mock.calls[0]?.[0] as TriggerItem[];
+    // The ignored namespace pair is gone from every item...
+    expect(stepItems[0]?.options).toEqual({});
+    expect(stepItems[1]?.options).toEqual({});
+    // ...while legitimate per-item options ride along untouched.
+    expect(stepItems[2]?.options).toEqual({ concurrencyKey: 'k3' });
+  });
 });

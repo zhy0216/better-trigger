@@ -368,6 +368,35 @@ describe('waitForResult — caller signal (p1-17)', () => {
       vi.useRealTimers();
     }
   });
+
+  it('aborts during the retry backoff sleep instead of waiting it out', async () => {
+    vi.useFakeTimers();
+    try {
+      // Every hop answers 503 instantly, so the loop parks in the backoff
+      // sleep — the abort must cut that sleep short, not land after it.
+      const { fetch } = scriptedFetch([errorResponse(503, 'internal_error', 'boom')]);
+      const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+      const controller = new AbortController();
+      const reason = new Error('caller stopped');
+
+      const result = trigger.waitForResult('run_1', undefined, {
+        timeoutMs: 30_000,
+        signal: controller.signal,
+      });
+      const errPromise = result.catch((e: unknown) => e);
+      await flush(); // first 503 lands, the backoff sleep is armed
+      controller.abort(reason);
+      const err = await errPromise;
+
+      // The caller's reason surfaces untouched (as on the in-flight path)...
+      expect(err).toBe(reason);
+      // ...and the backoff timer is cleared — nothing left to fire into a
+      // settled wait.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('RunHandle.result() — no instance registered (p1-17)', () => {

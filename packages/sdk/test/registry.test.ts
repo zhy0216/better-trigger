@@ -15,12 +15,16 @@
    ============================================================================= */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WaitResult } from '@better-trigger/core';
+import pkg from '../package.json';
 
 /** The exact key registry.ts stamps (Symbol.for, so copies share it). */
 const REGISTRY_KEY = Symbol.for('better-trigger.registry.v1');
 
-/** The version a same-version copy would leave behind (registry.ts SDK_VERSION). */
-const SDK_VERSION = '0.1.0';
+/** The version a same-version copy would leave behind. Read from the SDK's own
+ *  package.json (the manifest registry.ts's SDK_VERSION must stay in sync
+ *  with), so a version bump updates the assertions automatically instead of
+ *  silently drifting apart from the hardcoded stamp. */
+const SDK_VERSION: string = pkg.version;
 
 function setSlot(value: unknown): void {
   (globalThis as unknown as Record<symbol, unknown>)[REGISTRY_KEY] = value;
@@ -84,7 +88,7 @@ describe('registry adoption across SDK copies', () => {
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]?.[0]).toMatch(/two SDK copies/);
     expect(warn.mock.calls[0]?.[0]).toContain('0.0.9');
-    expect(warn.mock.calls[0]?.[0]).toContain('0.1.0');
+    expect(warn.mock.calls[0]?.[0]).toContain(SDK_VERSION);
   });
 
   it('throws on a valid-version slot missing required keys', async () => {

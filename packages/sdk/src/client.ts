@@ -93,6 +93,11 @@ export class HttpClient {
     this.base = opts.url.replace(/\/+$/, '');
     this.apiKey = opts.apiKey;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) {
+      throw new Error(
+        `better-trigger: "timeoutMs" must be a positive number of milliseconds (got ${String(opts.timeoutMs)})`,
+      );
+    }
     const f = opts.fetch ?? globalThis.fetch;
     if (typeof f !== 'function') {
       throw new Error(

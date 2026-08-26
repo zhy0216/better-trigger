@@ -39,6 +39,24 @@ describe('HttpClient — construction', () => {
     expect(() => new HttpClient({ url: '' })).toThrow(/"url" is required/);
   });
 
+  it('rejects a non-positive or non-finite timeoutMs at construction', () => {
+    // 0 / negative / NaN (or Infinity) would arm a setTimeout that fires
+    // immediately (or never), so every request would fail as a mystery
+    // timeout — fail loudly at construction instead.
+    const fetchImpl = (async () =>
+      new Response('{"ok":true}', { status: 200 })) as unknown as typeof globalThis.fetch;
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(
+        () =>
+          new HttpClient({ url: 'http://daemon.test:4848', fetch: fetchImpl, timeoutMs: bad }),
+      ).toThrow(/"timeoutMs" must be a positive number of milliseconds/);
+    }
+    expect(
+      () =>
+        new HttpClient({ url: 'http://daemon.test:4848', fetch: fetchImpl, timeoutMs: 1 }),
+    ).not.toThrow();
+  });
+
   it('strips trailing slashes so /api/v1 does not double up', () => {
     const { fetch, calls } = stubFetch(new Response(null, { status: 204 }));
     const c = new HttpClient({ url: 'http://daemon.test:4848///', fetch });

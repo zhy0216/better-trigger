@@ -313,16 +313,20 @@ function makeHandle<TPayload, TOutput>(
 
     async batchTrigger(items, options) {
       const executor = currentExecutor();
-      const triggerItems = items.map((it) => ({
-        taskId: def.id,
-        payload: it.payload,
-        options: withConcurrencyKey(it.payload, it.options),
-      }));
       if (executor) {
         // Children always inherit the parent's namespace (C2); a batch-level
         // env/projectId cannot be honoured in-run — say so instead of silently
         // dropping a staging intent.
         warnIgnoredNamespace(options);
+        // Strip per-item env/projectId (the type already Omits them, but a
+        // non-typed caller's pair would ride along into the durable step
+        // fingerprint — replay drift for a value that is ignored anyway, same
+        // as the single trigger path above).
+        const triggerItems = items.map((it) => ({
+          taskId: def.id,
+          payload: it.payload,
+          options: stripIgnoredNamespace(withConcurrencyKey(it.payload, it.options)),
+        }));
         const runIds = await executor.durableBatchTrigger(
           triggerItems,
           `batchTrigger:${def.id}`,
@@ -332,6 +336,11 @@ function makeHandle<TPayload, TOutput>(
       // The instance batch is untyped (items can be different tasks, so the
       // batch endpoint returns RunHandle<unknown>[]) — this handle knows all
       // items share its TOutput (p2-23).
+      const triggerItems = items.map((it) => ({
+        taskId: def.id,
+        payload: it.payload,
+        options: withConcurrencyKey(it.payload, it.options),
+      }));
       return requireDefaultInstance().batchTrigger(triggerItems, options) as Promise<
         RunHandle<TOutput>[]
       >;

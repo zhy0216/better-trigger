@@ -294,8 +294,26 @@ function jitter(ms: number): number {
   return ms * (0.8 + Math.random() * 0.4);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Backoff sleep, interruptible by the caller's signal. Abort rejects with the
+ *  signal's reason (falling back to a plain Error, matching client.ts's
+ *  pre-abort path) so a caller aborting mid-backoff is answered immediately
+ *  instead of after the sleep (up to 2s, p2-12). */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error('aborted'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error('aborted'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /** Errors worth another hop. KernelErrors (e.g. not_found) and 4xx are
@@ -443,7 +461,7 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
           // caller's deadline, and skip the sleep entirely when nothing is
           // left.
           const sleepMs = Math.min(jitter(backoffMs), deadline - Date.now());
-          if (sleepMs > 0) await sleep(sleepMs);
+          if (sleepMs > 0) await sleep(sleepMs, opts?.signal);
           backoffMs = Math.min(backoffMs * 2, 2000);
           continue;
         }

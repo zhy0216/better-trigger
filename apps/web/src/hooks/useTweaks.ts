@@ -4,8 +4,7 @@
    Originally wired to an external host that persisted the values by rewriting an
    EDITMODE block on disk over postMessage. The host protocol was removed (it
    was documented as dead in apps/web/README.md); values now live in React state
-   for the session, and change listeners subscribe to the `tweakchange`
-   CustomEvent instead.
+   for the session only — setTweak merges into that state and nothing else.
    ============================================================================= */
 import React from 'react';
 
@@ -20,7 +19,6 @@ export function useTweaks<T extends Record<string, unknown>>(defaults: T): [T, S
       ? keyOrEdits
       : { [keyOrEdits as keyof T]: val }) as Partial<T>;
     setValues((prev) => ({ ...prev, ...edits }));
-    window.dispatchEvent(new CustomEvent('tweakchange', { detail: edits }));
   }, []);
 
   return [values, setTweak];
