@@ -73,7 +73,7 @@ jobs:
       - name: Build
         env:
           BT_GIT_SHA: ${{ github.sha }}
-        run: bun run build
+        run: bun run --bun build
 
       - name: Package exports
         run: bun run check:exports
@@ -140,7 +140,7 @@ jobs:
       - name: Rebuild with bumped version
         env:
           BT_GIT_SHA: ${{ github.sha }}
-        run: bun run build
+        run: bun run --bun build
 
       # Pack with `bun pm pack`: it rewrites workspace:* deps to exact
       # versions (npm pack/publish do NOT — publishing straight from the
