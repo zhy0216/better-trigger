@@ -233,10 +233,10 @@ describePg('log terminal boundary (p2-40)', () => {
       const final = await countLogs(pool, 'mid-1');
       // The legal outcome set under the strict boundary: the terminal landed
       // before chunk 2 (1000), before chunk 3 (2000) or after all of them
-      // (3000 — every chunk got its lock first, so every line is pre-terminal).
-      expect([1000, 2000, 3000]).toContain(final);
+      // (2500 — every chunk got its lock first, so every line is pre-terminal).
+      expect([1000, 2000, 2500]).toContain(final);
       const terminalWarns = warns.filter((w) => w.includes('already terminal'));
-      if (final < 3000) {
+      if (final < 2500) {
         expect(terminalWarns).toHaveLength(1);
         expect(terminalWarns[0]).toMatch(new RegExp(`dropped ${2500 - final} log line`));
       } else {
