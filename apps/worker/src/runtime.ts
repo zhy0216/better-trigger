@@ -257,11 +257,22 @@ export async function startWorkerRuntime(
   scheduleHeartbeat();
 
   /* ---- one claim-and-execute loop (a single concurrency slot) ----------- */
+  // P0-14: the shared claim budget scans namespaces in rotation order, and
+  // the rotation counter lives HERE (runtime side) so the kernel stays pure.
+  // Every claim call — from any slot — advances the scan start by one, so a
+  // permanently busy namespace cannot monopolize the budget: each served
+  // namespace leads the scan order within namespaces.length calls. With one
+  // namespace the counter is pinned to 0 and rotation is a no-op.
+  const nsCount = Math.max(1, options.namespaces.length);
+  let claimRotation = 0;
+
   async function claimLoop(slot: number): Promise<void> {
     let idleBackoff = IDLE_POLL_BASE_MS;
     while (!stopping) {
       let run: ClaimedRun | undefined;
       try {
+        const rotateFrom = claimRotation;
+        claimRotation = (claimRotation + 1) % nsCount;
         const claimed = await kernel.claimRuns({
           workerId,
           taskIds,
@@ -270,6 +281,22 @@ export async function startWorkerRuntime(
           // The claim scan filters runs by this worker's (project_id, env)
           // pairs — a staging worker can never pick up a prod run (C2).
           namespaces: options.namespaces,
+          // P0-14: rotate which namespace the shared limit is spent on first.
+          rotateFrom,
+          // A skip is bounded under rotation, but a namespace that is ALWAYS
+          // behind the budget is still worth seeing — throttled per key like
+          // the claim-error warning, so a busy ns[0] costs one line per
+          // window, not one per poll.
+          onScanSkipped: (skipped) => {
+            log.warn(
+              'claim:scan-skipped',
+              `claim budget was met before scanning ${skipped
+                .map((ns) => `${ns.projectId}/${ns.env}`)
+                .join(', ')} (worker=${workerId}, slot=${slot}); ` +
+                `those namespaces lead the scan order on a later round`,
+              skipped.map((ns) => `${ns.projectId}/${ns.env}`).join(','),
+            );
+          },
           // Undefined (not an empty array) when pinning is off: the kernel keys
           // "filter or not" off the field's presence.
           codeVersions: options.pinCodeVersion ? taskVersions : undefined,

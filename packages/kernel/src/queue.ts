@@ -220,6 +220,29 @@ export interface ClaimRunsArgs {
    * to console.
    */
   logger?: KernelLogger;
+  /**
+   * Index of the namespace the candidate scan starts at (P0-14). The scan
+   * walks `namespaces` in rotation order starting here, and the shared
+   * `limit` is consumed in that order — pinned to index 0, a worker whose
+   * `namespaces[0]` always has claimable runs would never scan the rest of
+   * the list, starving them forever. The CALLER owns the rotation state (the
+   * runtime advances it once per claim), so the kernel stays a pure function
+   * of its arguments. Any integer is accepted (normalized into
+   * [0, namespaces.length), negatives counted from the end); undefined = 0,
+   * the historical order.
+   */
+  rotateFrom?: number;
+  /**
+   * Invoked when the shared `limit` budget was met before every namespace in
+   * the rotation order got a candidate scan (P0-14): the callback receives
+   * the namespaces that were NOT scanned this call, in scan order. Purely
+   * observational — bounded fairness comes from `rotateFrom` (a skipped
+   * namespace leads the order within `namespaces.length` calls); this is the
+   * number behind the skip, so "one namespace is always behind the budget"
+   * is visible the way claim errors are. Not called when nothing was
+   * skipped.
+   */
+  onScanSkipped?: (skipped: readonly Namespace[]) => void;
 }
 
 /**
@@ -338,11 +361,28 @@ async function scanCandidates(
   // SQL below), and nsPredicateFor() numbers the namespace pair from the next
   // free slot — a fresh array here would restart at $1 and collide with the
   // literal placeholders above it. The `r`-side equality references the SAME
-  // pair. The limit is shared round-robin: once a namespace's claims fill it,
-  // scanning stops and later namespaces never get a scan.
-  for (const ns of args.namespaces) {
+  // pair. The limit is shared sequentially in scan order: once the budget is
+  // filled, the namespaces the rotation order has not reached yet get no scan
+  // THIS call, and `onScanSkipped` reports them. That skip is bounded, not
+  // permanent (P0-14): the caller rotates `rotateFrom`, so every namespace
+  // leads the scan order within `namespaces.length` calls and a busy first
+  // namespace can never monopolize the budget.
+  const n = args.namespaces.length;
+  const rawStart = args.rotateFrom ?? 0;
+  const start = Number.isFinite(rawStart)
+    ? ((Math.trunc(rawStart) % n) + n) % n
+    : 0;
+  for (let i = 0; i < n; i += 1) {
     const remaining = args.limit - pending.length;
-    if (remaining <= 0) break;
+    if (remaining <= 0) {
+      if (args.onScanSkipped) {
+        args.onScanSkipped(
+          Array.from({ length: n - i }, (_, j) => args.namespaces[(start + i + j) % n]!),
+        );
+      }
+      break;
+    }
+    const ns = args.namespaces[(start + i) % n]!;
 
     const params: unknown[] = pinned
       ? [args.taskIds, claimWindow(remaining), codeVersions]
@@ -610,10 +650,16 @@ async function readLedger(
  * config causing an order-of-magnitude plan regression with no warning. A
  * worker serving N namespaces now issues N candidate scans, each a pair of
  * constant equalities on `q` (`queue_claimable_idx` binds directly) with the
- * matching `r`-side equality made explicit. The `limit` is shared round-robin
- * sequentially: each scan's window is `claimWindow(remaining)` for the runs
- * earlier namespaces have not claimed yet, and scanning stops once the budget
- * is met. Semantics are unchanged — the same (project_id, env) pairs are
+ * matching `r`-side equality made explicit. The `limit` is shared across the
+ * scans in rotation order: each scan's window is `claimWindow(remaining)` for
+ * the runs the namespaces earlier in that order have not claimed yet, and
+ * scanning stops once the budget is met (the unscanned tail is reported via
+ * `onScanSkipped`). Pinned to array order that sharing starves every
+ * namespace behind a permanently busy one — P0-14 fixed it by making the scan
+ * start rotatable: the caller advances `rotateFrom` once per claim, so each
+ * served namespace leads the order within `namespaces.length` calls and gets
+ * a non-zero share of the budget as long as the worker keeps polling.
+ * Semantics are otherwise unchanged — the same (project_id, env) pairs are
  * served, the pairing can never leak a run across namespaces (each scan
  * constrains both columns to one exact pair), and every candidate still goes
  * through the same concurrency-limit + claim statements.
