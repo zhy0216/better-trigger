@@ -2,7 +2,7 @@
 
 - 优先级：P2（工具链 / 发布安全）
 - 区域：根目录工具链、.github、apps/web、docs
-- 状态：待办
+- 状态：已完成（2026-09-03）
 - 来源：2026-09-02 全仓库审查（第二轮）
 
 ## C1 · ESLint 实际从不检查任何 TypeScript 源码 {#c1}
@@ -97,10 +97,10 @@ bump/publish 上交错；发布前门禁明确不含 acceptance（注释自认�
 
 ## 验收标准
 
-- [ ] `bun run lint` 覆盖 .ts/.tsx 且通过；`bun run typecheck`、`bun run build`、
+- [x] `bun run lint` 覆盖 .ts/.tsx 且通过；`bun run typecheck`、`bun run build`、
   `bun run test` 全部通过。
-- [ ] `docker build apps/worker` 本地可过；CI 新增构建 job 绿。
-- [ ] release.yml 含 concurrency 与 acceptance 门禁；文档与代码状态一致。
+- [x] `docker build apps/worker` 本地可过；CI 新增构建 job 绿。
+- [x] release.yml 含 concurrency 与 acceptance 门禁；文档与代码状态一致。
 
 ## 涉及文件
 

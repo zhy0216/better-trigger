@@ -1,22 +1,25 @@
 /* =============================================================================
-   @better-trigger/web — dashboard lint config: the shared repo JavaScript
-   baseline (../../eslint.config.mjs) plus the React rules this app needs. The
-   shared config supplies eslint:recommended and the node globals; this file
-   adds browser globals and the React hooks/refresh plugins. TypeScript files
-   are checked by `tsc` and are intentionally outside ESLint's parser scope.
+   @better-trigger/web — dashboard lint config: the shared repo baseline
+   (../../eslint.config.mjs) plus the React rules this app needs. The shared
+   configs supply eslint:recommended for JS and for TS (P2-20: the typescript
+   parser, so these files get the same treatment as the rest of the repo);
+   this file adds browser globals and the React hooks/refresh plugins on top —
+   which is the point of the whole exercise: react-hooks has only ever been
+   able to check application code once .tsx is inside ESLint's parser scope.
    ============================================================================= */
 import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
 import reactRefresh from 'eslint-plugin-react-refresh';
-import { sharedIgnores, sharedJsConfig } from '../../eslint.config.mjs';
+import { sharedIgnores, sharedJsConfig, sharedTsConfig } from '../../eslint.config.mjs';
 
 export default [
   sharedIgnores,
   sharedJsConfig,
+  sharedTsConfig,
   {
-    files: ['**/*.{js,jsx,mjs,cjs}'],
+    files: ['**/*.{js,jsx,mjs,cjs,ts,tsx}'],
     languageOptions: {
-      // Merged over the shared config's node globals: browser wins on the
+      // Merged over the shared configs' node globals: browser wins on the
       // names both define (window, document, fetch...), node-only names
       // (process) are harmless leftovers the dashboard never touches.
       globals: globals.browser,

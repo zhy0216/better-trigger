@@ -113,7 +113,7 @@ better-trigger-worker(daemon)
 | task 模块 | 必须可被 daemon 独立 import;不得闭包应用内部状态 |
 | PostgreSQL | v1 唯一生产存储;内部 repository 是模块边界,不是公开 adapter API |
 | 所有 daemon 停止 | 只保存状态,不消耗任务("状态 durable,计算需要至少一个 daemon 在线") |
-| 唤醒延迟 | v1 **全部靠轮询,没有推送**:trigger → 开始执行 ≤ 一个空闲退避周期(~2.4s)、`result()` 每个等待者 4 QPS、wait/cron 唤醒 50 次/秒。具体数字与出处见分阶段计划 P2 下的「轮询代价」;LISTEN/NOTIFY 排在 P2 |
+| 唤醒延迟 | trigger → claim 与 result 等待两条路径已由 **LISTEN/NOTIFY 快速路径**覆盖(`work` 通知唤醒空闲 claim 退避,`terminal` 通知立即结算等待者;轮询保留为兜底)。**wait 到期与 cron 唤醒仍是纯轮询**(50 次/秒的全局/线性上限,且没有推送源可去掉);数字与出处见分阶段计划 P2 下的「轮询代价」 |
 
 ## Schema
 
@@ -158,22 +158,22 @@ core 拆分(kernel 独立成包、core 归零依赖);`packages/server` → `apps
 **验收(已跑通,9 个 harness;`bun run test:acceptance` 一键重跑,CI 每个 PR 都跑)**:e2e 18 项(hello / 多 step / wait 挂起恢复 / triggerAndWait / batchTrigger / 幂等键 / 重试与 AbortError / cron)· fencing 24 项 · replay-drift 17 项 · code-version-pinning 11 项(同一次改动,钉死开与关的两面)· concurrency 9 项 · crash 14 项(3× SIGKILL,step 恰好一次)· worker-lost 10 项 · graceful-restart 10 项 · retention 5 项。场景全部跑在 `packages/testing` 的 harness 上,不变量断言(seq 连续只追加、终态冻结)由 harness 统一提供。
 
 ### P2 — 正确性硬化(1 周)
-fingerprint + `NonDeterminismError`;vitest + 真 PG 的 correctness suite(已交付:`packages/kernel/test/pg/`,DATABASE_URL 门控,随 `bun run test` 跑,CI 的 postgres service 直接覆盖——见 p1-22);crash / fault-injection harness(**未交付**,仍在 P2:在每个持久化边界注入 throw / abort / 连接中断 / 重复投递);不变量断言(seq 连续只追加、终态不再接受写、每个外部事件至多一个 outcome、旧 fencing 全路径无效);LISTEN/NOTIFY 唤醒(**未交付**,仍在 P2)。
+fingerprint + `NonDeterminismError`;vitest + 真 PG 的 correctness suite(已交付:`packages/kernel/test/pg/`,DATABASE_URL 门控,随 `bun run test` 跑,CI 的 postgres service 直接覆盖——见 p1-22);crash / fault-injection harness(**未交付**,仍在 P2:在每个持久化边界注入 throw / abort / 连接中断 / 重复投递);不变量断言(seq 连续只追加、终态不再接受写、每个外部事件至多一个 outcome、旧 fencing 全路径无效);LISTEN/NOTIFY 唤醒(**已交付**,覆盖 trigger→claim 与 result 等待两条路径:发送端 `packages/kernel/src/notify.ts`(事务末句 `pg_notify`,COMMIT 才投递),接收端 `apps/worker/src/notify.ts`(每 daemon 一条专用 LISTEN 连接)+ `apps/worker/src/runtime.ts` 的 `sleepWithWake` 空闲唤醒 + `apps/worker/src/waiters.ts` 的等待者注册表;真 PG 延迟证据 `packages/kernel/test/pg/suspend-notify.test.ts`。**wait 到期与 cron 唤醒仍是纯轮询**——扫描循环本身没有可订阅的事件源,通知只在「变成可 claim」的那一刻加速下游)。
 
-#### 轮询代价(LISTEN/NOTIFY 落地前的当前值)
+#### 轮询代价(NOTIFY 落地后的现状:快速路径 + 轮询兜底)
 
-四条唤醒路径全是轮询,没有推送。数字写在这里,免得要读代码才知道上限:
+四条唤醒路径中,前两条有推送快速路径,轮询退化为「通知丢失/连接断开时最多一个周期」的兜底;后两条仍是纯轮询。数字写在这里,免得要读代码才知道上限:
 
 | 路径 | 当前值 | 代价 |
 |---|---|---|
-| trigger → 开始执行 | 空闲执行槽指数退避 300ms → 2s(`IDLE_POLL_BASE_MS` / `IDLE_POLL_MAX_MS`,`apps/worker/src/runtime.ts`),每次睡眠 ±20% jitter | 已空闲一阵的 daemon 上,冷启动延迟 0–2.4s(单槽中位 ~1s)。对「本地多 agent」这个定位是能被感知到的。并发槽各自独立退避、jitter 会打散相位,concurrency 越大实测中位越低,**上限不变**(仍是一个完整退避周期)。刚跑完一个 run 的槽退避重置为 300ms,所以繁忙时不吃这个延迟 |
-| `handle.result()` / `GET /runs/:id/result` | 服务端每 `pollMs`(默认 250ms,查询参数可给 50–5000ms)一次 `SELECT status, output, error FROM runs`(`packages/kernel/src/runs.ts` 的 `waitForResult`) | 每个等待中的客户端 = **4 QPS 纯轮询**;M 个并发等待 = 4M QPS,100 个 fan-out 子任务就是 400 QPS,全打在 daemon 的同一个 pg pool(未配置时 `pg` 默认 max 10 连接)上。单跳服务端等待上限 30s(`MAX_RESULT_WAIT_MS`),客户端按自己的 deadline 每 25s 续一跳 |
-| wait 到期唤醒 | `scanWaits` 每 tick `LIMIT 50`,tick 间隔 1s(`timerIntervalMs`) | **50 次唤醒/秒**,而且是**全局上限**:phase 1 是不加锁的普通读,每个 daemon 都读到同一批 50 行,再靠 `SKIP LOCKED` 互相跳过 —— 加 daemon 只增加争用,不提高吞吐。积压超过 50 时按 `resume_at` 升序逐 tick 消化 |
-| cron 起 run | `scanCron` 每 tick `LIMIT 50`,tick 间隔 1s(`cronIntervalMs`) | 50 次调度/秒;这条的 phase 1 自带 `FOR UPDATE SKIP LOCKED`,每个 daemon 锁到互不相同的 50 行,所以**随 daemon 数线性放大**,不像 waits 那样是全局上限 |
+| trigger → 开始执行 | `work` 通知在 enqueue 事务 COMMIT 时发出(`notifyWork`),唤醒空闲执行槽的退避睡眠(`sleepWithWake`,300ms → 2s 退避仍是兜底,`apps/worker/src/runtime.ts`) | 通知到达时冷启动延迟 ~0(一次 COMMIT→wake 的往返);LISTEN 连接断开或通知丢失时退回旧上界 0–2.4s。并发槽各自独立退避、jitter 会打散相位;刚跑完一个 run 的槽退避重置为 300ms,所以繁忙时本来就不吃这个延迟 |
+| `handle.result()` / `GET /runs/:id/result` | `terminal` 通知立即结算该 run 的全部等待者(`apps/worker/src/waiters.ts` 注册表);注册表自带的共享扫描是**每进程 1 QPS 一条 `WHERE id = ANY(...)`** 的兜底,不再是每等待者 4 QPS | 通知路径下每等待者 ~0 查询;兜底路径下 M 个并发等待合计 ≈1 QPS(旧值 4M QPS 的反面)。单跳服务端等待上限 30s(`MAX_RESULT_WAIT_MS`)不变,客户端按自己的 deadline 每 25s 续一跳 |
+| wait 到期唤醒 | `scanWaits` 每 tick `LIMIT 50`,tick 间隔 1s(`timerIntervalMs`) | **50 次唤醒/秒**,而且是**全局上限**:phase 1 是不加锁的普通读,每个 daemon 都读到同一批 50 行,再靠 `SKIP LOCKED` 互相跳过 —— 加 daemon 只增加争用,不提高吞吐。积压超过 50 时按 `resume_at` 升序逐 tick 消化。到期后重新入队会发 `work` 通知,所以下游 claim 是快的;慢的是「发现到期」这一步本身,没有推送源 |
+| cron 起 run | `scanCron` 每 tick `LIMIT 50`,tick 间隔 1s(`cronIntervalMs`) | 50 次调度/秒;这条的 phase 1 自带 `FOR UPDATE SKIP LOCKED`,每个 daemon 锁到互不相同的 50 行,所以**随 daemon 数线性放大**,不像 waits 那样是全局上限。起 run 后的 enqueue 走 `work` 通知,同样只是下游变快,「发现到点」仍是纯轮询 |
 
 两个扫描循环都有「上一 tick 没跑完就跳过本 tick」的护栏,所以 50/s 是 tick 能在 1s 内跑完时的上限;`scanWaits` 每条 wait 一个短事务,一个满 tick 就是 50 个 round-trip。
 
-`NOTIFY` 落地后,前两行趋近于零,后两行变成「NOTIFY 唤醒 + 轮询兜底」。
+NOTIFY 只是延迟优化,从不承载正确性:每条路径的轮询兜底都保留着,丢一条通知最多慢一个轮询周期。
 
 ### P3 — 交互原语(1–2 周)
 `event()` / `emit` / `wait.forEvent`(signal 级不变量:写入与唤醒原子、离线不丢、恰好消费一次);cancel 级联(父→子传播);`batchTriggerAndWait`(fan-out/fan-in);testing 包虚拟时间(测试里跳过数天 wait)。

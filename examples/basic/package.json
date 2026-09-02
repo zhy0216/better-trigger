@@ -28,7 +28,7 @@
     "loop-hang": "bun scripts/loop-hang.ts",
     "concurrency": "bun scripts/concurrency.ts",
     "test:acceptance": "bun scripts/acceptance.ts",
-    "lint": "eslint --no-error-on-unmatched-pattern '**/*.{js,jsx,mjs,cjs}'",
+    "lint": "eslint --no-error-on-unmatched-pattern '**/*.{js,jsx,mjs,cjs,ts,tsx}'",
     "bench:claim-scan": "bun scripts/claim-scan-bench.ts",
     "bench:stats": "bun scripts/stats-bench.ts",
     "typecheck": "tsc --noEmit"

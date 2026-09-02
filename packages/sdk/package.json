@@ -57,7 +57,7 @@
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint --no-error-on-unmatched-pattern '**/*.{js,jsx,mjs,cjs}'",
+    "lint": "eslint --no-error-on-unmatched-pattern '**/*.{js,jsx,mjs,cjs,ts,tsx}'",
     "test": "vitest run"
   },
   "dependencies": {

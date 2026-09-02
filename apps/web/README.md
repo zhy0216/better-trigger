@@ -100,13 +100,14 @@ out). **That host protocol was removed** — it was documented as dead, and the
 unorigin-checked `window` listener plus the `'*'` posts were a security hole.
 No message listener or postMessage call remains.
 
-The panel starts hidden and there is no built-in toggle. To make it
-user-toggleable, hold an `open` boolean in `App.tsx` and drive it with
-`setOpen` — either pass it into the panel or wrap it:
+The panel starts hidden and is toggled from the top bar's settings button
+(p2-19): `App.tsx` holds the `open` boolean, `Shell`'s `IconButton` flips it,
+and the panel receives `open` / `onOpenChange`.
 
 ```ts
-// App.tsx — the panel only renders while `open` is true
-{open && <TweaksPanel title="Tweaks">…</TweaksPanel>}
+// App.tsx — state lives here, Shell exposes the built-in toggle
+const [tweaksOpen, setTweaksOpen] = React.useState(false);
+<TweaksPanel open={tweaksOpen} onOpenChange={setTweaksOpen}>…</TweaksPanel>
 ```
 
 ## Notes from the conversion

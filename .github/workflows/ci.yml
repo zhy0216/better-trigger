@@ -58,13 +58,34 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      # P2-20: the bun install cache (global store + the workspace node_modules
+      # trees it links into) keyed on bun.lock. One-time runners otherwise
+      # re-download and re-link ~570 packages per job — including once per
+      # node-smoke matrix leg. The Install step still runs after a hit:
+      # --frozen-lockfile against an identical tree is a fast no-op and
+      # repairs any drift the cache could not carry.
+      - name: Cache bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+            examples/*/node_modules
+          key: ${{ runner.os }}-bun-1.3.14-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-1.3.14-
+
       - name: Install
         run: bun install --frozen-lockfile
 
-      # O5: every workspace runs the shared JavaScript lint baseline
-      # (eslint.config.mjs) — web picks it up from its own config, the rest
-      # resolve it from the repo root. TypeScript is checked separately below.
-      # Runs first so a lint regression fails in seconds, before the build.
+      # O5 (P2-20 extended it to .ts/.tsx): every workspace runs the shared
+      # lint baseline (eslint.config.mjs) — web picks it up from its own
+      # config, the rest resolve it from the repo root. The type checking is
+      # still done by tsc in the Typecheck step below; lint on TS files is
+      # parser-only with the same baseline rules. Runs first so a lint
+      # regression fails in seconds, before the build.
       - name: Lint
         run: bun run lint
 
@@ -213,6 +234,23 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      # Same P2-20 cache as the main job. All three matrix legs share the key
+      # (it is lockfile-locked, not Node-locked — the leg's Node version only
+      # matters for the smoke assertions, not for what bun installs), so the
+      # legs after the first restore instead of re-installing from scratch.
+      - name: Cache bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+            examples/*/node_modules
+          key: ${{ runner.os }}-bun-1.3.14-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-1.3.14-
+
       - name: Install
         run: bun install --frozen-lockfile
 
@@ -257,3 +295,25 @@ jobs:
             (cd "$install_dir" && node --input-type=module -e \
               "import('$pkg').then((m) => { if (typeof m !== 'object') process.exit(1) })")
           done
+
+  # P2-20 C3: apps/worker/Dockerfile is the only image docker-compose ships,
+  # and no workflow ever built it — a broken Dockerfile reached users through
+  # `docker compose up`, not through CI. Build only: no push, no run (a compose
+  # smoke would need the whole stack; a silently broken build is what actually
+  # regressed). The build runs inside docker with its own install, so the
+  # actions/cache above does not apply here.
+  docker:
+    name: docker build (worker image)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build worker image
+        run: |
+          docker build \
+            -f apps/worker/Dockerfile \
+            --build-arg GIT_SHA="$GITHUB_SHA" \
+            -t better-trigger-worker:ci \
+            .

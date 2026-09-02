@@ -346,6 +346,7 @@ describe('instance batchTrigger per-item namespace narrowing (p2-19)', () => {
     // would typecheck and then be silently dropped by the server.
     const { fetch } = scriptedFetch([]);
     const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    expect(typeof trigger.batchTrigger).toBe('function');
     const items: Parameters<typeof trigger.batchTrigger>[0] = [
       { taskId: 'hello', payload: { n: 1 } },
       {

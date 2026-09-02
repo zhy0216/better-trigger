@@ -50,7 +50,7 @@
   "scripts": {
     "build": "bun scripts/write-build-info.mjs && tsdown && bun scripts/copy-public.mjs",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint --no-error-on-unmatched-pattern '**/*.{js,jsx,mjs,cjs}'",
+    "lint": "eslint --no-error-on-unmatched-pattern '**/*.{js,jsx,mjs,cjs,ts,tsx}'",
     "dev": "bun --watch src/main.ts",
     "start": "node dist/main.js",
     "test": "vitest run"

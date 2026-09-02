@@ -34,10 +34,47 @@ on:
 permissions:
   contents: write
 
+# P2-20 C4: publishing is the one CI step that cannot be undone, so two
+# overlapping dispatches interleaving across bump/publish is the failure mode
+# to rule out — ci.yml has carried this guard all along, release.yml did not.
+# cancel-in-progress: false is deliberate: a release already halfway through
+# its publish order must run to completion, never be torn down by a newer
+# dispatch.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # P2-20: raised from 30 — the gate now also runs the acceptance
+    # harnesses (same sequence the main CI job completes inside its 20-minute
+    # budget, plus the publish tail here).
+    timeout-minutes: 40
+
+    # P2-20 C4: the pre-release gate was "the CI sequence minus acceptance"
+    # because this workflow had no Postgres. ci.yml proves the fix is cheap —
+    # same service container as its main job, so acceptance can gate releases.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: better_trigger
+        ports:
+          - 5432:5432
+        # The harnesses connect immediately on start; wait for a real handshake.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # Each harness derives its own database name from this base URL and
+      # provisions it via the admin `postgres` database (DROP/CREATE).
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/better_trigger
 
     steps:
       - uses: actions/checkout@v4
@@ -53,13 +90,29 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
+      # P2-20: same lockfile-keyed bun cache as ci.yml (see its comment).
+      - name: Cache bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+            examples/*/node_modules
+          key: ${{ runner.os }}-bun-1.3.14-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-1.3.14-
+
       - name: Install
         run: bun install --frozen-lockfile
 
       # ------------------------------------------------------------------
-      # Pre-release gate: the CI sequence minus the acceptance harnesses
-      # (no Postgres in this workflow). Everything must be green on the
-      # exact tree that is about to be published.
+      # Pre-release gate: the full CI sequence — packaging guards, build,
+      # typecheck, unit tests, the O4 clean-install smoke, and since p2-20
+      # the acceptance harnesses too (the postgres service above removed the
+      # old "no Postgres in this workflow" excuse). Everything must be green
+      # on the exact tree that is about to be published.
       # ------------------------------------------------------------------
       - name: Lint
         run: bun run lint
@@ -120,6 +173,15 @@ jobs:
             echo "dist does not carry the packed version $ver (stale dist?)"
             exit 1
           }
+
+      # P2-20 C4: the acceptance suite is the project's real correctness
+      # evidence — ci.yml has always gated on it, and the tree that passes CI
+      # is the tree that should be publishable. Publishing a main that fails
+      # acceptance was previously possible (the gate skipped it for want of a
+      # Postgres service); now it is not. Same command, same service, same
+      # DATABASE_URL shape as the main CI job.
+      - name: Acceptance harnesses
+        run: bun run test:acceptance
 
       # ------------------------------------------------------------------
       # Version bump. The five publishable packages move together; the root

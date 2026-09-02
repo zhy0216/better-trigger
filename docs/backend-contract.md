@@ -5,7 +5,8 @@
 > (claim + lease/fencing;fencing 语义见 architecture.md),中间没有协议。
 > §5 的 REST 形状仍在用,并且现在**也是 SDK 的传输面**(`betterTrigger({url})`),另加两个端点:
 > `GET /runs/:id/record`(单个 run 行)与 `GET /runs/:id/result?timeoutMs=&pollMs=`(服务端 long-poll 到终态;
-> long-poll 内部仍是 `pollMs`(默认 250ms)一次 `SELECT`,每个等待者 4 QPS —— 轮询代价的完整数字见
+> 内部已改为等待者注册表(`apps/worker/src/waiters.ts`)+ `terminal` 通知即时结算,`pollMs` 现在是**共享**
+> 兜底扫描的间隔(默认 1s),不再是每等待者各跑一条 `pollMs` SELECT —— 轮询代价的完整数字见
 > architecture.md「P2 · 轮询代价」)。
 > `configure()`/`BETTER_TRIGGER_API_URL` 不复存在,改为 `betterTrigger({ url })` / `BETTER_TRIGGER_URL`。
 > **§3 引擎语义(重放不变量、退避公式、suspend/resume、cron、并发)继续有效且规范。**
@@ -260,7 +261,7 @@ SELECT q.id AS queue_id, q.run_id,
 - **两本预算分开记**(C4):`attempt/max_attempts` 是**用户代码**的失败预算(只有 failRun 会花),`recoveries/max_recoveries` 是**基础设施**接管预算(只有 reaper 会花,默认 10,`BETTER_TRIGGER_MAX_RECOVERIES` 在创建 run 时盖章)。worker 消失(部署、OOM、机器休眠)属于后者:`maxAttempts: 3` 的语义是"我的代码可以失败 3 次",三次部署不该把它耗光。因此 lease 过期的恢复**不动 `attempt`**,run 在**同一个 attempt** 上按账本继续重放;而 `max_recoveries` 仍然兜住"每个 claim 它的 worker 都会死"的无限循环。两种耗尽的终态错误文案必须可区分:reaper 写 `{ name: 'WorkerLostError', message: "worker lost: recovery budget exhausted (R/M infrastructure recoveries used; attempt A/N unaffected)" }`,用户代码耗尽 attempt 写的是用户自己的错误。`recoveries` 跨 attempt 累计,不重置。
 - 心跳每 `leaseMs/3`(默认 60s 租约 → 20s,下限 500ms):带上在飞的 `runIds` → 把这些 run 的 **`queue.lease_until` 推到 `now() + leaseMs`**(`locked_at` 保持「什么时候被 claim 的」这个语义,**不刷新**),同时刷 worker `last_heartbeat_at`。续期语句本身 `RETURNING run_id`:续到的就是「我还持有的 claim」,请求集减去它、再减去 cancel 集就是 `lostRunIds`,不额外多一条查询。响应含 `cancelRunIds`(server 发现已 cancel 的 run)与 `lostRunIds`(请求续期但已不再持有 claim 的 run —— 被 reaper 收走或已终态)。两个集合互斥;收到 `lostRunIds` 的 executor 立刻 abort `ctx.signal`(reason `lease_lost`),不再为一份注定被 fencing 拒绝的结果空跑。worker 2 分钟无心跳 → 编排器标记 `offline`。
 - **优雅关停**是主动交接,不是失败:daemon 排干后停掉心跳,把自己名下没排完的 claim 一次性归还(`locked_by/locked_at/lease_until = NULL`、`available_at = now()`、`runs.status='queued'`),并立刻把 workers 行标成 `offline`。**`attempt` 不递增**(一次部署不该花掉用户的重试预算),`fencing_token` 也不动 —— 释放 `locked_by` 已经让旧 executor 的迟到写立即被 `assertOwnedRunning` 拒掉,下一次 claim 的 token++ 再永久作废它们。因此正常重启的接管是秒级的,不用等可见性超时 + reaper。
-- **领取节奏**:daemon 的每个并发槽各跑一条自己的 `claimRuns({ limit: 1 })` 循环 —— 领到就执行,执行完立刻再 claim;空手而归则按 300ms → 2s 指数退避(带 jitter),领到之后退避重置。所以最常见的形状就是 `limit=1`、候选窗口 10。没有 LISTEN/NOTIFY,因此「trigger → 开始执行」的冷启动延迟是 0–2s(量化见 `todos/02-performance.md` PF5;NOTIFY 在 architecture.md 的 P2)。
+- **领取节奏**:daemon 的每个并发槽各跑一条自己的 `claimRuns({ limit: 1 })` 循环 —— 领到就执行,执行完立刻再 claim;空手而归则按 300ms → 2s 指数退避(带 jitter),领到之后退避重置。所以最常见的形状就是 `limit=1`、候选窗口 10。LISTEN/NOTIFY 已交付:`work` 通知(`packages/kernel/src/notify.ts` 在事务末句 `pg_notify`,COMMIT 才投递;接收端 `apps/worker/src/notify.ts` 每 daemon 一条专用 LISTEN 连接)会提前唤醒空闲槽的退避睡眠(`apps/worker/src/runtime.ts` 的 `sleepWithWake`),通知到达时「trigger → 开始执行」的冷启动延迟 ~0;退避轮询保留为通知丢失 / LISTEN 连接断开时的兜底(旧上界 0–2s,见 `todos/02-performance.md` PF5 与 architecture.md 的「轮询代价」)。
 
 ### 3.6 cron 调度
 - worker register 时,manifest 带 cron 的 task → upsert `schedules`(保留已有 `enabled` 状态),用 **croner** 按 timezone 算 `next_run_at`。manifest 不再含 cron 的已有 schedule → 删除。

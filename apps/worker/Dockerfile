@@ -23,15 +23,15 @@ WORKDIR /app
 # — pass it when building:  GIT_SHA=$(git rev-parse --short HEAD) docker compose
 # build worker  (CI passes $GITHUB_SHA). Without it the image degrades to
 # version-only build metadata.
-ARG GIT_SHA=
-ENV BT_GIT_SHA=$GIT_SHA
-FROM base AS build
+#
 # Manifests first for layer caching: the install layer only invalidates when a
 # package.json / bun.lock changes. Every workspace member's package.json must
 # be present (root workspaces glob + bun.lock cover apps/*, packages/*,
 # examples/*) or the frozen install refuses to resolve — only the packages the
 # daemon needs are copied and built though.
 FROM base AS build
+ARG GIT_SHA=
+ENV BT_GIT_SHA=$GIT_SHA
 COPY package.json bun.lock turbo.json tsconfig.json ./
 COPY packages/core/package.json packages/core/package.json
 COPY packages/kernel/package.json packages/kernel/package.json
@@ -42,6 +42,13 @@ COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/testing/package.json packages/testing/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
+# apps/docs is a workspace member recorded in bun.lock — `bun install
+# --frozen-lockfile` validates the manifests present against the lock's
+# workspace list, and this member was the one the list above missed: the
+# frozen install refused the whole lockfile (the exact failure P2-20's new
+# CI docker job exists to catch). Only the manifest travels; the docs site
+# itself is not part of the daemon image.
+COPY apps/docs/package.json apps/docs/package.json
 COPY examples/basic/package.json examples/basic/package.json
 RUN bun install --frozen-lockfile
 
