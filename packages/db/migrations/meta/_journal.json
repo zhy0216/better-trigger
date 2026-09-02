@@ -113,6 +113,13 @@
       "when": 1787586226636,
       "tag": "0015_cynical_millenium_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1788390378741,
+      "tag": "0016_smooth_loki",
+      "breakpoints": true
     }
   ]
 }

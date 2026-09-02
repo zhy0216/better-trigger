@@ -109,6 +109,11 @@ describe.each([
   ['waits', 'waits_kind_check', "IN ('duration','until','run')"],
   ['workers', 'workers_status_check', "IN ('online','offline')"],
   ['logs', 'logs_level_check', "IN ('debug','info','warn','error')"],
+  // The two closed sets 0011 left out (backend-contract.md §2); added by 0016
+  // so the hardening is consistent — same "pre-existing values are in-set"
+  // assumption as every CHECK above.
+  ['runs', 'runs_trigger_type_check', "IN ('api','schedule','subtask','retry','dashboard')"],
+  ['tasks', 'tasks_trigger_source_check', "IN ('api','schedule')"],
 ] as const)('%s %s', (table, name, values) => {
   const add = constraint(name);
 

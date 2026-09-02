@@ -121,13 +121,13 @@ async function main(s: Scenario): Promise<void> {
 
   /* -- 2. the migration history survives a database full of orphans -------- */
   await s.check('0011 cleans orphans before adding the constraints', async () => {
-    // Rebuild the pre-0011 shape: drop every FK/CHECK 0011 adds, drop the
-    // index-only 0012 object, and remove 0011 AND 0012 from the journal, so
-    // `migrate()` re-applies them — orphan cleanups included. (Journal records
-    // are identified by their hash, which is sha256(sql file content),
-    // computed exactly as drizzle's migrator does. Only 0011/0012 re-run: the
-    // migrator skips everything older than the newest remaining record, so
-    // 0007..0010 stay applied as-is.)
+    // Rebuild the pre-0011 shape: drop every FK/CHECK 0011 adds (plus 0016's
+    // two CHECKs), undo the schema effects of everything younger, and
+    // de-journal 0011..0016, so `migrate()` re-applies them — orphan cleanups
+    // included. (Journal records are identified by their hash, which is
+    // sha256(sql file content), computed exactly as drizzle's migrator does.
+    // Only 0011 and younger re-run: the migrator skips everything older than
+    // the newest remaining record, so 0007..0010 stay applied as-is.)
     const C5_CONSTRAINTS: Array<{ table: string; name: string }> = [
       { table: 'queue', name: 'queue_run_id_runs_id_fk' },
       { table: 'runs', name: 'runs_parent_run_id_runs_id_fk' },
@@ -144,6 +144,10 @@ async function main(s: Scenario): Promise<void> {
       { table: 'waits', name: 'waits_kind_check' },
       { table: 'waits', name: 'waits_status_check' },
       { table: 'workers', name: 'workers_status_check' },
+      // 0016's two CHECKs: dropped with the rest so the re-migrate re-applies
+      // them instead of failing on a duplicate_object.
+      { table: 'runs', name: 'runs_trigger_type_check' },
+      { table: 'tasks', name: 'tasks_trigger_source_check' },
     ];
     for (const c of C5_CONSTRAINTS) {
       await s.pool.query(`ALTER TABLE ${c.table} DROP CONSTRAINT ${c.name}`);
@@ -151,16 +155,24 @@ async function main(s: Scenario): Promise<void> {
 
     const migrationsDir = fileURLToPath(new URL('../../../packages/db/migrations', import.meta.url));
     // Re-running 0011 means making it (and everything younger) the newest
-    // migration again: de-journal 0011..0015 and undo their schema effects so
+    // migration again: de-journal 0011..0016 and undo their schema effects so
     // the re-migrate re-applies them cleanly — 0012's CREATE INDEX needs
     // waits_run_idx gone, 0013's DROP INDEX needs queue_available_priority_idx
     // to exist first (it is the pre-0013 shape the fixture rebuilds), and
     // 0014/0015's unique index and retry-operations table must go or their
-    // CREATE statements fail on the re-migrate. (The migrator skips everything
-    // at or below the newest remaining journal row's created_at, so leaving
-    // 0014/0015 journaled would silently skip 0011's cleanups as well.)
+    // CREATE statements fail on the re-migrate. 0016's four FK-support indexes
+    // on tables this fixture keeps have the same problem (its two on
+    // run_retry_operations go with that table), while its logs_run_id_idx
+    // rebuild needs no undo because 0016 opens with a DROP. (The migrator skips
+    // everything at or below the newest remaining journal row's created_at, so
+    // leaving ANY of 0012..0016 journaled would silently skip 0011's cleanups
+    // as well.)
     await s.pool.query(`DROP INDEX IF EXISTS waits_run_idx`);
     await s.pool.query(`DROP INDEX IF EXISTS waits_pending_step_uniq`);
+    await s.pool.query(`DROP INDEX IF EXISTS waits_run_id_fk_idx`);
+    await s.pool.query(`DROP INDEX IF EXISTS waits_child_run_id_fk_idx`);
+    await s.pool.query(`DROP INDEX IF EXISTS runs_parent_run_id_fk_idx`);
+    await s.pool.query(`DROP INDEX IF EXISTS workers_online_heartbeat_idx`);
     await s.pool.query(`DROP TABLE IF EXISTS run_retry_operations`);
     await s.pool.query(
       `CREATE INDEX "queue_available_priority_idx" ON "queue"
@@ -172,6 +184,7 @@ async function main(s: Scenario): Promise<void> {
       '0013_cool_nomad.sql',
       '0014_cooing_miek.sql',
       '0015_cynical_millenium_guard.sql',
+      '0016_smooth_loki.sql',
     ]) {
       const sql = readFileSync(`${migrationsDir}/${file}`, 'utf8');
       const hash = createHash('sha256').update(sql).digest('hex');

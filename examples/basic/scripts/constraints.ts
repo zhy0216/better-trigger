@@ -6,7 +6,8 @@
    cannot tell whether Postgres actually enforces any of it. This scenario
    proves it on a real database:
 
-     1. the five foreign keys and ten CHECK constraints exist (pg_constraint);
+     1. the five foreign keys and twelve CHECK constraints exist (pg_constraint;
+        ten from 0011, the two trigger enums from 0016);
      2. a manual `DELETE FROM runs` takes the run's queue row and its own
         waits, and SET NULLs the child_run_id of OTHER runs' waits (a deleted
         child must not strand its waiting parent) — never touching a
@@ -19,9 +20,9 @@
         dies);
      4. deleting a task row cascades to its schedule (a schedule is one task's
         cron registration);
-     5. illegal status / kind / level / attempt / recovery values — one write
-        per CHECK, all ten constraints — are refused by the database (23514
-        check_violation) — the kernel's enums and the database agree;
+     5. illegal status / kind / level / attempt / recovery / trigger values — one
+        write per CHECK, all twelve constraints — are refused by the database
+        (23514 check_violation) — the kernel's enums and the database agree;
      6. the 0011 migration is applied to a database that already contains
         ORPHANS (queue / waits / parent_run_id / child_run_id / schedule rows
         pointing at nothing — inserted after dropping the constraints, i.e. a
@@ -106,18 +107,27 @@ const C5_CHECKS = [
   'workers_status_check',
   'logs_level_check',
 ];
+/** The two CHECKs 0011 left out of the C5 set (backend-contract.md §2 lists
+ *  both columns as closed enums) and 0016 adds; also re-applied by the
+ *  orphan-migration scenario below, so they have to be dropped with the rest. */
+const C16_CHECKS = ['runs_trigger_type_check', 'tasks_trigger_source_check'];
+/** Every constraint name this scenario expects to exist on a migrated database. */
+const CONSTRAINT_NAMES = [...C5_FKS.map((f) => f.name), ...C5_CHECKS, ...C16_CHECKS];
 
 async function main(s: Scenario): Promise<void> {
   const kernel = createKernel({ pool: s.pool });
 
   /* -- 1. the constraints exist -------------------------------------------- */
-  await s.check('migration 0011 ships the five FKs and ten CHECKs', async () => {
-    const names = [...C5_FKS.map((f) => f.name), ...C5_CHECKS];
+  await s.check('migrations 0011 + 0016 ship the five FKs and twelve CHECKs', async () => {
     const res = await s.pool.query<{ conname: string }>(
       `SELECT conname FROM pg_constraint WHERE conname = ANY($1::text[])`,
-      [names],
+      [CONSTRAINT_NAMES],
     );
-    s.assertEqual(res.rows.map((r) => r.conname).sort(), [...names].sort(), 'constraints present');
+    s.assertEqual(
+      res.rows.map((r) => r.conname).sort(),
+      [...CONSTRAINT_NAMES].sort(),
+      'constraints present',
+    );
   });
 
   /* -- 2. manual DELETE FROM runs cascades queue + own waits, and SET NULLs
@@ -264,7 +274,7 @@ async function main(s: Scenario): Promise<void> {
   });
 
   /* -- 5. the database refuses illegal states ------------------------------ */
-  await s.check('illegal status / kind / level writes are refused (23514)', async () => {
+  await s.check('illegal status / kind / level / trigger writes are refused (23514)', async () => {
     let rejected = 0;
     const expectCheckViolation = async (sql: string, params: unknown[], label: string) => {
       try {
@@ -317,7 +327,7 @@ async function main(s: Scenario): Promise<void> {
       [],
       'logs.level fatal',
     );
-    // The remaining CHECKs, one trigger each, so all ten are live-tested:
+    // The remaining 0011 CHECKs, one write each, so every one is live-tested:
     await expectCheckViolation(
       `INSERT INTO run_steps (run_id, seq, kind, status) VALUES ('run_good', 2, 'step', 'bogus')`,
       [],
@@ -353,7 +363,19 @@ async function main(s: Scenario): Promise<void> {
       [],
       'runs.recoveries 11 > max_recoveries 10',
     );
-    s.assertEqual(rejected, 12, 'all twelve illegal writes refused');
+    // The two closed sets 0016 adds on top of 0011's.
+    await expectCheckViolation(
+      `INSERT INTO runs (id, task_id, status, trigger_type, created_at, updated_at)
+       VALUES ('run_bad_trigger', 't', 'queued', 'webhook', now(), now())`,
+      [],
+      "runs.trigger_type 'webhook'",
+    );
+    await expectCheckViolation(
+      `INSERT INTO tasks (id, name, trigger_source) VALUES ('task_bad_source', 'x', 'webhook')`,
+      [],
+      "tasks.trigger_source 'webhook'",
+    );
+    s.assertEqual(rejected, 14, 'all fourteen illegal writes refused');
   });
 
   /* -- 6. the migration survives a database full of orphans ----------------- */
@@ -362,8 +384,8 @@ async function main(s: Scenario): Promise<void> {
     // ADD CONSTRAINT fail — and with it every daemon's boot. ALL of 0011's
     // constraints go (the CHECKs too): the re-run re-adds every one, and an
     // existing constraint would fail it with a duplicate_object error instead.
-    // 0012 (p1-06, waits_run_idx) is younger than 0011, so it must be dropped
-    // and de-journaled as well, or its CREATE INDEX fails on the re-migrate.
+    // 0012..0016 are younger than 0011, so everything they add must be dropped
+    // and de-journaled as well, or their CREATE statements fail on the re-migrate.
     const checkTables: Array<{ name: string; table: string }> = [
       { name: 'runs_status_check', table: 'runs' },
       { name: 'runs_attempt_check', table: 'runs' },
@@ -375,6 +397,8 @@ async function main(s: Scenario): Promise<void> {
       { name: 'waits_status_check', table: 'waits' },
       { name: 'workers_status_check', table: 'workers' },
       { name: 'logs_level_check', table: 'logs' },
+      { name: 'runs_trigger_type_check', table: 'runs' },
+      { name: 'tasks_trigger_source_check', table: 'tasks' },
     ];
     for (const fk of C5_FKS) {
       await s.pool.query(`ALTER TABLE ${fk.table} DROP CONSTRAINT ${fk.name}`);
@@ -387,11 +411,18 @@ async function main(s: Scenario): Promise<void> {
     // gone, 0013's DROP INDEX needs queue_available_priority_idx to exist first
     // (the pre-0013 shape this fixture rebuilds), and 0014/0015's unique index
     // and retry-operations table must go or their CREATE statements fail on the
-    // re-migrate. De-journal 0011..0015: the migrator skips everything at or
+    // re-migrate, and so must 0016's four FK-support indexes on the tables this
+    // fixture keeps (its two on run_retry_operations die with that table) — its
+    // logs_run_id_idx rebuild needs no undo, since 0016 leads with a DROP.
+    // De-journal 0011..0016: the migrator skips everything at or
     // below the newest remaining journal row's created_at, so leaving any of
-    // 0014/0015 journaled would silently skip 0011's cleanups as well.
+    // 0014/0015/0016 journaled would silently skip 0011's cleanups as well.
     await s.pool.query(`DROP INDEX IF EXISTS waits_run_idx`);
     await s.pool.query(`DROP INDEX IF EXISTS waits_pending_step_uniq`);
+    await s.pool.query(`DROP INDEX IF EXISTS waits_run_id_fk_idx`);
+    await s.pool.query(`DROP INDEX IF EXISTS waits_child_run_id_fk_idx`);
+    await s.pool.query(`DROP INDEX IF EXISTS runs_parent_run_id_fk_idx`);
+    await s.pool.query(`DROP INDEX IF EXISTS workers_online_heartbeat_idx`);
     await s.pool.query(`DROP TABLE IF EXISTS run_retry_operations`);
     await s.pool.query(
       `CREATE INDEX "queue_available_priority_idx" ON "queue"
@@ -399,7 +430,7 @@ async function main(s: Scenario): Promise<void> {
     );
     await s.pool.query(
       `DELETE FROM drizzle.__drizzle_migrations WHERE hash IN (
-         SELECT hash FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 5)`,
+         SELECT hash FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 6)`,
     );
     // Orphan queue row + orphan wait (run_id and child_run_id variants) +
     // orphan parent_run_id + orphan schedule, all pointing at 'run_gone'.
@@ -462,12 +493,11 @@ async function main(s: Scenario): Promise<void> {
     // checks that follow.
     await s.pool.query(`DELETE FROM runs WHERE id IN ('run_live_parent', 'run_orphan_parent', 'run_waiter')`);
     // And the constraints are back, so all of the above still holds.
-    const names = [...C5_FKS.map((f) => f.name), ...C5_CHECKS];
     const res = await s.pool.query<{ conname: string }>(
       `SELECT conname FROM pg_constraint WHERE conname = ANY($1::text[])`,
-      [names],
+      [CONSTRAINT_NAMES],
     );
-    s.assertEqual(res.rows.length, names.length, 'constraints after the re-run migration');
+    s.assertEqual(res.rows.length, CONSTRAINT_NAMES.length, 'constraints after the re-run migration');
   });
 
   /* -- 7. prune: terminal parent deleted, running child survives with NULL -- */

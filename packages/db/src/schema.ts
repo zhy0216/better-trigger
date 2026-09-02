@@ -5,18 +5,26 @@
    Authoritative spec: docs/backend-contract.md §2 (+ §3.5 concurrency_key on runs).
    All business tables carry project_id ('default') and env ('prod').
    DB columns are snake_case; the JS object keys are camelCase.
-   Referential integrity (C5, todos/01-correctness.md): every relation is a
-   real FK — queue/waits.run_id → runs CASCADE, runs.parent_run_id →
-   waits.child_run_id → runs SET NULL (a deleted child run must not strand
-   its 'waiting' parent; the orchestrator's wait-due scanner fails those
-   parents with a ChildLostError), schedules → tasks CASCADE — and
-   status/kind/level are CHECK-constrained closed enums; a manual DELETE or a
-   hand-written bad status cannot leave orphan rows or unreadable states
-   behind. Migration 0011 cleans FK orphans automatically, but CHECK
-   constraints assume pre-existing status/kind/level values are already
-   in-set (everything this engine writes is): a hand-edited row outside the
-   set makes the migration fail, which the operator must resolve by fixing
-   the row (the migration's header comment spells out the UPDATEs).
+    Referential integrity (C5, todos/01-correctness.md): every relation is a
+    real FK — queue/waits.run_id → runs CASCADE, runs.parent_run_id →
+    waits.child_run_id → runs SET NULL (a deleted child run must not strand
+    its 'waiting' parent; the orchestrator's wait-due scanner fails those
+    parents with a ChildLostError), schedules → tasks CASCADE — and every
+    status/kind/level/trigger column is a CHECK-constrained closed enum; a
+    manual DELETE or a hand-written bad status cannot leave orphan rows or
+    unreadable states behind. Migration 0011 cleans FK orphans automatically,
+    but CHECK constraints (0011's, plus 0016's trigger enums) assume
+    pre-existing values are already in-set (everything this engine writes is):
+    a hand-edited row outside the set makes the migration fail, which the
+    operator must resolve by fixing the row (the migration's header comment
+    spells out the UPDATEs).
+    Indexing (0016): the `*_fk_idx` indexes — and logs_run_id_idx, which serves
+    a log page and a cascade at once — are deliberately the only secondary
+    indexes without the (project_id, env) prefix. Postgres enforces a foreign
+    key by looking up the referencing column alone, so a namespace-led index
+    cannot answer a cascade check — prefixing those would put prune's
+    DELETE FROM runs back to a sequential scan per dependent table, per
+    deleted run.
    ============================================================================= */
 import { sql } from 'drizzle-orm';
 import {
@@ -57,7 +65,15 @@ export const tasks = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.projectId, t.env, t.id] })],
+  (t) => [
+    primaryKey({ columns: [t.projectId, t.env, t.id] }),
+    // C5, closed-set for real (0016): TriggerSource in core, and backend-
+    // contract.md §2 lists exactly these two. upsertTask writes
+    // `t.cron ? 'schedule' : 'api'`, so every value the engine has ever
+    // written is in-set — the CHECK assumes the same of pre-existing rows,
+    // exactly like 0011's status/kind/level CHECKs.
+    check('tasks_trigger_source_check', sql`${t.triggerSource} IN ('api','schedule')`),
+  ],
 );
 
 /* ---------------------------------------------------------------------------
@@ -127,11 +143,27 @@ export const runs = pgTable(
     index('runs_task_created_idx').on(t.projectId, t.env, t.taskId, t.createdAt),
     index('runs_status_concurrency_idx').on(t.projectId, t.env, t.status, t.concurrencyKey),
     index('runs_created_idx').on(t.projectId, t.env, t.createdAt),
-    // C5 (todos/01-correctness.md): status is an enum the whole engine switches
-    // on — a row outside the set would be unreadable garbage instead of a state.
+    // FK support (0016), deliberately NOT namespace-prefixed: Postgres checks
+    // an ON DELETE SET NULL self-FK by the referencing column alone
+    // (`UPDATE runs SET parent_run_id = NULL WHERE parent_run_id = $1`), so
+    // every prune batch that deletes a parent seq-scans the whole runs table.
+    // A leading (project_id, env) cannot help a lookup that never mentions them.
+    index('runs_parent_run_id_fk_idx').on(t.parentRunId),
+    // C5: status is an enum the whole engine switches on — a row outside the set
+    // would be unreadable garbage instead of a state.
     check(
       'runs_status_check',
       sql`${t.status} IN ('queued','running','waiting','completed','failed','canceled')`,
+    ),
+    // C5, closed-set for real (0016): TriggerType in core — the exact set
+    // backend-contract.md §2 lists, and the set runs-read.ts's
+    // `trigger_type as TriggerType` cast already assumes. Same "pre-existing
+    // rows are already in-set" assumption as 0011's CHECKs: the kernel writes
+    // 'api' / 'schedule' / 'subtask' / 'retry', and 'dashboard' is in the
+    // contract but nothing writes it yet.
+    check(
+      'runs_trigger_type_check',
+      sql`${t.triggerType} IN ('api','schedule','subtask','retry','dashboard')`,
     ),
     // attempt is 1-based and only ever grows (failRun guards attempt <
     // max_attempts before incrementing). max_attempts is deliberately NOT
@@ -193,7 +225,16 @@ export const runRetryOperations = pgTable(
       .references(() => runs.id, { onDelete: 'cascade' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.projectId, t.env, t.sourceRunId, t.operationKey] })],
+  (t) => [
+    primaryKey({ columns: [t.projectId, t.env, t.sourceRunId, t.operationKey] }),
+    // FK support (0016), deliberately NOT namespace-prefixed (see the runs /
+    // waits / logs entries): both cascades are checked by the referenced run id
+    // alone. The PK cannot serve either — source_run_id sits behind
+    // (project_id, env), and retry_run_id is not in it at all — so 0015 left
+    // every prune of a retried run scanning this table twice per deleted row.
+    index('run_retry_operations_source_run_id_fk_idx').on(t.sourceRunId),
+    index('run_retry_operations_retry_run_id_fk_idx').on(t.retryRunId),
+  ],
 );
 
 /* ---------------------------------------------------------------------------
@@ -341,6 +382,18 @@ export const waits = pgTable(
   (t) => [
     index('waits_status_resume_idx').on(t.projectId, t.env, t.status, t.resumeAt),
     index('waits_child_run_idx').on(t.projectId, t.env, t.childRunId),
+    // FK support (0016), deliberately NOT namespace-prefixed: the cascade and
+    // the SET NULL are checked by the referenced run id alone
+    // (`DELETE FROM waits WHERE run_id = $1`,
+    // `UPDATE waits SET child_run_id = NULL WHERE child_run_id = $1`), and
+    // neither statement ever mentions the namespace — so the namespace-led
+    // indexes above can at best walk every entry of the index to answer them.
+    // They stay because the application queries that DO filter by namespace
+    // bind their leading columns (wakeParentIfWaiting, cancelRun's cleanup —
+    // C2, p1-06); these two exist so a prune batch reaches just the deleted
+    // run's rows instead of scanning the never-deleted waits table twice.
+    index('waits_run_id_fk_idx').on(t.runId),
+    index('waits_child_run_id_fk_idx').on(t.childRunId),
     // Per-run lookups: terminalFail/cancelRun's waits cleanups, waitForChildRun's
     // `run_id + step_seq` probe, and getRunDetail's waits page all hit
     // `WHERE run_id = ...` (waits rows are never deleted, so without this every
@@ -384,7 +437,16 @@ export const logs = pgTable(
     ts: timestamp('ts', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    index('logs_run_id_idx').on(t.projectId, t.env, t.runId, t.id),
+    // One index for both jobs, run_id leading (0016). The log page query
+    // (`WHERE run_id = $1 AND project_id = $2 AND env = $3 ORDER BY id DESC`)
+    // binds all three equality columns and then reads the id tail, so moving
+    // the namespace behind run_id costs it nothing — while the FK cascade
+    // (`DELETE FROM logs WHERE run_id = $1`), which never mentions the
+    // namespace, finally gets an index instead of a seq scan over the
+    // fastest-growing table for every pruned run. A separate (run_id) index
+    // would have meant two indexes on the table that grows fastest, for one
+    // column set that already covers both shapes.
+    index('logs_run_id_idx').on(t.runId, t.projectId, t.env, t.id),
     // C5: LogLevel in core — the executor's logger emits exactly these.
     check('logs_level_check', sql`${t.level} IN ('debug','info','warn','error')`),
   ],
@@ -449,7 +511,30 @@ export const workers = pgTable('workers', {
   status: text('status').notNull().default('online'),
 },
 // C5: the offline marker and heartbeat loop flip between exactly these two.
-(t) => [check('workers_status_check', sql`${t.status} IN ('online','offline')`)],
+(t) => [
+  check('workers_status_check', sql`${t.status} IN ('online','offline')`),
+  // Partial, online-only (0016). The table is append-only history — one row
+  // per process start, never updated except by the offline marker — and with
+  // retention off by default it only grows, while every hot scan wants just
+  // the live handful: markOfflineWorkers (`status='online' AND
+  // last_heartbeat_at < now() - X`), the served-task probe and the stranded
+  // scan (`status='online' AND last_heartbeat_at > now() - 2min`, each
+  // expanding jsonb_array_elements(w.tasks) per row it reads). The key order is
+  // the heartbeat bound those scans filter on, and the predicate keeps the
+  // index at "workers that are actually running" instead of the whole history.
+  // pruneWorkers' `status='offline' AND last_heartbeat_at < cutoff` DELETE is
+  // deliberately left un-indexed: it runs at most once an hour, and it is the
+  // statement that shrinks the table, so an index over the growing offline set
+  // would be paid for on every registration to serve a sweep that deletes rows.
+  // No GIN(tasks) either, on purpose: the task probes above are semi-joins over
+  // the ONLINE subset only (this index makes that subset cheap to reach), and
+  // GIN would add a write-amplified, history-wide index over a jsonb array
+  // whose elements the queries match through an expression
+  // (`COALESCE(e->>'id', ...)`) a GIN on `tasks` cannot bind anyway.
+  index('workers_online_heartbeat_idx')
+    .on(t.lastHeartbeatAt)
+    .where(sql`${t.status} = 'online'`),
+],
 );
 
 /* ---------------------------------------------------------------------------
