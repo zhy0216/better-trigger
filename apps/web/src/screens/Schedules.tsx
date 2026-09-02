@@ -4,7 +4,8 @@
 import React from 'react';
 import { Icon, Badge, Switch } from '../components/primitives';
 import { Page, Card, SectionHead, ErrorState, LoadingState } from '../components/Layout';
-import { useSchedules, api } from '../api/hooks';
+import { useSchedules, api, recordConnectionError } from '../api/hooks';
+import { ApiError } from '../api/client';
 import type { Schedule } from '../types';
 
 export function Schedules({ env = 'prod' }: { env?: string }) {
@@ -12,15 +13,23 @@ export function Schedules({ env = 'prod' }: { env?: string }) {
   // local override layer: optimistic toggles applied on top of polled data,
   // so the switch stays responsive between 2s refreshes.
   const [overrides, setOverrides] = React.useState<Record<string, boolean>>({});
+  // C2 · mirrors RunView's actionError: a failed toggle must say so instead of
+  // silently rolling back. Cleared on the next attempt.
+  const [toggleError, setToggleError] = React.useState<string | null>(null);
   const items: Schedule[] = (data ?? []).map((s) => (s.id in overrides ? { ...s, enabled: overrides[s.id] } : s));
   const toggle = (id: string) => {
     const cur = items.find((i) => i.id === id);
     if (!cur) return;
     const next = !cur.enabled;
+    setToggleError(null);
     setOverrides((o) => ({ ...o, [id]: next }));
-    api.setScheduleEnabled(id, next, env).catch(() => {
-      // revert optimistic change on failure
+    api.setScheduleEnabled(id, next, env).catch((e: unknown) => {
+      // revert optimistic change on failure and surface the reason (C2)
       setOverrides((o) => ({ ...o, [id]: cur.enabled }));
+      setToggleError(e instanceof Error ? e.message : 'request failed');
+      // A rejected key must reach the shared connection registry so the key
+      // prompt takes over, exactly like RunHeader's control actions.
+      if (e instanceof ApiError && e.status === 401) recordConnectionError(e);
     });
   };
   if (!data) {
@@ -34,6 +43,12 @@ export function Schedules({ env = 'prod' }: { env?: string }) {
   return (
     <Page>
       <SectionHead title="Schedules" sub="Cron-style triggers attached to your tasks." />
+      {toggleError && (
+        <div role="alert" style={{ display: 'flex', alignItems: 'center', gap: 6, margin: '0 0 12px', padding: '8px 10px', borderRadius: 8, fontSize: 12.5, color: 'var(--red-text)', background: 'color-mix(in srgb, var(--red-primary) 7%, transparent)', border: '1px solid color-mix(in srgb, var(--red-primary) 25%, transparent)' }}>
+          <Icon name="close" size={13} />
+          <span>Failed to update schedule — {toggleError}</span>
+        </div>
+      )}
       <Card>
         {items.length === 0 && (
           <div style={{ padding: '48px 0', textAlign: 'center', color: 'var(--fg-subtle)', fontSize: 13 }}>

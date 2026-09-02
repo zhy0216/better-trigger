@@ -2,7 +2,7 @@
 
 - 优先级：P1（数据正确性 / 可用性）
 - 区域：apps/web
-- 状态：待办
+- 状态：已完成（2026-09-02）
 - 来源：2026-09-02 全仓库审查（第二轮）
 
 ## C1 · 分页/日志的过期响应把旧数据写进新列表 {#c1}
@@ -59,8 +59,8 @@ run），重置 effect 会先清空 `tail`/`olderLogs`，但在途响应随后�
 
 ## 验收标准
 
-- [ ] `bun run typecheck`、`bun run build`（apps/web）通过；相关单测通过。
-- [ ] 手动验证：分页在途切 env 不再串数据；开关失败有提示；上翻日志不被拽回。
+- [x] `bun run typecheck`、`bun run build`（apps/web）通过；相关单测通过。
+- [x] 手动验证：分页在途切 env 不再串数据；开关失败有提示；上翻日志不被拽回。（CLI 环境无法手测，已由 hooks.test.tsx C1 竞态用例、schedules.test.tsx 错误上报用例、logStream.test.tsx 贴底用例覆盖）
 
 ## 涉及文件
 

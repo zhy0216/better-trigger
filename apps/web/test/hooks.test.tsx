@@ -268,6 +268,89 @@ describe('useRuns pagination (loadMore)', () => {
     // re-click can retry.
     expect(result.current.hasMore).toBe(true);
   });
+
+  it('drops an in-flight loadMore when env changes before it lands (P1-17 C1)', async () => {
+    let resolveTail: ((r: Response) => void) | undefined;
+    const tail = new Promise<Response>((r) => {
+      resolveTail = r;
+    });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const u = String(input);
+      // The prod page-2 request hangs; every head answers the same first page.
+      if (u.includes('cursor=')) return tail;
+      return Promise.resolve(res(page(['a1', 'a0'], 'c1')));
+    });
+    const { result, rerender } = renderHook(({ env }: { env: string }) => useRuns(env), {
+      initialProps: { env: 'prod' },
+    });
+
+    await flush();
+    expect(result.current.hasMore).toBe(true);
+
+    act(() => {
+      void result.current.loadMore();
+    });
+    expect(result.current.loadingMore).toBe(true);
+
+    // The user switches env while the page is still in flight…
+    rerender({ env: 'staging' });
+    await flush();
+    // …then the OLD prod response lands: its rows must never enter the
+    // staging list (before the guard they were appended into the new query).
+    await act(async () => {
+      resolveTail!(res(page(['stale'], null)));
+    });
+    expect(result.current.data?.map((r) => r.id)).toEqual(['a1', 'a0']);
+    expect(result.current.loadingMore).toBe(false);
+    expect(result.current.hasMore).toBe(true); // staging paging still armed
+    expect(result.current.loadMoreError).toBeNull();
+  });
+
+  it('a stale loadMore landing during a fresh one neither appends rows nor clears the new spinner (P1-17 C1)', async () => {
+    let resolveProd: ((r: Response) => void) | undefined;
+    let resolveStaging: ((r: Response) => void) | undefined;
+    const prodTail = new Promise<Response>((r) => {
+      resolveProd = r;
+    });
+    const stagingTail = new Promise<Response>((r) => {
+      resolveStaging = r;
+    });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const u = String(input);
+      if (u.includes('cursor=')) return u.includes('env=prod') ? prodTail : stagingTail;
+      return Promise.resolve(res(page(['a1', 'a0'], 'c1')));
+    });
+    const { result, rerender } = renderHook(({ env }: { env: string }) => useRuns(env), {
+      initialProps: { env: 'prod' },
+    });
+
+    await flush();
+    act(() => {
+      void result.current.loadMore();
+    });
+    // Env switches mid-flight; the fresh staging loadMore starts while the
+    // prod page is still pending.
+    rerender({ env: 'staging' });
+    await flush();
+    act(() => {
+      void result.current.loadMore();
+    });
+    expect(result.current.loadingMore).toBe(true);
+
+    // The stale prod page resolves first: it must not append its rows and
+    // must not clear the spinner the staging request still owns.
+    await act(async () => {
+      resolveProd!(res(page(['stale'], null)));
+    });
+    expect(result.current.loadingMore).toBe(true);
+    expect(result.current.data?.map((r) => r.id)).toEqual(['a1', 'a0']);
+
+    await act(async () => {
+      resolveStaging!(res(page(['s1'], null)));
+    });
+    expect(result.current.loadingMore).toBe(false);
+    expect(result.current.data?.map((r) => r.id)).toEqual(['a1', 'a0', 's1']);
+  });
 });
 
 describe('connection aggregation — one flaky poll must not flip the dot', () => {
@@ -450,6 +533,45 @@ describe('useRun logs pagination (loadOlderLogs)', () => {
     expect(more).toBe(false);
     expect(result.current.loadOlderLogsError).toBe('Failed to fetch');
     expect(result.current.hasOlderLogs).toBe(true); // a failure ≠ than "no more"
+  });
+
+  it('drops an in-flight loadOlderLogs when the run changes before it lands (P1-17 C1)', async () => {
+    let resolveOlder: ((r: Response) => void) | undefined;
+    const older = new Promise<Response>((r) => {
+      resolveOlder = r;
+    });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const u = String(input);
+      // The older-page request hangs; each run's head carries a distinct line.
+      if (u.includes('logsBefore=')) return older;
+      const body = u.includes('/runs/r2') ? detail([301], 301) : detail([201], 201);
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+    });
+    const { result, rerender } = renderHook(({ runId }: { runId: string }) => useRun(runId), {
+      initialProps: { runId: 'r1' },
+    });
+
+    await flush();
+    expect(result.current.data?.spanLogs.s0).toHaveLength(1);
+
+    act(() => {
+      void result.current.loadOlderLogs();
+    });
+    expect(result.current.loadingOlderLogs).toBe(true);
+
+    // The user opens a different run while the page is still in flight…
+    rerender({ runId: 'r2' });
+    await flush();
+    expect(result.current.data?.spanLogs.s0).toHaveLength(1); // r2's own head
+    // …then the abandoned r1 page lands: its lines must not splice into r2.
+    await act(async () => {
+      resolveOlder!(new Response(JSON.stringify(detail([1, 2, 3], null)), { status: 200 }));
+    });
+    expect(result.current.data?.spanLogs.s0).toHaveLength(1);
+    expect(result.current.data?.spanLogs.s0?.[0]?.[1]).toBe('line 301');
+    expect(result.current.loadingOlderLogs).toBe(false);
+    expect(result.current.hasOlderLogs).toBe(true); // r2 paging still armed
+    expect(result.current.loadOlderLogsError).toBeNull();
   });
 });
 

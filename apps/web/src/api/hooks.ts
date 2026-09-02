@@ -319,6 +319,13 @@ export function useRuns(
   const [tailCursor, setTailCursor] = React.useState<string | null | undefined>(undefined);
   const [loadingMore, setLoadingMore] = React.useState(false);
   const [loadMoreError, setLoadMoreError] = React.useState<string | null>(null);
+  // C1 (p1-17): generation counter for the query identity. The reset effect
+  // below bumps it whenever env/filters change; a loadMore in flight when that
+  // happens snapshots the old generation and DISCARDS its response on arrival,
+  // so a slow page of the previous query can never append old-env rows to the
+  // new list. A counter (not the key string) also catches prod→staging→prod
+  // round trips, where the key matches again but the tail was reset.
+  const pageGen = React.useRef(0);
 
   // The polled head's own keyset. It only answers "are there more runs at
   // all" BEFORE paging has started — once the user has loaded an older page,
@@ -330,8 +337,10 @@ export function useRuns(
   const headHasMore = (base.data?.nextCursor ?? null) !== null;
 
   // A filter/env change invalidates appended pages — they were loaded for the
-  // previous query.
+  // previous query. Bumping pageGen also retires any page still in flight
+  // (see the C1 guard inside loadMore).
   React.useEffect(() => {
+    pageGen.current += 1;
     setTail([]);
     setTailCursor(undefined);
     setLoadingMore(false);
@@ -343,19 +352,29 @@ export function useRuns(
     if (tailCursor === null) return false; // already loaded everything
     const cursor = tailCursor ?? base.data?.nextCursor ?? null;
     if (cursor === null) return false; // the head page itself was the last page
+    const gen = pageGen.current;
+    const stale = () => pageGen.current !== gen;
     setLoadingMore(true);
     setLoadMoreError(null);
     try {
       const res = await api.runs({ env, status, taskId, limit: pageLimit, cursor });
+      // The query changed while this page was in flight — the reset effect
+      // already dropped the tail; committing now would splice the OLD query's
+      // rows into the new list.
+      if (stale()) return false;
       setTail((prev) => appendTailPage(prev, adaptRuns(res.runs)));
       // Only the user's own paging advances the tail cursor.
       setTailCursor(res.nextCursor);
       return res.nextCursor !== null;
     } catch (e) {
+      if (stale()) return false;
       setLoadMoreError(e instanceof Error ? e.message || 'request failed' : 'request failed');
       return false;
     } finally {
-      setLoadingMore(false);
+      // A stale request must not clear the NEW query's spinner either: the
+      // reset effect already set loadingMore false, and a fresh loadMore for
+      // the new key may be in flight right now.
+      if (!stale()) setLoadingMore(false);
     }
   }, [loadingMore, enabled, tailCursor, base.data?.nextCursor, env, status, taskId, pageLimit]);
 
@@ -421,10 +440,16 @@ export function useRun(runId: string | null, env: string = 'prod'): RunDetailRes
   const [olderCursor, setOlderCursor] = React.useState<number | null | undefined>(undefined);
   const [loadingOlderLogs, setLoadingOlderLogs] = React.useState(false);
   const [loadOlderLogsError, setLoadOlderLogsError] = React.useState<string | null>(null);
+  // C1 (p1-17): same generation guard as useRuns.loadMore — an older-log page
+  // that outlives its run/env identity is discarded instead of splicing the
+  // OLD run's lines into the new run's stream.
+  const pageGen = React.useRef(0);
 
   // A runId/env change invalidates loaded pages (RunDetail is keyed by runId,
-  // so this is belt-and-braces for the same effect).
+  // so this is belt-and-braces for the same effect). Bumping pageGen also
+  // retires any page still in flight (see loadOlderLogs below).
   React.useEffect(() => {
+    pageGen.current += 1;
     setOlderLogs([]);
     setOlderCursor(undefined);
     setLoadingOlderLogs(false);
@@ -437,10 +462,16 @@ export function useRun(runId: string | null, env: string = 'prod'): RunDetailRes
     if (olderCursor === null) return false; // already loaded everything
     const cursor = olderCursor ?? base.data?.logsNextCursor ?? null;
     if (cursor === null) return false; // the head page itself has no older logs
+    const gen = pageGen.current;
+    const stale = () => pageGen.current !== gen;
     setLoadingOlderLogs(true);
     setLoadOlderLogsError(null);
     try {
       const res = await api.run(runId, env, { logsBefore: cursor });
+      // The run/env changed while this page was in flight — the reset effect
+      // already dropped the loaded pages; committing now would splice the OLD
+      // run's lines into the new run's stream.
+      if (stale()) return false;
       // Append the older page; the head may have slid forward between polls,
       // so rows the newer pages already carry are dropped (dedupe by log id).
       setOlderLogs((prev) => {
@@ -450,10 +481,13 @@ export function useRun(runId: string | null, env: string = 'prod'): RunDetailRes
       setOlderCursor(res.logsNextCursor);
       return res.logsNextCursor !== null;
     } catch (e) {
+      if (stale()) return false;
       setLoadOlderLogsError(e instanceof Error ? e.message || 'request failed' : 'request failed');
       return false;
     } finally {
-      setLoadingOlderLogs(false);
+      // A stale request must not clear the NEW run's spinner either (the
+      // reset effect already set it false; a fresh load may be in flight).
+      if (!stale()) setLoadingOlderLogs(false);
     }
   }, [runId, env, loadingOlderLogs, olderCursor, base.data?.logsNextCursor]);
 

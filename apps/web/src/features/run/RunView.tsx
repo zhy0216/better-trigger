@@ -311,7 +311,19 @@ const LOG_TONE: Record<string, string> = {
 
 interface LogEntry { spanId: string; lvl: string; msg: string; ms: number; label: string }
 
-function LogStream({ trace, logs, t, selectedId, scoped, setScoped, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs, loadOlderLogsError }: {
+// C3 (p1-17): auto-follow only while the reader is stuck to the bottom. The
+// ε absorbs sub-pixel rounding and the row-height jitter of a line landing
+// mid-render, so "still bottomed" doesn't need to be pixel-exact.
+const AT_BOTTOM_EPSILON_PX = 4;
+
+/** Pure stickiness predicate — exported so the keep-position rule is unit
+ *  testable without a layout engine (jsdom reports 0 for scroll geometry). */
+export function isAtBottom(scrollTop: number, clientHeight: number, scrollHeight: number): boolean {
+  return scrollHeight - scrollTop - clientHeight <= AT_BOTTOM_EPSILON_PX;
+}
+
+// Rendered standalone only by tests; the app mounts it via RunDetail.
+export function LogStream({ trace, logs, t, selectedId, scoped, setScoped, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs, loadOlderLogsError }: {
   trace: Trace; logs: Record<string, LogLine[]>; t: number; selectedId: string; scoped: boolean; setScoped: React.Dispatch<React.SetStateAction<boolean>>;
   /** PF3 logs paging: fetch the next older page and append it to the stream. */
   onLoadOlderLogs: () => Promise<boolean>; loadingOlderLogs: boolean; hasOlderLogs: boolean;
@@ -329,7 +341,21 @@ function LogStream({ trace, logs, t, selectedId, scoped, setScoped, onLoadOlderL
   }, [trace, logs]);
   const visible = lines.filter((l) => l.ms <= t && (!scoped || !selectedId || l.spanId === selectedId));
   const ref = React.useRef<HTMLDivElement | null>(null);
-  React.useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [visible.length]);
+  // C3 (p1-17): auto-following must be conditional. `stickToBottom` tracks
+  // whether the reader is at the bottom (a scroll event updates it; appending
+  // lines does not). Only then does the length-change effect pull them to the
+  // new bottom — a user who scrolled up keeps their position through the 2s
+  // poll instead of being yanked back every refresh. Starts pinned so a fresh
+  // view follows its run's log tail.
+  const stickToBottom = React.useRef(true);
+  const onScroll = () => {
+    const el = ref.current;
+    if (el) stickToBottom.current = isAtBottom(el.scrollTop, el.clientHeight, el.scrollHeight);
+  };
+  React.useEffect(() => {
+    const el = ref.current;
+    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
+  }, [visible.length]);
   return (
     <div style={{ height: 184, flexShrink: 0, borderTop: '1px solid var(--border)', background: 'var(--panel-bg)', display: 'flex', flexDirection: 'column' }}>
       <div style={{ height: 34, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10, padding: '0 14px', borderBottom: '1px solid var(--divider)' }}>
@@ -357,7 +383,7 @@ function LogStream({ trace, logs, t, selectedId, scoped, setScoped, onLoadOlderL
           <Icon name="filter" size={12} /> {scoped ? 'Scoped to span' : 'All spans'}
         </button>
       </div>
-      <div ref={ref} style={{ flex: 1, overflowY: 'auto', padding: '8px 14px', fontFamily: 'var(--font-mono)', fontSize: 11.5, lineHeight: 1.85 }}>
+      <div ref={ref} onScroll={onScroll} style={{ flex: 1, overflowY: 'auto', padding: '8px 14px', fontFamily: 'var(--font-mono)', fontSize: 11.5, lineHeight: 1.85 }}>
         {visible.length === 0 && <div style={{ color: 'var(--fg-faint)', fontFamily: 'var(--font-sans)' }}>Waiting for logs…</div>}
         {visible.map((l, i) => (
           <div key={i} style={{ display: 'flex', gap: 10 }}>
