@@ -8,7 +8,8 @@
    ============================================================================= */
 import { KernelError, type RetryPolicy, type TaskRunResult, type TriggerItem, type TriggerOptions, type WaitResult } from '@better-trigger/core';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
-import { executorStorage, type RunExecutor } from '../src/context';
+import { executorStorage, type DurableTriggerOptions, type RunExecutor } from '../src/context';
+import { applyConcurrencyKey } from '../src/concurrency';
 import type { RunCtx } from '../src/context';
 import type { AnySchema } from '../src/schema';
 import type { RunHandle } from '../src/instance';
@@ -349,7 +350,11 @@ describe('durable in-run trigger — namespace warning (p1-15)', () => {
     let warned: unknown[];
     try {
       await executorStorage()!.run(executor, async () => {
-        const result = await handle.triggerAndWait({ n: 1 }, { env: 'staging' });
+        // env/projectId are now a compile error on triggerAndWait (T4). The
+        // cast is deliberate: a non-typed (plain-JS) caller can still reach the
+        // runtime strip+warn depth defense, so pin that it does.
+        const envOpts = { env: 'staging' } as unknown as DurableTriggerOptions;
+        const result = await handle.triggerAndWait({ n: 1 }, envOpts);
         expect(result.ok).toBe(true);
       });
       warned = warnSpy.mock.calls.map((c) => c[0]);
@@ -389,5 +394,120 @@ describe('durable in-run trigger — namespace warning (p1-15)', () => {
     expect(stepItems[1]?.options).toEqual({});
     // ...while legitimate per-item options ride along untouched.
     expect(stepItems[2]?.options).toEqual({ concurrencyKey: 'k3' });
+  });
+});
+
+describe('task() concurrency.limit validation (01-core-sdk T2)', () => {
+  it('rejects a non-positive / non-integer limit at definition time', () => {
+    const bad: Array<[string, number]> = [
+      ['0 (silently unschedulable)', 0],
+      ['-1', -1],
+      ['2.5 (fractional)', 2.5],
+      ['NaN', Number.NaN],
+    ];
+    for (const [why, limit] of bad) {
+      let err: unknown;
+      try {
+        // Well-typed on purpose: the type allows any number — the RANGE is bug.
+        task({ id: 'x', concurrency: { limit }, run: noop });
+      } catch (e) {
+        err = e;
+      }
+      expect(err, why).toBeInstanceOf(KernelError);
+      expect((err as KernelError).code, why).toBe('bad_request');
+      expect((err as KernelError).message, why).toContain('task("x").concurrency.limit');
+    }
+  });
+
+  it('accepts a positive integer limit, and a key-only config with no limit', () => {
+    expect(() => task({ id: 'x', concurrency: { limit: 1 }, run: noop })).not.toThrow();
+    expect(() => task({ id: 'x', concurrency: { limit: 5 }, run: noop })).not.toThrow();
+    expect(() =>
+      task({ id: 'x', concurrency: { key: (p: { id: string }) => p.id }, run: noop }),
+    ).not.toThrow();
+    expect(() => task({ id: 'x', run: noop })).not.toThrow();
+  });
+});
+
+describe('triggerAndWait outside a run rejects (01-core-sdk T11)', () => {
+  it('throws a clear error naming the call, not an HTTP trigger', async () => {
+    const handle = task('child', noop);
+    // No executor in AsyncLocalStorage and no default instance is consulted —
+    // triggerAndWait is durable-only.
+    await expect(handle.triggerAndWait({ n: 1 })).rejects.toThrow(
+      /triggerAndWait\("child"\) must be called inside a running task/,
+    );
+  });
+});
+
+describe('batchTrigger batch-level options narrowing (01-core-sdk T3)', () => {
+  const handle = task('narrow-batch', noop);
+
+  it('a batch-level delay / priority / idempotencyKey / concurrencyKey is a compile error', () => {
+    // The batch endpoint only reads projectId/env from the batch scope
+    // (apps/worker routes/trigger.ts); the rest used to typecheck then vanish.
+    expect(handle.id).toBe('narrow-batch'); // consume the handle (compile-only test)
+    const bad: Parameters<typeof handle.batchTrigger>[1][] = [
+      // @ts-expect-error — batch-level delay is dropped by the server (T3)
+      { delay: 100 },
+      // @ts-expect-error — batch-level priority is dropped by the server (T3)
+      { priority: 1 },
+      // @ts-expect-error — batch-level idempotencyKey is dropped by the server (T3)
+      { idempotencyKey: 'k' },
+      // @ts-expect-error — batch-level concurrencyKey is per-item only (T3)
+      { concurrencyKey: 'k' },
+    ];
+    expect(bad).toHaveLength(4);
+    // Positive: the namespace pair — and only it — typechecks.
+    const good: Parameters<typeof handle.batchTrigger>[1] = {
+      env: 'staging',
+      projectId: 'acme',
+    };
+    expect(good).toEqual({ env: 'staging', projectId: 'acme' });
+  });
+});
+
+describe('triggerAndWait options narrowing (01-core-sdk T4)', () => {
+  const handle = task('narrow-taw', noop);
+
+  it('idempotencyKey / env / projectId are compile errors', () => {
+    // idempotencyKey → kernel bad_request fails the whole parent run;
+    // env/projectId → warned + stripped. All three are now a type error.
+    expect(handle.id).toBe('narrow-taw'); // consume the handle (compile-only test)
+    const bad: Parameters<typeof handle.triggerAndWait>[1][] = [
+      // @ts-expect-error — idempotencyKey is refused on triggerAndWait (T4)
+      { idempotencyKey: 'k' },
+      // @ts-expect-error — a durable child inherits the parent's env (T4)
+      { env: 'staging' },
+      // @ts-expect-error — a durable child inherits the parent's projectId (T4)
+      { projectId: 'acme' },
+    ];
+    expect(bad).toHaveLength(3);
+    // Positive: the genuinely honoured options still typecheck.
+    const good: Parameters<typeof handle.triggerAndWait>[1] = {
+      delay: '10m',
+      priority: 2,
+      concurrencyKey: 'k',
+    };
+    expect(good).toEqual({ delay: '10m', priority: 2, concurrencyKey: 'k' });
+  });
+});
+
+describe('applyConcurrencyKey — shared derivation (01-core-sdk T10)', () => {
+  it('explicit option wins over the derived key', () => {
+    expect(applyConcurrencyKey({ concurrencyKey: 'explicit' }, 'derived')).toEqual({
+      concurrencyKey: 'explicit',
+    });
+  });
+
+  it('uses the derived key when none was given', () => {
+    expect(applyConcurrencyKey({}, 'derived')).toEqual({ concurrencyKey: 'derived' });
+    expect(applyConcurrencyKey(undefined, 'derived')).toEqual({ concurrencyKey: 'derived' });
+  });
+
+  it('leaves options untouched when neither is present', () => {
+    const options: TriggerOptions = { priority: 1 };
+    expect(applyConcurrencyKey(options, undefined)).toBe(options);
+    expect(applyConcurrencyKey(undefined, undefined)).toBeUndefined();
   });
 });

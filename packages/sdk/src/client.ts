@@ -74,7 +74,13 @@ export interface RequestOptions {
   signal?: AbortSignal;
   /** Overrides the client-level timeout for this request. */
   timeoutMs?: number;
-  /** Extra request headers, merged over the defaults (auth, content-type). */
+  /**
+   * Extra request headers, merged case-insensitively with the defaults: a
+   * caller header and a client default that differ only in case never both
+   * survive into the request (a doubled name would make fetch comma-join them).
+   * Content-Type is caller-overridable; Authorization is owned by the client's
+   * apiKey and cannot be overridden. See the merge in `request`.
+   */
   headers?: Record<string, string>;
 }
 
@@ -93,6 +99,41 @@ function assertTimeoutMs(value: number): void {
       `better-trigger: "timeoutMs" must be a positive number of milliseconds (got ${String(value)})`,
     );
   }
+}
+
+/**
+ * Merge caller-supplied headers with the client defaults CASE-INSENSITIVELY
+ * (01-core-sdk T7). Two headers that differ only in case must never both reach
+ * fetch: it comma-joins same-name values into a single header, and a doubled
+ * Content-Type trips the server's requireJsonContentType with a 400. Precedence
+ * is explicit and asymmetric:
+ *   - `defaults` are applied first, then the CALLER's headers win over them — so
+ *     a caller can override Content-Type.
+ *   - `locked` headers are applied last, winning over the caller: Authorization
+ *     belongs to the client's apiKey and must not be swappable.
+ * The surviving value keeps the casing it was supplied with.
+ */
+function mergeHeaders(
+  caller: Record<string, string> | undefined,
+  defaults: ReadonlyArray<readonly [string, string]>,
+  locked: ReadonlyArray<readonly [string, string]>,
+): Record<string, string> {
+  const byKey = new Map<string, { name: string; value: string }>();
+  const order: string[] = [];
+  const put = (name: string, value: string): void => {
+    const key = name.toLowerCase();
+    if (!byKey.has(key)) order.push(key);
+    byKey.set(key, { name, value });
+  };
+  for (const [name, value] of defaults) put(name, value);
+  for (const [name, value] of Object.entries(caller ?? {})) put(name, value);
+  for (const [name, value] of locked) put(name, value);
+  const out: Record<string, string> = {};
+  for (const key of order) {
+    const entry = byKey.get(key)!;
+    out[entry.name] = entry.value;
+  }
+  return out;
 }
 
 export class HttpClient {
@@ -160,9 +201,13 @@ export class HttpClient {
     const onAbort = () => controller.abort(signal?.reason);
     signal?.addEventListener('abort', onAbort, { once: true });
 
-    const headers: Record<string, string> = { ...(opts.headers ?? {}) };
-    if (body !== undefined) headers['Content-Type'] = 'application/json';
-    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    // Case-insensitive header merge (T7): the caller may override Content-Type,
+    // but Authorization is owned by the apiKey and is applied last.
+    const headers = mergeHeaders(
+      opts.headers,
+      body !== undefined ? [['Content-Type', 'application/json']] : [],
+      this.apiKey ? [['Authorization', `Bearer ${this.apiKey}`]] : [],
+    );
 
     try {
       const res = await this.doFetch(this.base + PREFIX + path, {
@@ -180,7 +225,13 @@ export class HttpClient {
       // the classifier below — the same timeout / abort errors as the
       // header phase.
       if (!res.ok) throw await toError(res, controller.signal);
-      if (res.status === 204) return undefined as T;
+      // A 204 has no body: `request` is typed for a JSON answer, so the value
+      // it yields here is `undefined` regardless of T. Callers that expect no
+      // body use requestEmpty() (which returns Promise<void>, no generic to
+      // misrepresent); a JSON caller that ever meets a 204 is on the documented
+      // contract that the result is undefined. The double cast makes that lie
+      // explicit rather than hiding it behind a single `as T` (01-core-sdk T8).
+      if (res.status === 204) return undefined as unknown as T;
       // A 2xx with a non-JSON body (a misconfigured proxy, an HTML error page
       // behind a 200) used to throw a bare SyntaxError from res.json() OUTSIDE
       // this guard — not an HttpError, not a KernelError — so callers could not
@@ -224,6 +275,18 @@ export class HttpClient {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
     }
+  }
+
+  /**
+   * Send a request whose outcome is the status code alone — cancel and other
+   * control endpoints answer `{ ok: true }` (200) or a bare 204 with nothing the
+   * caller reads. This is the honest counterpart to request<T>: there is no
+   * generic to violate, the return is simply void, and any non-error response
+   * body is consumed and discarded (01-core-sdk T8). Error mapping and the
+   * timeout/abort guard are request's, unchanged.
+   */
+  async requestEmpty(path: string, opts: RequestOptions = {}): Promise<void> {
+    await this.request<unknown>(path, opts);
   }
 }
 

@@ -90,9 +90,12 @@ function canonicalizePlain(value: unknown, seen: WeakSet<object>): unknown {
 
 /** UTF-8 byte length. TextEncoder rather than Buffer: core is on the SDK's
  *  dependency path, and Buffer is not available in every runtime that imports
- *  the SDK. */
+ *  the SDK. The encoder is stateless, so one module-level instance is reused
+ *  for every measurement instead of allocating one per call. */
+const textEncoder = new TextEncoder();
+
 function byteLength(s: string): number {
-  return new TextEncoder().encode(s).length;
+  return textEncoder.encode(s).length;
 }
 
 function fail(

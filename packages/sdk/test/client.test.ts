@@ -455,3 +455,59 @@ describe('HttpClient — body reads inside the timeout/abort guard', () => {
     expect((err as HttpError).message).toContain('timed out after 5ms');
   });
 });
+
+describe('HttpClient — case-insensitive header merge (01-core-sdk T7)', () => {
+  const headerFor = (init: RequestInit, name: string): string[] => {
+    const headers = init.headers as Record<string, string>;
+    return Object.keys(headers)
+      .filter((k) => k.toLowerCase() === name)
+      .map((k) => headers[k]!);
+  };
+
+  it('a lowercase caller content-type overrides the default with no duplicate key', async () => {
+    const { fetch, calls } = stubFetch(new Response('{"ok":true}', { status: 200 }));
+    await client(fetch).request('/trigger', {
+      method: 'POST',
+      body: { a: 1 },
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    });
+
+    // Two same-name headers (differing only in case) would make fetch comma-join
+    // them into one value and trip the server's requireJsonContentType with 400.
+    const contentTypes = headerFor(calls[0]!.init, 'content-type');
+    expect(contentTypes).toEqual(['application/json; charset=utf-8']);
+  });
+
+  it('ignores a caller authorization override — the apiKey owns that header', async () => {
+    const { fetch, calls } = stubFetch(new Response('{"ok":true}', { status: 200 }));
+    const c = new HttpClient({ url: 'http://daemon.test:4848', apiKey: 'k-1', fetch });
+    await c.request('/trigger', {
+      method: 'POST',
+      body: {},
+      headers: { AUTHORIZATION: 'Bearer attacker-supplied' },
+    });
+    const auth = headerFor(calls[0]!.init, 'authorization');
+    expect(auth).toEqual(['Bearer k-1']); // the client's credential wins
+  });
+});
+
+describe('HttpClient — requestEmpty (01-core-sdk T8)', () => {
+  it('resolves void for a 204 and for a 200 with a body (data discarded)', async () => {
+    const empty = stubFetch(new Response(null, { status: 204 }));
+    await expect(
+      client(empty.fetch).requestEmpty('/runs/run_1/cancel', { method: 'POST' }),
+    ).resolves.toBeUndefined();
+
+    const json = stubFetch(new Response('{"ok":true}', { status: 200 }));
+    await expect(
+      client(json.fetch).requestEmpty('/runs/run_1/cancel', { method: 'POST' }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('still maps an error response through request()', async () => {
+    const { fetch } = stubFetch(errorResponse(409, 'run_not_running', 'not running'));
+    await expect(
+      client(fetch).requestEmpty('/runs/run_1/cancel', { method: 'POST' }),
+    ).rejects.toBeInstanceOf(KernelError);
+  });
+});

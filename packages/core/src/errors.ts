@@ -112,10 +112,35 @@ export function isControlFlowSignal(
   return isSuspendSignal(err) || isExecutionEndedSignal(err);
 }
 
-/** Convert any thrown value to a JSON-safe error record. */
+/**
+ * Convert any thrown value to a JSON-safe error record. Total on purpose, like
+ * safeSerializeJson (serialize.ts): serializeError runs on the failure-reporting
+ * path, so a bare `JSON.stringify` here would throw a TypeError on a BigInt or a
+ * circular structure — turning the failure report itself into a crash that
+ * escapes the executor and surfaces as a misleading WorkerLostError — and it
+ * returns `undefined` for a top-level undefined/function/symbol, which would
+ * make `{ message: undefined }` violate SerializedError.message: string. Every
+ * branch below produces a string message; nothing here throws.
+ */
 export function serializeError(err: unknown): SerializedError {
   if (err instanceof Error) {
     return { message: err.message, name: err.name, stack: err.stack };
   }
-  return { message: typeof err === 'string' ? err : JSON.stringify(err) };
+  if (typeof err === 'string') {
+    return { message: err };
+  }
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(err);
+  } catch {
+    // A BigInt or a circular structure: JSON.stringify cannot represent them.
+    json = undefined;
+  }
+  if (json === undefined) {
+    // Either stringify threw above, or it legitimately returned undefined — a
+    // top-level undefined/function/symbol, which has no JSON spelling. String()
+    // (not a template interpolation) is used because `${symbol}` itself throws.
+    return { message: `non-serializable thrown value: ${String(err)}` };
+  }
+  return { message: json };
 }

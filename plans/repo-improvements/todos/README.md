@@ -6,7 +6,7 @@
 
 | # | 文件 | 优先级 | 难度 | 一句话 |
 |---|------|--------|------|--------|
-| 01 | [01-core-sdk-type-holes.md](./01-core-sdk-type-holes.md) | P1 | medium | serializeError 非全函数、concurrency.limit 零值静默饥饿、batch/triggerAndWait options 类型洞，外加 SDK 校验与导出补齐 |
+| 01 | [01-core-sdk-type-holes.md](./done/01-core-sdk-type-holes.md) | P1 | medium | ✅ 已完成 · serializeError 非全函数、concurrency.limit 零值静默饥饿、batch/triggerAndWait options 类型洞，外加 SDK 校验与导出补齐 |
 | 02 | [02-kernel-validation-boundaries.md](./02-kernel-validation-boundaries.md) | P1 | medium | prune batchSize:0 死循环，及 waitForResult/claimRuns/registerWorker/worker 输入/心跳零行等内核校验边界 |
 | 03 | [03-db-fk-indexes-and-checks.md](./03-db-fk-indexes-and-checks.md) | P1 | medium | 缺 FK 支撑索引导致 prune 级联 seq scan；workers 部分索引；trigger_type/trigger_source 缺 CHECK |
 | 04 | [04-kernel-cron-poison-and-takeover.md](./04-kernel-cron-poison-and-takeover.md) | P1 | hard | 依赖 02。单条毒 cron 停摆全调度器；C4 接管守卫对旧版 manifest 失明；batchTriggerChild 孤儿 run；served 语义分裂 |
@@ -22,7 +22,7 @@
 
 执行顺序（从高到低；同一轨道内串行，轨道间文件不相交可并行）：
 
-1. `01-core-sdk-type-holes.md`（P1）
+1. `01-core-sdk-type-holes.md`（P1）✅ 已完成，归档至 `done/`
 2. `02-kernel-validation-boundaries.md`（P1）
 3. `03-db-fk-indexes-and-checks.md`（P1）
 4. `04-kernel-cron-poison-and-takeover.md`（P1）— 依赖 02（共享 queue.ts / workers.ts / runs-steps.ts）

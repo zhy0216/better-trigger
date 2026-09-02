@@ -10,7 +10,7 @@
    immediately. No daemon, no Postgres — `fetch` is injected and the clock is
    faked.
    ============================================================================= */
-import { DEFAULT_NAMESPACE, KernelError, type WaitResult } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError, type Namespace, type WaitResult } from '@better-trigger/core';
 import { describe, expect, it, vi } from 'vitest';
 import { HttpError } from '../src/client';
 import { betterTrigger, ResultTimeoutError } from '../src/instance';
@@ -824,5 +824,110 @@ describe('registry.defaultInstance — first-wins, setDefault override, requireD
     } finally {
       restoreRegistrySlot(original);
     }
+  });
+});
+
+describe('waitForResult — argument hardening (01-core-sdk T5)', () => {
+  it('rejects a NaN / 0 / negative timeoutMs as a config error, without polling', async () => {
+    const { fetch, calls } = scriptedFetch([terminalResponse('completed', {})]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    for (const bad of [Number.NaN, 0, -1]) {
+      await expect(
+        trigger.waitForResult('run_1', undefined, { timeoutMs: bad }),
+      ).rejects.toThrow(/positive number of milliseconds/);
+    }
+    expect(calls).toHaveLength(0); // a bad budget must never hit the network
+  });
+
+  it('honors Infinity as "wait indefinitely" (still returns a terminal hop)', async () => {
+    const { fetch } = scriptedFetch([terminalResponse('completed', { ok: 1 })]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    await expect(
+      trigger.waitForResult('run_1', undefined, { timeoutMs: Infinity }),
+    ).resolves.toEqual({ status: 'completed', output: { ok: 1 } });
+  });
+
+  it('floors a fractional budget into an integer timeoutMs request param', async () => {
+    const { fetch, calls } = handledFetch([() => terminalResponse('completed', { ok: 1 })]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    await trigger.waitForResult('run_1', undefined, { timeoutMs: 250.5 });
+
+    const param = new URL(calls[0]!.url).searchParams.get('timeoutMs')!;
+    expect(param).not.toContain('.');
+    expect(Number.isInteger(Number(param))).toBe(true);
+    expect(Number(param)).toBeLessThanOrEqual(250);
+  });
+
+  it('throws on a half namespace, naming the missing field', async () => {
+    const { fetch, calls } = scriptedFetch([terminalResponse('completed', {})]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    await expect(
+      trigger.waitForResult('run_1', { projectId: 'acme' } as unknown as Namespace),
+    ).rejects.toThrow(/both projectId and env.*without env/);
+    await expect(
+      trigger.waitForResult('run_1', { env: 'staging' } as unknown as Namespace),
+    ).rejects.toThrow(/both projectId and env.*without projectId/);
+    expect(calls).toHaveLength(0); // rejected before any poll
+  });
+});
+
+describe('waitForResult — rate_limited (429) is retriable (01-core-sdk T6)', () => {
+  it('backs off and retries a transient rate_limited KernelError, then resolves', async () => {
+    vi.useFakeTimers();
+    try {
+      const { fetch, calls } = scriptedFetch([
+        errorResponse(429, 'rate_limited', 'too many requests'),
+        terminalResponse('completed', { ok: 1 }),
+      ]);
+      const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+
+      const result = trigger.waitForResult('run_1', undefined, { timeoutMs: 5_000 });
+      await flush(); // the 429 → KernelError('rate_limited'), retry sleep armed
+      await vi.advanceTimersByTimeAsync(1_000); // backoff elapses
+      await expect(result).resolves.toEqual({ status: 'completed', output: { ok: 1 } });
+      expect(calls.length).toBeGreaterThanOrEqual(2); // it retried, not failed
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('instance batchTrigger batch-level options narrowing (01-core-sdk T3)', () => {
+  it('a batch-level delay / priority is a compile error; env/projectId typechecks', () => {
+    const { fetch } = scriptedFetch([]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    // Compile-only: batchTrigger is never invoked, the stub is never consumed.
+    expect(typeof trigger.batchTrigger).toBe('function');
+    const bad: Parameters<typeof trigger.batchTrigger>[1][] = [
+      // @ts-expect-error — batch-level delay is dropped by the server (T3)
+      { delay: 100 },
+      // @ts-expect-error — batch-level priority is dropped by the server (T3)
+      { priority: 5 },
+    ];
+    expect(bad).toHaveLength(2);
+    const good: Parameters<typeof trigger.batchTrigger>[1] = {
+      env: 'staging',
+      projectId: 'acme',
+    };
+    expect(good).toEqual({ env: 'staging', projectId: 'acme' });
+  });
+});
+
+describe('retryRun — Idempotency-Key header (01-core-sdk T11)', () => {
+  it('sends operationKey as an Idempotency-Key header, and omits it otherwise', async () => {
+    const { fetch, calls } = scriptedFetch([
+      () =>
+        new Response(JSON.stringify({ runId: 'run_9' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    ]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+
+    await trigger.retryRun('run_1', { projectId: 'acme', env: 'prod' }, { operationKey: 'op-1' });
+    expect(calls[0]!.init.headers).toMatchObject({ 'Idempotency-Key': 'op-1' });
+
+    await trigger.retryRun('run_2');
+    expect(calls[1]!.init.headers).not.toHaveProperty('Idempotency-Key');
   });
 });

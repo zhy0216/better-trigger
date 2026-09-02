@@ -26,6 +26,7 @@ export {
   NonDeterminismError,
   SuspendSignal,
   isAbortError,
+  isExecutionEndedSignal,
   isNonDeterminismError,
   isSuspendSignal,
   isControlFlowSignal,
@@ -38,9 +39,15 @@ export type {
   ConcurrencyConfig,
   CronInput,
   BatchItem,
+  BatchItemOptions,
   ResolvedTaskDefinition,
 } from './task';
-export type { BetterTrigger, BetterTriggerOptions, RunHandle } from './instance';
+export type {
+  BetterTrigger,
+  BetterTriggerOptions,
+  BatchTriggerItem,
+  RunHandle,
+} from './instance';
 export type {
   RunCtx,
   RunInfo,
@@ -54,6 +61,8 @@ export type { AnySchema, InferSchema } from './schema';
 /* ---- re-exported domain types from core --------------------------------- */
 export type {
   ExecutionEndedSignal,
+  Namespace,
+  RetryRunOptions,
   TaskRunResult,
   TriggerOptions,
   TriggerItem,

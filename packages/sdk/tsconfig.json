@@ -8,8 +8,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src", "test", "vitest.config.ts"],
-  // test/lifecycle-selftest.ts is a pre-split bun script (needs a live
-  // Postgres, predates the client/daemon split) — see vitest.config.ts.
-  "exclude": ["test/lifecycle-selftest.ts"]
+  "include": ["src", "test", "vitest.config.ts"]
 }

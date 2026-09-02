@@ -24,6 +24,19 @@ export interface StepOptions {
   retry?: RetryPolicy;
 }
 
+/**
+ * Options a durable in-run triggerAndWait accepts: the namespace pair is dropped
+ * (a child run always inherits the parent's scope, so env/projectId were warned-
+ * and-stripped at runtime), and `idempotencyKey` is dropped (the kernel refuses
+ * it with bad_request, which the executor treats as non-retryable and fails the
+ * whole parent run). Both used to typecheck and then bite at run time
+ * (01-core-sdk T4); the runtime strip/warn stays on as depth defense.
+ */
+export type DurableTriggerOptions = Omit<
+  TriggerOptions,
+  'idempotencyKey' | 'env' | 'projectId'
+>;
+
 /** Run metadata exposed to user code via ctx.run. */
 export interface RunInfo {
   /** Run id. */
@@ -109,11 +122,15 @@ export interface RunCtx {
    * triggers the handle's own task. The escape hatch for dynamic child ids: an
    * unregistered id (a typo) fails the call with AbortError instead of creating
    * a child run nobody claims and stranding the parent waiting forever.
+   *
+   * `options` excludes idempotencyKey/env/projectId — see DurableTriggerOptions:
+   * a durable child inherits the parent's namespace and the kernel rejects an
+   * idempotency key here (01-core-sdk T4).
    */
   triggerAndWait<TOutput>(
     taskId: string,
     payload: unknown,
-    options?: TriggerOptions,
+    options?: DurableTriggerOptions,
   ): Promise<TaskRunResult<TOutput>>;
   /** Wait primitives (wait.for / wait.until). */
   wait: RunWait;

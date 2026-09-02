@@ -22,8 +22,9 @@ import type {
 } from '@better-trigger/core';
 import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
 import { HttpClient, HttpError, type HttpClientOptions } from './client';
+import { applyConcurrencyKey } from './concurrency';
 import { registry } from './registry';
-import type { BatchItemOptions, TaskHandle } from './task';
+import type { BatchItemOptions, BatchNamespaceOptions, TaskHandle } from './task';
 
 /**
  * Thrown by waitForResult / RunHandle.result() when `throwOnTimeout` is set and
@@ -110,9 +111,15 @@ export interface BetterTrigger {
    * / env only) names the namespace the whole batch runs in; absent →
    * default/prod. Per-item options are data — they never split a batch across
    * namespaces, so per-item env/projectId are a compile error (p2-19, same
-   * narrowing TaskHandle.batchTrigger got in p1-15).
+   * narrowing TaskHandle.batchTrigger got in p1-15). The batch-level type is
+   * likewise narrowed to the pair the server reads: a batch-level delay /
+   * priority / idempotencyKey compiled before and was silently dropped
+   * (01-core-sdk T3).
    */
-  batchTrigger(items: BatchTriggerItem[], options?: TriggerOptions): Promise<RunHandle[]>;
+  batchTrigger(
+    items: BatchTriggerItem[],
+    options?: BatchNamespaceOptions,
+  ): Promise<RunHandle[]>;
   /**
    * Cancel a non-terminal run (terminal → no-op). `namespace` scopes the
    * request; absent → server default (default/prod).
@@ -334,9 +341,12 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  *  deterministic answers — retrying cannot change them. Transport failures
  *  (status 0: daemon down, proxy cut, timeout) and server 5xx (transient, or
  *  the deliberate WaiterRegistryStoppedError shutdown 5xx) may clear on the
- *  next attempt, ideally against a different daemon. */
+ *  next attempt, ideally against a different daemon. The one KernelError that
+ *  IS transient is 'rate_limited' (429): by definition it clears once the
+ *  window rolls over, so the poll backs off and retries instead of failing a
+ *  perfectly healthy wait at the first throttled hop (01-core-sdk T6). */
 function isRetriable(err: unknown): boolean {
-  if (err instanceof KernelError) return false;
+  if (err instanceof KernelError) return err.code === 'rate_limited';
   return err instanceof HttpError && (err.status === 0 || err.status >= 500);
 }
 
@@ -362,11 +372,10 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
       if (typeof taskOrId === 'string') {
         taskId = taskOrId;
       } else {
-        // Same concurrency-key derivation as TaskHandle: explicit option wins.
+        // Same concurrency-key derivation as TaskHandle: explicit option wins
+        // (shared applyConcurrencyKey, 01-core-sdk T10).
         taskId = taskOrId.id;
-        const key =
-          options?.concurrencyKey ?? taskOrId.__definition.concurrency?.key?.(payload);
-        if (key !== undefined) opts = { ...options, concurrencyKey: key };
+        opts = applyConcurrencyKey(options, taskOrId.__definition.concurrency?.key?.(payload));
       }
       const created = await http.request<CreatedRun>('/trigger', {
         method: 'POST',
@@ -386,7 +395,10 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
     },
 
     async cancelRun(runId, namespace) {
-      await http.request(`/runs/${encodeURIComponent(runId)}/cancel${nsQuery(namespace)}`, {
+      // Control endpoint: its result is a status, not data (the daemon answers
+      // `{ ok: true }` / a bare 204), so it goes through requestEmpty rather
+      // than a `request<T>` whose generic there would be a lie (01-core-sdk T8).
+      await http.requestEmpty(`/runs/${encodeURIComponent(runId)}/cancel${nsQuery(namespace)}`, {
         method: 'POST',
       });
     },
@@ -415,16 +427,22 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
 
     /**
      * Poll until terminal, retrying transient failures within the caller's
-     * budget. Retry contract: a 5xx or a transport failure (HttpError status 0
-     * — daemon unreachable, a proxy cut the long-poll, a timeout) is retried
-     * with jittered exponential backoff while budget remains — the daemon is
-     * designed for this (a redeploy answers in-flight waiters with a 5xx so
-     * the SDK hops to another daemon). When the budget is exhausted the LAST
-     * error is thrown, never a fabricated terminal status. 4xx and
-     * KernelErrors (e.g. not_found) fail immediately: retrying cannot change
-     * them. With `throwOnTimeout: true`, budget exhaustion throws
-     * ResultTimeoutError (with the latest observed status) instead of
-     * returning the latest non-terminal status / the last error (p2-23).
+     * budget. Retry contract: a 5xx, a transport failure (HttpError status 0
+     * — daemon unreachable, a proxy cut the long-poll, a timeout), or a
+     * rate_limited (429) KernelError is retried with jittered exponential
+     * backoff while budget remains — the daemon is designed for this (a redeploy
+     * answers in-flight waiters with a 5xx so the SDK hops to another daemon).
+     * When the budget is exhausted the LAST error is thrown, never a fabricated
+     * terminal status. Other 4xx and KernelErrors (e.g. not_found) fail
+     * immediately: retrying cannot change them. With `throwOnTimeout: true`,
+     * budget exhaustion throws ResultTimeoutError (with the latest observed
+     * status) instead of returning the latest non-terminal status / the last
+     * error (p2-23).
+     *
+     * `timeoutMs` must be a positive number of milliseconds; NaN / 0 / negative
+     * is rejected as a config error rather than arming a deadline that never (or
+     * immediately) fires. `Infinity` is honored as "wait indefinitely" — every
+     * hop still caps at MAX_LONGPOLL_MS, but the loop has no terminal deadline.
      */
     async waitForResult<T = unknown>(
       runId: string,
@@ -432,10 +450,33 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
       b?: WaitForResultOptions,
     ) {
       const namespace = isNamespace(a) ? a : undefined;
+      // A half namespace — one of projectId/env present as a string but not the
+      // other — is a mistake, not an options object. Without this it fell through
+      // to the `opts` slot and the run silently polled default/prod (01-core-sdk
+      // T5). The overloads already keep a well-formed Namespace vs options
+      // distinct; this catches the untyped (JS) case.
+      if (a !== undefined && namespace === undefined) {
+        const half = a as Partial<Namespace>;
+        const hasProjectId = typeof half.projectId === 'string';
+        const hasEnv = typeof half.env === 'string';
+        if (hasProjectId !== hasEnv) {
+          throw new Error(
+            `better-trigger: waitForResult namespace must set both projectId and env ` +
+              `(got ${hasProjectId ? 'projectId' : 'env'} without ${hasProjectId ? 'env' : 'projectId'})`,
+          );
+        }
+      }
       // `a` occupies the namespace slot when it is a Namespace or undefined
       // (opts then lives in `b`); otherwise the two-arg form placed opts in `a`.
+      // isNamespace(a) keeps `a` narrowed to WaitForResultOptions in the else.
       const opts = isNamespace(a) || a === undefined ? b : a;
       const timeoutMs = opts?.timeoutMs ?? 30_000;
+      if (Number.isNaN(timeoutMs) || timeoutMs <= 0) {
+        throw new Error(
+          `better-trigger: waitForResult "timeoutMs" must be a positive number of milliseconds ` +
+            `(Infinity waits indefinitely), got ${String(timeoutMs)}`,
+        );
+      }
       const deadline = Date.now() + timeoutMs;
       const pollMs = opts?.pollMs;
       // Backoff base: 200ms, ×2 per retry, capped at 2s, ±20% jitter.
@@ -446,7 +487,10 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
       for (;;) {
         // Each hop long-polls server-side for at most MAX_LONGPOLL_MS; the
         // remaining budget can be 0, which asks for a single immediate read.
-        const slice = Math.max(0, Math.min(deadline - Date.now(), MAX_LONGPOLL_MS));
+        // Floored so a fractional budget still sends an integer timeoutMs — a
+        // fractional value makes the server's intQuery fall back to its 5s
+        // default long-poll and overshoot the budget (01-core-sdk T5).
+        const slice = Math.floor(Math.max(0, Math.min(deadline - Date.now(), MAX_LONGPOLL_MS)));
         const query = new URLSearchParams({ timeoutMs: String(slice) });
         if (pollMs !== undefined) query.set('pollMs', String(pollMs));
         // Namespace travels as query params, matching the runs routes

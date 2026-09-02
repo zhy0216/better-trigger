@@ -19,8 +19,14 @@ import type {
   TaskRunResult,
   TriggerOptions,
 } from '@better-trigger/core';
-import { validateRetryPolicy } from '@better-trigger/core';
-import { currentExecutor, type ExecutorTask, type RunCtx } from './context';
+import { KernelError, validateRetryPolicy } from '@better-trigger/core';
+import { applyConcurrencyKey } from './concurrency';
+import {
+  currentExecutor,
+  type DurableTriggerOptions,
+  type ExecutorTask,
+  type RunCtx,
+} from './context';
 import { makeRunHandle, requireDefaultInstance, type RunHandle } from './instance';
 import { isSchema, validateSchema, type AnySchema, type InferSchema } from './schema';
 
@@ -41,6 +47,12 @@ export type CronInput = string | CronConfig;
  *  typecheck and then be silently dropped — a staging intent creating prod
  *  runs. Now it is a compile error instead (p1-15). */
 export type BatchItemOptions = Omit<TriggerOptions, 'env' | 'projectId'>;
+
+/** Batch-level options for batchTrigger: ONLY the namespace pair. The server
+ *  reads nothing else from the batch scope (delay / priority / idempotencyKey /
+ *  concurrencyKey are per-item), so the wider TriggerOptions let a caller set a
+ *  batch-level `delay` that compiled and then vanished (01-core-sdk T3). */
+export type BatchNamespaceOptions = Pick<TriggerOptions, 'env' | 'projectId'>;
 
 /** Per-item payload for batchTrigger. */
 export interface BatchItem<TPayload> {
@@ -94,22 +106,32 @@ export interface TaskHandle<TPayload, TOutput> {
    * in. Inside a task → durable batch-trigger step; the children always inherit
    * the parent's namespace, so `options` carries no namespace there (a set
    * env/projectId is warned and ignored). Returns one handle per item, in order.
+   *
+   * `options` is narrowed to the pair the server actually reads: batchTrigger's
+   * batch-level options only decide the namespace (delay / priority /
+   * idempotencyKey / concurrencyKey are per-item), so a value set here used to
+   * typecheck and then be silently dropped (01-core-sdk T3).
    */
   batchTrigger(
     items: Array<BatchItem<TPayload>>,
-    options?: TriggerOptions,
+    options?: BatchNamespaceOptions,
   ): Promise<RunHandle<TOutput>[]>;
 
   /**
    * Trigger a child run and durably wait for it. MUST be called inside a task.
-   * Never throws on child failure — inspect `result.ok` / use unwrapResult().
+   * Never throws on child failure — inspect `ok` / use unwrapResult().
    *
-   * `options.idempotencyKey` is NOT accepted here (the kernel refuses it with
-   * bad_request): the child's identity is this call's durable step, so every
-   * execution of this call site creates its own child — global idempotency
-   * belongs on `trigger()`.
+   * `options` excludes the fields this path cannot honour: `idempotencyKey` (the
+   * kernel refuses it with bad_request → the whole parent run fails), and the
+   * namespace pair `env`/`projectId` (a durable child always inherits the
+   * parent's namespace). The runtime still warns on a bare-JS caller that slips
+   * one through (p1-15), but at the type level they are now a compile error
+   * (01-core-sdk T4).
    */
-  triggerAndWait(payload: TPayload, options?: TriggerOptions): Promise<TaskRunResult<TOutput>>;
+  triggerAndWait(
+    payload: TPayload,
+    options?: DurableTriggerOptions,
+  ): Promise<TaskRunResult<TOutput>>;
 }
 
 /** Normalized internal definition. */
@@ -247,6 +269,22 @@ function normalizeDefinition(
   // names the task at definition time (p1-16). Throws KernelError bad_request.
   validateRetryPolicy(config.retry, `task("${id}").retry`);
 
+  // A concurrency limit of 0 (or a negative / fractional / NaN value) used to
+  // ride straight into tasks.concurrency_limit, where the kernel's claim guard
+  // `running >= limit` is then always true (queue.ts) — the task silently became
+  // unschedulable with no error anywhere. A limit is a count of concurrent runs,
+  // so it must be a positive integer; absent (a keyed-but-unlimited task) is
+  // fine. Names the task at definition time, mirroring validateRetryPolicy.
+  const concurrencyLimit = config.concurrency?.limit;
+  if (concurrencyLimit !== undefined) {
+    if (!Number.isInteger(concurrencyLimit) || concurrencyLimit < 1) {
+      throw new KernelError(
+        'bad_request',
+        `task("${id}").concurrency.limit must be an integer >= 1, got ${String(concurrencyLimit)}`,
+      );
+    }
+  }
+
   return {
     id,
     name: config.name,
@@ -273,21 +311,14 @@ export function normalizeCron(cron: CronInput | undefined): CronConfig | undefin
 function makeHandle<TPayload, TOutput>(
   def: ResolvedTaskDefinition<TPayload, TOutput>,
 ): TaskHandle<TPayload, TOutput> {
-  const concurrencyKeyFor = (payload: TPayload): string | undefined => {
-    const c = def.concurrency;
-    if (!c?.key) return undefined;
-    return c.key(payload);
-  };
-
-  /** Merge a derived concurrency key into options (explicit option wins). */
+  /** Merge the task's derived concurrency key into options (explicit wins).
+   *  The shared applyConcurrencyKey keeps this identical to the instance-level
+   *  trigger() derivation (01-core-sdk T10). */
   const withConcurrencyKey = (
     payload: TPayload,
     options?: TriggerOptions,
-  ): TriggerOptions | undefined => {
-    const key = options?.concurrencyKey ?? concurrencyKeyFor(payload);
-    if (key === undefined) return options;
-    return { ...options, concurrencyKey: key };
-  };
+  ): TriggerOptions | undefined =>
+    applyConcurrencyKey(options, def.concurrency?.key?.(payload));
 
   const handle: TaskHandle<TPayload, TOutput> = {
     id: def.id,
