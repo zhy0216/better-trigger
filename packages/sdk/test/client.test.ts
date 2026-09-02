@@ -326,6 +326,22 @@ describe('HttpClient — error mapping', () => {
     expect((err as HttpError).message).toContain('timed out after 10ms');
   });
 
+  it('rejects an invalid per-request timeoutMs override before touching the network', async () => {
+    // The constructor guards timeoutMs; a per-request override must clear the
+    // same bar. A 0/NaN override used to arm an already-expired timer, so the
+    // request died as a mystery 'timeout' HttpError instead of a config error.
+    // It throws (rejects) rather than falling back to the client value — the
+    // same contract as the constructor path.
+    const { fetch, calls } = stubFetch(new Response('{"ok":true}', { status: 200 }));
+    const c = client(fetch);
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(c.request('/runs', { timeoutMs: bad })).rejects.toThrow(
+        /"timeoutMs" must be a positive number of milliseconds/,
+      );
+    }
+    expect(calls).toHaveLength(0);
+  });
+
   it('aborts a mid-flight request when the caller signal fires, leaving no timer behind', async () => {
     // The stub never settles on its own — only the caller's abort can end it.
     // It mirrors a real fetch, which rejects with the signal's reason (a
@@ -355,5 +371,87 @@ describe('HttpClient — error mapping', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/* =============================================================================
+   P1-15 — body reads inside the timeout/abort guard.
+
+   The guard used to be dropped in the fetch call's `finally`, i.e. as soon as
+   the response HEADERS arrived: a slow-drip body could hang past timeoutMs
+   forever, and a caller abort landing during the body read (a run's
+   ctx.signal being the real case) was ignored. The timer and the listener now
+   stay armed until the body is fully consumed — on both the success path
+   (res.json) and the error path (toError also reads a body).
+
+   The stubs below mirror what a real fetch does on abort mid-body: the
+   response is constructed with an open stream that never delivers bytes, and
+   the request signal errors that stream when it fires — which is exactly
+   undici's behaviour, so the read breaks the same way it would in production.
+   ============================================================================= */
+describe('HttpClient — body reads inside the timeout/abort guard', () => {
+  /** Headers resolve immediately; the body stream stays open and errors on abort. */
+  function streamingFetch(init: { status?: number; statusText?: string } = {}) {
+    return ((_input: any, reqInit: any) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          reqInit.signal.addEventListener(
+            'abort',
+            () =>
+              controller.error(
+                reqInit.signal.reason ?? new DOMException('This operation was aborted', 'AbortError'),
+              ),
+            { once: true },
+          );
+        },
+      });
+      return Promise.resolve(new Response(stream, init));
+    }) as unknown as typeof globalThis.fetch;
+  }
+
+  it('times out when headers arrive fast but the body never does', async () => {
+    const err = await client(streamingFetch())
+      .request('/runs/run_1', { timeoutMs: 5 })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(0);
+    expect((err as HttpError).code).toBe('timeout');
+    expect((err as HttpError).message).toContain('timed out after 5ms');
+  });
+
+  it('surfaces a caller abort that lands during the body read, leaving no timer behind', async () => {
+    const caller = new AbortController();
+    vi.useFakeTimers();
+    try {
+      const errPromise = client(streamingFetch())
+        .request('/runs/run_1', { signal: caller.signal, timeoutMs: 30_000 })
+        .catch((e: unknown) => e);
+
+      caller.abort(new Error('run cancelled')); // after headers, during the body
+      const err = await errPromise;
+
+      // Same contract as a header-phase abort: the caller's own reason wins,
+      // not an HttpError(0, 'timeout').
+      expect(err).toBe(caller.signal.reason);
+      expect((err as Error).message).toBe('run cancelled');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('times out on a slow error body instead of degrading to the status-line fallback', async () => {
+    // toError reads the body too; without the guard in that phase a 5xx whose
+    // error body never arrives would hang, and an aborted read would masquerade
+    // as HttpError(500) "Internal Server Error" — the timeout must surface.
+    const err = await client(streamingFetch({ status: 500, statusText: 'Internal Server Error' }))
+      .request('/runs/run_1', { timeoutMs: 5 })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(0);
+    expect((err as HttpError).code).toBe('timeout');
+    expect((err as HttpError).message).toContain('timed out after 5ms');
   });
 });

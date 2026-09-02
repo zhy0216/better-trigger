@@ -81,6 +81,20 @@ export interface RequestOptions {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const PREFIX = '/api/v1';
 
+/**
+ * Shared timeoutMs guard for the constructor and the per-request override.
+ * A 0 / negative / non-finite value arms a setTimeout that fires immediately
+ * (or never), turning every request into a mystery 'timeout' HttpError — so
+ * it fails loudly with the same config error instead.
+ */
+function assertTimeoutMs(value: number): void {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(
+      `better-trigger: "timeoutMs" must be a positive number of milliseconds (got ${String(value)})`,
+    );
+  }
+}
+
 export class HttpClient {
   private readonly base: string;
   private readonly apiKey?: string;
@@ -93,11 +107,7 @@ export class HttpClient {
     this.base = opts.url.replace(/\/+$/, '');
     this.apiKey = opts.apiKey;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) {
-      throw new Error(
-        `better-trigger: "timeoutMs" must be a positive number of milliseconds (got ${String(opts.timeoutMs)})`,
-      );
-    }
+    assertTimeoutMs(this.timeoutMs);
     const f = opts.fetch ?? globalThis.fetch;
     if (typeof f !== 'function') {
       throw new Error(
@@ -114,6 +124,11 @@ export class HttpClient {
 
   async request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     const { method = 'GET', body, signal } = opts;
+    // A per-request override goes through the same guard as the constructor
+    // value: an invalid override must fail as a config error, not silently
+    // degrade to "every request times out immediately" (throwing is chosen
+    // over falling back so both call paths enforce the same contract).
+    if (opts.timeoutMs !== undefined) assertTimeoutMs(opts.timeoutMs);
     const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
 
     // Encode the body before the timeout controller and abort listener exist:
@@ -149,15 +164,45 @@ export class HttpClient {
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
 
-    let res: Response;
     try {
-      res = await this.doFetch(this.base + PREFIX + path, {
+      const res = await this.doFetch(this.base + PREFIX + path, {
         method,
         headers,
         body: bodyStr,
         signal: controller.signal,
       });
+
+      // Body consumption stays INSIDE the timeout/abort guard (p1-15): the
+      // timer is still armed and the caller's listener still attached, so a
+      // slow-drip body cannot outrun timeoutMs and a mid-body caller abort
+      // (e.g. a run's ctx.signal) still breaks the read. When either fires,
+      // controller.abort() errors the body stream and the rejection lands in
+      // the classifier below — the same timeout / abort errors as the
+      // header phase.
+      if (!res.ok) throw await toError(res, controller.signal);
+      if (res.status === 204) return undefined as T;
+      // A 2xx with a non-JSON body (a misconfigured proxy, an HTML error page
+      // behind a 200) used to throw a bare SyntaxError from res.json() OUTSIDE
+      // this guard — not an HttpError, not a KernelError — so callers could not
+      // recognize it. Wrap it as a distinguishable HttpError(status, invalid_json).
+      try {
+        return (await res.json()) as T;
+      } catch (err) {
+        // The read died because WE aborted it (timeout or caller cancel) —
+        // that is a timeout/abort, not a malformed body. Let the classifier
+        // below map it; do not dress it up as invalid_json.
+        if (controller.signal.aborted) throw err;
+        throw new HttpError(
+          res.status,
+          'invalid_json',
+          `better-trigger: request to ${this.base}${PREFIX}${path} answered ${res.status} with a body that is not JSON`,
+        );
+      }
     } catch (err) {
+      // Mapped failures (toError's HttpError/KernelError, invalid_json) leave
+      // untouched; everything else is a transport-phase or body-phase
+      // interruption and gets classified here.
+      if (err instanceof HttpError || err instanceof KernelError) throw err;
       // Caller aborted → surface their reason; our internal timeout → a
       // distinguishable HttpError (code 'timeout'); otherwise a genuine
       // transport failure (daemon down, DNS, TLS).
@@ -179,27 +224,18 @@ export class HttpClient {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
     }
-
-    if (!res.ok) throw await toError(res);
-    if (res.status === 204) return undefined as T;
-    // A 2xx with a non-JSON body (a misconfigured proxy, an HTML error page
-    // behind a 200) used to throw a bare SyntaxError from res.json() OUTSIDE
-    // this guard — not an HttpError, not a KernelError — so callers could not
-    // recognize it. Wrap it as a distinguishable HttpError(status, invalid_json).
-    try {
-      return (await res.json()) as T;
-    } catch {
-      throw new HttpError(
-        res.status,
-        'invalid_json',
-        `better-trigger: request to ${this.base}${PREFIX}${path} answered ${res.status} with a body that is not JSON`,
-      );
-    }
   }
 }
 
-/** Turn a non-2xx response into a KernelError (known code) or HttpError. */
-async function toError(res: Response): Promise<Error> {
+/**
+ * Turn a non-2xx response into a KernelError (known code) or HttpError.
+ * `signal` is the request's internal abort signal: reading the error body
+ * happens inside the timeout/abort guard too (p1-15), so when the read dies
+ * because the timeout fired or the caller aborted, the abort must surface
+ * (the caller classifies it as timeout/abort) instead of degrading to the
+ * status-line fallback and hanging or hiding the real failure.
+ */
+async function toError(res: Response, signal?: AbortSignal): Promise<Error> {
   let message = res.statusText || `HTTP ${res.status}`;
   let code: string | null = null;
   let requestId: string | null = null;
@@ -212,7 +248,8 @@ async function toError(res: Response): Promise<Error> {
       if (typeof body.error.code === 'string') code = body.error.code;
       if (typeof body.error.requestId === 'string') requestId = body.error.requestId;
     }
-  } catch {
+  } catch (err) {
+    if (signal?.aborted) throw err;
     /* non-JSON error body — keep the status line */
   }
   if (code && KERNEL_CODES.has(code)) {

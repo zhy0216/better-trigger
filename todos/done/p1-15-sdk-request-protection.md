@@ -2,7 +2,7 @@
 
 - 优先级：P1（合约破坏 / 可挂起）
 - 区域：packages/sdk
-- 状态：待办
+- 状态：已完成（C1/C2 均已落地，见 `packages/sdk/src/client.ts` 与 `packages/sdk/test/client.test.ts`）
 - 来源：2026-09-02 全仓库审查（第二轮）
 
 ## C1 · body 读取在 timeout/abort 清理之后 {#c1}
@@ -47,8 +47,8 @@
 
 ## 验收标准
 
-- [ ] `bun run typecheck`、`bun run build`、`bun run test` 全部通过。
-- [ ] 新增单测：响应头立即返回但 body 延迟超过 `timeoutMs` → 按超时失败；
+- [x] `bun run typecheck`、`bun run build`、`bun run test` 全部通过。
+- [x] 新增单测：响应头立即返回但 body 延迟超过 `timeoutMs` → 按超时失败；
   body 阶段外部 abort → 按 abort 失败；非法 per-request `timeoutMs` → 报错。
 
 ## 涉及文件
