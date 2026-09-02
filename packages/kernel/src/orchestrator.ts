@@ -5,7 +5,9 @@
    default OFF (5. retention GC, below):
      1. wait-due scanner   (timerIntervalMs, 1s)   — resume duration/until waits
      2. cron scheduler     (cronIntervalMs, 1s)    — fire due schedules via
-        createRunIn (task retry policy resolved like any other trigger)
+        createRunIn (task retry policy resolved like any other trigger);
+        fires for tasks no online worker serves are SKIPPED and counted
+        rather than turned into runs nobody can ever claim (p2-18 C1)
      3. lease reaper       (reaperIntervalMs, 10s) — recover runs whose
         lease_until has expired (spends runs.recoveries, never runs.attempt —
         losing a worker is infrastructure, not the user's code failing)
@@ -39,7 +41,7 @@
    (logged via the kernel logger) so loops never die.
    ============================================================================= */
 import { Cron } from 'croner';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import {
   DEFAULT_NAMESPACE,
   KernelError,
@@ -114,6 +116,37 @@ const REAP_BATCH = 100;
 export function nextCronAt(pattern: string, timezone?: string, from?: Date): Date | null {
   const cron = new Cron(pattern, timezone ? { timezone } : {});
   return cron.nextRun(from ?? new Date());
+}
+
+/**
+ * Which of `taskIds` an online worker still serves in `namespace` (p2-18 C1).
+ *
+ * "Served" is the same reading the registration guard uses (workers.ts): an
+ * `online` worker row, heartbeating inside the offline-marker window (the
+ * '2 minutes' literal is WORKER_OFFLINE_MS, spelled the same way there), that
+ * serves this namespace and lists the task id in its manifest. Manifest rows
+ * written by an older build (or a peer mid-rollout) hold bare id strings;
+ * COALESCE normalizes both shapes, same as scanStrandedRuns does.
+ */
+async function servedTaskIds(
+  client: PoolClient,
+  namespace: Namespace,
+  taskIds: string[],
+): Promise<Set<string>> {
+  const res = await client.query<{ task_id: string }>(
+    `SELECT t.task_id
+       FROM (SELECT unnest($2::text[]) AS task_id) t
+      WHERE EXISTS (
+        SELECT 1 FROM workers w
+          CROSS JOIN LATERAL jsonb_array_elements(w.tasks) e
+         WHERE w.status = 'online'
+           AND w.last_heartbeat_at > now() - INTERVAL '2 minutes'
+           AND w.namespaces @> $1::jsonb
+           AND COALESCE(e->>'id', e #>> '{}') = t.task_id
+      )`,
+    [JSON.stringify([namespace]), taskIds],
+  );
+  return new Set(res.rows.map((r) => r.task_id));
 }
 
 export interface OrchestratorOptions {
@@ -193,6 +226,14 @@ export interface OrchestratorCounters {
    * runs at all (`stranded`), which is to say unless something pins.
    */
   stranded: StrandedScan;
+  /**
+   * Cron fires the scheduler SKIPPED because no online worker serves the
+   * task (p2-18 C1) — the schedule of a task removed from every manifest
+   * stays due forever otherwise, and every tick that found it due would add
+   * another queued run no worker can ever claim. Monotonic total of skipped
+   * fires; the task ids involved are named by the loop's transition log.
+   */
+  cronSkippedUnserved: number;
   /** Loop iterations that threw, per loop. Each one is logged too, but a rate
    *  is what says "the cron loop has been failing all afternoon". */
   loopErrors: {
@@ -223,6 +264,7 @@ export function createOrchestratorCounters(): OrchestratorCounters {
     gcRunsDeleted: 0,
     gcWorkersDeleted: 0,
     stranded: { groups: [], truncated: false },
+    cronSkippedUnserved: 0,
     loopErrors: { waits: 0, cron: 0, reaper: 0, workers: 0, gc: 0, stranded: 0 },
     // 0 = "this loop has never ticked" — the metrics reader emits only loops
     // that have actually run, so a deliberately-disabled loop (e.g. waits on
@@ -608,6 +650,12 @@ export function startOrchestrator(
   // below. Starts at the all-clear signature so the first clean tick does not
   // log a phantom "recovery".
   let lastWaitGraphSignature = '0/0';
+  // p2-18 C1: the set of unserved cron tasks as of the last committed tick,
+  // same transition-logging rationale as lastWaitGraphSignature — the
+  // condition persists by nature (an unregistered task stays unregistered
+  // across many fires), so a line per skipped fire would be noise while a
+  // line only on the way in would leave "did it come back?" unanswered.
+  let lastUnservedCronSignature = '';
   const logWaitGraphViolations = (noWaitRuns: number, stuckWaits: number): void => {
     const signature = `${noWaitRuns}/${stuckWaits}`;
     if (signature === lastWaitGraphSignature) return;
@@ -717,7 +765,51 @@ export function startOrchestrator(
         due.rows.push(...res.rows);
       }
 
+      // p2-18 C1: a task removed from every online worker's manifest keeps
+      // its `tasks` row AND its schedule (the engine never deletes a task),
+      // so the due-scan above still finds it due — and firing it would create
+      // a run no worker can ever claim: queue rows pile up forever, silently
+      // (the stranded scan is off unless something pins). Skip those fires
+      // instead, with a transition log + counter, and still advance
+      // next_run_at from the DB clock (same p1-09 discipline as the fire
+      // path): the schedule keeps its cadence, cannot monopolize the LIMIT
+      // window with a permanently-due head, and fires normally the moment a
+      // serving worker comes back. Nothing is created and nothing is
+      // deleted — stopping the bleeding and exposing it is all this loop may
+      // do for data it does not own.
+      const fired: ScheduleRow[] = [];
+      const skippedUnserved: ScheduleRow[] = [];
+      const dueNs = new Map<string, ScheduleRow[]>();
       for (const s of due.rows) {
+        const key = `${s.project_id}/${s.env}`;
+        const group = dueNs.get(key);
+        if (group) group.push(s);
+        else dueNs.set(key, [s]);
+      }
+      for (const group of dueNs.values()) {
+        const ns: Namespace = { projectId: group[0]!.project_id, env: group[0]!.env };
+        const served = await servedTaskIds(client, ns, [...new Set(group.map((s) => s.task_id))]);
+        for (const s of group) (served.has(s.task_id) ? fired : skippedUnserved).push(s);
+      }
+
+      for (const s of skippedUnserved) {
+        const next = nextCronAt(s.cron_pattern, s.cron_tz ?? undefined, s.db_now);
+        // No last_run_at / last_run_id: no run happened. The clamp and the
+        // NULL guard are the fire path's (p1-09) — an impossible pattern must
+        // stay silent, not spin.
+        await client.query(
+          `UPDATE schedules
+              SET next_run_at = CASE
+                    WHEN $2::timestamptz IS NULL THEN NULL
+                    ELSE GREATEST($2::timestamptz, now() + interval '1 second')
+                  END,
+                  updated_at = now()
+            WHERE id = $1 AND project_id = $3 AND env = $4`,
+          [s.id, next, s.project_id, s.env],
+        );
+      }
+
+      for (const s of fired) {
         // Create + enqueue through the shared path so retry policy and
         // concurrency key resolve exactly like any other trigger.
         const created = await createRunIn(client, {
@@ -755,8 +847,33 @@ export function startOrchestrator(
       }
       // At least one schedule fired in this tx → wake the claim loops with a
       // single aggregate `work` notification (see runs.ts batchTrigger).
-      if (due.rows.length > 0) await notifyWork(client);
+      // Skipped-unserved schedules created no run, so they wake nothing.
+      if (fired.length > 0) await notifyWork(client);
       await client.query('COMMIT');
+      // Folded after COMMIT like the reaper's tallies: a rolled-back tick
+      // created no runs and consumed no fires (next_run_at reverts with it),
+      // so it skipped nothing worth counting or logging.
+      counters.cronSkippedUnserved += skippedUnserved.length;
+      const unservedSignature = [...new Set(
+        skippedUnserved.map((s) => `${s.project_id}/${s.env}/${s.task_id}`),
+      )]
+        .sort()
+        .join(', ');
+      if (unservedSignature !== lastUnservedCronSignature) {
+        lastUnservedCronSignature = unservedSignature;
+        if (unservedSignature === '') {
+          logger.warn(
+            `[orchestrator:cron] no cron schedule is unserved anymore — fires resumed`,
+          );
+        } else {
+          logger.warn(
+            `[orchestrator:cron] skipped due cron fire(s) for task(s) no online ` +
+              `worker serves: ${unservedSignature} — no runs were created for them. ` +
+              `Start a worker whose manifest declares the task, or delete its ` +
+              `schedule; the scan keeps skipping it while nothing serves it.`,
+          );
+        }
+      }
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       throw err;

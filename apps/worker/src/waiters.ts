@@ -306,8 +306,17 @@ export function createWaiterRegistry(deps: {
     }
   }
 
+  // p2-18 C4: re-entrancy guard, same single-flight shape as the orchestrator
+  // loops' running flags. isPending already prevented double-settling, but a
+  // sweep still slower than pollMs (a degraded database) would otherwise keep
+  // launching overlapping batch reads that all re-query the same waiters.
+  let sweeping = false;
   const pollTimer = setInterval(() => {
-    void sweep();
+    if (sweeping) return;
+    sweeping = true;
+    void sweep().finally(() => {
+      sweeping = false;
+    });
   }, pollMs);
   (pollTimer as { unref?: () => void }).unref?.();
 

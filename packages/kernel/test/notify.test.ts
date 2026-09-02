@@ -628,6 +628,10 @@ describe('notify sources — orchestrator loops', () => {
             },
           ],
         }),
+        // p2-18 C1: the served-check answers "an online worker serves t1" —
+        // without it the schedule reads as orphaned and the fire is skipped
+        // (that path has its own suite in cron-unserved.test.ts).
+        () => ({ rows: [{ task_id: 't1' }] }),
         () => ({ rows: [TASK_ROW] }),
         (_, params) => ({ rows: [{ id: String(params?.[0]) }] }),
         () => ({ rows: [] }), // enqueue

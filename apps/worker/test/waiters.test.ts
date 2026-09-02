@@ -146,6 +146,51 @@ describe('waiter registry', () => {
     reg.stop();
   });
 
+  // p2-18 C4: sweep had no re-entrancy guard — a sweep slower than pollMs
+  // (degraded database) kept launching overlapping batch reads. isPending
+  // already prevented double-settling, but the redundant concurrent queries
+  // did not match the single-flight shape of every other poll in the repo
+  // (orchestrator loops, metrics gauge). The guard makes one sweep at most
+  // in flight; skipped ticks are not lost, the next one covers the backlog.
+  it('does not overlap sweeps when the query outlasts the interval', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let sweeps = 0;
+    const state = { status: 'running', output: null as unknown };
+    const pool = {
+      query: async (text: string) => {
+        if (/WHERE id = ANY/.test(text)) {
+          sweeps += 1;
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((r) => setTimeout(r, 80)); // ≫ pollMs
+          inFlight -= 1;
+          return {
+            rows: [{ id: 'run_r', status: state.status, output: state.output, error: null }],
+          };
+        }
+        // The register() initial read — keep the waiter pending.
+        return { rows: [{ status: 'running', output: null, error: null }] };
+      },
+    } as unknown as Parameters<typeof createWaiterRegistry>[0]['pool'];
+
+    const reg = createWaiterRegistry({ pool, counters: createNotifyCounters(), pollMs: 10 });
+    const p = reg.register('run_r', NS, { timeoutMs: 5_000 });
+    await new Promise((r) => setTimeout(r, 250)); // ≥ 8 tick windows, ~3 slow sweeps
+    expect(sweeps).toBeGreaterThan(0);
+    expect(maxInFlight).toBe(1);
+    // Without the guard ~25 overlapping sweeps would have fired in this
+    // window; with it, at most one per actual sweep duration plus slack.
+    expect(sweeps).toBeLessThanOrEqual(8);
+
+    // The sweep still settles the waiter once the run goes terminal.
+    state.status = 'completed';
+    state.output = 'late';
+    const res = await p;
+    expect(res.status).toBe('completed');
+    reg.stop();
+  });
+
   it('times out with the latest non-terminal status, matching waitForResult', async () => {
     const { reg, runs } = registry();
     runs.set('run_t', { id: 'run_t', status: 'running' });

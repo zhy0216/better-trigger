@@ -2,7 +2,7 @@
 
 - 优先级：P2（健壮性 / 可观测性打磨）
 - 区域：packages/kernel、apps/worker
-- 状态：待办
+- 状态：已完成（2026-09-02）
 - 来源：2026-09-02 全仓库审查（第二轮）
 
 ## C1 · 从所有 manifest 移除的 cron task，schedule 永久触发、run 无限堆积 {#c1}
@@ -92,9 +92,21 @@ stopping 后认领到的 run、未知 task 的 run，两处释放用 `.catch(() 
 
 ## 验收标准
 
-- [ ] `bun run typecheck`、`bun run build`、`bun run test` 全部通过；涉及通知/
-  调度路径的改动在真 PG 下复跑相关套件。
-- [ ] 不改变既有正确路径行为；新增观测点有对应指标/日志断言。
+- [x] `bun run typecheck`、`bun run build`、`bun run test` 全部通过；涉及通知/
+  调度路径的改动在真 PG 下复跑相关套件（kernel 全套 + test/pg/cron-unserved、
+  cron-skew、suspend-notify、smoke 于本机 postgres:16 通过）。
+- [x] 不改变既有正确路径行为；新增观测点有对应指标/日志断言。
+  - C1：`OrchestratorCounters.cronSkippedUnserved` 计数 + `[orchestrator:cron]`
+    转换日志；stub 断言见 `packages/kernel/test/cron-unserved.test.ts`，真 PG
+    断言见 `packages/kernel/test/pg/cron-unserved.test.ts`（含 worker 回归在线后
+    恢复触发）。
+  - C2：`notify.test.ts` 新增 delayed-'end'/stale-'error' 两个竞态用例；既有
+    error+end 去重、stop 语义用例不变。
+  - C3：慢 appendLogs 下 `maxInFlight == 1`、全量投递 / 溢出 drop-oldest 计入
+    `logFlushErrors` 并有 warn 行（`executor-log-backpressure.test.ts`）。
+  - C4：`waiters.test.ts` 新增 sweep 不重叠用例。
+  - C5：两处 `releaseClaims` 失败经 throttled `log.warn`（`release-claims:` 桶，
+    对齐 `handBack()` 口径）并报出（`runtime-logging.test.ts` 两个用例）。
 
 ## 涉及文件
 

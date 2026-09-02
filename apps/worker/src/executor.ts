@@ -115,6 +115,17 @@ export type ExecutionResult =
 
 const LOG_FLUSH_INTERVAL_MS = 1_000;
 const LOG_FLUSH_THRESHOLD = 50;
+/**
+ * p2-18 C3 bounds. Flushes are serialised through one appendLogs at a time;
+ * at most this many threshold/timer-triggered flushes may be queued behind
+ * the in-flight one (awaited flushes from execution transitions queue past
+ * this cap — see flushLogs), and at most this many log lines stay buffered
+ * (overflow drops the oldest, counted through the existing logFlushErrors
+ * bucket). The caps only ever bite a database that cannot drain; the steady
+ * state is one batch in flight and the buffer below the threshold.
+ */
+const LOG_FLUSH_QUEUE_MAX = 4;
+const LOG_BUFFER_MAX = 1_000;
 
 export class Executor implements RunExecutor {
   private seq = 0;
@@ -128,6 +139,13 @@ export class Executor implements RunExecutor {
   private readonly stepAls = new AsyncLocalStorage<number>();
   private logBuffer: LogEntry[] = [];
   private logTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * p2-18 C3: the serial flush chain (flushLogs appends one step per call;
+   * only one appendLogs is ever in flight) and how many steps are queued on
+   * it, counted so opportunistic callers can be refused at the cap.
+   */
+  private flushChain: Promise<void> = Promise.resolve();
+  private flushQueued = 0;
   /** Set true once a kernel write is rejected (run_not_running / stale_lease). */
   private abandoned = false;
   /**
@@ -299,7 +317,7 @@ export class Executor implements RunExecutor {
       // happen. Report the outcome that actually holds instead.
       if (this.endSignal !== null) return this.endedWithoutUs();
       if (this.abandoned) return { type: 'abandoned' };
-      await this.flushLogs();
+      await this.flushLogs(true);
       try {
         await this.kernel.completeRun({
           runId: this.run.id,
@@ -329,7 +347,7 @@ export class Executor implements RunExecutor {
   private async handleThrown(err: unknown): Promise<ExecutionResult> {
     // SuspendSignal: wait / triggerAndWait already recorded in the kernel.
     if (isSuspendSignal(err)) {
-      await this.flushLogs();
+      await this.flushLogs(true);
       return { type: 'suspended' };
     }
     // ExecutionDone: a step failure path already reported fail() — just unwind.
@@ -365,7 +383,7 @@ export class Executor implements RunExecutor {
         `everything after the catch ran outside the run: unrecorded, and again on ` +
         `replay. Rethrow it: if (isControlFlowSignal(err)) throw err.`,
     );
-    await this.flushLogs();
+    await this.flushLogs(true);
     if (this.endSignal === 'suspend') return { type: 'suspended' };
     return this.abandoned ? { type: 'abandoned' } : { type: 'failed' };
   }
@@ -677,7 +695,7 @@ export class Executor implements RunExecutor {
     );
     // Reach the user before the throw is classified: the abandonment paths in
     // handleThrown return without flushing, and this warning is the only trace.
-    await this.flushLogs();
+    await this.flushLogs(true);
     throw new AbortError(
       `${summary}. A catch-all around a durable primitive swallows the signal ` +
         `that ends the execution, so run ${this.run.id} kept executing while it ` +
@@ -1049,7 +1067,7 @@ export class Executor implements RunExecutor {
     abort: boolean,
     retry: RetryPolicy | undefined,
   ): Promise<void> {
-    await this.flushLogs();
+    await this.flushLogs(true);
     try {
       await this.kernel.failRun({
         runId: this.run.id,
@@ -1092,6 +1110,29 @@ export class Executor implements RunExecutor {
     const activeStepSeq = this.stepAls.getStore();
     if (activeStepSeq !== undefined) entry.stepSeq = activeStepSeq;
     this.logBuffer.push(entry);
+    if (this.logBuffer.length > LOG_BUFFER_MAX) {
+      // p2-18 C3: the flush side is bounded (one appendLogs in flight, queue
+      // capped), so against a database slower than the log rate the buffer
+      // would otherwise grow at rate × delay without ceiling. Past the cap
+      // the OLDEST lines go — they are the ones already furthest from the
+      // run reader's tail — and the loss goes through the same
+      // logFlushErrors bucket a dropped flush reports to: bounded memory,
+      // counted loss, never an exception into the execution path. Dropping
+      // straight back to half the cap (rather than one line per push) keeps
+      // this a rare amortized event instead of a splice per line.
+      const dropped = this.logBuffer.splice(0, this.logBuffer.length - LOG_BUFFER_MAX / 2);
+      const d = this.diagnostics;
+      if (d) {
+        d.counters.logFlushErrors += 1;
+        d.log.warn(
+          'log-flush:backpressure',
+          `dropped ${dropped.length} oldest buffered log line(s) for run ${this.run.id} ` +
+            `(task=${this.run.taskId}) — appendLogs is not draining; buffered cap ` +
+            `is ${LOG_BUFFER_MAX} lines`,
+          undefined,
+        );
+      }
+    }
     if (this.logBuffer.length >= LOG_FLUSH_THRESHOLD) {
       void this.flushLogs();
     }
@@ -1110,8 +1151,41 @@ export class Executor implements RunExecutor {
     }
   }
 
-  /** Ship buffered logs (best-effort; never throws into the execution path). */
-  private async flushLogs(): Promise<void> {
+  /**
+   * Ship buffered logs (best-effort; never throws into the execution path).
+   *
+   * p2-18 C3: every call queues its batch behind the one in flight instead of
+   * starting a parallel appendLogs — before this, each threshold crossing and
+   * each 1s timer tick fired its own, so a slow database meant unbounded
+   * concurrent flushes and unbounded in-flight memory. Opportunistic calls
+   * (threshold, timer) are refused once LOG_FLUSH_QUEUE_MAX steps already
+   * wait; the refused lines simply stay in the capped buffer and ride out with
+   * the next drain. `mandatory` is the awaited flush of an execution
+   * transition (suspend, complete, fail, the signal-swallow warning): it
+   * queues past the cap, and awaiting it therefore awaits every batch queued
+   * before it — the ordering callers depend on (logs before the terminal
+   * write) survives a slow DB, only the transition waits. An empty buffer
+   * returns immediately, exactly as before: the ordering promise covers the
+   * lines still buffered at call time, and they are all in the buffer (a
+   * queued step only takes its batch when it runs).
+   */
+  private flushLogs(mandatory = false): Promise<void> {
+    if (this.logBuffer.length === 0) return Promise.resolve();
+    if (!mandatory && this.flushQueued >= LOG_FLUSH_QUEUE_MAX) return Promise.resolve();
+    this.flushQueued += 1;
+    const step = this.flushChain.then(() => {
+      this.flushQueued -= 1;
+      return this.flushOnce();
+    });
+    // The chain must never carry a rejection or every later step skips
+    // execution (flushOnce swallows appendLogs failures today — the catch
+    // keeps that structural rather than incidental).
+    this.flushChain = step.catch(() => {});
+    return step;
+  }
+
+  /** One buffered batch to the kernel; failures are reported, never thrown. */
+  private async flushOnce(): Promise<void> {
     if (this.logBuffer.length === 0) return;
     const logs = this.logBuffer;
     this.logBuffer = [];

@@ -173,6 +173,77 @@ describe('LISTEN connection lifecycle', () => {
     }
   });
 
+  // p2-18 C2: the dedup flag assumes the broken connection's 'end' lands
+  // BEFORE the reconnect timer fires. When the socket's 'end' is delayed past
+  // the successful reconnect, the old handler used to schedule a SECOND
+  // connect() whose client overwrote `client` — orphaning the freshly
+  // LISTENing connection (unclosed, duplicating every notification) and
+  // leaking one socket per race. The generation guard is what makes a stale
+  // connection's callbacks inert.
+  it("a delayed 'end' after the reconnect landed does not orphan the live connection", async () => {
+    const { listener, counters } = makeListener({ reconnectBaseMs: 10 });
+    try {
+      await waitFor(
+        () =>
+          FakeClient.instances.length === 1 &&
+          FakeClient.instances[0]!.connects === 1 &&
+          FakeClient.instances[0]!.has('end'),
+      );
+      const first = FakeClient.instances[0]!;
+      first.emit('error', new Error('connection reset'));
+      // The replacement connects AND adopts its handlers before the old
+      // connection's 'end' finally arrives.
+      await waitFor(
+        () =>
+          FakeClient.instances.length === 2 &&
+          FakeClient.instances[1]!.connects === 1 &&
+          FakeClient.instances[1]!.has('end'),
+      );
+      const second = FakeClient.instances[1]!;
+      first.emit('end'); // the delayed one
+
+      await new Promise((r) => setTimeout(r, 40)); // past another backoff window
+      expect(FakeClient.instances.length).toBe(2); // no third connect
+      expect(second.ended).toBe(0); // the live LISTEN was not orphaned
+      expect(counters.listenReconnects).toBe(1); // and not counted twice
+      // The successor still owns the listener role: notifications dispatch.
+      second.emit('notification', { channel: NOTIFY_CHANNEL, payload: '{"type":"work"}' });
+      await waitFor(() => counters.notificationsReceived >= 1);
+    } finally {
+      await listener.stop();
+    }
+  });
+
+  it('a stale late erroring connection closes itself without disturbing the live one', async () => {
+    const { listener, counters } = makeListener({ reconnectBaseMs: 10 });
+    try {
+      await waitFor(
+        () =>
+          FakeClient.instances.length === 1 &&
+          FakeClient.instances[0]!.connects === 1 &&
+          FakeClient.instances[0]!.has('end'),
+      );
+      const first = FakeClient.instances[0]!;
+      first.emit('error', new Error('connection reset'));
+      await waitFor(
+        () =>
+          FakeClient.instances.length === 2 &&
+          FakeClient.instances[1]!.connects === 1 &&
+          FakeClient.instances[1]!.has('error'),
+      );
+      const second = FakeClient.instances[1]!;
+
+      first.emit('error', new Error('late error on an abandoned socket'));
+      await new Promise((r) => setTimeout(r, 40));
+      expect(FakeClient.instances.length).toBe(2); // the stale error scheduled nothing
+      expect(second.ended).toBe(0); // the live connection untouched
+      expect(first.ended).toBeGreaterThanOrEqual(1); // the stale socket was closed
+      expect(counters.listenReconnects).toBe(1);
+    } finally {
+      await listener.stop();
+    }
+  });
+
   it('dispatches parsed payloads and drops malformed ones', async () => {
     const { listener, onNotify } = makeListener({});
     try {

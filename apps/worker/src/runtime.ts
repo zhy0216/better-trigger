@@ -343,11 +343,26 @@ export async function startWorkerRuntime(
         // The run's fencing token was already bumped by the claim; releaseClaims
         // does not touch it, and the next claim's token++ invalidates any late
         // write.
-        await kernel.releaseClaims({
-          workerId,
-          namespaces: options.namespaces,
-          runIds: [run.id],
-        }).catch(() => {});
+        await kernel
+          .releaseClaims({
+            workerId,
+            namespaces: options.namespaces,
+            runIds: [run.id],
+          })
+          .catch((err) => {
+            // p2-18 C5: the failure used to vanish into an empty catch. Losing
+            // this release costs the run a reaper pass and one of its
+            // recoveries, so it gets the same voice and bucket handBack()
+            // reports to — the run is still safe (reaper), it is only no
+            // longer silent.
+            log.warn(
+              `release-claims:${errorKey(err)}`,
+              `failed to release claim on run ${run.id} while stopping ` +
+                `(worker=${workerId}, slot=${slot}); the run waits for the ` +
+                `lease reaper instead`,
+              err,
+            );
+          });
         break;
       }
 
@@ -355,12 +370,24 @@ export async function startWorkerRuntime(
       if (!def) {
         // Should not happen (the claim filters by this worker's task ids);
         // hand the lease straight back so another worker can pick the run up
-        // at once instead of waiting out the lease reaper.
-        await kernel.releaseClaims({
-          workerId,
-          namespaces: options.namespaces,
-          runIds: [run.id],
-        }).catch(() => {});
+        // at once instead of waiting out the lease reaper. Same p2-18 C5
+        // visibility as the stop-path release above: a failed hand-back means
+        // this run now waits for the reaper like a lost lease.
+        await kernel
+          .releaseClaims({
+            workerId,
+            namespaces: options.namespaces,
+            runIds: [run.id],
+          })
+          .catch((err) => {
+            log.warn(
+              `release-claims:${errorKey(err)}`,
+              `failed to release claim on run ${run.id} with unknown task ` +
+                `${run.taskId} (worker=${workerId}, slot=${slot}); the run ` +
+                `waits for the lease reaper instead`,
+              err,
+            );
+          });
         continue;
       }
 

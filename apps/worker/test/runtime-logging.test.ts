@@ -260,3 +260,81 @@ describe('a log flush that fails', () => {
     expect(handle.counters.logFlushErrors).toBe(1);
   }, 15_000);
 });
+
+/* ---------------------------------------------------------------------------
+ * p2-18 C5: the claim loop's two per-run releaseClaims hand-backs used to end
+ * in `.catch(() => {})` — a failed one left the run to the reaper with no
+ * trace at all. They now report through the same throttled release-claims
+ * bucket handBack() uses.
+ * ------------------------------------------------------------------------- */
+
+const GHOST: ClaimedRun = { ...RUN, id: 'run_ghost', taskId: 'ghost' };
+
+function releaseFailingKernel(opts: { claimDelayMs?: number; alwaysHandOut?: boolean } = {}) {
+  const releases: unknown[] = [];
+  let handedOut = false;
+  const kernel = {
+    registerWorker: async () => ({ workerId: 'w1' }),
+    startOrchestrator: () => ({ stop: () => {} }),
+    claimRuns: async () => {
+      if (opts.claimDelayMs) await new Promise((r) => setTimeout(r, opts.claimDelayMs));
+      if (opts.alwaysHandOut) return [GHOST];
+      if (handedOut) return [];
+      handedOut = true;
+      return [GHOST];
+    },
+    heartbeat: async () => ({ cancelRunIds: [], lostRunIds: [] }),
+    releaseClaims: async (input: unknown) => {
+      releases.push(input);
+      throw new Error('connection refused');
+    },
+    deregisterWorker: async () => {},
+    completeRun: async () => {},
+    failRun: async () => ({ willRetry: false }),
+    appendLogs: async () => {},
+    reportStep: async () => {},
+  } as unknown as Kernel;
+  return { kernel, releases };
+}
+
+describe('a per-run claim hand-back that fails (p2-18 C5)', () => {
+  it('warns on the unknown-task release and keeps the slot claiming', async () => {
+    const { kernel, releases } = releaseFailingKernel();
+    const { lines, logger } = recordingLogger();
+
+    const handle = await startWorkerRuntime(
+      { kernel, logger },
+      { tasks: [ok], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
+    );
+    await waitFor(() => releases.length >= 1);
+    await handle.stop();
+
+    const warned = lines.find((l) => l.includes('failed to release claim on run run_ghost'));
+    expect(warned).toBeDefined();
+    expect(warned).toContain('unknown task ghost');
+    expect(warned).toContain('waits for the');
+    // The slot did not die on the failed hand-back — the loop moved on.
+    expect(handle.counters.executorErrors).toBe(0);
+  }, 15_000);
+
+  it('warns when the claim resolved after stopping and the release fails', async () => {
+    // The p1-12 path: the claim lands after stop() began, so the run is
+    // handed back — and THAT release failing must now be visible too.
+    const { kernel, releases } = releaseFailingKernel({ claimDelayMs: 40, alwaysHandOut: true });
+    const { lines, logger } = recordingLogger();
+
+    const handle = await startWorkerRuntime(
+      { kernel, logger },
+      { tasks: [ok], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
+    );
+    await new Promise((r) => setTimeout(r, 10)); // stop while the claim is in flight
+    await handle.stop();
+
+    expect(releases.length).toBeGreaterThanOrEqual(1);
+    const warned = lines.find((l) => l.includes('while stopping'));
+    expect(warned).toBeDefined();
+    expect(warned).toContain('failed to release claim on run run_ghost');
+    // The run was never executed: no task body ran for the stopped claim.
+    expect(handle.counters.runOutcomes.completed).toBe(0);
+  }, 15_000);
+});

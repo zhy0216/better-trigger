@@ -2,7 +2,7 @@
 
 本轮条目来自对 kernel / worker / sdk / core / web / CI / roadmap 的第二轮全仓库审查（第一轮 12 条见 `done/`）。每个文件一个（或一组紧密相关的）问题；文件内保留现状证据、影响、不变量、实现方案和验收标准。条目目前都只是待办，不代表修复已经落地。
 
-## 状态：进行中（6/8 已归档至 done/）
+## 状态：进行中（7/8 已归档至 done/）
 
 ## 优先级与执行顺序
 
@@ -15,7 +15,7 @@
 | 3 | [p1-15-sdk-request-protection.md](./done/p1-15-sdk-request-protection.md) ✅ | SDK 响应 body 读取在 timeout/abort 清理之后 → 慢速 body 突破 `timeoutMs` 合约；per-request `timeoutMs` 覆盖绕过校验 | — |
 | 4 | [p1-16-config-input-validation.md](./done/p1-16-config-input-validation.md) ✅ | `RetryPolicy` 全链路零校验（NaN/负值直落数据库）；`--lease-ms ≤ 500` 不拒绝（心跳必然晚于租约，reaper 吃光 recoveries）；`requireInt` 不校验整数 | — |
 | 5 | [p1-17-dashboard-race-and-errors.md](./done/p1-17-dashboard-race-and-errors.md) ✅ | loadMore/loadOlderLogs 过期响应把旧 env/旧 run 数据写进新列表；Schedules 开关失败吞错、401 不上报；日志流强制滚底打断回读 | 已完成：分页提交加代次守卫（过期响应丢弃）；开关失败对齐 actionError 并 401 上报连接注册表；日志仅在贴底时自动跟随 |
-| 6 | [p2-18-kernel-worker-low-hanging-2.md](./p2-18-kernel-worker-low-hanging-2.md) | kernel/worker 低挂果：孤儿 cron schedule 永久触发、LISTEN 重连代数竞态、日志 flush 无背压、waiter sweep 重入、releaseClaims 静默吞错 | — |
+| 6 | [p2-18-kernel-worker-low-hanging-2.md](./done/p2-18-kernel-worker-low-hanging-2.md) ✅ | kernel/worker 低挂果：孤儿 cron schedule 永久触发、LISTEN 重连代数竞态、日志 flush 无背压、waiter sweep 重入、releaseClaims 静默吞错 | — |
 | 7 | [p2-19-sdk-web-low-hanging-2.md](./done/p2-19-sdk-web-low-hanging-2.md) ✅ | sdk/web 低挂果：实例级 `batchTrigger` per-item env 类型洞、TweaksPanel 永远不可达、Switch/行/菜单键盘不可用、拖拽监听器泄漏 | 已完成：实例级 item options 收窄为 `BatchItemOptions`；TweaksPanel 受控 + TopBar 开关；Switch/行/Card/Radio/EnvSwitcher 键盘可达；拖拽监听器卸载兜底 |
 | 8 | [p2-20-toolchain-ci-low-hanging.md](./p2-20-toolchain-ci-low-hanging.md) | 工具链/CI：ESLint 从不检查 .ts/.tsx、CI 无缓存、Dockerfile 不构建验证且有死 stage、release 无 concurrency/验收门禁、LISTEN/NOTIFY 文档漂移 | — |
 

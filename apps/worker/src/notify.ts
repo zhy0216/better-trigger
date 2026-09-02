@@ -139,6 +139,19 @@ export function createNotifyListener(deps: NotifyListenerDeps): NotifyListener {
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectScheduled = false;
   let reconnectDelayMs = reconnectBaseMs;
+  // p2-18 C2: every connect() takes the next generation number, and the
+  // error/end handlers only act while THEIR generation is still current.
+  // Without it, an old broken connection whose 'end' lands after the
+  // reconnect completed would schedule another connect(), which overwrites
+  // `client` — orphaning the freshly-established, LISTENing connection (it
+  // is never closed, and every leaked one duplicates the notifications).
+  let generation = 0;
+
+  /** Still the connection that owns the listener role? (stop() and every
+   *  superseding connect() take that away.) */
+  function isCurrent(c: pg.Client, gen: number): boolean {
+    return !stopping && gen === generation && client === c;
+  }
 
   function scheduleReconnect(): void {
     // 'error' and the 'end' that usually follows both land here; without the
@@ -158,6 +171,7 @@ export function createNotifyListener(deps: NotifyListenerDeps): NotifyListener {
 
   async function connect(): Promise<void> {
     if (stopping) return;
+    const gen = ++generation;
     const c = createClient();
     client = c;
     try {
@@ -177,7 +191,22 @@ export function createNotifyListener(deps: NotifyListenerDeps): NotifyListener {
         `[better-trigger] notification fast-path: LISTEN failed ` +
           `(${err instanceof Error ? err.message : String(err)}); polling covers it — retrying in background`,
       );
-      scheduleReconnect();
+      // p2-18 C2: the generation check, not `client === c` — the two lines
+      // above just nullled `client`, so a CURRENT failed attempt is still
+      // allowed to retry; an attempt already superseded by a newer one is
+      // not (its successor owns the recovery).
+      if (!stopping && gen === generation) scheduleReconnect();
+      return;
+    }
+
+    if (!isCurrent(c, gen)) {
+      // p2-18 C2: superseded while the connect/LISTEN awaited — this
+      // connection must never adopt the listener role behind its successor,
+      // and must not stay open either. Under `stopping` the close belongs to
+      // stop() (it grabbed and ended `client`), so ending here would double-
+      // close; when merely superseded, close it. (Unreachable in today's
+      // single-connect-at-a-time flow; the guard is what keeps it that way.)
+      if (!stopping) void c.end().catch(() => {});
       return;
     }
 
@@ -209,6 +238,15 @@ export function createNotifyListener(deps: NotifyListenerDeps): NotifyListener {
         '[better-trigger] notification fast-path: connection error',
         err instanceof Error ? err.message : String(err),
       );
+      if (!isCurrent(c, gen)) {
+        // p2-18 C2: a stale connection erroring late must not touch the
+        // reconnect bookkeeping — its successor owns the role. Still close
+        // it (under stop() that close is stop()'s job): an errored socket
+        // that nobody ends is exactly the leak this is about. (end() on an
+        // already-ended client rejects; ignored.)
+        if (!stopping) void c.end().catch(() => {});
+        return;
+      }
       // Do NOT wait for 'end' to schedule the reconnect: some connection
       // failures never emit it. Closing here also surfaces 'end' for the ones
       // that do — scheduleReconnect dedups the pair.
@@ -217,6 +255,14 @@ export function createNotifyListener(deps: NotifyListenerDeps): NotifyListener {
     });
     c.on('end', () => {
       if (stopping) return;
+      if (!isCurrent(c, gen)) {
+        // p2-18 C2: the delayed-'end' race — the reconnect this connection
+        // provoked already completed, so its handler firing now must NOT
+        // schedule a second connect() (that is what orphaned the live
+        // successor). The connection is ended by definition here, so there
+        // is nothing to close either.
+        return;
+      }
       logger.warn(
         '[better-trigger] notification fast-path: LISTEN connection lost; ' +
           'reconnecting — polling covers the gap',
