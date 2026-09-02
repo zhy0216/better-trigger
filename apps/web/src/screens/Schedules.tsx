@@ -2,7 +2,7 @@
    Better Trigger — Schedules.
    ============================================================================= */
 import React from 'react';
-import { Icon, Badge, Switch } from '../components/primitives';
+import { Icon, Badge } from '../components/primitives';
 import { Page, Card, SectionHead, ErrorState, LoadingState } from '../components/Layout';
 import { useSchedules, api, recordConnectionError } from '../api/hooks';
 import { ApiError } from '../api/client';
@@ -16,21 +16,55 @@ export function Schedules({ env = 'prod' }: { env?: string }) {
   // C2 · mirrors RunView's actionError: a failed toggle must say so instead of
   // silently rolling back. Cleared on the next attempt.
   const [toggleError, setToggleError] = React.useState<string | null>(null);
+  // last server-confirmed `enabled` per schedule, refreshed on every poll; a
+  // rollback reverts to this truth rather than a stale click-time snapshot (T2).
+  const serverRef = React.useRef<Record<string, boolean>>({});
+  // request sequence per schedule id: a newer click supersedes an in-flight
+  // PATCH, so its late failure must not clobber the newer optimistic state (T2).
+  const seqRef = React.useRef<Record<string, number>>({});
   const items: Schedule[] = (data ?? []).map((s) => (s.id in overrides ? { ...s, enabled: overrides[s.id] } : s));
+  // Reconcile on each poll (T1): record server truth, then drop every override
+  // a poll has confirmed (server now agrees) or orphaned (row gone). An override
+  // that still diverges is held — the write hasn't surfaced yet.
+  React.useEffect(() => {
+    if (!data) return;
+    for (const s of data) serverRef.current[s.id] = s.enabled;
+    setOverrides((o) => {
+      let changed = false;
+      const next: Record<string, boolean> = {};
+      for (const [id, val] of Object.entries(o)) {
+        const row = data.find((s) => s.id === id);
+        if (!row || row.enabled === val) { changed = true; continue; }
+        next[id] = val;
+      }
+      return changed ? next : o;
+    });
+  }, [data]);
   const toggle = (id: string) => {
     const cur = items.find((i) => i.id === id);
     if (!cur) return;
     const next = !cur.enabled;
+    const seq = (seqRef.current[id] ?? 0) + 1;
+    seqRef.current[id] = seq;
     setToggleError(null);
     setOverrides((o) => ({ ...o, [id]: next }));
-    api.setScheduleEnabled(id, next, env).catch((e: unknown) => {
-      // revert optimistic change on failure and surface the reason (C2)
-      setOverrides((o) => ({ ...o, [id]: cur.enabled }));
-      setToggleError(e instanceof Error ? e.message : 'request failed');
-      // A rejected key must reach the shared connection registry so the key
-      // prompt takes over, exactly like RunHeader's control actions.
-      if (e instanceof ApiError && e.status === 401) recordConnectionError(e);
-    });
+    api.setScheduleEnabled(id, next, env)
+      .then(() => {
+        // the write landed: remember it as the current server truth so a later
+        // rollback for this row reverts to reality, not a pre-write snapshot.
+        serverRef.current[id] = next;
+      })
+      .catch((e: unknown) => {
+        // A newer click on this row owns the switch now — its outcome is
+        // authoritative, so a superseded failure is silently dropped (T2).
+        if (seqRef.current[id] !== seq) return;
+        // revert to the last server-confirmed value and surface the reason (C2)
+        setOverrides((o) => ({ ...o, [id]: serverRef.current[id] ?? cur.enabled }));
+        setToggleError(e instanceof Error ? e.message : 'request failed');
+        // A rejected key must reach the shared connection registry so the key
+        // prompt takes over, exactly like RunHeader's control actions.
+        if (e instanceof ApiError && e.status === 401) recordConnectionError(e);
+      });
   };
   if (!data) {
     return (
@@ -79,7 +113,24 @@ export function Schedules({ env = 'prod' }: { env?: string }) {
               <div className="mono tnum" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--fg)' }}>{s.next}</div>
             </div>
             <div style={{ width: 70 }}><Badge tone={s.last === 'warn' ? 'orange' : 'green'}>last {s.last}</Badge></div>
-            <Switch checked={s.enabled} onChange={() => toggle(s.id)} />
+            {/* ponytail: mirrors primitives' Switch (size 18) inline because the
+                shared Switch takes no accessible name and primitives.tsx is owned
+                by parallel task 08 — give it an optional `aria-label` prop and
+                collapse this back to <Switch aria-label=… />. */}
+            <button type="button" role="switch" aria-checked={s.enabled} aria-label={`Toggle ${s.task} schedule`}
+              onClick={() => toggle(s.id)}
+              style={{
+                appearance: 'none', padding: 0, border: 'none',
+                position: 'relative', width: 32, height: 18, cursor: 'pointer', flexShrink: 0,
+                background: s.enabled ? 'var(--accent)' : 'var(--border-strong)', borderRadius: 9999,
+                transition: 'background var(--dur-fast)',
+              }}>
+              <span aria-hidden="true" style={{
+                position: 'absolute', top: 2, left: 2, width: 14, height: 14, background: '#fff',
+                borderRadius: '50%', transform: s.enabled ? 'translateX(14px)' : 'translateX(0)',
+                transition: 'transform var(--dur-fast) var(--ease-standard)', boxShadow: 'var(--shadow-sm)',
+              }} />
+            </button>
           </div>
         ))}
       </Card>
