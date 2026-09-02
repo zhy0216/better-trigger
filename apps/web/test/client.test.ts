@@ -112,3 +112,48 @@ describe('ApiError parsing', () => {
     }
   });
 });
+
+describe('request timeout', () => {
+  const hungFetch = () =>
+    vi.fn((_url: unknown, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        // Reject like a real fetch does when its signal aborts — but ONLY on
+        // abort, so the request would otherwise hang forever.
+        init?.signal?.addEventListener('abort', () =>
+          reject(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })),
+        );
+      }),
+    );
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('aborts a stalled request at the deadline as a timeout (not an AbortError)', async () => {
+    fetchMock.mockImplementation(hungFetch());
+    const settled = api.health().catch((e: Error) => e);
+    await vi.advanceTimersByTimeAsync(9_000);
+    // Nothing settles before the deadline — the fetch is still pending.
+    let done = false;
+    void settled.then(() => { done = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const err = (await settled) as Error;
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).not.toBe('AbortError');
+    expect(err.message).toMatch(/timed out/i);
+  });
+
+  it('a caller cancellation still surfaces an AbortError (usePoll swallows it)', async () => {
+    fetchMock.mockImplementation(hungFetch());
+    const ctrl = new AbortController();
+    const settled = api.health(ctrl.signal).catch((e: Error) => e);
+    ctrl.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(((await settled) as Error).name).toBe('AbortError');
+  });
+});

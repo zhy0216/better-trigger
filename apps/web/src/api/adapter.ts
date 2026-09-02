@@ -207,7 +207,7 @@ export function groupLogsBySpan(
     const spanId = lg.stepSeq != null ? seqToSpanId.get(lg.stepSeq) ?? 's0' : 's0';
     const at = parseTs(lg.ts);
     const ms = at != null ? Math.max(0, at - t0) : 0;
-    pushLog(spanId, [lg.level, lg.message, Math.round(ms) + 'ms']);
+    pushLog(spanId, [lg.level, lg.message, Math.round(ms) + 'ms', lg.id]);
   });
   return spanLogs;
 }

@@ -229,9 +229,10 @@ describe('adaptRunDetail', () => {
     });
     expect(trace.spans[1].error).toBeNull();
 
-    // Step-seq'd log → its span; null-seq'd log → the root span.
-    expect(spanLogs.s1).toEqual([['info', 'loaded', '500ms']]);
-    expect(spanLogs.s0).toEqual([['warn', 'root line', '2000ms']]);
+    // Step-seq'd log → its span; null-seq'd log → the root span. Each line
+    // carries its log-record id so the stream can key rows stably.
+    expect(spanLogs.s1).toEqual([['info', 'loaded', '500ms', 1]]);
+    expect(spanLogs.s0).toEqual([['warn', 'root line', '2000ms', 2]]);
 
     // Only pending waits surface to the inspector.
     expect(pendingWaits).toEqual([

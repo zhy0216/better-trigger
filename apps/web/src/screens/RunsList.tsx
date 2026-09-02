@@ -53,9 +53,9 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
     <Page>
       {/* toolbar */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--fill)', borderRadius: 9999 }}>
+        <div role="group" aria-label="Status filter" style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--fill)', borderRadius: 9999 }}>
           {FILTERS.map((f) => (
-            <button key={f.id} onClick={() => setFilter(f.id)}
+            <button key={f.id} onClick={() => setFilter(f.id)} aria-pressed={filter === f.id}
               style={{
                 display: 'flex', alignItems: 'center', gap: 6, height: 28, padding: '0 12px', borderRadius: 9999, border: 'none', cursor: 'pointer',
                 fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500,
@@ -68,7 +68,7 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
         </div>
         <div style={{ width: 220 }}><Input icon="search" placeholder="Filter by task id…" value={q} onChange={setQ} mono /></div>
         <div style={{ flex: 1 }} />
-        <button onClick={() => setLive((v) => !v)}
+        <button onClick={() => setLive((v) => !v)} aria-pressed={live}
           style={{
             display: 'flex', alignItems: 'center', gap: 7, height: 32, padding: '0 11px', borderRadius: 8, border: '1px solid var(--border)',
             background: live ? 'var(--accent-fill)' : 'var(--surface)', color: live ? 'var(--accent)' : 'var(--fg-muted)', cursor: 'pointer', fontSize: 12.5, fontWeight: 500,

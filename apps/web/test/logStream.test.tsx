@@ -7,9 +7,10 @@
    no layout, so the scroll geometry is faked on the container element — the
    predicate (isAtBottom) is additionally pinned as a pure unit.
    ============================================================================= */
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { LogStream, isAtBottom } from '../src/features/run/RunView';
+import { LogStream } from '../src/features/run/RunView';
+import { isAtBottom } from '../src/features/run/scroll';
 import type { LogLine, Span, Trace } from '../src/types';
 
 const span: Span = { id: 's0', label: 'task', kind: 'task', level: 0, start: 0, dur: 100, status: 'running' };
@@ -18,7 +19,7 @@ const trace: Trace = {
   queuedFor: '0ms', payload: {}, totalMs: 1000, spans: [span],
 };
 
-const line = (ms: number): LogLine => ['info', `line ${ms}`, String(ms)];
+const line = (ms: number): LogLine => ['info', `line ${ms}`, String(ms), ms];
 const logsOf = (count: number): Record<string, LogLine[]> => ({
   s0: Array.from({ length: count }, (_, i) => line(i)),
 });
@@ -73,5 +74,28 @@ describe('LogStream auto-scroll (P1-17 C3)', () => {
     fireEvent.scroll(el!);
     rerender(stream(6));
     expect(geom.scrollTop).toBe(1000);
+  });
+});
+
+describe('LogStream stable row keys (T4)', () => {
+  const view = (logs: Record<string, LogLine[]>) => (
+    <LogStream trace={trace} logs={logs} t={100_000} selectedId="" scoped={false}
+      setScoped={() => {}} onLoadOlderLogs={async () => false} loadingOlderLogs={false}
+      hasOlderLogs={false} loadOlderLogsError={null} />
+  );
+
+  it('reuses existing rows when "load older" prepends an earlier page', () => {
+    // Head page (ids 3,4); the older page prepends ids 1,2 ahead of them.
+    const head: Record<string, LogLine[]> = { s0: [['info', 'keepA', '300ms', 3], ['info', 'keepB', '400ms', 4]] };
+    const grew: Record<string, LogLine[]> = {
+      s0: [['info', 'old1', '100ms', 1], ['info', 'old2', '200ms', 2], ['info', 'keepA', '300ms', 3], ['info', 'keepB', '400ms', 4]],
+    };
+    const { rerender } = render(view(head));
+    const before = screen.getByText('keepA');
+    rerender(view(grew));
+    // Keyed by the log-record id, the already-visible row keeps its DOM node
+    // (with index keys the prepend shifted every row and rebuilt them).
+    expect(screen.getByText('keepA')).toBe(before);
+    expect(screen.getByText('old1')).toBeTruthy();
   });
 });

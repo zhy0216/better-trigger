@@ -25,7 +25,7 @@ const CODE_TASK: Token[] = [
 
 const CODE_DAEMON: Token[] = [
   ['fn', 'DATABASE_URL=postgres://localhost:5432/better_trigger'], ['t', ' \\'], ['nl'],
-  ['t', '  bunx --bun better-trigger-worker --tasks ./tasks.ts'],
+  ['t', '  bunx --bun @better-trigger/worker --tasks ./tasks.ts'],
 ];
 
 const CODE_TRIGGER: Token[] = [
@@ -39,14 +39,38 @@ const CODE_TRIGGER: Token[] = [
 
 const TOK: Record<string, string> = { kw: 'var(--st-frozen)', s: 'var(--green-primary)', fn: 'var(--accent)', c: 'var(--fg-faint)', t: 'var(--fg)' };
 
+/** Last-resort copy for non-secure contexts where navigator.clipboard is absent
+ *  (http on a LAN host, older browsers). Best-effort: a failure just means no
+ *  feedback, never an unhandled rejection. */
+function legacyCopy(text: string, done: () => void): void {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = typeof document.execCommand === 'function' && document.execCommand('copy');
+    ta.remove();
+    if (ok) done();
+  } catch {
+    /* clipboard unavailable — swallow it, the copy is simply a no-op */
+  }
+}
+
 function CodeBlock({ tokens, title }: { tokens: Token[]; title: string }) {
   const [copied, setCopied] = React.useState(false);
   const copy = () => {
     const text = tokens.map((tk) => (tk[0] === 'nl' ? '\n' : tk[1])).join('');
-    void navigator.clipboard.writeText(text).then(() => {
+    const done = () => {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1200);
-    });
+    };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => legacyCopy(text, done));
+    } else {
+      legacyCopy(text, done);
+    }
   };
   return (
     <div style={{ borderRadius: 10, overflow: 'hidden', border: '1px solid var(--border)', background: 'var(--code-bg)' }}>

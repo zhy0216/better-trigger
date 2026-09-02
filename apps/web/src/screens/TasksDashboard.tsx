@@ -7,22 +7,22 @@ import { Page, Card, Metric, ErrorState, LoadingState } from '../components/Layo
 import { useTasks, useSchedules, useWorkers } from '../api/hooks';
 import type { Route } from '../types';
 
-export function TasksDashboard({ setRoute, env = 'prod' }: { onOpenRun?: (runId?: string) => void; setRoute: (r: Route) => void; env?: string }) {
+export function TasksDashboard({ setRoute, env = 'prod' }: { setRoute: (r: Route) => void; env?: string }) {
   const { data: tasks, error } = useTasks(env);
-  const { data: schedules } = useSchedules(env);
-  const { data: workers } = useWorkers(env);
+  const { data: schedules, error: schedulesError } = useSchedules(env);
+  const { data: workers, error: workersError } = useWorkers(env);
   if (!tasks) return <Page>{error ? <ErrorState message={error} /> : <LoadingState />}</Page>;
   const totalRuns = tasks.reduce((a, t) => a + t.runs24h, 0);
   const avgSuccess = tasks.length ? (tasks.reduce((a, t) => a + t.success, 0) / tasks.length).toFixed(1) : '0.0';
   const scheduledCount = schedules?.filter((s) => s.enabled).length;
   const workersOnline = workers?.filter((w) => w.status === 'online').length;
 
-  const Stat = ({ label, value, sub, tone }: { label: string; value: React.ReactNode; sub?: string; tone?: string }) => (
+  const Stat = ({ label, value, sub, tone, subTone }: { label: string; value: React.ReactNode; sub?: string; tone?: string; subTone?: string }) => (
     <Card style={{ padding: '14px 16px', flex: 1, minWidth: 0 }}>
       <div style={{ fontSize: 11.5, color: 'var(--fg-subtle)', marginBottom: 6 }}>{label}</div>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 7 }}>
         <span className="tnum" style={{ fontSize: 26, fontWeight: 600, letterSpacing: '-0.02em', color: tone || 'var(--fg)' }}>{value}</span>
-        {sub && <span style={{ fontSize: 12, color: 'var(--fg-subtle)' }}>{sub}</span>}
+        {sub && <span role="status" style={{ fontSize: 12, color: subTone || 'var(--fg-subtle)' }}>{sub}</span>}
       </div>
     </Card>
   );
@@ -32,8 +32,19 @@ export function TasksDashboard({ setRoute, env = 'prod' }: { onOpenRun?: (runId?
       <div style={{ display: 'flex', gap: 12, marginBottom: 18 }}>
         <Stat label="Runs · last 24h" value={totalRuns.toLocaleString()} />
         <Stat label="Avg success rate" value={avgSuccess + '%'} tone="var(--green-primary)" />
-        <Stat label="Active tasks" value={tasks.length} sub={scheduledCount != null ? scheduledCount + ' scheduled' : undefined} />
-        <Stat label="Workers online" value={workersOnline ?? '—'} tone={workersOnline ? 'var(--green-primary)' : undefined} />
+        <Stat
+          label="Active tasks"
+          value={tasks.length}
+          sub={schedulesError ? 'schedules unavailable' : scheduledCount != null ? scheduledCount + ' scheduled' : undefined}
+          subTone={schedulesError ? 'var(--red-text)' : undefined}
+        />
+        <Stat
+          label="Workers online"
+          value={workersOnline ?? '—'}
+          tone={workersOnline ? 'var(--green-primary)' : undefined}
+          sub={workersError ? 'unavailable' : undefined}
+          subTone={workersError ? 'var(--red-text)' : undefined}
+        />
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>

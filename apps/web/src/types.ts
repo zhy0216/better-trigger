@@ -77,8 +77,9 @@ export interface Trace {
   spans: Span[];
 }
 
-/** [level, message, timestamp] */
-export type LogLine = [string, string, string];
+/** [level, message, timestamp, log-record id]. The id keeps rendered rows keyed
+ *  stably when older log pages are prepended (see RunView LogStream). */
+export type LogLine = [string, string, string, number];
 
 export interface Schedule {
   id: string;

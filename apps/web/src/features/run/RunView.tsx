@@ -11,6 +11,8 @@ import { useRun, api, recordConnectionError } from '../../api/hooks';
 import { ApiError } from '../../api/client';
 import { relativeFuture, type AdaptedRunDetail } from '../../api/adapter';
 import { createRetryIntentKey } from './retryIntentKey';
+import { rulerTicks } from './ruler';
+import { isAtBottom } from './scroll';
 import type { Span, Trace, LogLine, VizStyle } from '../../types';
 
 const KIND_ICON: Record<string, string> = { task: 'bolt', http: 'globe', query: 'db', fn: 'fn' };
@@ -123,8 +125,7 @@ function RunHeader({ trace, runStatus, env, onRetried }: { trace: Trace; runStat
 
 // ---- time ruler ----
 function Ruler({ totalMs, labelW }: { totalMs: number; labelW: number }) {
-  const ticks: number[] = [];
-  for (let ms = 0; ms <= totalMs; ms += 1000) ticks.push(ms);
+  const ticks = rulerTicks(totalMs);
   return (
     <div style={{
       display: 'flex', height: 26, alignItems: 'stretch', position: 'sticky', top: 0, zIndex: 3,
@@ -135,12 +136,12 @@ function Ruler({ totalMs, labelW }: { totalMs: number; labelW: number }) {
         fontSize: 10.5, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--fg-faint)',
       }}>Span</div>
       <div style={{ flex: 1, position: 'relative' }}>
-        {ticks.map((ms) => (
+        {ticks.map(({ ms, label }) => (
           <div key={ms} style={{
             position: 'absolute', left: (ms / totalMs) * 100 + '%', top: 0, bottom: 0,
             borderLeft: '1px solid var(--grid-line)', paddingLeft: 5,
           }}>
-            <span className="mono" style={{ fontSize: 10, color: 'var(--fg-faint)', lineHeight: '26px' }}>{ms / 1000}s</span>
+            <span className="mono" style={{ fontSize: 10, color: 'var(--fg-faint)', lineHeight: '26px' }}>{label}</span>
           </div>
         ))}
       </div>
@@ -162,6 +163,13 @@ function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle }: {
 
   return (
     <div onClick={() => onSelect(s.id)}
+      role="button" tabIndex={0} aria-pressed={selected}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect(s.id);
+        }
+      }}
       style={{
         height: 'var(--span-h)', display: 'flex', alignItems: 'center', cursor: 'pointer', position: 'relative',
         background: selected ? 'var(--accent-fill)' : 'transparent',
@@ -191,7 +199,7 @@ function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle }: {
         ) : (
           <div style={{
             position: 'absolute', left: left + '%', width: width + '%', top: '50%', transform: 'translateY(-50%)',
-            height: Math.min(15, parseInt(getComputedStyle(document.documentElement).getPropertyValue('--span-h')) - 8) || 14,
+            height: 'min(15px, calc(var(--span-h) - 8px))',
             minWidth: 3, borderRadius: 4, overflow: 'hidden',
             background: running ? 'transparent' : m.color,
             backgroundImage: running ? stripe : 'none', backgroundSize: '19.8px 100%',
@@ -309,18 +317,7 @@ const LOG_TONE: Record<string, string> = {
   info: 'var(--fg-muted)', debug: 'var(--fg-subtle)', query: 'var(--accent)', http: 'var(--st-frozen)', warn: 'var(--orange-primary)', error: 'var(--red-primary)',
 };
 
-interface LogEntry { spanId: string; lvl: string; msg: string; ms: number; label: string }
-
-// C3 (p1-17): auto-follow only while the reader is stuck to the bottom. The
-// ε absorbs sub-pixel rounding and the row-height jitter of a line landing
-// mid-render, so "still bottomed" doesn't need to be pixel-exact.
-const AT_BOTTOM_EPSILON_PX = 4;
-
-/** Pure stickiness predicate — exported so the keep-position rule is unit
- *  testable without a layout engine (jsdom reports 0 for scroll geometry). */
-export function isAtBottom(scrollTop: number, clientHeight: number, scrollHeight: number): boolean {
-  return scrollHeight - scrollTop - clientHeight <= AT_BOTTOM_EPSILON_PX;
-}
+interface LogEntry { id: number; spanId: string; lvl: string; msg: string; ms: number; label: string }
 
 // Rendered standalone only by tests; the app mounts it via RunDetail.
 export function LogStream({ trace, logs, t, selectedId, scoped, setScoped, onLoadOlderLogs, loadingOlderLogs, hasOlderLogs, loadOlderLogsError }: {
@@ -332,9 +329,9 @@ export function LogStream({ trace, logs, t, selectedId, scoped, setScoped, onLoa
   const lines = React.useMemo<LogEntry[]>(() => {
     const out: LogEntry[] = [];
     trace.spans.forEach((s) => {
-      (logs[s.id] || []).forEach(([lvl, msg, at]) => {
+      (logs[s.id] || []).forEach(([lvl, msg, at, id]) => {
         const ms = parseInt(at);
-        out.push({ spanId: s.id, lvl, msg, ms, label: s.label });
+        out.push({ id, spanId: s.id, lvl, msg, ms, label: s.label });
       });
     });
     return out.sort((a, b) => a.ms - b.ms);
@@ -385,8 +382,8 @@ export function LogStream({ trace, logs, t, selectedId, scoped, setScoped, onLoa
       </div>
       <div ref={ref} onScroll={onScroll} style={{ flex: 1, overflowY: 'auto', padding: '8px 14px', fontFamily: 'var(--font-mono)', fontSize: 11.5, lineHeight: 1.85 }}>
         {visible.length === 0 && <div style={{ color: 'var(--fg-faint)', fontFamily: 'var(--font-sans)' }}>Waiting for logs…</div>}
-        {visible.map((l, i) => (
-          <div key={i} style={{ display: 'flex', gap: 10 }}>
+        {visible.map((l) => (
+          <div key={l.id} style={{ display: 'flex', gap: 10 }}>
             <span className="tnum" style={{ color: 'var(--fg-faint)', flexShrink: 0, width: 52, textAlign: 'right' }}>{fmtMs(l.ms)}</span>
             <span style={{ color: LOG_TONE[l.lvl], textTransform: 'uppercase', fontSize: 10, fontWeight: 600, flexShrink: 0, width: 42, paddingTop: 1 }}>{l.lvl}</span>
             <span style={{ color: 'var(--fg)', flex: 1 }}>{l.msg}</span>

@@ -617,3 +617,41 @@ describe('useRun stops polling on a terminal run (C1)', () => {
     expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAtTerminal);
   });
 });
+
+describe('usePoll survives a stalled request (T1)', () => {
+  it('records the timeout as an error and keeps scheduling ticks', async () => {
+    // A daemon that accepts the connection but never answers: the request only
+    // settles when the client timeout aborts it. Before the fix this hung the
+    // fetch forever, so the self-rescheduling loop never advanced again.
+    fetchMock.mockImplementation((_url: unknown, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () =>
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+        );
+      }),
+    );
+    const { result } = renderHook(() => useRuns('prod'));
+    await flush();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Under the deadline: still pending, no error, loop waiting on the fetch.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_000);
+    });
+    expect(result.current.error).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Crossing the 10s deadline aborts the fetch → a recorded poll error.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(result.current.error).toMatch(/timed out/i);
+    expect(getConnection()).toBe('down');
+
+    // The finally still re-armed the loop → the next tick polls again.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});

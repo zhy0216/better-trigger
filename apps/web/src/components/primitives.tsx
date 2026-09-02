@@ -27,6 +27,7 @@ const ICONS: Record<string, React.ReactNode> = {
   close:      <path d="M18 6 6 18M6 6l12 12" />,
   check:      <path d="M20 6 9 17l-5-5" />,
   chevronDown: <path d="M6 9l6 6 6-6" />,
+  chevronUp: <path d="M18 15l-6-6-6 6" />,
   chevronRight: <path d="M9 18l6-6-6-6" />,
   chevronLeft: <path d="M15 18l-6-6 6-6" />,
   arrowRight: <path d="M5 12h14M12 5l7 7-7 7" />,
@@ -263,6 +264,9 @@ export const Input = ({ value, onChange, placeholder, icon, style, mono, type = 
 
 // tiny inline sparkline
 export const Sparkline = ({ data, w = 72, h = 22, color = 'var(--accent)' }: { data: number[]; w?: number; h?: number; color?: string }) => {
+  // A single point divides by (length - 1) → NaN; an empty one min/max over [] →
+  // Infinity. Either way the path is garbage — draw nothing instead.
+  if (data.length < 2) return null;
   const max = Math.max(...data, 1);
   const min = Math.min(...data);
   const rng = max - min || 1;

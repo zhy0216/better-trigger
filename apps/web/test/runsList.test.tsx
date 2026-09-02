@@ -7,7 +7,7 @@
    status chips must cover the full server status vocabulary including the
    waiting/canceled pair the adapter already maps.
    ============================================================================= */
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunsList } from '../src/screens/RunsList';
 import { setApiKey } from '../src/api/client';
@@ -119,5 +119,28 @@ describe('RunsList status chips', () => {
     await waitFor(() =>
       expect(fetchMock.mock.calls.some(([inp]) => String(inp).includes('status=canceled'))).toBe(true),
     );
+  });
+});
+
+describe('RunsList toolbar a11y', () => {
+  it('exposes aria-pressed on the status filter group and the live toggle (T8)', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(res(runsPage(['a1'], 'task-a'))));
+    render(<RunsList env="prod" onOpenRun={() => {}} />);
+    await waitFor(() => expect(screen.getByText('a1')).toBeTruthy());
+
+    const group = screen.getByRole('group', { name: 'Status filter' });
+    const all = within(group).getByRole('button', { name: 'All' });
+    const running = within(group).getByRole('button', { name: 'Running' });
+    expect(all.getAttribute('aria-pressed')).toBe('true');
+    expect(running.getAttribute('aria-pressed')).toBe('false');
+
+    fireEvent.click(running);
+    expect(running.getAttribute('aria-pressed')).toBe('true');
+    expect(all.getAttribute('aria-pressed')).toBe('false');
+
+    const live = screen.getByRole('button', { name: /Live tailing/ });
+    expect(live.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(live);
+    expect(screen.getByRole('button', { name: /Paused/ }).getAttribute('aria-pressed')).toBe('false');
   });
 });

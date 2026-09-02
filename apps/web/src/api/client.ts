@@ -91,17 +91,56 @@ interface RequestOptions {
   headers?: Record<string, string>;
 }
 
+/**
+ * Hard ceiling on a single request. A daemon that accepts the connection but
+ * never answers would otherwise leave the fetch (and therefore the self-
+ * rescheduling usePoll loop) unsettled forever: the endpoint stops polling and
+ * the connection indicator never falls back. A stalled request aborts at this
+ * deadline and surfaces as an ordinary poll error, so the loop keeps turning.
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
+
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, signal } = opts;
   const headers: Record<string, string> = { ...(opts.headers ?? {}) };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-  const res = await fetch(API_BASE_URL + PREFIX + path, {
-    method,
-    headers: Object.keys(headers).length > 0 ? headers : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-    signal,
-  });
+
+  // Combine the caller's cancellation (unmount / key change) with a timeout
+  // abort, but keep them distinguishable: usePoll must swallow a deliberate
+  // cancel (AbortError) yet record a timeout as a real failure.
+  const ctrl = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctrl.abort();
+  }, REQUEST_TIMEOUT_MS);
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+  }
+
+  let res!: Response;
+  let failure: unknown;
+  let failed = false;
+  try {
+    res = await fetch(API_BASE_URL + PREFIX + path, {
+      method,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    failed = true;
+    failure = e;
+  } finally {
+    clearTimeout(timer);
+  }
+  // Rethrown outside the catch so the caught error is preserved verbatim for a
+  // caller cancellation, while a stalled request becomes a plain timeout Error
+  // (not AbortError) — so usePoll records it as a poll failure instead of
+  // mistaking it for a deliberate cancel and swallowing it.
+  if (failed) throw timedOut ? new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`) : failure;
   if (!res.ok) {
     let msg = res.statusText;
     let code: string | null = null;
