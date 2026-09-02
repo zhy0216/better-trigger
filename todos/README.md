@@ -2,7 +2,7 @@
 
 本轮条目来自对 kernel / worker / sdk / core / web / CI / roadmap 的第二轮全仓库审查（第一轮 12 条见 `done/`）。每个文件一个（或一组紧密相关的）问题；文件内保留现状证据、影响、不变量、实现方案和验收标准。条目目前都只是待办，不代表修复已经落地。
 
-## 状态：待办（0/8）
+## 状态：待办（1/8）
 
 ## 优先级与执行顺序
 
@@ -10,7 +10,7 @@
 
 | # | 文件 | 一句话 | 依赖 |
 |---|------|--------|------|
-| 1 | [p0-13-workers-namespace-filter.md](./p0-13-workers-namespace-filter.md) | `GET /workers` 按从不写入的 `project_id/env` 列过滤，真成员关系在 `namespaces` jsonb → 多 namespace 隔离失效，测试还固化了错误谓词 | — |
+| 1 | [p0-13-workers-namespace-filter.md](./done/p0-13-workers-namespace-filter.md) ✅ | `GET /workers` 按从不写入的 `project_id/env` 列过滤，真成员关系在 `namespaces` jsonb → 多 namespace 隔离失效，测试还固化了错误谓词 | 已完成：谓词改为 `namespaces` jsonb 的 `EXISTS`，测试补多 namespace 隔离用例 |
 | 2 | [p0-14-claim-namespace-starvation.md](./p0-14-claim-namespace-starvation.md) | 多 namespace claim 扫描共享配额按数组顺序先到先得，`namespaces[0]` 持续有活时其余 namespace 永久饥饿 | — |
 | 3 | [p1-15-sdk-request-protection.md](./p1-15-sdk-request-protection.md) | SDK 响应 body 读取在 timeout/abort 清理之后 → 慢速 body 突破 `timeoutMs` 合约；per-request `timeoutMs` 覆盖绕过校验 | — |
 | 4 | [p1-16-config-input-validation.md](./p1-16-config-input-validation.md) | `RetryPolicy` 全链路零校验（NaN/负值直落数据库）；`--lease-ms ≤ 500` 不拒绝（心跳必然晚于租约，reaper 吃光 recoveries）；`requireInt` 不校验整数 | — |

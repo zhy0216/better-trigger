@@ -2,7 +2,7 @@
 
 - 优先级：P0（正确性 / namespace 隔离破坏）
 - 区域：apps/worker（route + test）、packages/kernel（对照）
-- 状态：待办
+- 状态：已完成（2026-09-02）
 - 来源：2026-09-02 全仓库审查（第二轮）
 
 ## 问题摘要

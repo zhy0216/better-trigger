@@ -512,8 +512,12 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
       throw new KernelError('bad_request', 'status must be online, offline or all');
     }
     const limit = intQuery(c, 'limit', { min: 1, max: 200, fallback: 50 });
-    // Workers are namespace rows too — a dashboard pointed at default/prod
-    // lists the daemons serving default/prod, not the whole fleet.
+    // A worker's namespace membership lives in the `namespaces` jsonb array,
+    // not in the never-written project_id/env columns (registerWorker's INSERT
+    // omits both — see packages/kernel/src/workers.ts). A dashboard pointed at
+    // default/prod lists the daemons whose namespaces array serves default/prod,
+    // not the whole fleet. Same EXISTS form as pruneWorkers and the stranded
+    // scan, so every read of worker membership agrees.
     const ns = namespaceFromQuery(c);
 
     const params: unknown[] = [];
@@ -524,7 +528,9 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
     }
     params.push(ns.projectId, ns.env);
     const nsParam = params.length - 1;
-    clauses.push(`project_id = $${nsParam} AND env = $${nsParam + 1}`);
+    clauses.push(
+      `EXISTS (SELECT 1 FROM jsonb_array_elements(namespaces) n WHERE n->>'projectId' = $${nsParam} AND n->>'env' = $${nsParam + 1})`,
+    );
     params.push(limit);
     const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
 

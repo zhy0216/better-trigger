@@ -58,8 +58,14 @@ describe('GET /workers', () => {
     const q = stmts[0]!;
     expect(q.sql).toMatch(/WHERE status = \$1/);
     // The default namespace (default/prod) is always predicated on — a
-    // dashboard pointed at nothing still only ever lists one namespace.
-    expect(q.sql).toMatch(/project_id = \$2 AND env = \$3/);
+    // dashboard pointed at nothing still only ever lists one namespace. The
+    // scope is the `namespaces` jsonb array (registerWorker never writes the
+    // project_id/env columns), not those dead columns.
+    expect(q.sql).toMatch(
+      /EXISTS \(SELECT 1 FROM jsonb_array_elements\(namespaces\) n WHERE n->>'projectId' = \$2 AND n->>'env' = \$3\)/,
+    );
+    expect(q.sql).not.toMatch(/\bproject_id = \$/);
+    expect(q.sql).not.toMatch(/ WHERE env = \$|\bAND env = \$/);
     expect(q.sql).toMatch(/LIMIT \$4/);
     expect(q.params).toEqual(['online', 'default', 'prod', 50]);
   });
@@ -71,9 +77,12 @@ describe('GET /workers', () => {
 
     const q = stmts[0]!;
     // status=all drops the status clause — the namespace scope and the LIMIT
-    // stay; the LIMIT moves to $3.
+    // stay; the namespace EXISTS params and the LIMIT shift down one.
     expect(q.sql).not.toMatch(/status = \$\d/);
-    expect(q.sql).toMatch(/WHERE project_id = \$1 AND env = \$2/);
+    expect(q.sql).toMatch(
+      /WHERE EXISTS \(SELECT 1 FROM jsonb_array_elements\(namespaces\) n WHERE n->>'projectId' = \$1 AND n->>'env' = \$2\)/,
+    );
+    expect(q.sql).not.toMatch(/\bproject_id = \$/);
     expect(q.sql).toMatch(/LIMIT \$3/);
     expect(q.params).toEqual(['default', 'prod', 50]);
   });
@@ -156,5 +165,81 @@ describe('GET /workers', () => {
         },
       ],
     });
+  });
+
+  it('isolates namespaces by the jsonb membership array, not the dead columns (C2)', async () => {
+    // A fake pool that evaluates the predicate the route actually builds, so
+    // "default/prod must not see an acme/staging-only worker" is exercised at
+    // the row level and not merely asserted as a SQL string. It reads the
+    // `n->>'projectId' = $k AND n->>'env' = $k+1` binding out of the SQL and
+    // filters each row by whether its `namespaces` array (the source of truth
+    // registerWorker writes) contains that pair. A worker whose project_id/env
+    // columns are the 'default'/'prod' defaults but whose namespaces array is
+    // only acme/staging is the exact shape registerWorker produces.
+    const started = new Date('2026-07-30T08:00:00.000Z');
+    const beat = new Date('2026-07-30T08:01:00.000Z');
+    const db = [
+      {
+        id: 'wrk_staging_only',
+        name: 'staging-daemon',
+        code_version: 'aaa',
+        runtime: 'bun',
+        tasks: ['t1'],
+        concurrency: 1,
+        status: 'online',
+        started_at: started,
+        last_heartbeat_at: beat,
+        // dead columns say default/prod; real membership is acme/staging
+        project_id: 'default',
+        env: 'prod',
+        namespaces: [{ projectId: 'acme', env: 'staging' }],
+      },
+      {
+        id: 'wrk_prod',
+        name: 'prod-daemon',
+        code_version: 'bbb',
+        runtime: 'node',
+        tasks: ['t2'],
+        concurrency: 2,
+        status: 'online',
+        started_at: started,
+        last_heartbeat_at: beat,
+        project_id: 'default',
+        env: 'prod',
+        namespaces: [{ projectId: 'default', env: 'prod' }],
+      },
+    ];
+
+    const pool = {
+      query: async (sql: string, params: unknown[] = []) => {
+        const nsMatch = /n->>'projectId' = \$(\d+) AND n->>'env' = \$(\d+)/.exec(sql);
+        expect(nsMatch, 'route must scope workers by the namespaces jsonb array').not.toBeNull();
+        // If the query still filtered on the never-written columns, the whole
+        // point of the fix is missed — fail loudly.
+        expect(sql).not.toMatch(/\bWHERE project_id = |\bAND project_id = /);
+        const projectId = params[Number(nsMatch![1]) - 1];
+        const env = params[Number(nsMatch![2]) - 1];
+        const statusMatch = /\bstatus = \$(\d+)/.exec(sql);
+        const status = statusMatch ? params[Number(statusMatch[1]) - 1] : undefined;
+        const limit = params[params.length - 1] as number;
+        const rows = db
+          .filter(
+            (r) =>
+              r.namespaces.some((n) => n.projectId === projectId && n.env === env) &&
+              (status === undefined || r.status === status),
+          )
+          .slice(0, limit);
+        return { rows };
+      },
+    } as unknown as Pool;
+    const app = createApp({ kernel, pool });
+
+    const ids = (r: Response) =>
+      r.json().then((b) => (b as { workers: { id: string }[] }).workers.map((w) => w.id));
+
+    expect(await ids(await app.fetch(get()))).toEqual(['wrk_prod']);
+    expect(await ids(await app.fetch(get('?projectId=acme&env=staging')))).toEqual([
+      'wrk_staging_only',
+    ]);
   });
 });
