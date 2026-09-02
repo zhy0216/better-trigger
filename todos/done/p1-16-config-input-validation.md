@@ -2,7 +2,7 @@
 
 - 优先级：P1（配置边界硬化）
 - 区域：packages/core、apps/worker、packages/sdk
-- 状态：待办
+- 状态：已完成（2026-09-02）
 - 来源：2026-09-02 全仓库审查（第二轮）
 
 ## C1 · `RetryPolicy` 全链路零校验，垃圾策略直落数据库 {#c1}
@@ -65,8 +65,8 @@ HTTP），却没有校验。
 
 ## 验收标准
 
-- [ ] `bun run typecheck`、`bun run build`、`bun run test` 全部通过。
-- [ ] 新增单测覆盖：非法 `RetryPolicy`（NaN/负 factor/0 maxAttempts）在注册与
+- [x] `bun run typecheck`、`bun run build`、`bun run test` 全部通过。
+- [x] 新增单测覆盖：非法 `RetryPolicy`（NaN/负 factor/0 maxAttempts）在注册与
   trigger 路径都被拒绝；`--lease-ms 100` 启动被拒；`--concurrency 2.5` 被拒。
 
 ## 涉及文件

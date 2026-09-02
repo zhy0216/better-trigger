@@ -4,7 +4,8 @@
    jitter 1.0, i.e. the raw curve, and 0 / 1 give the exact jitter envelope.
    ============================================================================= */
 import { describe, expect, it } from 'vitest';
-import { computeBackoffMs, resolveRetryPolicy } from '../src/backoff';
+import { computeBackoffMs, resolveRetryPolicy, validateRetryPolicy } from '../src/backoff';
+import { KernelError } from '../src/kernel-errors';
 import { DEFAULT_RETRY, type RetryPolicy } from '../src/types';
 
 describe('resolveRetryPolicy', () => {
@@ -40,6 +41,61 @@ describe('resolveRetryPolicy', () => {
     expect(merged).toEqual(DEFAULT_RETRY);
     // A genuinely-set field still wins.
     expect(resolveRetryPolicy({ maxAttempts: 7, factor: undefined }).maxAttempts).toBe(7);
+  });
+});
+
+describe('validateRetryPolicy (p1-16)', () => {
+  it('accepts undefined, an empty object, and every DEFAULT_RETRY field', () => {
+    expect(() => validateRetryPolicy()).not.toThrow();
+    expect(() => validateRetryPolicy(undefined)).not.toThrow();
+    expect(() => validateRetryPolicy({})).not.toThrow();
+    expect(() => validateRetryPolicy(DEFAULT_RETRY)).not.toThrow();
+    // Explicit undefined fields are absent, not invalid (p2-24 alignment).
+    expect(() => validateRetryPolicy({ maxAttempts: undefined })).not.toThrow();
+  });
+
+  it('rejects a bad maxAttempts: NaN, 0, negative, fractional', () => {
+    for (const v of [NaN, 0, -1, 2.5]) {
+      expect(() => validateRetryPolicy({ maxAttempts: v })).toThrow(KernelError);
+      expect(() => validateRetryPolicy({ maxAttempts: v })).toThrow(/maxAttempts/);
+    }
+    expect(() => validateRetryPolicy({ maxAttempts: 1 })).not.toThrow();
+  });
+
+  it('rejects a bad factor: NaN, Infinity, < 1', () => {
+    for (const v of [NaN, Infinity, 0, 0.5, -2]) {
+      expect(() => validateRetryPolicy({ factor: v })).toThrow(/factor/);
+    }
+    expect(() => validateRetryPolicy({ factor: 1 })).not.toThrow();
+    expect(() => validateRetryPolicy({ factor: 1.5 })).not.toThrow();
+  });
+
+  it('rejects a bad baseMs / maxMs: NaN, Infinity, negative', () => {
+    for (const v of [NaN, Infinity, -5]) {
+      expect(() => validateRetryPolicy({ baseMs: v })).toThrow(/baseMs/);
+      expect(() => validateRetryPolicy({ maxMs: v })).toThrow(/maxMs/);
+    }
+    expect(() => validateRetryPolicy({ baseMs: 0, maxMs: 0 })).not.toThrow();
+  });
+
+  it('throws the bad_request KernelError family with a label', () => {
+    const err = (() => {
+      try {
+        validateRetryPolicy({ factor: -2 }, 'task "x".retry');
+        return null;
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).toBeInstanceOf(KernelError);
+    expect((err as KernelError).code).toBe('bad_request');
+    expect((err as KernelError).message).toContain('task "x".retry.factor');
+  });
+
+  it('resolveRetryPolicy runs the same validation', () => {
+    expect(() => resolveRetryPolicy({ maxAttempts: NaN })).toThrow(KernelError);
+    expect(() => resolveRetryPolicy({ maxAttempts: 0 })).toThrow(KernelError);
+    expect(() => resolveRetryPolicy({ factor: -2 })).toThrow(KernelError);
   });
 });
 

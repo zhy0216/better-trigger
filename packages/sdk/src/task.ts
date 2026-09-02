@@ -19,6 +19,7 @@ import type {
   TaskRunResult,
   TriggerOptions,
 } from '@better-trigger/core';
+import { validateRetryPolicy } from '@better-trigger/core';
 import { currentExecutor, type ExecutorTask, type RunCtx } from './context';
 import { makeRunHandle, requireDefaultInstance, type RunHandle } from './instance';
 import { isSchema, validateSchema, type AnySchema, type InferSchema } from './schema';
@@ -242,6 +243,9 @@ function normalizeDefinition(
   ) {
     throw new Error(`task("${id}"): "replay" must be 'lenient' or 'strict'`);
   }
+  // Same range check the kernel registration boundary runs — catching it here
+  // names the task at definition time (p1-16). Throws KernelError bad_request.
+  validateRetryPolicy(config.retry, `task("${id}").retry`);
 
   return {
     id,

@@ -40,7 +40,9 @@ Options:
                            unless listed here. \`*\` allows any origin.
   --concurrency <n>        Concurrent execution slots   (env BETTER_TRIGGER_CONCURRENCY, default 5)
   --name <s>               Worker name shown in the dashboard
-  --lease-ms <n>           Claim lease duration         (default 60000)
+  --lease-ms <n>           Claim lease duration         (default 60000,
+                           minimum 1500 — a shorter lease expires before the
+                           first heartbeat renewal)
   --timer-interval-ms <n>  Wait-due scan interval       (default 1000)
   --cron-interval-ms <n>   Cron scan interval           (default 1000)
   --reaper-interval-ms <n> Expired-lease reap interval  (default 10000)
@@ -217,10 +219,39 @@ export function envFlag(raw: string | undefined): boolean {
   return v === '1' || v === 'true' || v === 'yes' || v === 'on';
 }
 
+/**
+ * A positive INTEGER flag value. isInteger, not isFinite (p1-16): every flag
+ * that uses this feeds a count or an interval where a fraction has no
+ * meaning — `--concurrency 2.5` was silently truncated to 2 slots by
+ * `Array.from({ length })`, and `--port 4848.5` only blew up later inside
+ * listen(). Aligned with parsePositiveIntEnv, which always demanded an
+ * integer for the same variables.
+ */
 export function requireInt(flag: string, raw: string): number {
   const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) {
-    throw new Error(`${flag} must be a positive number, got "${raw}"`);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`${flag} must be a positive integer, got "${raw}"`);
+  }
+  return n;
+}
+
+/**
+ * Floor for --lease-ms / the embedded leaseMs option. The heartbeat renews
+ * leases every `max(500, floor(leaseMs / 3))` ms (runtime.ts), so below 3 ×
+ * the 500ms heartbeat floor a claim's lease expires BEFORE its first renewal:
+ * the reaper reclaims a live run on every sweep, each reclaim consumes one of
+ * the run's recovery budget, and the run ends WorkerLostError while its
+ * worker was alive the whole time.
+ */
+export const MIN_LEASE_MS = 1_500;
+
+export function requireLeaseMs(flag: string, raw: string): number {
+  const n = requireInt(flag, raw);
+  if (n < MIN_LEASE_MS) {
+    throw new Error(
+      `${flag} must be at least ${MIN_LEASE_MS} (got ${n}) — the heartbeat renews at most every ` +
+        `500ms, so a shorter lease expires before its first renewal and a live run gets reaped`,
+    );
   }
   return n;
 }
@@ -411,7 +442,7 @@ export function parseArgs(argv: string[]): Options {
         opts.name = value();
         break;
       case '--lease-ms':
-        opts.leaseMs = requireInt(flag, value());
+        opts.leaseMs = requireLeaseMs(flag, value());
         break;
       case '--timer-interval-ms':
         opts.timerIntervalMs = requireInt(flag, value());

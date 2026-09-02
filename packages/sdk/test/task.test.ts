@@ -6,7 +6,7 @@
    stores) and the executor task (what runs). Everything here is pure — no
    executor in the AsyncLocalStorage, so trigger paths are not exercised.
    ============================================================================= */
-import type { TaskRunResult, TriggerItem, TriggerOptions, WaitResult } from '@better-trigger/core';
+import { KernelError, type RetryPolicy, type TaskRunResult, type TriggerItem, type TriggerOptions, type WaitResult } from '@better-trigger/core';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { executorStorage, type RunExecutor } from '../src/context';
 import type { RunCtx } from '../src/context';
@@ -113,6 +113,28 @@ describe('task(config)', () => {
     );
     expect(() => task({ id: 'x', replay: 'lenient', run: noop })).not.toThrow();
     expect(() => task({ id: 'x', replay: 'strict', run: noop })).not.toThrow();
+  });
+
+  it('rejects an out-of-range retry policy at definition time (p1-16)', () => {
+    const bad: Array<[string, Partial<RetryPolicy>]> = [
+      ['NaN maxAttempts', { maxAttempts: NaN }],
+      ['0 maxAttempts', { maxAttempts: 0 }],
+      ['negative factor', { factor: -2 }],
+      ['negative maxMs', { maxMs: -5 }],
+    ];
+    for (const [why, retry] of bad) {
+      let err: unknown;
+      try {
+        // Well-typed on purpose: NaN / -2 are numbers — the range is the bug.
+        task({ id: 'x', retry, run: noop });
+      } catch (e) {
+        err = e;
+      }
+      expect(err, why).toBeInstanceOf(KernelError);
+      expect((err as KernelError).code, why).toBe('bad_request');
+      expect((err as KernelError).message, why).toContain('task("x").retry');
+    }
+    expect(() => task({ id: 'x', retry: { maxAttempts: 5 }, run: noop })).not.toThrow();
   });
 });
 

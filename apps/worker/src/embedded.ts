@@ -46,6 +46,7 @@ import {
   type RunResultResolver,
 } from 'better-trigger/internal';
 import { createApp } from './app';
+import { MIN_LEASE_MS } from './cli';
 import { markInternalRequest } from './internal-request';
 import {
   createNotifyCounters,
@@ -212,6 +213,19 @@ export async function createEmbeddedRuntime(
   const concurrency = options.concurrency ?? 5;
   if (!Number.isInteger(concurrency) || concurrency <= 0) {
     throw new Error(`createEmbeddedRuntime concurrency must be a positive integer, got ${concurrency}`);
+  }
+  // Same floor the CLI enforces on --lease-ms (p1-16): below 3 × the 500ms
+  // heartbeat floor the lease of every claimed run expires before its first
+  // renewal, so the reaper recovers live runs until their recovery budget is
+  // spent and they fail WorkerLostError.
+  if (
+    options.leaseMs !== undefined &&
+    (!Number.isInteger(options.leaseMs) || options.leaseMs < MIN_LEASE_MS)
+  ) {
+    throw new Error(
+      `createEmbeddedRuntime leaseMs must be an integer of at least ${MIN_LEASE_MS}, got ${options.leaseMs} ` +
+        `(the heartbeat renews at most every 500ms; a shorter lease expires before its first renewal)`,
+    );
   }
   if (options.pool && options.poolOptions) {
     throw new Error('createEmbeddedRuntime poolOptions cannot be used with an injected pool');

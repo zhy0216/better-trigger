@@ -9,6 +9,7 @@ import type { Pool, PoolClient } from 'pg';
 import {
   assertNamespace,
   KernelError,
+  validateRetryPolicy,
   type Namespace,
   type TaskManifest,
 } from '@better-trigger/core';
@@ -56,6 +57,11 @@ export async function registerWorker(
     if (typeof t?.id !== 'string' || t.id.length === 0) {
       throw new KernelError('bad_request', 'task.id must be a non-empty string');
     }
+    // p1-16: the manifest is the only path a retry policy takes into
+    // tasks.retry (subtasks never pass through HTTP), and an unvalidated
+    // garbage policy (NaN maxAttempts, negative factor) would make every
+    // later trigger of that task misbehave — refuse the registration.
+    validateRetryPolicy(t.retry, `task "${t.id}".retry`);
   }
   const id = genWorkerId();
   const logger: KernelLogger = args.logger ?? console;
