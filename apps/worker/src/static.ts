@@ -47,9 +47,10 @@
    origins (Referrer-Policy: no-referrer). These sit on the shared `headers`
    object so the 304 and 200 paths answer identically.
    ============================================================================= */
-import { realpathSync, statSync } from 'node:fs';
-import { realpath, stat, readFile } from 'node:fs/promises';
+import { createReadStream, realpathSync, statSync } from 'node:fs';
+import { realpath, stat } from 'node:fs/promises';
 import { join, sep } from 'node:path';
+import { Readable } from 'node:stream';
 import type { MiddlewareHandler } from 'hono';
 
 /** Vite's default assetsDir: everything under here carries a content hash. */
@@ -216,8 +217,21 @@ async function serveFile(
     return new Response(null, { status: 304, headers });
   }
 
-  const body = await readFile(target);
-  return new Response(method === 'HEAD' ? null : body, { status: 200, headers });
+  // HEAD answers the headers (Content-Length included) with no body, without
+  // opening the file at all.
+  if (method === 'HEAD') {
+    return new Response(null, { status: 200, headers });
+  }
+
+  // Stream the file instead of buffering it whole: a large hashed JS bundle
+  // served under concurrency would otherwise allocate its full bytes per
+  // request (Content-Length is already known from the stat above, so the
+  // response is not chunked). Range is deliberately not implemented: every
+  // /assets/ path is content-hashed and served `immutable`, so clients cache
+  // each file in full and never byte-range it — the state machine would serve
+  // a request pattern that does not occur for this dashboard.
+  const body = Readable.toWeb(createReadStream(target));
+  return new Response(body, { status: 200, headers });
 }
 
 /**

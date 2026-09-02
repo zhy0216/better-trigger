@@ -427,8 +427,23 @@ export class Executor implements RunExecutor {
         // ctx.wait.for('24h') must fingerprint as '24h' on every replay, while
         // the absolute resumeAt is recomputed from wall-clock time each time
         // and would drift the ledger (C1).
-        for: (duration) => this.doWait('duration', durationToDate(duration), { duration }),
-        until: (date) => this.doWait('until', date, { until: date.toISOString() }),
+        //
+        // The arguments are evaluated here, before doWait takes a seq: a bad
+        // duration (parseDuration's Error, durationToDate's out-of-range
+        // KernelError) or an invalid Date (toISOString's RangeError) is
+        // deterministic — a replay re-raises the identical throw — so surface it
+        // as a non-retryable AbortError instead of letting handleThrown classify a
+        // plain Error as retryable and burn the run's attempt budget on it (T1).
+        for: (duration) =>
+          this.doWait(
+            'duration',
+            this.waitArg('ctx.wait.for', () => durationToDate(duration)),
+            { duration },
+          ),
+        until: (date) => {
+          const iso = this.waitArg('ctx.wait.until', () => date.toISOString());
+          return this.doWait('until', date, { until: iso });
+        },
       },
       logger: {
         debug: (m, d) => this.log('debug', m, d),
@@ -894,6 +909,24 @@ export class Executor implements RunExecutor {
 
   /* ---- ctx.wait -------------------------------------------------------- */
 
+  /**
+   * Evaluate a ctx.wait argument (T1). A bad duration or an invalid Date throws
+   * before the primitive is created — deterministic, so a replay re-raises the
+   * same value — hence an AbortError (non-retryable): handleThrown must not see
+   * a plain Error and attach this.task.retry, spending attempts on an argument
+   * that can never become valid. Same dogma as isUnfixableKernelError, applied
+   * to the wrapper's own argument evaluation, which runs between steps.
+   */
+  private waitArg<T>(what: string, compute: () => T): T {
+    try {
+      return compute();
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new AbortError(`${what}: ${reason}`);
+    }
+  }
+
   private async doWait(
     kind: 'duration' | 'until',
     resumeAt: Date,
@@ -1129,7 +1162,6 @@ export class Executor implements RunExecutor {
           `dropped ${dropped.length} oldest buffered log line(s) for run ${this.run.id} ` +
             `(task=${this.run.taskId}) — appendLogs is not draining; buffered cap ` +
             `is ${LOG_BUFFER_MAX} lines`,
-          undefined,
         );
       }
     }

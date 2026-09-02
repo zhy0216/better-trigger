@@ -8,7 +8,7 @@
    count — "how many times did this actually happen".
    ============================================================================= */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createThrottledLogger, errorKey } from '../src/observability';
+import { createThrottledLogger, describeError, errorKey } from '../src/observability';
 
 function recordingLogger() {
   const lines: string[] = [];
@@ -80,6 +80,17 @@ describe('createThrottledLogger', () => {
     expect(lines[0]).toContain('connection refused');
     expect(lines[0]).toContain('observability.test.ts');
   });
+
+  it('omits the error description entirely when there is no error (T3)', () => {
+    const { lines, logger } = recordingLogger();
+    const log = createThrottledLogger(logger, 30_000);
+    // The backpressure drop is a warning not caused by a thrown value: it used
+    // to append a phantom "undefined" from describeError(undefined).
+    log.warn('log-flush:backpressure', 'buffered log lines dropped under backpressure');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toBe('[better-trigger] buffered log lines dropped under backpressure');
+    expect(lines[0]).not.toContain('undefined');
+  });
 });
 
 describe('errorKey', () => {
@@ -93,5 +104,18 @@ describe('errorKey', () => {
   it('falls back to the error name, then to the typeof', () => {
     expect(errorKey(new TypeError('nope'))).toBe('TypeError');
     expect(errorKey('a string')).toBe('string');
+  });
+});
+
+describe('describeError', () => {
+  it('describes an absent error as the empty string, never the literals (T3)', () => {
+    expect(describeError(undefined)).toBe('');
+    expect(describeError(null)).toBe('');
+  });
+
+  it('renders an Error stack and a bare value', () => {
+    expect(describeError(new Error('boom'))).toContain('boom');
+    expect(describeError('a string')).toBe('a string');
+    expect(describeError(42)).toBe('42');
   });
 });

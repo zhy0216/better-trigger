@@ -12,7 +12,7 @@
    ============================================================================= */
 import { request as httpRequest } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { realpathSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -160,6 +160,19 @@ describe('dashboard hosting with a built dashboard', () => {
     expect(res.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
     expectSecurityHeaders(res);
     expect(await res.text()).toContain('fixture dashboard bundle');
+  });
+
+  it('streams the file with a correct Content-Length and byte-identical body', async () => {
+    // T4: serveFile answers from a createReadStream → Readable.toWeb instead of
+    // buffering. Content-Length still comes from the stat (the whole body is
+    // shipped, never chunked), and the streamed bytes must equal the file.
+    const target = join(publicDir, 'assets', 'app-abc123.js');
+    const size = statSync(target).size;
+    const content = readFileSync(target, 'utf8');
+    const res = await get(withDashboard(), '/assets/app-abc123.js');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-length')).toBe(String(size));
+    expect(await res.text()).toBe(content);
   });
 
   it('maps the content types in the MIME table', async () => {

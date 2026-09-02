@@ -24,6 +24,7 @@ import {
   type ResolvedTaskDefinition,
 } from 'better-trigger/internal';
 import { Executor } from './executor';
+import { MIN_LEASE_MS } from './cli';
 import { sleepWithWake, type WakeSignal } from './notify';
 import {
   createThrottledLogger,
@@ -138,6 +139,33 @@ export async function startWorkerRuntime(
   const { kernel } = deps;
   const concurrency = options.concurrency ?? 5;
   const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
+
+  // The library entry point gets the same guards the CLI (--lease-ms) and the
+  // embedded host apply, so a caller wiring startWorkerRuntime() up by hand
+  // cannot reach the kernel with a config that quietly wedges the worker (T2).
+  // A lease below 3 × the heartbeat floor expires before its first renewal and
+  // the reaper eats live runs' recovery budget; non-positive / non-integer
+  // concurrency yields zero claim loops; empty tasks or namespaces produce an
+  // infinitely-throttled claim-error loop. Checked before any side effect, so a
+  // rejected call never registers a worker or starts an orchestrator.
+  if (!Number.isInteger(concurrency) || concurrency <= 0) {
+    throw new Error(`startWorkerRuntime concurrency must be a positive integer, got ${concurrency}`);
+  }
+  if (
+    options.leaseMs !== undefined &&
+    (!Number.isInteger(options.leaseMs) || options.leaseMs < MIN_LEASE_MS)
+  ) {
+    throw new Error(
+      `startWorkerRuntime leaseMs must be an integer of at least ${MIN_LEASE_MS}, got ${options.leaseMs} ` +
+        `(the heartbeat renews at most every ${MIN_HEARTBEAT_MS}ms; a shorter lease expires before its first renewal)`,
+    );
+  }
+  if (!Array.isArray(options.tasks) || options.tasks.length === 0) {
+    throw new Error('startWorkerRuntime requires a non-empty tasks array');
+  }
+  if (!Array.isArray(options.namespaces) || options.namespaces.length === 0) {
+    throw new Error('startWorkerRuntime requires a non-empty namespaces array');
+  }
   const counters = createWorkerCounters();
   const log = createThrottledLogger(deps.logger ?? console, deps.logThrottleMs);
 
@@ -525,8 +553,7 @@ export async function startWorkerRuntime(
  *  versions below — an explicit git sha / image tag is more trustworthy than
  *  any source hash, and churns only when the deployment says so. */
 function envVersion(): string | undefined {
-  return (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
-    ?.BETTER_TRIGGER_VERSION;
+  return process.env.BETTER_TRIGGER_VERSION;
 }
 
 /** One task's identity for versioning: id + cron config + run body source. */

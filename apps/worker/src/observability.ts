@@ -29,9 +29,11 @@ export interface ThrottledLogger {
    * Report `err` once per `key` per window. Repeats inside the window are
    * counted, not printed, and the count rides along on the next line that gets
    * through — so a five-minute outage reads as a handful of lines that say how
-   * many times it actually happened.
+   * many times it actually happened. `err` is optional: a warning that is not
+   * caused by a thrown value (e.g. the log-buffer backpressure drop) omits it,
+   * and the line is not padded with a phantom error description.
    */
-  warn(key: string, message: string, err: unknown): void;
+  warn(key: string, message: string, err?: unknown): void;
 }
 
 export function createThrottledLogger(
@@ -55,7 +57,13 @@ export function createThrottledLogger(
         suppressed > 0
           ? ` (+${suppressed} more in the last ${Math.round(intervalMs / 1000)}s)`
           : '';
-      logger.warn(`[better-trigger] ${message}${folded}`, describeError(err));
+      const line = `[better-trigger] ${message}${folded}`;
+      const detail = describeError(err);
+      // Only pass an error description when there is one — otherwise a warning
+      // raised without a thrown value (backpressure) prints a trailing
+      // "undefined" (T3).
+      if (detail === '') logger.warn(line);
+      else logger.warn(line, detail);
     },
   };
 }
@@ -75,8 +83,12 @@ export function errorKey(err: unknown): string {
   return typeof err;
 }
 
-/** Stack when there is one — this line may be the only record of the fault. */
+/** Stack when there is one — this line may be the only record of the fault.
+ *  An absent error (undefined / null) describes to '' rather than the literal
+ *  "undefined" / "null", so a warning not caused by a thrown value stays clean
+ *  (T3). */
 export function describeError(err: unknown): string {
+  if (err == null) return '';
   if (err instanceof Error) return err.stack ?? `${err.name}: ${err.message}`;
   return String(err);
 }

@@ -12,7 +12,7 @@
 | 04 | [04-kernel-cron-poison-and-takeover.md](./04-kernel-cron-poison-and-takeover.md) | P1 | hard | 依赖 02。单条毒 cron 停摆全调度器；C4 接管守卫对旧版 manifest 失明；batchTriggerChild 孤儿 run；served 语义分裂 |
 | 05 | [05-kernel-quality-clock-selfheal.md](./05-kernel-quality-clock-selfheal.md) | P2 | hard | 依赖 04。宿主时钟 vs DB 时钟、wait-graph 检出不自愈、work 通知跨 namespace 唤醒、死代码/注释/契约文档漂移 |
 | 06 | [06-worker-api-cli-hardening.md](./done/06-worker-api-cli-hardening.md) | P2 | medium | ✅ 已完成 · CORS 缺 Idempotency-Key、GET /runs 游标毫秒截断丢行、CLI 上限缺失、--help 被 env 校验拦截、waiter 监听器泄漏、`--database-url` 凭据暴露未警示（T1–T7 全部落地） |
-| 07 | [07-worker-runtime-executor-hardening.md](./07-worker-runtime-executor-hardening.md) | P2 | medium | ctx.wait 确定性参数错误被可重试化、startWorkerRuntime 库 API 跳过校验、背压日志打 "undefined"、静态资源整体缓冲 |
+| 07 | [07-worker-runtime-executor-hardening.md](./done/07-worker-runtime-executor-hardening.md) | P2 | medium | ✅ 已完成 · ctx.wait 确定性参数错误被可重试化、startWorkerRuntime 库 API 跳过校验、背压日志打 "undefined"、静态资源整体缓冲、shebang 仅注入 bin、engines/target 对齐（T1–T5 全部落地） |
 | 08 | [08-web-robustness-perf-a11y.md](./08-web-robustness-perf-a11y.md) | P1 | medium | fetch 无超时杀死轮询、Ruler DOM 无界增长、Sparkline NaN、chevronUp 缺失、错误边界、a11y 与 key 修补 |
 | 09 | [09-web-schedules-reconciliation.md](./09-web-schedules-reconciliation.md) | P1 | medium | Schedules 乐观覆盖永不清除 + 并发点击竞态 + Switch 缺可访问名 |
 | 10 | [10-testing-package-harness.md](./10-testing-package-harness.md) | P2 | medium | testing 包 10 处缺陷（超时/泄漏/孤儿进程/URL 解析）+ 注入式时钟与单元测试从零补齐 |
@@ -28,7 +28,7 @@
 4. `04-kernel-cron-poison-and-takeover.md`（P1）— 依赖 02（共享 queue.ts / workers.ts / runs-steps.ts）
 5. `05-kernel-quality-clock-selfheal.md`（P2）— 依赖 04（共享 orchestrator.ts / runs-logs.ts 等）
 6. `06-worker-api-cli-hardening.md`（P2）✅ 已完成，归档至 `done/`
-7. `07-worker-runtime-executor-hardening.md`（P2）
+7. `07-worker-runtime-executor-hardening.md`（P2）✅ 已完成，归档至 `done/`
 8. `08-web-robustness-perf-a11y.md`（P1）
 9. `09-web-schedules-reconciliation.md`（P1）
 10. `10-testing-package-harness.md`（P2）

@@ -7,6 +7,8 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   fixedExtension: false,
+  // Matches engines.node in package.json (">=18"): the whole monorepo builds to
+  // the Node 18 floor and the runtime never reaches for a Node 20-only API.
   target: 'node18',
   // Keep heavy/native deps external so they resolve from node_modules at runtime.
   // `better-trigger` MUST stay external: the worker and the user's task modules
@@ -15,7 +17,8 @@ export default defineConfig({
   deps: {
     neverBundle: ['pg', 'hono', '@hono/node-server', 'better-trigger'],
   },
-  banner: {
-    js: '#!/usr/bin/env node',
-  },
+  // Only the CLI bin (dist/main.js) is executed directly and needs a shebang;
+  // the library (index) and embedded bundles are imported, never run as a
+  // script, so a shebang on them is noise.
+  banner: ({ fileName }) => (fileName === 'main.js' ? '#!/usr/bin/env node' : undefined),
 });

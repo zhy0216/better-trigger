@@ -96,10 +96,10 @@ describe('heartbeat lease loss', () => {
       }),
     );
 
-    // leaseMs/3 < the 500ms heartbeat floor, so the first tick lands at 500ms.
+    // leaseMs/3 floors at the 500ms heartbeat floor, so the first tick lands at 500ms.
     const handle = await startWorkerRuntime(
       { kernel },
-      { tasks: [slow], concurrency: 1, leaseMs: 1_200, namespaces: [DEFAULT_NAMESPACE] },
+      { tasks: [slow], concurrency: 1, leaseMs: 1_500, namespaces: [DEFAULT_NAMESPACE] },
     );
     const reason = (await aborted) as RunAbortedError;
     await handle.stop();

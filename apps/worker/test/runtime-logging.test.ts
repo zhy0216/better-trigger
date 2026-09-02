@@ -136,10 +136,10 @@ describe('heartbeat failures', () => {
     const { kernel, calls } = fakeKernel({ heartbeatFails: true });
     const { lines, logger } = recordingLogger();
 
-    // leaseMs/3 < the 500ms floor, so the first tick lands at 500ms.
+    // leaseMs/3 floors at the 500ms floor, so the first tick lands at 500ms.
     const handle = await startWorkerRuntime(
       { kernel, logger },
-      { tasks: [ok], concurrency: 1, leaseMs: 1_200, namespaces: [DEFAULT_NAMESPACE] },
+      { tasks: [ok], concurrency: 1, leaseMs: 1_500, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => lines.some((l) => l.includes('heartbeat failed')));
     // Claiming is unaffected — the heartbeat is its own loop.

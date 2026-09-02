@@ -152,6 +152,9 @@ describe('bounded log flushing (p2-18 C3)', () => {
     expect(handle.counters.logFlushErrors).toBeGreaterThan(0);
     expect(lines.some((l) => l.includes('oldest buffered log line(s)'))).toBe(true);
     expect(lines.some((l) => l.includes('not draining'))).toBe(true);
+    // T3: the backpressure drop passes no error value, so no line may be padded
+    // with the literal "undefined" describeError(undefined) used to emit.
+    expect(lines.some((l) => l.includes('undefined'))).toBe(false);
     // What did get shipped is bounded well under the burst, non-zero, and the
     // loss is exactly what the cap accounts for: delivered + dropped == 3000.
     expect(f.delivered()).toBeGreaterThan(0);
