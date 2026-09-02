@@ -85,9 +85,13 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
           <Th>Status</Th><Th>Run</Th><Th>Task</Th><Th>Trigger</Th><Th>Version</Th><Th style={{ textAlign: 'right' }}>Duration</Th><Th style={{ textAlign: 'right' }}>Started</Th>
         </div>
         {runs.map((r, i) => (
-          <div key={r.id} onClick={() => onOpenRun(r)}
+          // A real <button> row (p2-19): focusable, Enter/Space-openable. The
+          // box keeps the former div's grid/look; button UA defaults reset.
+          <button key={r.id} type="button" onClick={() => onOpenRun(r)}
             style={{
-              display: 'grid', gridTemplateColumns: colT, gap: 12, padding: '0 16px', height: 'var(--row-h)', alignItems: 'center', cursor: 'pointer',
+              appearance: 'none', border: 'none', padding: '0 16px', background: 'transparent',
+              font: 'inherit', fontFamily: 'var(--font-sans)', color: 'var(--fg)', textAlign: 'left', width: '100%',
+              display: 'grid', gridTemplateColumns: colT, gap: 12, height: 'var(--row-h)', alignItems: 'center', cursor: 'pointer',
               borderBottom: i < runs.length - 1 ? '1px solid var(--divider)' : 'none', transition: 'background var(--dur-fast)',
             }}
             onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--hover)')}
@@ -105,7 +109,7 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
               {r.duration || (r.status === 'running' ? 'running…' : '—')}
             </div>
             <div style={{ fontSize: 12, color: 'var(--fg-subtle)', textAlign: 'right', whiteSpace: 'nowrap' }}>{r.started}</div>
-          </div>
+          </button>
         ))}
         {runs.length === 0 && (
           <div style={{ padding: '48px 0', textAlign: 'center', color: 'var(--fg-subtle)', fontSize: 13 }}>No runs match these filters.</div>

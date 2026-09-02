@@ -61,6 +61,9 @@ export default function App() {
   const [route, setRoute] = React.useState<Route>(initial.route);
   const [env, setEnv] = React.useState('prod');
   const [collapsed, setCollapsed] = React.useState(false);
+  // The Tweaks panel is controlled from here (p2-19): hidden by default,
+  // toggled by the TopBar button, closed by the panel's own ✕.
+  const [tweaksOpen, setTweaksOpen] = React.useState(false);
   const [runId, setRunId] = React.useState<string | null>(initial.runId); // selected run for RunView
   const connection = useConnection();
   const [apiKeySource, setApiKeySource] = React.useState(getApiKeySource);
@@ -130,7 +133,8 @@ export default function App() {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <TopBar title={titles[route]} env={env} setEnv={setEnv}
           onToggleSidebar={() => setCollapsed((c) => !c)}
-          theme={t.theme} setTheme={(v) => setTweak('theme', v)}>
+          theme={t.theme} setTheme={(v) => setTweak('theme', v)}
+          tweaksOpen={tweaksOpen} onToggleTweaks={() => setTweaksOpen((v) => !v)}>
           <ConnectionDot connection={connection} />
           {apiKeySource === 'vite-env' && (
             <span title="VITE_BT_API_KEY is embedded in this bundle; use only for local development" style={{ color: 'var(--orange-text)', fontSize: 11.5, whiteSpace: 'nowrap' }}>
@@ -165,7 +169,7 @@ export default function App() {
         ) : screen}
       </div>
 
-      <TweaksPanel>
+      <TweaksPanel open={tweaksOpen} onOpenChange={setTweaksOpen}>
         <TweakSection label="Theme" />
         <TweakRadio label="Mode" value={t.theme} options={['light', 'dark']} onChange={(v) => setTweak('theme', v)} />
         <TweakColor label="Accent" value={t.accent}

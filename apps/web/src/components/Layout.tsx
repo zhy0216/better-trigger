@@ -14,6 +14,12 @@ export function Page({ children, pad = true, scroll = true }: { children?: React
   );
 }
 
+/**
+ * When given an `onClick` the card is an interactive control: it gets
+ * role="button" + tabIndex + Enter/Space activation (p2-19 — it used to be
+ * mouse-only). A real <button> is not used because cards carry block layout
+ * content and, on the schedules screen, nested real buttons.
+ */
 export function Card({
   children, style, onClick, hover,
 }: {
@@ -23,8 +29,17 @@ export function Card({
   hover?: boolean;
 }) {
   const [h, setH] = React.useState(false);
+  const interactive = onClick !== undefined;
   return (
     <div onClick={onClick}
+      role={interactive ? 'button' : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      onKeyDown={interactive ? (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick?.();
+        }
+      } : undefined}
       onMouseEnter={() => hover && setH(true)} onMouseLeave={() => setH(false)}
       style={{
         background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12,

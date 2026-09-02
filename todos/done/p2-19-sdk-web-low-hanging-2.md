@@ -2,7 +2,7 @@
 
 - 优先级：P2（类型安全 / 可用性打磨）
 - 区域：packages/sdk、apps/web
-- 状态：待办
+- 状态：已完成（2026-09-02）
 - 来源：2026-09-02 全仓库审查（第二轮）
 
 ## C1 · 实例级 `batchTrigger` per-item `env/projectId` 是静默丢弃的类型洞 {#c1}

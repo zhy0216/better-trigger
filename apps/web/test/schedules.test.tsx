@@ -52,7 +52,9 @@ afterEach(() => {
 /** Drive one enable/disable click on the (single) schedule row. */
 async function clickSwitch(): Promise<HTMLElement> {
   const row = screen.getByText('0 0 * * *').parentElement as HTMLElement;
-  const track = row.querySelector<HTMLElement>('div[style*="cursor: pointer"]') as HTMLElement;
+  // The schedule Switch is a real button[role=switch] (p2-19) — query it by
+  // role instead of the div+inline-cursor shape it used to have.
+  const track = row.querySelector<HTMLElement>('button[role="switch"]') as HTMLElement;
   fireEvent.click(track);
   await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit)?.method === 'PATCH')).toBe(true));
   return row;
@@ -78,7 +80,7 @@ describe('Schedules toggle errors (P1-17 C2)', () => {
     // …and the optimistic flip reverted: the row is back to enabled
     // (opacity 1, accent-colored switch track).
     expect(row.style.opacity).toBe('1');
-    expect(row.querySelector('div[style*="background: var(--accent)"]')).toBeTruthy();
+    expect(row.querySelector('[style*="background: var(--accent)"]')).toBeTruthy();
   });
 
   it('a 401 on the toggle feeds the shared connection error channel (P1-17 C2)', async () => {

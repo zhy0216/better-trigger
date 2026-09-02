@@ -16,7 +16,6 @@ import type {
   RunDetailResult,
   RunRecord,
   RunStatus,
-  TriggerItem,
   TriggerOptions,
   WaitForResultOptions,
   WaitResult,
@@ -24,7 +23,7 @@ import type {
 import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
 import { HttpClient, HttpError, type HttpClientOptions } from './client';
 import { registry } from './registry';
-import type { TaskHandle } from './task';
+import type { BatchItemOptions, TaskHandle } from './task';
 
 /**
  * Thrown by waitForResult / RunHandle.result() when `throwOnTimeout` is set and
@@ -77,6 +76,20 @@ export interface BetterTriggerOptions {
   timeoutMs?: number;
 }
 
+/**
+ * One item of an instance-level batchTrigger call. Same shape as core's
+ * TriggerItem but with the namespace pair removed from per-item options: a
+ * batch runs all-or-nothing in the ONE namespace named by the batch-level
+ * `options`, so a per-item env/projectId used to typecheck and then be
+ * silently dropped — a staging intent creating prod runs. Now it is a
+ * compile error instead (p2-19, matching BatchItemOptions from p1-15).
+ */
+export interface BatchTriggerItem {
+  taskId: string;
+  payload: unknown;
+  options?: BatchItemOptions;
+}
+
 export interface BetterTrigger {
   /** Base URL this instance talks to. */
   readonly url: string;
@@ -96,9 +109,10 @@ export interface BetterTrigger {
    * Trigger many runs in one all-or-nothing transaction. `options` (projectId
    * / env only) names the namespace the whole batch runs in; absent →
    * default/prod. Per-item options are data — they never split a batch across
-   * namespaces.
+   * namespaces, so per-item env/projectId are a compile error (p2-19, same
+   * narrowing TaskHandle.batchTrigger got in p1-15).
    */
-  batchTrigger(items: TriggerItem[], options?: TriggerOptions): Promise<RunHandle[]>;
+  batchTrigger(items: BatchTriggerItem[], options?: TriggerOptions): Promise<RunHandle[]>;
   /**
    * Cancel a non-terminal run (terminal → no-op). `namespace` scopes the
    * request; absent → server default (default/prod).

@@ -134,15 +134,18 @@ export const Button = ({
 export interface IconButtonProps {
   name: string;
   active?: boolean;
+  /** Toggle-button state, announced to assistive tech via aria-pressed. */
+  pressed?: boolean;
   onClick?: () => void;
   size?: number;
   title?: string;
   box?: number;
 }
 
-export const IconButton = ({ name, active, onClick, size = 16, title, box = 30 }: IconButtonProps) => (
-  <button onClick={onClick} title={title}
+export const IconButton = ({ name, active, pressed, onClick, size = 16, title, box = 30 }: IconButtonProps) => (
+  <button type="button" onClick={onClick} title={title}
     data-active={active}
+    aria-pressed={pressed}
     className="bt-icon-btn"
     style={{
       width: box, height: box, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -205,22 +208,29 @@ export const Badge = ({ tone = 'gray', children, style }: { tone?: BadgeTone; ch
   );
 };
 
+/**
+ * A real <button role="switch">: focusable, toggled by click, Enter and Space
+ * (p2-19 — it used to be an unlabelled div, mouse-only). The visual style is
+ * the div's former box; button UA defaults are reset inline.
+ */
 export const Switch = ({ checked, onChange, size = 18 }: { checked: boolean; onChange?: (v: boolean) => void; size?: number }) => {
   const w = size === 18 ? 32 : 38;
   const knob = size - 4;
   return (
-    <div onClick={() => onChange?.(!checked)}
+    <button type="button" role="switch" aria-checked={checked}
+      onClick={() => onChange?.(!checked)}
       style={{
+        appearance: 'none', padding: 0, border: 'none',
         position: 'relative', width: w, height: size, cursor: 'pointer', flexShrink: 0,
         background: checked ? 'var(--accent)' : 'var(--border-strong)', borderRadius: 9999,
         transition: 'background var(--dur-fast)',
       }}>
-      <div style={{
+      <span aria-hidden="true" style={{
         position: 'absolute', top: 2, left: 2, width: knob, height: knob, background: '#fff',
         borderRadius: '50%', transform: checked ? `translateX(${w - size}px)` : 'translateX(0)',
         transition: 'transform var(--dur-fast) var(--ease-standard)', boxShadow: 'var(--shadow-sm)',
       }} />
-    </div>
+    </button>
   );
 };
 

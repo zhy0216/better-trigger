@@ -4,9 +4,11 @@
    A floating, draggable control panel. The host postMessage protocol
    (`__activate_edit_mode` / `__edit_mode_available` / …) it was built for was
    removed — it was documented as dead in apps/web/README.md and, unorigin-
-   checked, would have let any framing page open/close the panel. Standalone
-   (no host), the panel starts hidden; a manual toggle needs an `open` state
-   wired in the caller (see README).
+   checked, would have let any framing page open/close the panel. The panel is
+   now fully controlled: the caller owns `open` (App.tsx, toggled from a TopBar
+   button; p2-19) and defaults it to closed. Pointer drags register window-
+   level move/up listeners; every site also stashes its detach in a ref so an
+   unmount mid-drag cannot leak one (p2-19).
    ============================================================================= */
 import React from 'react';
 
@@ -121,10 +123,20 @@ const __TWEAKS_STYLE = `
 `;
 
 // ── TweaksPanel ─────────────────────────────────────────────────────────────
-export function TweaksPanel({ title = 'Tweaks', children }: { title?: string; children?: React.ReactNode }) {
-  const [open, setOpen] = React.useState(false);
+export function TweaksPanel({
+  title = 'Tweaks', children, open = false, onOpenChange,
+}: {
+  title?: string; children?: React.ReactNode;
+  /** Controlled visibility (p2-19): the caller — App.tsx — owns the state. */
+  open?: boolean;
+  /** Notified when the panel asks to close (the ✕ button). */
+  onOpenChange?: (open: boolean) => void;
+}) {
   const dragRef = React.useRef<HTMLDivElement | null>(null);
   const offsetRef = React.useRef({ x: 16, y: 16 });
+  // Detaches the header drag's window listeners; set while a drag is live so
+  // the unmount effect below can clean up an in-flight drag (p2-19).
+  const dragCleanupRef = React.useRef<(() => void) | null>(null);
   const PAD = 16;
 
   const clampToViewport = React.useCallback(() => {
@@ -154,8 +166,12 @@ export function TweaksPanel({ title = 'Tweaks', children }: { title?: string; ch
     return () => ro.disconnect();
   }, [open, clampToViewport]);
 
+  // Unmounting mid-drag used to leak the window mousemove/mouseup pair until
+  // the next (detached) mouseup; detach it here instead (p2-19).
+  React.useEffect(() => () => dragCleanupRef.current?.(), []);
+
   const dismiss = () => {
-    setOpen(false);
+    onOpenChange?.(false);
   };
 
   const onDragStart = (e: React.MouseEvent) => {
@@ -173,12 +189,14 @@ export function TweaksPanel({ title = 'Tweaks', children }: { title?: string; ch
       };
       clampToViewport();
     };
-    const up = () => {
+    const detach = () => {
       window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
+      window.removeEventListener('mouseup', detach);
+      dragCleanupRef.current = null;
     };
+    dragCleanupRef.current = detach;
     window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
+    window.addEventListener('mouseup', detach);
   };
 
   if (!open) return null;
@@ -253,6 +271,10 @@ export function TweakRadio({ label, value, options, onChange }: {
   const [dragging, setDragging] = React.useState(false);
   const valueRef = React.useRef(value);
   valueRef.current = value;
+  // Detach for an in-flight scrub, so unmounting mid-drag can't leak the
+  // window pointer listeners (p2-19).
+  const dragCleanupRef = React.useRef<(() => void) | null>(null);
+  React.useEffect(() => () => dragCleanupRef.current?.(), []);
 
   const labelLen = (o: Option) => String(typeof o === 'object' ? o.label : o).length;
   const maxLen = options.reduce<number>((m, o) => Math.max(m, labelLen(o)), 0);
@@ -288,7 +310,9 @@ export function TweakRadio({ label, value, options, onChange }: {
       setDragging(false);
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      dragCleanupRef.current = null;
     };
+    dragCleanupRef.current = up;
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   };
@@ -300,7 +324,8 @@ export function TweakRadio({ label, value, options, onChange }: {
         <div className="twk-seg-thumb"
           style={{ left: `calc(2px + ${idx} * (100% - 4px) / ${n})`, width: `calc((100% - 4px) / ${n})` }} />
         {opts.map((o) => (
-          <button key={o.value} type="button" role="radio" aria-checked={o.value === value}>
+          <button key={o.value} type="button" role="radio" aria-checked={o.value === value}
+            onClick={() => { if (o.value !== valueRef.current) onChange(o.value); }}>
             {o.label}
           </button>
         ))}
@@ -345,6 +370,10 @@ export function TweakNumber({ label, value, min, max, step = 1, unit = '', onCha
     return n;
   };
   const startRef = React.useRef({ x: 0, val: 0 });
+  // Detach for an in-flight scrub, so unmounting mid-drag can't leak the
+  // window pointer listeners (p2-19).
+  const scrubCleanupRef = React.useRef<(() => void) | null>(null);
+  React.useEffect(() => () => scrubCleanupRef.current?.(), []);
   const onScrubStart = (e: React.PointerEvent) => {
     e.preventDefault();
     startRef.current = { x: e.clientX, val: value };
@@ -358,7 +387,9 @@ export function TweakNumber({ label, value, min, max, step = 1, unit = '', onCha
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      scrubCleanupRef.current = null;
     };
+    scrubCleanupRef.current = up;
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   };

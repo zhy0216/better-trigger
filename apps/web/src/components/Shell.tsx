@@ -73,10 +73,36 @@ export function Sidebar({ route, setRoute, collapsed }: { route: Route; setRoute
 
 export function EnvSwitcher({ env, setEnv }: { env: string; setEnv: (e: string) => void }) {
   const [open, setOpen] = React.useState(false);
+  const triggerRef = React.useRef<HTMLButtonElement | null>(null);
+  // EnvSwitcher keyboard path (p2-19): Esc closes and restores focus to the
+  // trigger; opening moves focus into the menu so Tab/Enter continue from
+  // there instead of leaving the caret on a vanished popup.
+  const optionRefs = React.useRef<Record<string, HTMLButtonElement | null>>({});
   const cur = ENVS.find((e) => e.id === env) || ENVS[0];
+
+  const close = React.useCallback((refocus: boolean) => {
+    setOpen(false);
+    if (refocus) triggerRef.current?.focus();
+  }, []);
+
+  React.useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close(true);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, close]);
+
+  React.useEffect(() => {
+    if (!open) return;
+    (optionRefs.current[env] ?? optionRefs.current[ENVS[0].id])?.focus();
+  }, [open, env]);
+
   return (
     <div style={{ position: 'relative' }}>
-      <button onClick={() => setOpen((o) => !o)}
+      <button ref={triggerRef} onClick={() => setOpen((o) => !o)}
+        aria-haspopup="true" aria-expanded={open}
         style={{
           display: 'flex', alignItems: 'center', gap: 8, height: 32, padding: '0 10px', borderRadius: 8,
           border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--fg)', cursor: 'pointer',
@@ -88,15 +114,17 @@ export function EnvSwitcher({ env, setEnv }: { env: string; setEnv: (e: string) 
       </button>
       {open && (
         <>
-          <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
-          <div style={{
+          <div onClick={() => setOpen(false)} aria-hidden="true" style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+          <div role="group" aria-label="Environment" style={{
             position: 'absolute', top: 38, left: 0, minWidth: 180, background: 'var(--panel-bg)',
             border: '1px solid var(--border)', borderRadius: 10, boxShadow: 'var(--shadow-pop)', padding: 5, zIndex: 50,
             animation: 'bt-fade-up 140ms var(--ease-standard)',
           }}>
             {ENVS.map((e) => (
-              <button key={e.id} onClick={() => { setEnv(e.id); setOpen(false); }}
+              <button key={e.id} ref={(el) => { optionRefs.current[e.id] = el; }}
+                onClick={() => { setEnv(e.id); setOpen(false); }}
                 data-selected={env === e.id}
+                aria-pressed={env === e.id}
                 className="bt-menu-item"
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8, width: '100%', height: 32, padding: '0 9px', borderRadius: 7,
@@ -116,7 +144,7 @@ export function EnvSwitcher({ env, setEnv }: { env: string; setEnv: (e: string) 
 }
 
 export function TopBar({
-  title, env, setEnv, onToggleSidebar, theme, setTheme, children,
+  title, env, setEnv, onToggleSidebar, theme, setTheme, tweaksOpen, onToggleTweaks, children,
 }: {
   title: string;
   env: string;
@@ -124,6 +152,10 @@ export function TopBar({
   onToggleSidebar: () => void;
   theme: string;
   setTheme: (t: string) => void;
+  /** Tweaks panel visibility + toggle (p2-19): the only built-in entry to the
+   *  panel — without it the panel could never be opened. */
+  tweaksOpen: boolean;
+  onToggleTweaks: () => void;
   children?: React.ReactNode;
 }) {
   return (
@@ -139,6 +171,8 @@ export function TopBar({
       {children}
       <EnvSwitcher env={env} setEnv={setEnv} />
       <IconButton name={theme === 'dark' ? 'sun' : 'moon'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="Toggle theme" />
+      <IconButton name="settings" active={tweaksOpen} pressed={tweaksOpen}
+        onClick={onToggleTweaks} title="Toggle tweaks" />
     </header>
   );
 }

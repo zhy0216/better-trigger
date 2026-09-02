@@ -338,6 +338,38 @@ describe('batchTrigger — namespace options in the request body (p1-15)', () =>
   });
 });
 
+describe('instance batchTrigger per-item namespace narrowing (p2-19)', () => {
+  it('per-item env/projectId are compile errors; batch-level still typechecks', () => {
+    // Compile-only: batchTrigger is never invoked, so the fetch stub is never
+    // consumed. The instance-level items must carry the same narrowed
+    // options as TaskHandle.batchTrigger (p1-15) — a per-item namespace
+    // would typecheck and then be silently dropped by the server.
+    const { fetch } = scriptedFetch([]);
+    const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+    const items: Parameters<typeof trigger.batchTrigger>[0] = [
+      { taskId: 'hello', payload: { n: 1 } },
+      {
+        taskId: 'hello',
+        payload: { n: 2 },
+        // @ts-expect-error — per-item env would be silently dropped (p2-19)
+        options: { env: 'staging' },
+      },
+      {
+        taskId: 'hello',
+        payload: { n: 3 },
+        // @ts-expect-error — per-item projectId would be silently dropped (p2-19)
+        options: { projectId: 'acme' },
+      },
+    ];
+    expect(items).toHaveLength(3);
+    const args: Parameters<typeof trigger.batchTrigger> = [
+      [{ taskId: 'hello', payload: { n: 1 } }],
+      { env: 'staging', projectId: 'acme' },
+    ];
+    expect(args[1]).toEqual({ env: 'staging', projectId: 'acme' });
+  });
+});
+
 describe('waitForResult — caller signal (p1-17)', () => {
   it('aborts the in-flight long-poll when the caller signal fires', async () => {
     vi.useFakeTimers();
