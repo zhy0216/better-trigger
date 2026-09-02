@@ -247,3 +247,35 @@ describe('prune retention floor', () => {
     await expect(prune(pool, { olderThanMs: MIN_RETENTION_MS , namespaces: [DEFAULT_NAMESPACE]})).resolves.toBeDefined();
   });
 });
+
+describe('prune batchSize floor', () => {
+  const call = (pool: Pool, batchSize: number) =>
+    prune(pool, { olderThanMs: RETENTION, namespaces: [DEFAULT_NAMESPACE], batchSize });
+
+  it('refuses 0 / negative / fractional / NaN before any statement', async () => {
+    // batchSize: 0 is the dangerous one: LIMIT 0 → deleteBatch returns 0 →
+    // the terminator `batch.runs < batchSize` (0 < 0) is never true, so the
+    // GC loop spins forever on one pool connection and retention never runs
+    // again. The rest reach pg as `LIMIT -5` / a truncated LIMIT — caller bugs
+    // of the same family, refused like the retention floor above.
+    for (const batchSize of [0, -1, 1.5, NaN]) {
+      const { pool, stmts } = stubPool(['a']);
+      await expect(call(pool, batchSize)).rejects.toBeInstanceOf(KernelError);
+      await call(pool, batchSize).catch((err: KernelError) => {
+        expect(err.code).toBe('bad_request');
+        expect(err.message).toMatch(/batchSize must be an integer of at least 1/);
+      });
+      expect(stmts).toEqual([]);
+    }
+  });
+
+  it('keeps the default batch path untouched', async () => {
+    // No batchSize → PRUNE_BATCH as before, and an explicit positive integer
+    // still just works (the batching tests above pin its delete behaviour).
+    const { pool } = stubPool(['a']);
+    await expect(
+      prune(pool, { olderThanMs: RETENTION, namespaces: [DEFAULT_NAMESPACE] }),
+    ).resolves.toBeDefined();
+    await expect(call(pool, 1)).resolves.toBeDefined();
+  });
+});

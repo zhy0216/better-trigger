@@ -240,7 +240,8 @@ export interface ClaimRunsArgs {
    * namespace leads the order within `namespaces.length` calls); this is the
    * number behind the skip, so "one namespace is always behind the budget"
    * is visible the way claim errors are. Not called when nothing was
-   * skipped.
+   * skipped. Called AFTER the claim transaction commits, and an observer
+   * that throws only earns a warn — it can never roll back or fail a claim.
    */
   onScanSkipped?: (skipped: readonly Namespace[]) => void;
 }
@@ -300,6 +301,16 @@ export function claimWindow(limit: number): number {
   return Math.max(limit * 2, 10);
 }
 
+/**
+ * Upper bound on a single claim's `limit`. The candidate scan holds
+ * `claimWindow(limit)` queue rows `FOR UPDATE SKIP LOCKED` for the whole claim
+ * transaction, so an unbounded `limit` is precisely the long-write-transaction
+ * the batch caps exist to prevent: `limit: 1_000_000` would pin up to two
+ * million rows from every peer worker. The runtime claims one run per slot
+ * (limit 1); anything at this ceiling already holds the window for a second.
+ */
+export const MAX_CLAIM_LIMIT = 500;
+
 interface PendingClaim {
   runId: string;
   taskId: string;
@@ -326,6 +337,13 @@ type Candidate = {
   concurrency_limit: number | null;
 };
 
+/**
+ * Runs the per-namespace candidate scans, filling `pending` up to `args.limit`.
+ * Returns the namespaces the rotation order did not reach before the budget
+ * filled (empty when every namespace was scanned) — the CALLER reports them
+ * via `onScanSkipped`, after the claim tx commits, so an observer can never
+ * run inside (or roll back) the transaction.
+ */
 async function scanCandidates(
   client: PoolClient,
   args: ClaimRunsArgs,
@@ -333,7 +351,7 @@ async function scanCandidates(
   codeVersions: string[],
   pending: PendingClaim[],
   logger: KernelLogger,
-): Promise<void> {
+): Promise<Namespace[]> {
   // The candidate scan runs once per namespace (p1-08). `JOIN runs` is an
   // inner join, so a queue row whose run vanished is simply not a candidate
   // (it was skipped by the old per-row read too). `r.status = 'queued'` is
@@ -363,7 +381,8 @@ async function scanCandidates(
   // literal placeholders above it. The `r`-side equality references the SAME
   // pair. The limit is shared sequentially in scan order: once the budget is
   // filled, the namespaces the rotation order has not reached yet get no scan
-  // THIS call, and `onScanSkipped` reports them. That skip is bounded, not
+  // THIS call and are returned for the caller to report via `onScanSkipped`
+  // (after the tx commits). That skip is bounded, not
   // permanent (P0-14): the caller rotates `rotateFrom`, so every namespace
   // leads the scan order within `namespaces.length` calls and a busy first
   // namespace can never monopolize the budget.
@@ -375,12 +394,7 @@ async function scanCandidates(
   for (let i = 0; i < n; i += 1) {
     const remaining = args.limit - pending.length;
     if (remaining <= 0) {
-      if (args.onScanSkipped) {
-        args.onScanSkipped(
-          Array.from({ length: n - i }, (_, j) => args.namespaces[(start + i + j) % n]!),
-        );
-      }
-      break;
+      return Array.from({ length: n - i }, (_, j) => args.namespaces[(start + i + j) % n]!);
     }
     const ns = args.namespaces[(start + i) % n]!;
 
@@ -439,6 +453,7 @@ async function scanCandidates(
       if (claim !== null) pending.push(claim);
     }
   }
+  return [];
 }
 
 async function tryClaimOne(
@@ -706,6 +721,12 @@ async function readLedger(
  * read from the RETURNING of the same-tx UPDATE that bumps it, never from here.
  */
 export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<ClaimedRun[]> {
+  if (args.limit > MAX_CLAIM_LIMIT) {
+    throw new KernelError(
+      'bad_request',
+      `limit must be at most ${MAX_CLAIM_LIMIT} — see MAX_CLAIM_LIMIT (a larger claim would lock a larger window FOR UPDATE)`,
+    );
+  }
   if (args.taskIds.length === 0 || args.limit <= 0) return [];
   assertNamespaces(args.namespaces);
   const logger: KernelLogger = args.logger ?? console;
@@ -732,9 +753,23 @@ export async function claimRuns(pool: Pool, args: ClaimRunsArgs): Promise<Claime
 
     const pending: PendingClaim[] = [];
 
-    await scanCandidates(client, args, pinned, codeVersions, pending, logger);
+    const skipped = await scanCandidates(client, args, pinned, codeVersions, pending, logger);
 
     await client.query('COMMIT');
+
+    // The observer runs AFTER the commit (it used to fire mid-tx, where a
+    // throwing host callback rolled the whole claim back): it is documented
+    // as purely observational, so its failure is contained to a warn and the
+    // claims stand whatever it does.
+    if (skipped.length > 0 && args.onScanSkipped) {
+      try {
+        args.onScanSkipped(skipped);
+      } catch (err) {
+        logger.warn(
+          `[queue:claim] onScanSkipped observer threw — skipped-namespace report dropped: ${String(err)}`,
+        );
+      }
+    }
 
     return readLedger(client, args, pending);
   } catch (err) {
@@ -862,7 +897,11 @@ export interface HeartbeatResult {
  * Renew leases for the given runs owned by this worker (heartbeat).
  * locked_at keeps its claim-time semantics and is not refreshed.
  * Returns the run ids that have been canceled (so the worker can stop them)
- * plus the ones whose claim is gone (so it can stop those too).
+ * plus the ones whose claim is gone (so it can stop those too). Throws
+ * KernelError('not_found') when the worker's own row is gone — the heartbeat
+ * that used to ride that out as a silent 0-row UPDATE is exactly how a
+ * pruned-while-online worker stayed invisible; the error is the re-register
+ * (or alert) signal for the caller.
  *
  * `lostRunIds` costs nothing extra: the renewal is already scoped by
  * `locked_by = us`, so `RETURNING run_id` turns the statement the heartbeat
@@ -900,10 +939,24 @@ export async function heartbeat(
     );
     renewed = res.rows.map((r) => r.run_id);
   }
-  await pool.query(
+  // A 0-row touch means the workers row is GONE — prune deleted an
+  // offline-and-stale row while the process stayed alive (long partition,
+  // missed offline-marker window). Silent success here let such a worker keep
+  // claiming while being invisible to servedTaskIds / the stranded scan / the
+  // offline marker / the dashboard, so the miss is now an error: the caller
+  // must re-register (the row it heartbeats no longer exists). The unheld
+  // leases simply lapse to the reaper, which is the correct outcome for a
+  // worker with no row.
+  const touched = await pool.query(
     `UPDATE workers SET last_heartbeat_at = now(), status = 'online' WHERE id = $1`,
     [args.workerId],
   );
+  if (touched.rowCount === 0) {
+    throw new KernelError(
+      'not_found',
+      `worker ${args.workerId} no longer has a workers row (pruned while online?) — re-register before heartbeating`,
+    );
+  }
 
   if (args.runIds.length === 0) return { cancelRunIds: [], lostRunIds: [] };
   // Any of the heartbeat's runs that are no longer 'running' → tell worker to drop.

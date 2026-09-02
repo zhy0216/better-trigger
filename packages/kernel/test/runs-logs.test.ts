@@ -217,6 +217,46 @@ describe('appendLogs', () => {
     expect(stmts).toEqual([]);
   });
 
+  it('drops a bad-level / bad-ts line with a warn and writes the rest of the batch', async () => {
+    // Worker messages arrive as JSON: a line whose level is outside
+    // logs_level_check or whose ts pg cannot cast to timestamptz used to fail
+    // the whole chunk INSERT at the database (a bare 23514/22007 that rolled
+    // the flush's good lines back with it). Preparation filters them out
+    // instead — the flush still resolves, the good lines still land.
+    const { pool, stmts, inserted, warns, logger } = makePool();
+    await appendLogs(pool, 'run_1', DEFAULT_NAMESPACE, [
+      entry('good 1'),
+      { ts: '2026-07-30T00:00:00.000Z', level: 'trace' as LogEntry['level'], message: 'bad level' },
+      { ts: 'next tuesday-ish', level: 'info', message: 'bad ts' },
+      entry('good 2'),
+    ], logger);
+
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.rows).toBe(2);
+    // Only the two good lines reach the VALUES list — the bad pair never
+    // makes it anywhere near a cast or a CHECK.
+    const insert = stmts.find((s) => /^INSERT INTO logs/.test(s.sql))!;
+    const messages = insert.params.filter((p) => typeof p === 'string' && /^good \d$/.test(p));
+    expect(messages).toEqual(['good 1', 'good 2']);
+    expect(insert.params).not.toContain('bad level');
+    expect(insert.params).not.toContain('bad ts');
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toMatch(/dropped 2 log line\(s\).*bad level or ts/);
+    expect(warns[0]).toMatch(/debug\/info\/warn\/error/);
+  });
+
+  it('a flush of only-bad lines writes nothing and still never throws', async () => {
+    const { pool, stmts, inserted, warns, logger } = makePool();
+    await expect(
+      appendLogs(pool, 'run_1', DEFAULT_NAMESPACE, [
+        { ts: 'soon', level: 'verbose' as LogEntry['level'], message: 'nope' },
+      ], logger),
+    ).resolves.toBeUndefined();
+    expect(inserted).toEqual([]);
+    expect(stmts).toEqual([]);
+    expect(warns).toHaveLength(1);
+  });
+
   it('drops — with a warn, never silently — a line that cannot fit the batch cap even after truncation', async () => {
     // A cap smaller than the smallest possible line: even shrinkRowForBatch's
     // degraded row (data omitted + message trimmed to the ellipsis) exceeds

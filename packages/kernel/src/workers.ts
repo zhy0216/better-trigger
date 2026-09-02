@@ -53,6 +53,13 @@ export async function registerWorker(
     throw new KernelError('bad_request', 'namespaces must be a non-empty array');
   }
   for (const ns of args.namespaces) assertNamespace(ns);
+  // The workers.concurrency column carries no CHECK, so a garbage value either
+  // lands in the row (a negative "capacity" the dashboard renders) or reaches
+  // pg as a type violation and surfaces as a bare driver error. It is a slot
+  // count: positive integer or nothing.
+  if (!Number.isSafeInteger(args.concurrency) || args.concurrency < 1) {
+    throw new KernelError('bad_request', 'concurrency must be a positive integer');
+  }
   for (const t of args.tasks) {
     if (typeof t?.id !== 'string' || t.id.length === 0) {
       throw new KernelError('bad_request', 'task.id must be a non-empty string');

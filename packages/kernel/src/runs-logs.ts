@@ -5,6 +5,7 @@ import {
   assertNamespace,
   safeSerializeJson,
   type LogEntry,
+  type LogLevel,
   type Namespace,
 } from '@better-trigger/core';
 import type { KernelLogger } from './kernel';
@@ -35,6 +36,23 @@ interface PreparedLogRow {
   ts: string;
   /** Estimated bytes the row occupies in one INSERT statement's parameters. */
   bytes: number;
+}
+
+/* The closed enum of the logs_level_check CHECK (0011), plus the requirement
+   that ts is a string pg can cast to timestamptz. Worker log messages arrive
+   as JSON: without a per-line check, one bad level/ts makes the chunk INSERT
+   fail at the database (23514 / 22007 — a 500-class error that also rolls
+   back its good neighbours), against the "dropping a flush never throws"
+   contract. Logs are the best-effort data plane, so the bad line is dropped
+   with a warn and the rest of the batch is written. */
+const LOG_LEVELS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error'];
+
+function isWritableLogLine(e: LogEntry): boolean {
+  return (
+    LOG_LEVELS.includes(e.level) &&
+    typeof e.ts === 'string' &&
+    !Number.isNaN(Date.parse(e.ts))
+  );
 }
 
 const utf8Bytes = (s: string): number => new TextEncoder().encode(s).length;
@@ -165,8 +183,16 @@ export async function appendLogs(
   // remaining chunks.
   const maxBatchBytes = logBatchMaxBytes();
   let oversizeLines = 0;
+  let invalidLines = 0;
   const rows: PreparedLogRow[] = [];
   for (const e of entries) {
+    // Bad level / unparseable ts: dropped here, before any chunk is built, so
+    // one garbage line can neither poison its own INSERT nor a neighbour's
+    // (isWritableLogLine). The rest of the flush lands normally.
+    if (!isWritableLogLine(e)) {
+      invalidLines += 1;
+      continue;
+    }
     let row = prepareLogRow(e);
     if (preparedRowBytes(row) > maxBatchBytes) {
       row = shrinkRowForBatch(row, maxBatchBytes);
@@ -250,26 +276,34 @@ export async function appendLogs(
     });
   }
 
-  // One warn per flush, first verdict wins. Over-cap lines were dropped during
-  // preparation, before any chunk ran, so they name the verdict when they
-  // exist; otherwise the chunk loop's missing/terminal verdicts apply. In
-  // practice a flush hits exactly one of the three.
+  // One warn per flush, first verdict wins. Invalid and over-cap lines were
+  // dropped during preparation, before any chunk ran, so they name the verdict
+  // when they exist; otherwise the chunk loop's missing/terminal verdicts
+  // apply. In practice a flush hits exactly one of the four.
   const dropped =
-    oversizeLines > 0
-      ? ({ kind: 'oversize', lines: oversizeLines } as const)
-      : missingLines > 0
-        ? ({ kind: 'missing', lines: missingLines } as const)
-        : terminalLines > 0
-          ? ({ kind: 'terminal', lines: terminalLines } as const)
-          : null;
+    invalidLines > 0
+      ? ({ kind: 'invalid', lines: invalidLines } as const)
+      : oversizeLines > 0
+        ? ({ kind: 'oversize', lines: oversizeLines } as const)
+        : missingLines > 0
+          ? ({ kind: 'missing', lines: missingLines } as const)
+          : terminalLines > 0
+            ? ({ kind: 'terminal', lines: terminalLines } as const)
+            : null;
 
   if (dropped !== null) {
     // Observable, never fatal: logs are the best-effort data plane, but the
     // boundary is strict, so the drop is recorded once per flush with the
-    // verdict that caused it (run absent vs terminal race vs an over-cap
-    // line), not retried.
+    // verdict that caused it (bad line vs run absent vs terminal race vs an
+    // over-cap line), not retried.
     const who = `run ${runId} (${namespace.projectId}/${namespace.env})`;
-    if (dropped.kind === 'missing') {
+    if (dropped.kind === 'invalid') {
+      logger.warn(
+        `[runs:logs] dropped ${dropped.lines} log line(s): ${who} carried a bad level or ` +
+          `ts (level must be one of ${LOG_LEVELS.join('/')}, ts must parse as a timestamp) ` +
+          `— the rest of the flush was written`,
+      );
+    } else if (dropped.kind === 'missing') {
       logger.warn(`[runs:logs] dropped ${dropped.lines} log line(s): ${who} does not exist`);
     } else if (dropped.kind === 'terminal') {
       logger.warn(

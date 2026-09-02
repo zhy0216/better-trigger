@@ -11,6 +11,7 @@ import {
   type Namespace,
   type SerializedError,
   type StepKind,
+  type StepStatus,
   type TriggerItem,
   type TriggerOptions,
 } from '@better-trigger/core';
@@ -53,6 +54,22 @@ export interface ReportStepArgs {
 
 /** Step-row payload without the fencing credentials. */
 export type StepWriteArgs = Omit<ReportStepArgs, 'workerId' | 'fencingToken'>;
+
+/* The closed enums of the two run_steps CHECK constraints (0011:
+   run_steps_kind_check / run_steps_status_check). Worker reports arrive as
+   JSON, so an out-of-set kind/status is not a type error but a row pg will
+   refuse — without this guard that lands as a bare 23514 (a 500-class
+   failure) instead of a KernelError the host maps to a 400. */
+const STEP_KINDS: readonly StepKind[] = [
+  'step',
+  'wait',
+  'trigger-and-wait',
+  'batch-trigger',
+  'now',
+  'random',
+  'uuid',
+];
+const STEP_STATUSES: readonly StepStatus[] = ['completed', 'failed'];
 
 /** Result of a step-row write: ok, or the reason the reported output could
  *  not be recorded (the row itself was still written — as a failed step whose
@@ -104,6 +121,18 @@ export async function reportStep(pool: Pool, args: ReportStepArgs): Promise<void
  * all of them.
  */
 export async function upsertStep(client: PoolClient, args: StepWriteArgs): Promise<StepWriteOutcome> {
+  if (!STEP_KINDS.includes(args.kind)) {
+    throw new KernelError(
+      'bad_request',
+      `kind must be one of ${STEP_KINDS.join(', ')}, got "${String(args.kind)}"`,
+    );
+  }
+  if (!STEP_STATUSES.includes(args.status)) {
+    throw new KernelError(
+      'bad_request',
+      `status must be one of ${STEP_STATUSES.join(', ')}, got "${String(args.status)}"`,
+    );
+  }
   // Serialize before the write: output/error land verbatim in jsonb columns,
   // so they are bounded like the payload (C3). An output that cannot be
   // serialized (circular / BigInt / over the cap) makes the STEP a failed one
@@ -229,6 +258,14 @@ export async function suspendRun(
   args: SuspendRunArgs,
 ): Promise<{ resumed: boolean }> {
   assertNamespace(args.namespace);
+  // resumeAt crosses the wire as a string; new Date() of garbage is an Invalid
+  // Date, and binding one to waits.resume_at reaches pg as a bare driver
+  // error. Parse + validate BEFORE opening the tx, so a refused suspend costs
+  // zero SQL and surfaces as bad_request, not a 500.
+  const resumeAt = new Date(args.resumeAt);
+  if (Number.isNaN(resumeAt.getTime())) {
+    throw new KernelError('bad_request', `resumeAt is not a valid timestamp: ${String(args.resumeAt)}`);
+  }
   return withTx(pool, async (client) => {
     const run = await assertOwnedRunning(
       client,
@@ -237,7 +274,6 @@ export async function suspendRun(
       args.fencingToken,
       args.namespace,
     );
-    const resumeAt = new Date(args.resumeAt);
 
     if (resumeAt.getTime() <= Date.now()) {
       // Already due — record the wait step as completed, keep running, with

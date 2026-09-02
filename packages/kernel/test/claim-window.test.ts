@@ -24,8 +24,8 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import { claimRuns, claimWindow } from '../src/queue';
+import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
+import { claimRuns, claimWindow, MAX_CLAIM_LIMIT } from '../src/queue';
 
 interface Stmt {
   sql: string;
@@ -106,5 +106,39 @@ describe('claimRuns candidate window', () => {
     expect(await claimRuns(pool, { ...ARGS, limit: 0 })).toEqual([]);
     expect(await claimRuns(pool, { ...ARGS, taskIds: [], limit: 1 })).toEqual([]);
     expect(stmts).toEqual([]);
+  });
+});
+
+describe('claimRuns limit ceiling', () => {
+  it('refuses a limit above MAX_CLAIM_LIMIT, naming the limit, before connecting', async () => {
+    // A huge limit widens the window (claimWindow = 2x), and every window row
+    // is held FOR UPDATE SKIP LOCKED for the whole claim tx — the exact
+    // long-write-transaction that pins queue rows from peers. Refused at the
+    // boundary, so no connection is ever taken.
+    const sentinel = new Error('connect() reached — the ceiling did not refuse');
+    const pool = {
+      connect: async () => {
+        throw sentinel;
+      },
+    } as unknown as Pool;
+
+    for (const limit of [MAX_CLAIM_LIMIT + 1, 1_000_000, Infinity]) {
+      await expect(claimRuns(pool, { ...ARGS, limit })).rejects.toBeInstanceOf(KernelError);
+      await claimRuns(pool, { ...ARGS, limit }).catch((err: KernelError) => {
+        expect(err.code).toBe('bad_request');
+        expect(err.message).toContain(String(MAX_CLAIM_LIMIT));
+      });
+    }
+  });
+
+  it('claims normally at and below the ceiling', async () => {
+    // Exactly at the ceiling scans as always — a window of claimWindow(500),
+    // bounded, and a normal limit is untouched.
+    const { pool, stmts } = stubPool();
+    await expect(claimRuns(pool, { ...ARGS, limit: MAX_CLAIM_LIMIT })).resolves.toEqual([]);
+    await expect(claimRuns(pool, { ...ARGS, limit: 1 })).resolves.toEqual([]);
+    const scans = stmts.filter((s) => /FROM queue q/.test(s.sql));
+    expect(scans[0]!.params[1]).toBe(claimWindow(MAX_CLAIM_LIMIT));
+    expect(scans[1]!.params[1]).toBe(claimWindow(1));
   });
 });

@@ -354,6 +354,9 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
   it('heartbeat numbers the renewal and cancel-check predicates after their clauses', async () => {
     const { pool, stmts } = recordPool([
       (sql) => (/UPDATE queue/.test(sql) ? { rows: [{ run_id: 'r1' }] } : undefined),
+      // The workers liveness touch must report a row (rowCount 0 = pruned row
+      // → not_found; see the heartbeat T7 guard).
+      (sql) => (/UPDATE workers/.test(sql) ? { rows: [], rowCount: 1 } : undefined),
       (sql) => (/FROM runs/.test(sql) ? { rows: [] } : undefined),
     ]);
 

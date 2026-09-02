@@ -132,6 +132,18 @@ export async function prune(pool: Pool, args: PruneArgs): Promise<PruneResult> {
   assertNamespaces(args.namespaces);
   const dryRun = args.dryRun ?? false;
   const batchSize = args.batchSize ?? PRUNE_BATCH;
+  // Same floor discipline as olderThanMs above. `batchSize: 0` is the dangerous
+  // one: the candidate SELECT gets `LIMIT 0`, deleteBatch returns 0 runs, and
+  // the loop terminator `batch.runs < batchSize` (0 < 0) is never true — the
+  // GC loop spins forever on one pool connection and retention never runs
+  // again. A negative one reaches pg as `LIMIT -5` (a bare error), a fractional
+  // one as a truncated LIMIT — all are caller bugs, so refuse rather than obey.
+  if (!Number.isSafeInteger(batchSize) || batchSize < 1) {
+    throw new KernelError(
+      'bad_request',
+      `batchSize must be an integer of at least 1, got ${batchSize}`,
+    );
+  }
   const cutoff = new Date(Date.now() - olderThanMs);
 
   const result = dryRun

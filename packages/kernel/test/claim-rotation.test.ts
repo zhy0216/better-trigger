@@ -136,6 +136,40 @@ describe('claimRuns namespace rotation (P0-14)', () => {
     expect(skipped).toEqual([]);
   });
 
+  it('the observer fires AFTER the claim tx commits', async () => {
+    // Running it mid-tx meant a host-side throw rolled the committed-baiting
+    // claim back; ordering is now pinned: COMMIT has already been sent when
+    // the observer runs.
+    const { pool, stmts } = busyPool();
+    let committedAtCall = false;
+    await claimRuns(pool, {
+      ...ARGS,
+      rotateFrom: 0,
+      onScanSkipped: () => {
+        committedAtCall = stmts.some((s) => s.sql === 'COMMIT');
+      },
+    });
+    expect(committedAtCall).toBe(true);
+  });
+
+  it('a throwing observer cannot fail the claim — it warns and the claims stand', async () => {
+    const warns: string[] = [];
+    const { pool } = busyPool();
+    const claimed = await claimRuns(pool, {
+      ...ARGS,
+      rotateFrom: 0,
+      logger: { warn: (m) => warns.push(String(m)), error: () => {} },
+      onScanSkipped: () => {
+        throw new Error('observer exploded');
+      },
+    });
+    // The claim itself succeeded exactly as it would have without the observer.
+    expect(claimed.map((c) => c.env)).toEqual(['staging']);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toMatch(/onScanSkipped observer threw/);
+    expect(warns[0]).toContain('observer exploded');
+  });
+
   it('without rotation a busy namespaces[0] starves namespaces[1] (the P0-14 bug)', async () => {
     // Six claims, ns A always has ≥ 2×limit of backlog: every round spends
     // the budget on A before B is even scanned.

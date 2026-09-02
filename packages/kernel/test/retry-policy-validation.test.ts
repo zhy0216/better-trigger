@@ -11,6 +11,11 @@
      resolveRetryPolicy call that feeds max_attempts into the runs row —
      instead of a NaN attempt budget exploding on the first failed run.
 
+   The registration block also pins the sibling boundary guard: registerWorker
+   validates `concurrency` before the tx opens (the workers.concurrency column
+   carries no CHECK, so a garbage value would otherwise land in the row or
+   surface as a bare driver error).
+
    Stub clients only; no Postgres.
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
@@ -132,5 +137,37 @@ describe('createRunIn trigger-path retry validation', () => {
     const option = trigger({ maxAttempts: NaN }, { maxAttempts: 2 });
     await option.run.catch(() => {});
     expect(option.sqls.some((s) => /INSERT INTO runs/.test(s))).toBe(true);
+  });
+});
+
+describe('registerWorker concurrency validation', () => {
+  const sentinel = new Error('connect() reached — concurrency guard did not refuse');
+  const refusingPool = {
+    connect: async () => {
+      throw sentinel;
+    },
+  } as unknown as Pool;
+
+  const register = (concurrency: number) =>
+    registerWorker(refusingPool, {
+      codeVersion: 'v1',
+      runtime: 'test',
+      concurrency,
+      namespaces: [DEFAULT_NAMESPACE],
+      tasks: [{ id: 't' }],
+    });
+
+  it('refuses 0 / negative / fractional / NaN concurrency before connecting', async () => {
+    for (const concurrency of [0, -1, 2.5, NaN]) {
+      await expect(register(concurrency)).rejects.toBeInstanceOf(KernelError);
+      await register(concurrency).catch((err: KernelError) => {
+        expect(err.code).toBe('bad_request');
+        expect(err.message).toMatch(/concurrency must be a positive integer/);
+      });
+    }
+  });
+
+  it('accepts a positive integer (the sentinel proves only concurrency was checked)', async () => {
+    await expect(register(4)).rejects.toBe(sentinel);
   });
 });

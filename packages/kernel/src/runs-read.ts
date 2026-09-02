@@ -287,6 +287,15 @@ export async function waitForResult(
   assertNamespace(namespace);
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const pollMs = opts.pollMs ?? 250;
+  // Same family as detailLimit/logsBefore: the HTTP route clamps pollMs to
+  // [50, 5000], but this function is also the embedded-host path and a public
+  // Kernel method. A 0/negative/NaN value turns sleep(pollMs) into a
+  // zero-delay timer and the whole timeout window into a tight SELECT loop
+  // against the database — a caller bug, refused before it can burn pool
+  // connections. Infinity is rejected for the same reason (no sleep at all).
+  if (!Number.isFinite(pollMs) || pollMs < 1) {
+    throw new KernelError('bad_request', `pollMs must be a finite number >= 1, got ${pollMs}`);
+  }
   const deadline = Date.now() + timeoutMs;
 
   for (;;) {
