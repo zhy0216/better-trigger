@@ -323,15 +323,24 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
     // Keyset cursor = "<createdAtIso>|<id>"; page strictly older. Only cursors
     // we minted are valid: the timestamp half is compared against created_at,
     // so anything unparseable would surface as pg's "invalid input syntax for
-    // type timestamp with time zone" → 500. Re-serialize it to be sure.
+    // type timestamp with time zone" → 500. The shape check replaces the old
+    // re-serialize-and-bind-a-Date path: pg timestamptz carries microseconds
+    // while JS Dates truncate to milliseconds, so the validated string is
+    // bound verbatim to keep the sub-millisecond precision the cursor was
+    // minted with (a truncated cursor would silently skip same-millisecond
+    // rows newer than the page's last row).
     if (cursor) {
       const sep = cursor.lastIndexOf('|');
-      const cAt = new Date(sep > 0 ? cursor.slice(0, sep) : '');
+      const cAt = sep > 0 ? cursor.slice(0, sep) : '';
       const cId = sep > 0 ? cursor.slice(sep + 1) : '';
-      if (cId === '' || Number.isNaN(cAt.getTime())) {
+      if (
+        cId === '' ||
+        !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$/.test(cAt) ||
+        Number.isNaN(new Date(cAt).getTime())
+      ) {
         throw new KernelError('bad_request', 'cursor must be "<createdAt ISO>|<id>"');
       }
-      params.push(cAt.toISOString());
+      params.push(cAt);
       const p1 = params.length;
       params.push(cId);
       const p2 = params.length;
@@ -351,11 +360,20 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
       env: string;
       attempt: number;
       created_at: Date;
+      created_at_us: string;
       started_at: Date | null;
       finished_at: Date | null;
     }>(
+      // created_at_us: the cursor half of created_at at pg's full microsecond
+      // precision. The Date the driver hands back is truncated to ms, and a
+      // ms-truncated cursor silently skips sub-millisecond rows that sort
+      // after the page's last row (batch triggers share one transaction's
+      // now() down to the microsecond). AT TIME ZONE 'UTC' keeps the text
+      // UTC-stable regardless of the session timezone.
       `SELECT id, task_id, status, trigger_type, code_version, env, attempt,
-              created_at, started_at, finished_at
+              created_at,
+              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') AS created_at_us,
+              started_at, finished_at
          FROM runs
          ${whereSql}
         ORDER BY created_at DESC, id DESC
@@ -381,7 +399,7 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
     }));
 
     const last = page[page.length - 1];
-    const nextCursor = hasMore && last ? `${last.created_at.toISOString()}|${last.id}` : null;
+    const nextCursor = hasMore && last ? `${last.created_at_us}Z|${last.id}` : null;
 
     const res: RunsResponse = { runs, nextCursor };
     return c.json(res);
@@ -549,7 +567,7 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
               started_at, last_heartbeat_at
          FROM workers
          ${whereSql}
-        ORDER BY started_at DESC
+        ORDER BY started_at DESC, id DESC
         LIMIT $${params.length}`,
       params,
     );

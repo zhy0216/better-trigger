@@ -58,6 +58,12 @@ interface PendingWaiter {
   /** throwOnTimeout (p2-23): a timeout rejects with ResultTimeoutError instead
    *  of resolving the latest non-terminal status. */
   throwOnTimeout: boolean;
+  /** The caller's abort signal and the listener attached to it, kept on the
+   *  entry so remove() can detach them: once the waiter settles, the listener
+   *  (and its closure over this entry) must not stay pinned to the request
+   *  signal until the request object is collected. */
+  abortSignal?: AbortSignal;
+  onAbort?: () => void;
 }
 
 interface RunRead {
@@ -126,6 +132,9 @@ export function createWaiterRegistry(deps: {
   let stopped = false;
 
   function remove(entry: PendingWaiter): void {
+    if (entry.abortSignal && entry.onAbort) {
+      entry.abortSignal.removeEventListener('abort', entry.onAbort);
+    }
     const set = pending.get(entry.runId);
     if (!set) return;
     set.delete(entry);
@@ -230,7 +239,11 @@ export function createWaiterRegistry(deps: {
         reject(new ResultWaitAbortedError());
         return;
       }
-      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal) {
+        entry.abortSignal = signal;
+        entry.onAbort = onAbort;
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
       let set = pending.get(runId);
       if (!set) {
         set = new Set();

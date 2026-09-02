@@ -87,6 +87,17 @@ describe('GET /workers', () => {
     expect(q.params).toEqual(['default', 'prod', 50]);
   });
 
+  it('breaks started_at ties on id so the ordering is stable across reads', async () => {
+    // `bun --watch` reloads and daemons started in the same millisecond share
+    // started_at; without a tiebreaker the DB may return those rows in
+    // different orders across identical reads (GET /runs already keys on id).
+    const { app, stmts } = makeApp();
+
+    await app.fetch(get());
+
+    expect(stmts[0]!.sql).toMatch(/ORDER BY started_at DESC, id DESC/);
+  });
+
   it('can be asked for the offline history explicitly', async () => {
     const { app, stmts } = makeApp();
 

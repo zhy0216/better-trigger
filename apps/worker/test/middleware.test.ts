@@ -121,6 +121,25 @@ describe('CORS allowlist', () => {
     expect(res.headers.get('Vary')).toContain('Origin');
   });
 
+  it('allows the Idempotency-Key header the retry route reads', async () => {
+    // POST /runs/:id/retry reads Idempotency-Key, which is NOT on the CORS
+    // safelist: without listing it, every browser caller through --cors-origin
+    // fails the preflight the moment it sends the header.
+    const app = makeApp();
+    const res = await app.fetch(
+      new Request('http://localhost:4848/api/v1/runs/run_1/retry', {
+        method: 'OPTIONS',
+        headers: {
+          Origin: 'http://localhost:5173',
+          'Access-Control-Request-Method': 'POST',
+          'Access-Control-Request-Headers': 'content-type, idempotency-key',
+        },
+      }),
+    );
+    expect(res.status).toBe(204);
+    expect(res.headers.get('Access-Control-Allow-Headers')).toContain('Idempotency-Key');
+  });
+
   it('leaves clients that send no Origin alone', async () => {
     const app = makeApp();
     const res = await app.fetch(post());

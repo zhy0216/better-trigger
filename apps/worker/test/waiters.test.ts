@@ -305,6 +305,112 @@ describe('waiter registry', () => {
     reg.stop();
   });
 
+  /* ---------------- abort listener lifecycle (round-three T6) ------------- */
+
+  /** A signal stand-in that records listeners, so "was the abort listener
+   *  detached on settle" is directly observable. */
+  function recordingSignal() {
+    const listeners = new Set<() => void>();
+    const impl = {
+      aborted: false,
+      addEventListener: (_type: string, fn: () => void): void => {
+        listeners.add(fn);
+      },
+      removeEventListener: (_type: string, fn: () => void): void => {
+        listeners.delete(fn);
+      },
+    };
+    const signal = impl as unknown as AbortSignal;
+    /** Fire the recorded listeners the way an abort dispatch would. */
+    const emitAbort = (): void => {
+      impl.aborted = true;
+      for (const fn of [...listeners]) fn();
+    };
+    return { signal, listeners, emitAbort };
+  }
+
+  it('a notification settle detaches the abort listener from the signal', async () => {
+    const { reg, runs } = registry();
+    runs.set('run_l1', { id: 'run_l1', status: 'running' });
+    const s = recordingSignal();
+    const p = reg.register('run_l1', NS, { timeoutMs: 5_000 }, s.signal);
+    await new Promise((r) => setTimeout(r, 5)); // let the registration land
+    expect(s.listeners.size).toBe(1);
+
+    runs.set('run_l1', { id: 'run_l1', status: 'completed', output: 'ok' });
+    await reg.resolve('run_l1');
+    expect(await p).toEqual({ status: 'completed', output: 'ok', error: undefined });
+    expect(s.listeners.size).toBe(0);
+    reg.stop();
+  });
+
+  it('a timeout settle detaches the abort listener too', async () => {
+    const { reg, runs } = registry();
+    runs.set('run_l2', { id: 'run_l2', status: 'running' });
+    const s = recordingSignal();
+    const res = await reg.register('run_l2', NS, { timeoutMs: 40 }, s.signal);
+    expect(res).toEqual({ status: 'running' });
+    expect(s.listeners.size).toBe(0);
+    reg.stop();
+  });
+
+  it('stop() detaches the abort listener of the waiter it rejects', async () => {
+    const { reg, runs } = registry();
+    runs.set('run_l3', { id: 'run_l3', status: 'running' });
+    const s = recordingSignal();
+    const p = reg.register('run_l3', NS, { timeoutMs: 5_000 }, s.signal);
+    await new Promise((r) => setTimeout(r, 5)); // let the registration land
+    expect(s.listeners.size).toBe(1);
+
+    reg.stop();
+    await expect(p).rejects.toThrow('daemon shutting down');
+    expect(s.listeners.size).toBe(0);
+  });
+
+  it('a vanished run and a sweep settle both detach the listener', async () => {
+    const { reg, runs } = registry();
+    runs.set('run_l4', { id: 'run_l4', status: 'running' });
+    const s4 = recordingSignal();
+    const p4 = reg.register('run_l4', NS, { timeoutMs: 5_000 }, s4.signal);
+    await new Promise((r) => setTimeout(r, 5));
+    runs.delete('run_l4');
+    await expect(p4).rejects.toThrow(KernelError);
+    expect(s4.listeners.size).toBe(0);
+
+    runs.set('run_l5', { id: 'run_l5', status: 'running' });
+    const s5 = recordingSignal();
+    const p5 = reg.register('run_l5', NS, { timeoutMs: 5_000 }, s5.signal);
+    await new Promise((r) => setTimeout(r, 5));
+    runs.set('run_l5', { id: 'run_l5', status: 'completed', output: 1 });
+    expect((await p5).status).toBe('completed'); // the shared sweep settles it
+    expect(s5.listeners.size).toBe(0);
+    reg.stop();
+  });
+
+  it('the abort path settles the waiter and leaves no listener behind', async () => {
+    const { reg, runs } = registry();
+    runs.set('run_l6', { id: 'run_l6', status: 'running' });
+    const s = recordingSignal();
+    const p = reg.register('run_l6', NS, { timeoutMs: 5_000 }, s.signal);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(reg.pending()).toBe(1);
+
+    s.emitAbort();
+    await expect(p).rejects.toMatchObject({ name: 'AbortError' });
+    expect(reg.pending()).toBe(0);
+    expect(s.listeners.size).toBe(0);
+    reg.stop();
+  });
+
+  it('a run already terminal at register never attaches a listener', async () => {
+    const { reg, runs } = registry();
+    runs.set('run_l7', { id: 'run_l7', status: 'completed', output: 'ok' });
+    const s = recordingSignal();
+    await reg.register('run_l7', NS, { timeoutMs: 5_000 }, s.signal);
+    expect(s.listeners.size).toBe(0);
+    reg.stop();
+  });
+
   /* ------------------------- route-level: a disconnect answers 499 */
 
   it('a request aborted mid-poll answers 499', async () => {

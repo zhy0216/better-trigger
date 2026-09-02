@@ -215,11 +215,29 @@ describe('GET /runs query params', () => {
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
-  it('passes a well-formed cursor through, normalized to ISO', async () => {
+  it('passes a well-formed cursor through verbatim', async () => {
     const { app, calls } = makeApp();
     const res = await app.fetch(get('/runs?cursor=2026-07-30T08%3A00%3A00.000Z%7Crun_9'));
     expect(res.status).toBe(200);
     expect(calls.query[0]?.params).toEqual(['default', 'prod', '2026-07-30T08:00:00.000Z', 'run_9', 51]);
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps microsecond precision on a full-precision cursor', async () => {
+    // The Date round-trip used to truncate .123456Z to .123Z, which then
+    // silently skipped same-millisecond rows newer than the page's last row.
+    const { app, calls } = makeApp();
+    const res = await app.fetch(
+      get('/runs?cursor=2026-07-30T08%3A00%3A00.123456Z%7Crun_9'),
+    );
+    expect(res.status).toBe(200);
+    expect(calls.query[0]?.params).toEqual([
+      'default',
+      'prod',
+      '2026-07-30T08:00:00.123456Z',
+      'run_9',
+      51,
+    ]);
     expect(errorSpy).not.toHaveBeenCalled();
   });
 

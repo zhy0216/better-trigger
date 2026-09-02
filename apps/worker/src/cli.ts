@@ -63,7 +63,10 @@ Options:
                            in, claims from, and resumes/crons only the
                            namespaces listed here. Default: default/prod —
                            the namespace every pre-namespace row lives in.
-  --database-url <s>       Postgres connection string   (env DATABASE_URL)
+  --database-url <s>       Postgres connection string   (env DATABASE_URL).
+                           A value carrying credentials is visible to every
+                           other user of this machine (ps, /proc/<pid>/
+                           cmdline); prefer the env form.
   --no-migrate             Skip applying migrations at boot
   --no-serve               Execute tasks without serving HTTP (executor-only
                            node; another daemon serves the API)
@@ -155,7 +158,10 @@ Options:
                            deletes history inside these pairs — it can never
                            remove another namespace's runs. Default:
                            default/prod.
-  --database-url <s>       Postgres connection string   (env DATABASE_URL)
+  --database-url <s>       Postgres connection string   (env DATABASE_URL).
+                           A value carrying credentials is visible to every
+                           other user of this machine (ps, /proc/<pid>/
+                           cmdline); prefer the env form.
   --no-migrate             Skip applying migrations first. The cascade that
                            removes steps and logs is a constraint added by
                            migration 0007, so on a database that has not been
@@ -225,15 +231,28 @@ export function envFlag(raw: string | undefined): boolean {
  * meaning — `--concurrency 2.5` was silently truncated to 2 slots by
  * `Array.from({ length })`, and `--port 4848.5` only blew up later inside
  * listen(). Aligned with parsePositiveIntEnv, which always demanded an
- * integer for the same variables.
+ * integer for the same variables. The optional max bounds the value on the
+ * same fail-at-startup principle (`--port 70000` fails here, not in listen()).
  */
-export function requireInt(flag: string, raw: string): number {
+export function requireInt(flag: string, raw: string, max?: number): number {
   const n = Number(raw);
   if (!Number.isInteger(n) || n <= 0) {
     throw new Error(`${flag} must be a positive integer, got "${raw}"`);
   }
+  if (max !== undefined && n > max) {
+    throw new Error(`${flag} must be at most ${max}, got "${raw}"`);
+  }
   return n;
 }
+
+/** TCP ports end at 65535; refusing above it at parse time beats listen()'s
+ *  cryptic failure later (the same fail-at-startup contract as requireLeaseMs). */
+export const MAX_PORT = 65_535;
+
+/** Each execution slot is a claim loop holding a pool connection; past this a
+ *  "count" is a typo, not a plan — and `Array.from({ length: 1e9 })` at
+ *  runtime.ts would die with a RangeError well after registration. */
+export const MAX_CONCURRENCY = 1_000;
 
 /**
  * Floor for --lease-ms / the embedded leaseMs option. The heartbeat renews
@@ -262,15 +281,48 @@ export function requireLeaseMs(flag: string, raw: string): number {
  * otherwise be silent: concurrency lands in `Array.from({ length })` (NaN → 0
  * claim loops → a daemon that serves the API but never picks up a task), and
  * the port would blow up later inside listen() instead of at parse time. A
- * typo'd or fractional value therefore fails here, naming the variable.
+ * typo'd or fractional value therefore fails here, naming the variable. The
+ * optional max mirrors the flag ceilings (PORT past 65535 blows up in
+ * listen(), concurrency past MAX_CONCURRENCY dies in Array.from).
  */
-export function parsePositiveIntEnv(name: string, raw: string | undefined, fallback: number): number {
+export function parsePositiveIntEnv(
+  name: string,
+  raw: string | undefined,
+  fallback: number,
+  max?: number,
+): number {
   if (raw === undefined) return fallback;
   const n = Number(raw);
   if (!Number.isInteger(n) || n <= 0) {
     throw new Error(`${name} must be a positive integer, got "${raw}"`);
   }
+  if (max !== undefined && n > max) {
+    throw new Error(`${name} must be at most ${max}, got "${raw}"`);
+  }
   return n;
+}
+
+/** True when a connection string carries credentials in its URL userinfo
+ *  (`scheme://user:password@host`). Anything unparseable is left alone — the
+ *  driver gets to complain about that, not the warning path. */
+export function urlHasCredentials(raw: string): boolean {
+  try {
+    return new URL(raw).password !== '';
+  } catch {
+    return false;
+  }
+}
+
+export const DATABASE_URL_CREDENTIALS_WARNING =
+  'warning: --database-url carries credentials, which are visible to every ' +
+  'other user of this machine for the process lifetime (ps, ' +
+  '/proc/<pid>/cmdline); prefer the DATABASE_URL environment variable\n';
+
+/** Print the credentials warning at most once per startup (parse call). */
+function warnDatabaseUrlCredentials(value: string, warned: { done: boolean }): void {
+  if (warned.done || !urlHasCredentials(value)) return;
+  warned.done = true;
+  process.stderr.write(DATABASE_URL_CREDENTIALS_WARNING);
 }
 
 /**
@@ -362,10 +414,35 @@ export function parseNamespaces(flag: string, raw: string): Namespace[] {
   return out;
 }
 
+/** The "flag had no value" error, split by cause: nothing followed the flag,
+ *  or the next token is another flag. The bare "requires a value" used to
+ *  cover both, which sent callers hunting for a missing value that was
+ *  sitting right there — rejected because it looked like an option. */
+function missingValueError(flag: string, next: string | undefined): Error {
+  if (next === undefined) return new Error(`${flag} requires a value`);
+  return new Error(
+    `${flag} got the flag "${next}" where its value belongs; if the value itself ` +
+      `starts with "-", pass it as ${flag}=<value>`,
+  );
+}
+
+/** `-h` / `--help`, in bare or `=` form. Scanned before any parsing so help
+ *  works with a broken environment: a typo'd PORT must not stop `--help`
+ *  from printing usage and exiting 0. */
+function isHelpArg(arg: string): boolean {
+  const eq = arg.indexOf('=');
+  const flag = eq === -1 ? arg : arg.slice(0, eq);
+  return flag === '-h' || flag === '--help';
+}
+
 export function parseArgs(argv: string[]): Options {
+  if (argv.some(isHelpArg)) {
+    process.stdout.write(USAGE);
+    process.exit(0);
+  }
   const opts: Options = {
     tasks: [],
-    port: parsePositiveIntEnv('PORT', process.env.PORT, 4848),
+    port: parsePositiveIntEnv('PORT', process.env.PORT, 4848, MAX_PORT),
     // Loopback by default: a local runtime should not answer the subnet.
     host: process.env.BETTER_TRIGGER_HOST || '127.0.0.1',
     allowUnauthenticated: envFlag(process.env.BETTER_TRIGGER_ALLOW_UNAUTHENTICATED),
@@ -377,6 +454,7 @@ export function parseArgs(argv: string[]): Options {
       'BETTER_TRIGGER_CONCURRENCY',
       process.env.BETTER_TRIGGER_CONCURRENCY,
       5,
+      MAX_CONCURRENCY,
     ),
     databaseUrl: process.env.DATABASE_URL,
     migrate: true,
@@ -390,6 +468,10 @@ export function parseArgs(argv: string[]): Options {
     namespaces: parseNamespaces('BETTER_TRIGGER_NAMESPACES', process.env.BETTER_TRIGGER_NAMESPACES ?? ''),
   };
 
+  // At most one credentials warning per startup, however many times the flag
+  // is repeated.
+  const dbUrlWarned = { done: false };
+
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     // Both `--flag value` and `--flag=value` are accepted.
@@ -400,18 +482,13 @@ export function parseArgs(argv: string[]): Options {
       if (inline !== undefined) return inline;
       const next = argv[i + 1];
       if (next === undefined || next.startsWith('-')) {
-        throw new Error(`${flag} requires a value`);
+        throw missingValueError(flag, next);
       }
       i += 1;
       return next;
     };
 
     switch (flag) {
-      case '-h':
-      case '--help':
-        process.stdout.write(USAGE);
-        process.exit(0);
-        break;
       case '--tasks': {
         const paths = value()
           .split(',')
@@ -421,7 +498,7 @@ export function parseArgs(argv: string[]): Options {
         break;
       }
       case '--port':
-        opts.port = requireInt(flag, value());
+        opts.port = requireInt(flag, value(), MAX_PORT);
         break;
       case '--host':
         opts.host = value();
@@ -436,7 +513,7 @@ export function parseArgs(argv: string[]): Options {
         opts.corsOrigins.push(...parseOriginList(value()));
         break;
       case '--concurrency':
-        opts.concurrency = requireInt(flag, value());
+        opts.concurrency = requireInt(flag, value(), MAX_CONCURRENCY);
         break;
       case '--name':
         opts.name = value();
@@ -462,9 +539,12 @@ export function parseArgs(argv: string[]): Options {
       case '--stranded-interval-ms':
         opts.strandedIntervalMs = requireInt(flag, value());
         break;
-      case '--database-url':
-        opts.databaseUrl = value();
+      case '--database-url': {
+        const databaseUrl = value();
+        warnDatabaseUrlCredentials(databaseUrl, dbUrlWarned);
+        opts.databaseUrl = databaseUrl;
         break;
+      }
       case '--no-migrate':
         opts.migrate = false;
         break;
@@ -505,6 +585,10 @@ export function parseArgs(argv: string[]): Options {
  * a bool flag that ignored its value would resolve a typo towards deleting.
  */
 export function parsePruneArgs(argv: string[]): PruneOptions {
+  if (argv.some(isHelpArg)) {
+    process.stdout.write(PRUNE_USAGE);
+    process.exit(0);
+  }
   let olderThanMs: number | undefined;
   const opts: Omit<PruneOptions, 'olderThanMs'> = {
     dryRun: false,
@@ -512,6 +596,7 @@ export function parsePruneArgs(argv: string[]): PruneOptions {
     databaseUrl: process.env.DATABASE_URL,
     migrate: true,
   };
+  const dbUrlWarned = { done: false };
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -522,18 +607,13 @@ export function parsePruneArgs(argv: string[]): PruneOptions {
       if (inline !== undefined) return inline;
       const next = argv[i + 1];
       if (next === undefined || next.startsWith('-')) {
-        throw new Error(`${flag} requires a value`);
+        throw missingValueError(flag, next);
       }
       i += 1;
       return next;
     };
 
     switch (flag) {
-      case '-h':
-      case '--help':
-        process.stdout.write(PRUNE_USAGE);
-        process.exit(0);
-        break;
       case '--older-than':
         olderThanMs = requireDuration(flag, value());
         break;
@@ -543,9 +623,12 @@ export function parsePruneArgs(argv: string[]): PruneOptions {
       case '--namespace':
         opts.namespaces.push(...parseNamespaces(flag, value()));
         break;
-      case '--database-url':
-        opts.databaseUrl = value();
+      case '--database-url': {
+        const databaseUrl = value();
+        warnDatabaseUrlCredentials(databaseUrl, dbUrlWarned);
+        opts.databaseUrl = databaseUrl;
         break;
+      }
       case '--no-migrate':
         opts.migrate = false;
         break;

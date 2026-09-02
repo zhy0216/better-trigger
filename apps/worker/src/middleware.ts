@@ -113,7 +113,10 @@ export function allowedOrigin(origin: string): string | null {
 export const corsMiddleware: MiddlewareHandler = cors({
   origin: (origin) => allowedOrigin(origin),
   allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Authorization', 'Content-Type'],
+  // Idempotency-Key is read by POST /runs/:id/retry and is not on the CORS
+  // safelist, so a browser caller with --cors-origin would fail the preflight
+  // without it here.
+  allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
 });
 
 /**
