@@ -1,8 +1,8 @@
-# better-trigger TODOs — 全仓库改进点专项（2026-08-26）
+# better-trigger TODOs — 全仓库改进点专项（第二轮，2026-09-02）
 
-本轮条目来自对 kernel / db / sdk / core / worker / web / CI 的全仓库审查。每个文件一个（或一组紧密相关的）问题；文件内保留现状证据、影响、不变量、实现方案和验收标准。条目目前都只是待办，不代表修复已经落地。
+本轮条目来自对 kernel / worker / sdk / core / web / CI / roadmap 的第二轮全仓库审查（第一轮 12 条见 `done/`）。每个文件一个（或一组紧密相关的）问题；文件内保留现状证据、影响、不变量、实现方案和验收标准。条目目前都只是待办，不代表修复已经落地。
 
-## 状态：已完成（12/12 归档至 done/）
+## 状态：待办（0/8）
 
 ## 优先级与执行顺序
 
@@ -10,18 +10,26 @@
 
 | # | 文件 | 一句话 | 依赖 |
 |---|------|--------|------|
-| 1 | [p0-01-concurrency-env-validation.md](./done/p0-01-concurrency-env-validation.md) ✅ | `BETTER_TRIGGER_CONCURRENCY` env 用裸 `Number()`，拼错值 → NaN → daemon 正常启动但永不领取任务 | — |
-| 2 | [p0-02-dashboard-env-propagation.md](./done/p0-02-dashboard-env-propagation.md) ✅ | Dashboard EnvSwitcher 只对 `/runs` 列表生效，详情/Cancel/Retry/tasks/schedules/workers 不带 env，非 prod run 全部 404 或静默显示 prod 数据 | — |
-| 3 | [p1-03-embedded-rate-limit.md](./done/p1-03-embedded-rate-limit.md) ✅ | embedded 进程内 fetch 也过 rateLimitMiddleware，高吞吐 embedded 应用会对自己返回 429 | — |
-| 4 | [p1-04-heartbeat-reentrancy.md](./done/p1-04-heartbeat-reentrancy.md) ✅ | heartbeat 的 `setInterval` 无重入保护，慢 tick 会并发；stop() 后仍可能把 workers 行重新点亮 | — |
-| 5 | [p1-05-sdk-waitforresult-signature.md](./done/p1-05-sdk-waitforresult-signature.md) ✅ | SDK `waitForResult` 签名与文档/兄弟方法不一致；README 漏 namespace 列与 `retryRun.operationKey` | — |
-| 6 | [p1-06-dashboard-terminal-polling.md](./done/p1-06-dashboard-terminal-polling.md) ✅ | 终态 run 永久 2s 轮询、不感知页面可见性；loadMore 吞错、动作 401 不进连接注册表 | — |
-| 7 | [p1-07-schema-drift-guard.md](./done/p1-07-schema-drift-guard.md) ✅ | schema.ts 自称 single source of truth 但只对 migration 成立；kernel 手写行类型/约束名无编译期保护 | — |
-| 8 | [p1-08-ci-release-node-matrix.md](./done/p1-08-ci-release-node-matrix.md) ✅ | 无 release workflow、CI 无 Node 矩阵、publint/attw 未覆盖 kernel/db、残留 `.next` 输出、TS 未使用变量无人查 | — |
-| 9 | [p2-09-refactor-monoliths.md](./done/p2-09-refactor-monoliths.md) ✅ | kernel `runs.ts`(2577) / `claimRuns`(315) / `scanWaits`(290) / worker `main.ts`(1246) 拆分，executor 重复模板抽取 | — |
-| 10 | [p2-10-kernel-low-hanging.md](./done/p2-10-kernel-low-hanging.md) ✅ | kernel 低挂果：appendLogs 静默丢弃、enqueueMany 陷阱、裸 Error→500、TERMINAL_STATUSES 重复、withTx 样板、prune 索引、注释漂移 | — |
-| 11 | [p2-11-worker-low-hanging.md](./done/p2-11-worker-low-hanging.md) ✅ | worker 低挂果：未知 task 租约滞留、stepsTruncated 读 env、AbortError 模板重复、intQuery clamp、PATCH /schedules 限流/审计、Bearer 大小写、handoff 顺序 | — |
-| 12 | [p2-12-sdk-web-toolchain-low-hanging.md](./done/p2-12-sdk-web-toolchain-low-hanging.md) ✅ | sdk/web/toolchain 低挂果：SDK_VERSION 硬编码、batchTrigger env 剥离、retry sleep 不感知 AbortSignal、timeoutMs 校验、useTweaks 死代码、VITE_BT_API_URL 注释 | — |
+| 1 | [p0-13-workers-namespace-filter.md](./p0-13-workers-namespace-filter.md) | `GET /workers` 按从不写入的 `project_id/env` 列过滤，真成员关系在 `namespaces` jsonb → 多 namespace 隔离失效，测试还固化了错误谓词 | — |
+| 2 | [p0-14-claim-namespace-starvation.md](./p0-14-claim-namespace-starvation.md) | 多 namespace claim 扫描共享配额按数组顺序先到先得，`namespaces[0]` 持续有活时其余 namespace 永久饥饿 | — |
+| 3 | [p1-15-sdk-request-protection.md](./p1-15-sdk-request-protection.md) | SDK 响应 body 读取在 timeout/abort 清理之后 → 慢速 body 突破 `timeoutMs` 合约；per-request `timeoutMs` 覆盖绕过校验 | — |
+| 4 | [p1-16-config-input-validation.md](./p1-16-config-input-validation.md) | `RetryPolicy` 全链路零校验（NaN/负值直落数据库）；`--lease-ms ≤ 500` 不拒绝（心跳必然晚于租约，reaper 吃光 recoveries）；`requireInt` 不校验整数 | — |
+| 5 | [p1-17-dashboard-race-and-errors.md](./p1-17-dashboard-race-and-errors.md) | loadMore/loadOlderLogs 过期响应把旧 env/旧 run 数据写进新列表；Schedules 开关失败吞错、401 不上报；日志流强制滚底打断回读 | — |
+| 6 | [p2-18-kernel-worker-low-hanging-2.md](./p2-18-kernel-worker-low-hanging-2.md) | kernel/worker 低挂果：孤儿 cron schedule 永久触发、LISTEN 重连代数竞态、日志 flush 无背压、waiter sweep 重入、releaseClaims 静默吞错 | — |
+| 7 | [p2-19-sdk-web-low-hanging-2.md](./p2-19-sdk-web-low-hanging-2.md) | sdk/web 低挂果：实例级 `batchTrigger` per-item env 类型洞、TweaksPanel 永远不可达、Switch/行/菜单键盘不可用、拖拽监听器泄漏 | — |
+| 8 | [p2-20-toolchain-ci-low-hanging.md](./p2-20-toolchain-ci-low-hanging.md) | 工具链/CI：ESLint 从不检查 .ts/.tsx、CI 无缓存、Dockerfile 不构建验证且有死 stage、release 无 concurrency/验收门禁、LISTEN/NOTIFY 文档漂移 | — |
+
+## 本轮未收编、后续单独立项的候选（roadmap 缺口）
+
+审查同时核实了 `docs/architecture.md` P2–P6 的交付状态；以下是**新需求**而非缺陷，规模超出本轮条目，留待单独立项：
+
+- **P3 events**：`event()` / `emit` / `wait.forEvent` + `events` 表（requestApproval 与北极星 demo 的地基，内核唯一整块缺失的原语）。
+- **P3 fan-out 闭环**：`batchTriggerAndWait` + cancel 父→子级联（当前取消不传子，留孤儿 run）。
+- **P2 尾**：持久化边界故障注入 harness（现只有 SIGKILL 一种故障；连接中断/重复投递下的接管承诺仍是空白）。
+- **P3 前置**：testing 包虚拟时间（多日 wait 与未来 forEvent 的测试效率）。
+- **P4**：`better-trigger-worker migrate` 子命令（cli.ts 已有 prune 模板，半天级）。
+- **P5 agent 层**：`ctx.handoff` / `ctx.gather` / `ctx.requestApproval` / `ctx.llm` / `continueAsNew`、multi-agent 示例、dashboard agent 视图（依赖 P3）。
+- **P6**：plugin interceptors、eslint-plugin。
 
 ## 执行约定
 
@@ -29,7 +37,7 @@
 - 一个文件内部条目多于 6 条时，按 `finish-todo` 规则拆成两个 workflow（先 P0/P1 条目，再其余）。
 - 每个条目下面的「推荐实现方案」是实现 agent 的边界，不等于本轮已经修改源代码。
 - 只动条目要求的代码；不顺手重构、不改无关文件、不升级依赖。
-- P2 里的「低挂果重命名/去重」类条目要格外小心：去重（如 `TERMINAL_STATUSES`）时若某处故意以内联字面量表达独立语义，需保留注释说明差异，不要把语义不同的常量合并。
+- P2 里的「低挂果」类条目要格外小心：改观测/背压时不得改变既有正确路径的语义；去重/合并常量时语义不同处保留注释说明差异。
 
 ## 基线校验
 
