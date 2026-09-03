@@ -16,6 +16,7 @@ import {
 import type { KernelLogger } from './kernel';
 import { scheduleId as genScheduleId, workerId as genWorkerId } from './ids';
 import { nextCronAt } from './orchestrator';
+import { WORKER_OFFLINE_MS } from './queue';
 
 export interface RegisterWorkerArgs {
   name?: string;
@@ -191,17 +192,24 @@ export async function deregisterWorker(
  * skipped and a warn is logged. Registration timestamps cannot order the two
  * cases — an old worker restarting and a new worker deploying both register
  * "now" — so "still served" is the only signal that separates them. The
- * subquery looks up the STORED version (tasks.latest_code_version, built into
- * the jsonb pair with jsonb_build_object) — never the incoming one, which the
- * registering worker's own row (inserted earlier in this same transaction,
- * online with a fresh heartbeat) would otherwise always match and block every
- * takeover. A stored version is "served" by a workers row that is online,
- * heartbeating within the same 2-minute window the offline marker uses
- * (orchestrator.ts WORKER_OFFLINE_MS), serves this namespace (C2) and lists
- * this (task id, stored version) pair. The guard lives in the upsert itself
- * (one atomic statement, no check-then-write race); a refused update comes
- * back as rowCount 0 and the caller is NOT the metadata owner (see
- * registerWorker — only the owner syncs that task's schedule).
+ * subquery looks up the STORED version (tasks.latest_code_version) — never
+ * the incoming one, which the registering worker's own row (inserted earlier
+ * in this same transaction, online with a fresh heartbeat) would otherwise
+ * always match and block every takeover. A stored version is "served" by a
+ * workers row that is online, heartbeating within the offline-marker window
+ * (queue.ts WORKER_OFFLINE_MS, bound as a parameter), serves this namespace
+ * (C2) and lists this (task id, stored version) pair. The manifest read
+ * normalizes BOTH shapes the way every other reader does (orchestrator.ts
+ * servedTaskIds, queue.ts scanStrandedRuns): rows written by an older build
+ * hold bare id strings with no per-task version, and those normalize to the
+ * worker-level code_version — which is exactly what that build stamped its
+ * tasks with. Without this, online OLD-FORMAT workers are invisible to the
+ * guard during a rolling upgrade, and a new registration takes over tasks
+ * they are still serving — the rollback C4 exists to prevent. The guard
+ * lives in the upsert itself (one atomic statement, no check-then-write
+ * race); a refused update comes back as rowCount 0 and the caller is NOT the
+ * metadata owner (see registerWorker — only the owner syncs that task's
+ * schedule).
  */
 async function upsertTask(
   client: PoolClient,
@@ -226,17 +234,17 @@ async function upsertTask(
            concurrency_limit = EXCLUDED.concurrency_limit,
            latest_code_version = EXCLUDED.latest_code_version,
            updated_at = now()
-     WHERE tasks.latest_code_version IS NULL
-        OR tasks.latest_code_version = EXCLUDED.latest_code_version
-        OR NOT EXISTS (
-          SELECT 1 FROM workers w
-           WHERE w.status = 'online'
-             AND w.last_heartbeat_at > now() - INTERVAL '2 minutes'
-             AND w.namespaces @> $12::jsonb
-             AND w.tasks @> jsonb_build_array(
-                   jsonb_build_object('id', tasks.id, 'codeVersion', tasks.latest_code_version)
-                 )
-        )`,
+      WHERE tasks.latest_code_version IS NULL
+         OR tasks.latest_code_version = EXCLUDED.latest_code_version
+         OR NOT EXISTS (
+           SELECT 1 FROM workers w
+             CROSS JOIN LATERAL jsonb_array_elements(w.tasks) e
+            WHERE w.status = 'online'
+              AND w.last_heartbeat_at > now() - ($13::text || ' milliseconds')::interval
+              AND w.namespaces @> $12::jsonb
+              AND COALESCE(e->>'id', e #>> '{}') = tasks.id
+              AND COALESCE(e->>'codeVersion', w.code_version) = tasks.latest_code_version
+         )`,
     [
       t.id,
       namespace.projectId,
@@ -253,6 +261,9 @@ async function upsertTask(
       // matches is built in SQL from the target row, not bound from the
       // incoming manifest (which would match the registering worker's own row).
       JSON.stringify([namespace]),
+      // $13: the "still served" heartbeat window — the same WORKER_OFFLINE_MS
+      // the offline marker, the cron served-check and the stranded scan bind.
+      String(WORKER_OFFLINE_MS),
     ],
   );
   if (res.rowCount === 0) {

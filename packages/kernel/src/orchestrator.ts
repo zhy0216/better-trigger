@@ -4,10 +4,13 @@
    switchable via OrchestratorOptions — all default on), plus a fifth that is
    default OFF (5. retention GC, below):
      1. wait-due scanner   (timerIntervalMs, 1s)   — resume duration/until waits
-     2. cron scheduler     (cronIntervalMs, 1s)    — fire due schedules via
+      2. cron scheduler     (cronIntervalMs, 1s)    — fire due schedules via
         createRunIn (task retry policy resolved like any other trigger);
         fires for tasks no online worker serves are SKIPPED and counted
-        rather than turned into runs nobody can ever claim (p2-18 C1)
+        rather than turned into runs nobody can ever claim (p2-18 C1); a
+        schedule whose stored pattern/timezone no longer parses is
+        quarantined alone (next_run_at NULL, counted, warned) instead of
+        rolling the whole tick back and stalling every other schedule (04-T1)
      3. lease reaper       (reaperIntervalMs, 10s) — recover runs whose
         lease_until has expired (spends runs.recoveries, never runs.attempt —
         losing a worker is infrastructure, not the user's code failing)
@@ -55,6 +58,7 @@ import {
   nsPredicateFor,
   scanStrandedRuns,
   TERMINAL_STATUSES,
+  WORKER_OFFLINE_MS,
   type StrandedScan,
 } from './queue';
 import {
@@ -67,7 +71,6 @@ import {
 } from './runs';
 import { notifyTerminal, notifyWork } from './notify';
 
-const WORKER_OFFLINE_MS = 120_000;
 const WORKER_OFFLINE_SCAN_MS = 30_000;
 
 /**
@@ -122,11 +125,12 @@ export function nextCronAt(pattern: string, timezone?: string, from?: Date): Dat
  * Which of `taskIds` an online worker still serves in `namespace` (p2-18 C1).
  *
  * "Served" is the same reading the registration guard uses (workers.ts): an
- * `online` worker row, heartbeating inside the offline-marker window (the
- * '2 minutes' literal is WORKER_OFFLINE_MS, spelled the same way there), that
- * serves this namespace and lists the task id in its manifest. Manifest rows
- * written by an older build (or a peer mid-rollout) hold bare id strings;
- * COALESCE normalizes both shapes, same as scanStrandedRuns does.
+ * `online` worker row, heartbeating inside the offline-marker window
+ * (WORKER_OFFLINE_MS, bound as a parameter — same constant the stranded scan
+ * and the guard bind), that serves this namespace and lists the task id in
+ * its manifest. Manifest rows written by an older build (or a peer
+ * mid-rollout) hold bare id strings; COALESCE normalizes both shapes, same as
+ * scanStrandedRuns does.
  */
 async function servedTaskIds(
   client: PoolClient,
@@ -140,11 +144,11 @@ async function servedTaskIds(
         SELECT 1 FROM workers w
           CROSS JOIN LATERAL jsonb_array_elements(w.tasks) e
          WHERE w.status = 'online'
-           AND w.last_heartbeat_at > now() - INTERVAL '2 minutes'
+           AND w.last_heartbeat_at > now() - ($3::text || ' milliseconds')::interval
            AND w.namespaces @> $1::jsonb
            AND COALESCE(e->>'id', e #>> '{}') = t.task_id
       )`,
-    [JSON.stringify([namespace]), taskIds],
+    [JSON.stringify([namespace]), taskIds, String(WORKER_OFFLINE_MS)],
   );
   return new Set(res.rows.map((r) => r.task_id));
 }
@@ -234,6 +238,17 @@ export interface OrchestratorCounters {
    * fires; the task ids involved are named by the loop's transition log.
    */
   cronSkippedUnserved: number;
+  /**
+   * Due schedules whose stored cron_pattern/cron_tz no longer parses
+   * (04-T1). Registration validates, so a poisoned row comes from outside
+   * it — a dashboard/manual edit of schedules.cron_pattern/cron_tz, a croner
+   * upgrade, tz-data renaming a zone. Each one is isolated (its next_run_at
+   * goes NULL, the rest of the batch still fires) instead of rolling the
+   * whole tick back, which would leave EVERY due schedule due forever and
+   * stall the namespace's cron. Monotonic total of quarantined schedules;
+   * each occurrence is also named by a warn.
+   */
+  cronPoisoned: number;
   /** Loop iterations that threw, per loop. Each one is logged too, but a rate
    *  is what says "the cron loop has been failing all afternoon". */
   loopErrors: {
@@ -265,6 +280,7 @@ export function createOrchestratorCounters(): OrchestratorCounters {
     gcWorkersDeleted: 0,
     stranded: { groups: [], truncated: false },
     cronSkippedUnserved: 0,
+    cronPoisoned: 0,
     loopErrors: { waits: 0, cron: 0, reaper: 0, workers: 0, gc: 0, stranded: 0 },
     // 0 = "this loop has never ticked" — the metrics reader emits only loops
     // that have actually run, so a deliberately-disabled loop (e.g. waits on
@@ -792,11 +808,35 @@ export function startOrchestrator(
         for (const s of group) (served.has(s.task_id) ? fired : skippedUnserved).push(s);
       }
 
+      // Poison isolation (04-T1): nextCronAt THROWS on an unparseable pattern
+      // or an unknown timezone. Registration validates both, so a stored row
+      // only turns poisonous from outside it — a dashboard/manual edit of
+      // schedules.cron_pattern/cron_tz, a croner upgrade, tz-data renaming a
+      // zone. Pre-isolation that throw rolled the whole tick back, so EVERY
+      // due schedule kept its stale next_run_at and came back due next tick —
+      // one bad row stalled the namespace's entire cron, silently except for
+      // loopErrors.cron. Each schedule's next-fire computation now fails
+      // alone: the poisoned row gets the impossible-pattern treatment
+      // (next_run_at NULL → silent until the pattern is fixed and the
+      // schedule re-enabled / re-registered), the rest of the batch proceeds,
+      // and the row is counted and named. A poisoned SERVED schedule still
+      // fires the run that was legitimately due — only its FUTURE fires are
+      // undefined, so the quarantine starts after this fire.
+      const poisoned: Array<{ row: ScheduleRow; error: unknown }> = [];
+      const nextOf = (s: ScheduleRow): Date | null => {
+        try {
+          return nextCronAt(s.cron_pattern, s.cron_tz ?? undefined, s.db_now);
+        } catch (err) {
+          poisoned.push({ row: s, error: err });
+          return null;
+        }
+      };
+
       for (const s of skippedUnserved) {
-        const next = nextCronAt(s.cron_pattern, s.cron_tz ?? undefined, s.db_now);
+        const next = nextOf(s);
         // No last_run_at / last_run_id: no run happened. The clamp and the
         // NULL guard are the fire path's (p1-09) — an impossible pattern must
-        // stay silent, not spin.
+        // stay silent, not spin (and so must a poisoned one).
         await client.query(
           `UPDATE schedules
               SET next_run_at = CASE
@@ -825,7 +865,7 @@ export function startOrchestrator(
         // clock skew. Computing from db_now (the clock that judged it due)
         // keeps the two decisions on one clock, and missed windows are skipped
         // (no catch-up).
-        const next = nextCronAt(s.cron_pattern, s.cron_tz ?? undefined, s.db_now);
+        const next = nextOf(s);
         // Second defense: whatever the computation above did, a schedule can
         // never be immediately re-due right after firing — the clamp keeps a
         // skewed daemon clock from writing a next_run_at the DB reads as
@@ -852,8 +892,25 @@ export function startOrchestrator(
       await client.query('COMMIT');
       // Folded after COMMIT like the reaper's tallies: a rolled-back tick
       // created no runs and consumed no fires (next_run_at reverts with it),
-      // so it skipped nothing worth counting or logging.
+      // so it skipped nothing worth counting or logging — and quarantined no
+      // poisoned row either.
       counters.cronSkippedUnserved += skippedUnserved.length;
+      counters.cronPoisoned += poisoned.length;
+      // One warn per poisoned row, not a transition signature: the quarantine
+      // sets next_run_at NULL, so the same row cannot come back due and
+      // re-warn until somebody fixes the pattern and re-enables it — the
+      // per-occurrence line cannot spam.
+      for (const p of poisoned) {
+        logger.warn(
+          `[orchestrator:cron] schedule ${p.row.id} ` +
+            `(${p.row.project_id}/${p.row.env}/${p.row.task_id}) has a cron ` +
+            `pattern/timezone that no longer parses ` +
+            `(${JSON.stringify(p.row.cron_pattern)} / ${JSON.stringify(p.row.cron_tz)}): ` +
+            `${p.error instanceof Error ? p.error.message : String(p.error)} — ` +
+            `next_run_at set to NULL so it cannot stall the other schedules; ` +
+            `fix the pattern (dashboard PATCH or re-registration) to resume it`,
+        );
+      }
       const unservedSignature = [...new Set(
         skippedUnserved.map((s) => `${s.project_id}/${s.env}/${s.task_id}`),
       )]

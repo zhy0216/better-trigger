@@ -131,9 +131,14 @@ describe('scanCron — unserved schedule skip (p2-18 C1)', () => {
     expect(servedCheck.params[1]).toEqual(['ghost']);
     // "Served" is the registration guard's reading (workers.ts): online AND
     // heartbeating inside the offline-marker window AND namespace-scoped,
-    // with both manifest shapes (pair / legacy bare id) normalized.
+    // with both manifest shapes (pair / legacy bare id) normalized. The
+    // window is WORKER_OFFLINE_MS bound as a parameter ($3), the same
+    // constant the guard and the stranded scan bind — never a literal.
     expect(servedCheck.sql).toMatch(/w\.status = 'online'/);
-    expect(servedCheck.sql).toMatch(/w\.last_heartbeat_at > now\(\) - INTERVAL '2 minutes'/);
+    expect(servedCheck.sql).toMatch(
+      /w\.last_heartbeat_at > now\(\) - \(\$3::text \|\| ' milliseconds'\)::interval/,
+    );
+    expect(servedCheck.params[2]).toBe('120000');
     expect(servedCheck.sql).toMatch(/w\.namespaces @> \$1::jsonb/);
     expect(servedCheck.sql).toMatch(/COALESCE\(e->>'id', e #>> '\{\}'\) = t\.task_id/);
     expectAligned(servedCheck.sql, servedCheck.params);

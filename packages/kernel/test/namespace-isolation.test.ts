@@ -380,7 +380,7 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
     expect(cancel.sql).toMatch(/runs\.project_id = \$2::text AND runs\.env = \$3::text/);
   });
 
-  it('scanStrandedRuns numbers the predicate after the LIMIT param', async () => {
+  it('scanStrandedRuns numbers the predicate after the LIMIT and window params', async () => {
     const sqls: string[] = [];
     const paramLists: unknown[][] = [];
     const pool = {
@@ -394,9 +394,10 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
     await scanStrandedRuns(pool, [NS_STAGING]);
 
     expectAligned(sqls[0]!, paramLists[0]!);
-    // $1 = the cap+1 limit, then the namespace pair.
-    expect(paramLists[0]).toEqual([21, 'acme', 'staging']);
-    expect(sqls[0]).toMatch(/r\.project_id = \$2::text AND r\.env = \$3::text/);
+    // $1 = the cap+1 limit, $2 = the WORKER_OFFLINE_MS heartbeat window, then
+    // the namespace pair.
+    expect(paramLists[0]).toEqual([21, '120000', 'acme', 'staging']);
+    expect(sqls[0]).toMatch(/r\.project_id = \$3::text AND r\.env = \$4::text/);
   });
 
   it('prune countPrunable numbers the predicate after cutoff + statuses', async () => {

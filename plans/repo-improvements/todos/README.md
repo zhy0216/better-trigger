@@ -9,7 +9,7 @@
 | 01 | [01-core-sdk-type-holes.md](./done/01-core-sdk-type-holes.md) | P1 | medium | ✅ 已完成 · serializeError 非全函数、concurrency.limit 零值静默饥饿、batch/triggerAndWait options 类型洞，外加 SDK 校验与导出补齐 |
 | 02 | [02-kernel-validation-boundaries.md](./done/02-kernel-validation-boundaries.md) | P1 | medium | ✅ 已完成 · prune batchSize:0 死循环，及 waitForResult/claimRuns/registerWorker/worker 输入/心跳零行等内核校验边界 |
 | 03 | [03-db-fk-indexes-and-checks.md](./done/03-db-fk-indexes-and-checks.md) | P1 | medium | ✅ 已完成 · 缺 FK 支撑索引导致 prune 级联 seq scan；workers 部分索引；trigger_type/trigger_source 缺 CHECK（迁移 0016：5 个 `*_fk_idx` + logs_run_id_idx 改 run_id 打头避免重复索引 + workers 在线部分索引 + 两个 trigger 枚举 CHECK） |
-| 04 | [04-kernel-cron-poison-and-takeover.md](./04-kernel-cron-poison-and-takeover.md) | P1 | hard | 依赖 02。单条毒 cron 停摆全调度器；C4 接管守卫对旧版 manifest 失明；batchTriggerChild 孤儿 run；served 语义分裂 |
+| 04 | [04-kernel-cron-poison-and-takeover.md](./done/04-kernel-cron-poison-and-takeover.md) | P1 | hard | ✅ 已完成 · 单条毒 cron 隔离（计数/告警/不回滚整事务）、C4 接管守卫归一旧版 manifest、batchTriggerChild requireTask、served 语义与心跳窗口常量归一 |
 | 05 | [05-kernel-quality-clock-selfheal.md](./05-kernel-quality-clock-selfheal.md) | P2 | hard | 依赖 04。宿主时钟 vs DB 时钟、wait-graph 检出不自愈、work 通知跨 namespace 唤醒、死代码/注释/契约文档漂移 |
 | 06 | [06-worker-api-cli-hardening.md](./done/06-worker-api-cli-hardening.md) | P2 | medium | ✅ 已完成 · CORS 缺 Idempotency-Key、GET /runs 游标毫秒截断丢行、CLI 上限缺失、--help 被 env 校验拦截、waiter 监听器泄漏、`--database-url` 凭据暴露未警示（T1–T7 全部落地） |
 | 07 | [07-worker-runtime-executor-hardening.md](./done/07-worker-runtime-executor-hardening.md) | P2 | medium | ✅ 已完成 · ctx.wait 确定性参数错误被可重试化、startWorkerRuntime 库 API 跳过校验、背压日志打 "undefined"、静态资源整体缓冲、shebang 仅注入 bin、engines/target 对齐（T1–T5 全部落地） |
@@ -25,7 +25,7 @@
 1. `01-core-sdk-type-holes.md`（P1）✅ 已完成，归档至 `done/`
 2. `02-kernel-validation-boundaries.md`（P1）✅ 已完成，归档至 `done/`
 3. `03-db-fk-indexes-and-checks.md`（P1）✅ 已完成，归档至 `done/`
-4. `04-kernel-cron-poison-and-takeover.md`（P1）— 依赖 02（共享 queue.ts / workers.ts / runs-steps.ts）
+4. `04-kernel-cron-poison-and-takeover.md`（P1）✅ 已完成，归档至 `done/`（依赖 02，共享 queue.ts / workers.ts / runs-steps.ts）
 5. `05-kernel-quality-clock-selfheal.md`（P2）— 依赖 04（共享 orchestrator.ts / runs-logs.ts 等）
 6. `06-worker-api-cli-hardening.md`（P2）✅ 已完成，归档至 `done/`
 7. `07-worker-runtime-executor-hardening.md`（P2）✅ 已完成，归档至 `done/`

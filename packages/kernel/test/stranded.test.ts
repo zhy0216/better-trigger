@@ -68,7 +68,7 @@ describe('scanStrandedRuns', () => {
   });
 
   it('reads the served set off online workers, both manifest shapes', async () => {
-    const { pool, sqls } = stubPool([]);
+    const { pool, sqls, params } = stubPool([]);
 
     await scanStrandedRuns(pool, [DEFAULT_NAMESPACE]);
 
@@ -78,6 +78,14 @@ describe('scanStrandedRuns', () => {
     // (those fall back to the worker's own version, which is what it stamped).
     expect(sql).toMatch(/COALESCE\(e->>'id', e #>> '\{\}'\)/);
     expect(sql).toMatch(/COALESCE\(e->>'codeVersion', w\.code_version\)/);
+    // "Online" includes the heartbeat window: a row that stopped heartbeating
+    // must count as gone here the moment the cron served-check and the
+    // registration guard stop counting it (04-T4). One constant drives all
+    // three SQL windows — WORKER_OFFLINE_MS bound as $2, never a literal.
+    expect(sql).toMatch(
+      /w\.last_heartbeat_at > now\(\) - \(\$2::text \|\| ' milliseconds'\)::interval/,
+    );
+    expect(params[0]![1]).toBe('120000');
   });
 
   it('caps the groups it reports and says when it truncated', async () => {

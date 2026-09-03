@@ -67,8 +67,8 @@ function expectAligned(sql: string, params: unknown[]): void {
  * The guard mirrors the C4 rule in the workers.ts docstring: the STORED
  * version is displaced only when it is NULL, equals the incoming one, or is no
  * longer in `servedVersions` (the set of versions live workers serve) — the
- * same stored-version check the real SQL builds with
- * jsonb_build_object('id', tasks.id, 'codeVersion', tasks.latest_code_version).
+ * same stored-version check the real SQL builds with the COALESCE-normalized
+ * (task id, stored version) match over the workers manifests.
  * Tests mutate `servedVersions` directly to stage "the new worker is still
  * online" vs "its workers are all gone".
  */
@@ -162,17 +162,28 @@ describe('registerWorker — task metadata owner/version rule (C4)', () => {
     // The version guard: same version, or no longer served, may overwrite.
     expect(upsert.sql).toMatch(/WHERE tasks\.latest_code_version IS NULL/);
     expect(upsert.sql).toMatch(/tasks\.latest_code_version = EXCLUDED\.latest_code_version/);
-    expect(upsert.sql).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM workers w\s+WHERE w\.status = 'online'/);
-    // The stored version is protected while a live worker serves it: heartbeat
-    // within the offline-marker window (orchestrator WORKER_OFFLINE_MS), in
-    // this namespace, carrying this (task id, STORED version) pair. The pair
-    // is built in SQL from the target row — binding the INCOMING version here
-    // would match the registering worker's own row (inserted earlier in the
-    // same tx, online, fresh heartbeat) and block every takeover.
-    expect(upsert.sql).toMatch(/w\.last_heartbeat_at > now\(\) - INTERVAL '2 minutes'/);
-    expect(upsert.sql).toMatch(/w\.namespaces @> \$12::jsonb/);
     expect(upsert.sql).toMatch(
-      /w\.tasks @> jsonb_build_array\(\s*jsonb_build_object\('id', tasks\.id, 'codeVersion', tasks\.latest_code_version\)\s*\)/,
+      /NOT EXISTS \(\s*SELECT 1 FROM workers w\s+CROSS JOIN LATERAL jsonb_array_elements\(w\.tasks\) e\s+WHERE w\.status = 'online'/,
+    );
+    // The stored version is protected while a live worker serves it: heartbeat
+    // within the offline-marker window — WORKER_OFFLINE_MS bound as $13, the
+    // same constant the offline marker, the cron served-check and the stranded
+    // scan bind — in this namespace, carrying this (task id, STORED version)
+    // pair. Both manifest shapes normalize (pair objects AND the legacy bare
+    // id strings an older build wrote, which fall back to the worker-level
+    // code_version — what that build stamped), so an online OLD-FORMAT worker
+    // still blocks a takeover of the task it serves. The pair is built in SQL
+    // from the target row — binding the INCOMING version here would match the
+    // registering worker's own row (inserted earlier in the same tx, online,
+    // fresh heartbeat) and block every takeover.
+    expect(upsert.sql).toMatch(
+      /w\.last_heartbeat_at > now\(\) - \(\$13::text \|\| ' milliseconds'\)::interval/,
+    );
+    expect(upsert.params[12]).toBe('120000');
+    expect(upsert.sql).toMatch(/w\.namespaces @> \$12::jsonb/);
+    expect(upsert.sql).toMatch(/COALESCE\(e->>'id', e #>> '\{\}'\) = tasks\.id/);
+    expect(upsert.sql).toMatch(
+      /COALESCE\(e->>'codeVersion', w\.code_version\) = tasks\.latest_code_version/,
     );
     // The guard region checks only the STORED version — EXCLUDED (the incoming
     // manifest version) must not appear inside the NOT EXISTS subquery.
@@ -180,7 +191,7 @@ describe('registerWorker — task metadata owner/version rule (C4)', () => {
     expect(guard).not.toMatch(/EXCLUDED/);
     expectAligned(upsert.sql, upsert.params);
     expect(JSON.parse(String(upsert.params[11]))).toEqual([NS]);
-    expect(upsert.params).toHaveLength(12);
+    expect(upsert.params).toHaveLength(13);
 
     expect(warns).toEqual([]);
   });

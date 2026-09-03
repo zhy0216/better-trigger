@@ -89,6 +89,22 @@ function makeClient() {
         // id of each VALUES row — every 13th param, starting at the first.
         return { rows: p.filter((_, i) => i % 13 === 0).map((id) => ({ id: String(id) })) };
       }
+      if (/FROM tasks/.test(sql)) {
+        // Task-config lookup for the create paths: echo the requested id(s) —
+        // params are (projectId, env, id) triples — so a requireTask lookup
+        // finds a registered task. All-null config = engine defaults, the same
+        // resolution as no row at all.
+        const ids = p.length === 3 ? [p[2]] : p.filter((_, i) => i % 3 === 2);
+        return {
+          rows: ids.map((id) => ({
+            id: String(id),
+            retry: null,
+            concurrency_limit: null,
+            latest_code_version: null,
+          })),
+          rowCount: ids.length,
+        };
+      }
       if (/INSERT INTO run_steps/.test(sql)) return { rows: [], rowCount: 1 };
       if (/FROM runs/.test(sql)) return { rows: [RUNNING_ROW], rowCount: 1 };
       if (sql.includes('child_run_id')) {

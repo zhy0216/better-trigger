@@ -18,6 +18,20 @@ import {
 import type { KernelLogger } from './kernel';
 import { notifyWork } from './notify';
 
+/**
+ * How long a worker row may go without a heartbeat and still count as live.
+ * ONE constant drives every "is this worker still there" reading — the
+ * stranded-run scan below, the cron served-check (orchestrator.ts
+ * servedTaskIds), the registration takeover guard (workers.ts) — plus the
+ * offline marker loop (orchestrator.ts markOfflineWorkers): a row past this
+ * window is treated as gone by all of them at once, so the observation
+ * surfaces cannot disagree about a worker that stopped heartbeating. Every
+ * SQL window binds it as `($n::text || ' milliseconds')::interval` (never a
+ * literal), the way markOfflineWorkers always has, so the SQL and the
+ * constant cannot drift.
+ */
+export const WORKER_OFFLINE_MS = 120_000;
+
 export interface EnqueueArgs {
   runId: string;
   availableAt: Date;
@@ -822,6 +836,13 @@ const STRANDED_GROUP_LIMIT = 20;
  * worker-level `code_version`, which is exactly what that build stamped its
  * tasks with.
  *
+ * "Online" includes the heartbeat window (WORKER_OFFLINE_MS), the same reading
+ * the cron served-check and the registration guard use: a row that is still
+ * status='online' but stopped heartbeating must count as gone here too, or the
+ * stranded scan and the other surfaces give opposite answers about the same
+ * worker for up to one window (the offline marker flips the status only on its
+ * own 30s tick).
+ *
  * Meaningless when nothing pins (an unpinned worker claims these runs on its
  * next poll), so the loop that calls it is off unless pinning is on.
  */
@@ -830,9 +851,9 @@ export async function scanStrandedRuns(
   namespaces: readonly Namespace[],
 ): Promise<StrandedScan> {
   assertNamespaces(namespaces);
-  // $1 is the LIMIT, written literally in the SQL; the namespace pairs are
-  // numbered from $2 in the same array (see namespacePredicate).
-  const params: unknown[] = [STRANDED_GROUP_LIMIT + 1];
+  // $1 is the LIMIT and $2 the heartbeat window, both written literally in the
+  // SQL; the namespace pairs are numbered after them (see namespacePredicate).
+  const params: unknown[] = [STRANDED_GROUP_LIMIT + 1, String(WORKER_OFFLINE_MS)];
   const nsPredicate = namespacePredicate('r', namespaces, params);
   const res = await pool.query<{ task_id: string; code_version: string; n: string }>(
     `SELECT r.task_id, r.code_version, count(*)::text AS n
@@ -847,6 +868,7 @@ export async function scanStrandedRuns(
            CROSS JOIN LATERAL jsonb_array_elements(w.tasks) e
            CROSS JOIN LATERAL jsonb_array_elements(w.namespaces) n
            WHERE w.status = 'online'
+             AND w.last_heartbeat_at > now() - ($2::text || ' milliseconds')::interval
              AND COALESCE(e->>'id', e #>> '{}') = r.task_id
              AND COALESCE(e->>'codeVersion', w.code_version) = r.code_version
              AND n->>'projectId' = r.project_id

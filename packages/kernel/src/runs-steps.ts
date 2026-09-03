@@ -586,14 +586,21 @@ export async function batchTriggerChild(
     }
 
     // Batched creation (PF5): a constant number of statements for the whole
-    // fan-out. Like createRunIn here, a missing task row is NOT an error —
-    // "no task config" means default retry/concurrency.
+    // fan-out. requireTask — like triggerAndWait above and the client-side
+    // batchTrigger: a task row only exists once some worker registered it, so
+    // a missing row means no worker can ever claim the child run. Worse, such
+    // a run's code_version is NULL, which the stranded-run scan filters out —
+    // the orphan piles up in the queue without ever surfacing in metrics or
+    // logs. Fail HERE with TaskNotFoundError instead (the executor turns
+    // task_not_found into a non-retryable failure — a missing task id
+    // reproduces on every replay), rolling the whole fan-out back rather than
+    // leaving unclaimable children behind.
     const out = await createRunsInBatch(client, {
       items: prepared,
       namespace: { projectId: parent.project_id, env: parent.env },
       triggerType: 'subtask',
       parentRunId: args.runId,
-      requireTask: false,
+      requireTask: true,
     });
     const runIds = out.runIds;
 
