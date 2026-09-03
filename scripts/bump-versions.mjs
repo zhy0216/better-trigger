@@ -102,6 +102,6 @@ for (const dir of PUBLISHABLE) {
 }
 
 console.log(`bumped ${PUBLISHABLE.length} packages to their new versions and synced bun.lock`);
-for (const [dir, [name, version]] of bumped.map((b, i) => [PUBLISHABLE[i], b])) {
+for (const [_dir, [name, version]] of bumped.map((b, i) => [PUBLISHABLE[i], b])) {
   console.log(`  ${name}@${version}`);
 }

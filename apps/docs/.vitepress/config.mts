@@ -44,7 +44,6 @@ export default defineConfig(
       "TypeScript-first, PostgreSQL-backed durable execution runtime. Replay-based tasks, cron, retries — no Redis, no ClickHouse.",
     base: "/better-trigger/",
     cleanUrls: true,
-    ignoreDeadLinks: true,
     head: sharedHead,
     mermaid,
     vite: {

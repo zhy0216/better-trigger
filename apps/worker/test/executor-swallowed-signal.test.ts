@@ -160,7 +160,6 @@ describe('swallowed suspend signal', () => {
     const { kernel, calls } = fakeKernel();
     // Assigned after the task closure captures it (TDZ pattern) — `const`
     // would be a compile error, so the assignment is deliberately deferred.
-    // eslint-disable-next-line prefer-const
     let ex!: Executor;
     const task: ExecutorTask = {
       id: 'demo',
@@ -278,7 +277,6 @@ describe('every durable primitive is guarded', () => {
 
   it.each(entries)('%s refuses to run after a swallowed signal', async (_name, call, named) => {
     const { kernel, calls } = fakeKernel();
-    // eslint-disable-next-line prefer-const
     let ex!: Executor;
     let caught: any;
     const task: ExecutorTask = {

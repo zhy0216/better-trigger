@@ -16,22 +16,13 @@
 FROM oven/bun:1.3-slim AS base
 WORKDIR /app
 
-# ---- build -----------------------------------------------------------------
-# O4 build provenance: the build stage has NO .git (only the listed paths are
-# copied), so the commit identity is injected instead. scripts/write-build-info
-# .mjs reads BT_GIT_SHA before falling back to git rev-parse (which fails here)
-# — pass it when building:  GIT_SHA=$(git rev-parse --short HEAD) docker compose
-# build worker  (CI passes $GITHUB_SHA). Without it the image degrades to
-# version-only build metadata.
-#
-# Manifests first for layer caching: the install layer only invalidates when a
-# package.json / bun.lock changes. Every workspace member's package.json must
-# be present (root workspaces glob + bun.lock cover apps/*, packages/*,
+# ---- manifests ---------------------------------------------------------------
+# Manifests first for layer caching: the install layers below only invalidate
+# when a package.json / bun.lock changes. Every workspace member's package.json
+# must be present (root workspaces glob + bun.lock cover apps/*, packages/*,
 # examples/*) or the frozen install refuses to resolve — only the packages the
 # daemon needs are copied and built though.
-FROM base AS build
-ARG GIT_SHA=
-ENV BT_GIT_SHA=$GIT_SHA
+FROM base AS manifests
 COPY package.json bun.lock turbo.json tsconfig.json ./
 COPY packages/core/package.json packages/core/package.json
 COPY packages/kernel/package.json packages/kernel/package.json
@@ -50,6 +41,21 @@ COPY apps/web/package.json apps/web/package.json
 # itself is not part of the daemon image.
 COPY apps/docs/package.json apps/docs/package.json
 COPY examples/basic/package.json examples/basic/package.json
+
+# ---- build -----------------------------------------------------------------
+# O4 build provenance: the build stage has NO .git (only the listed paths are
+# copied), so the commit identity is injected instead. scripts/write-build-info
+# .mjs reads BT_GIT_SHA before falling back to git rev-parse (which fails here)
+# — pass it when building:  GIT_SHA=$(git rev-parse --short HEAD) docker compose
+# build worker  (CI passes $GITHUB_SHA). Without it the image degrades to
+# version-only build metadata.
+FROM base AS build
+ARG GIT_SHA=
+ENV BT_GIT_SHA=$GIT_SHA
+COPY --from=manifests /app ./
+# Unfiltered on purpose: this stage needs the dev toolchain (tsdown, the
+# workspace typescript, the web build the worker embeds). The runtime image
+# takes its dependency trees from prod-deps instead, so none of that ships.
 RUN bun install --frozen-lockfile
 
 COPY packages/core packages/core
@@ -68,6 +74,18 @@ RUN bun run --cwd packages/core build \
  && bun run --cwd packages/sdk build \
  && bun run --cwd apps/worker build
 
+# ---- production dependencies -----------------------------------------------
+# The same frozen lockfile installed without devDependencies: ~26 packages
+# against the build stage's ~594, because the runtime image has no business
+# carrying typescript, vitest, eslint, tsdown or the web toolchain. Workspace
+# links survive a production install, so pg / hono / better-trigger → packages/
+# sdk all still resolve from the trees copied below. (A `--production` install
+# on top of the build stage's node_modules would NOT prune it — bun only
+# skips adding dev deps — hence this separate stage.)
+FROM base AS prod-deps
+COPY --from=manifests /app ./
+RUN bun install --frozen-lockfile --production
+
 # ---- runtime ---------------------------------------------------------------
 FROM oven/bun:1.3-slim AS runtime
 WORKDIR /app
@@ -80,36 +98,39 @@ ENV PORT=4848
 # --allow-unauthenticated) says the exposure is intended.
 ENV BETTER_TRIGGER_HOST=0.0.0.0
 
-# Root store + the per-package symlink trees for the packages we actually run.
-COPY --from=build /app/node_modules ./node_modules
+# Root store + the per-package symlink trees for the packages we actually run,
+# from the production install. core is the one package with no dependency tree
+# to copy at all (zero runtime deps, so bun never creates packages/core/
+# node_modules) — that absence is the guarantee check:deps enforces.
+COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/packages/core/dist packages/core/dist
 COPY --from=build /app/packages/core/package.json packages/core/package.json
-COPY --from=build /app/packages/core/node_modules packages/core/node_modules
 COPY --from=build /app/packages/kernel/dist packages/kernel/dist
 COPY --from=build /app/packages/kernel/package.json packages/kernel/package.json
-COPY --from=build /app/packages/kernel/node_modules packages/kernel/node_modules
+COPY --from=prod-deps /app/packages/kernel/node_modules packages/kernel/node_modules
 COPY --from=build /app/packages/db/dist packages/db/dist
 # migrations are applied at boot; migrate() resolves them relative to db/dist.
 COPY --from=build /app/packages/db/migrations packages/db/migrations
 COPY --from=build /app/packages/db/package.json packages/db/package.json
-COPY --from=build /app/packages/db/node_modules packages/db/node_modules
+COPY --from=prod-deps /app/packages/db/node_modules packages/db/node_modules
 COPY --from=build /app/packages/sdk/dist packages/sdk/dist
 COPY --from=build /app/packages/sdk/package.json packages/sdk/package.json
-COPY --from=build /app/packages/sdk/node_modules packages/sdk/node_modules
+COPY --from=prod-deps /app/packages/sdk/node_modules packages/sdk/node_modules
 COPY --from=build /app/apps/worker/dist apps/worker/dist
 COPY --from=build /app/apps/worker/package.json apps/worker/package.json
-COPY --from=build /app/apps/worker/node_modules apps/worker/node_modules
+COPY --from=prod-deps /app/apps/worker/node_modules apps/worker/node_modules
 
 # The example task set, so the image is executable on its own. Its sources need
 # no build step (bun runs the TypeScript), so they come straight from the build
-# context — only node_modules is install output and has to come from `build`.
-# That tree is what resolves the module's two imports, and both of its symlinks
-# land inside this stage: `better-trigger` -> ../../../packages/sdk and
-# `zod` -> ../../../node_modules/.bun/zod@…/node_modules/zod. The workspace
-# links it also holds for the example's devDependencies (@better-trigger/testing
-# and friends) dangle here — nothing in src/ imports them.
-COPY --from=build /app/examples/basic/node_modules examples/basic/node_modules
+# context — only node_modules is install output and has to come from an install
+# stage. That tree is what resolves the module's two imports, and both of its
+# symlinks land inside this stage: `better-trigger` -> ../../../packages/sdk and
+# `zod` -> ../../../node_modules/.bun/zod@…/node_modules/zod. The production
+# install never linked the example's devDependencies (@better-trigger/testing &c.)
+# at all here — nothing in src/ imports them, and the acceptance harnesses are
+# not part of the image.
+COPY --from=prod-deps /app/examples/basic/node_modules examples/basic/node_modules
 COPY examples/basic/package.json examples/basic/package.json
 COPY examples/basic/src examples/basic/src
 

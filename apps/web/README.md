@@ -10,7 +10,9 @@ bun run dev        # vite dev server (http://localhost:5173)
 bun run build      # tsc --noEmit && vite build  → dist/
 bun run preview    # serve the production build
 bun run typecheck  # tsc --noEmit
-bun run lint       # eslint (JavaScript/config files; TypeScript via tsc)
+bun run lint       # eslint — the shared repo baseline over JS and .ts/.tsx
+                   # (parser-only; type errors stay tsc's job), plus the
+                   # react-hooks / react-refresh rules this app adds
 ```
 
 ## API key mode

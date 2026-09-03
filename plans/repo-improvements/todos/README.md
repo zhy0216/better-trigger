@@ -16,7 +16,7 @@
 | 08 | [08-web-robustness-perf-a11y.md](./done/08-web-robustness-perf-a11y.md) | P1 | medium | ✅ 已完成 · fetch 无超时杀死轮询、Ruler DOM 无界增长、Sparkline NaN、chevronUp 缺失、错误边界、a11y 与 key 修补 |
 | 09 | [09-web-schedules-reconciliation.md](./done/09-web-schedules-reconciliation.md) | P1 | medium | ✅ 已完成 · Schedules 乐观覆盖轮询确认即清除、并发点击按 id 串行化（序号 + 服务端确认值回滚）、Switch 可访问名 |
 | 10 | [10-testing-package-harness.md](./done/10-testing-package-harness.md) | P2 | medium | ✅ 已完成 · testing 包 harness 缺陷（waitForStatus 吞中止、探测无超时、--port undefined、stop 定时器残留、孤儿 daemon、spawn error 强退、URL query 泄漏、migrate 池泄漏、NaN 端口）修复 + 注入式时钟/namespace 转发 + 40 条自有单测接入 turbo |
-| 11 | [11-toolchain-ci-docs.md](./11-toolchain-ci-docs.md) | P2 | medium | 4 条 lint warning、root scripts 零 lint 覆盖、CI turbo 缓存与 SHA pin、docs PR 门禁、docker-compose PG 暴露、文档漂移 |
+| 11 | [11-toolchain-ci-docs.md](./done/11-toolchain-ci-docs.md) | P2 | medium | ✅ 已完成 · worker 4 条 lint warning 清零、root 脚本与配置进 lint（`//#lint:root`）、CI 缓存 `.turbo` + actions SHA 固定、docs PR 门禁、关闭 ignoreDeadLinks、compose PG 绑 loopback、镜像剔除 devDep、文档漂移修复（T1–T7 全部落地） |
 
 ## 文件
 
@@ -32,7 +32,7 @@
 8. `08-web-robustness-perf-a11y.md`（P1）✅ 已完成，归档至 `done/`
 9. `09-web-schedules-reconciliation.md`（P1）✅ 已完成，归档至 `done/`
 10. `10-testing-package-harness.md`（P2）✅ 已完成，归档至 `done/`
-11. `11-toolchain-ci-docs.md`（P2）
+11. `11-toolchain-ci-docs.md`（P2）✅ 已完成，归档至 `done/`
 
 可并行轨道：{01} {02→04→05} {03} {06,07} {08,09} {10} {11}。
 

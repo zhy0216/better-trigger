@@ -303,7 +303,9 @@ your application installs, cannot reach the database even by accident —
 bun run dev            # turbo run dev
 bun run build          # build all packages (tsdown) + web (tsc + vite)
 bun run typecheck      # tsc --noEmit everywhere
-bun run lint              # ESLint on JavaScript/config files; TypeScript via typecheck
+bun run lint           # ESLint (shared baseline in eslint.config.mjs) on JS and
+                       # TS/TSX in every workspace plus the root scripts and
+                       # configs (//#lint:root); tsc still does the type checking
 bun run test           # vitest unit tests. DB-free by default; the kernel's
                        # true-Postgres suite (packages/kernel/test/pg) runs
                        # automatically when DATABASE_URL is set, skips cleanly

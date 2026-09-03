@@ -25,6 +25,11 @@
       "persistent": true
     },
     "lint": {},
+    // Root-level counterpart: the repo-root scripts (bump-versions, the
+    // packaging/drift guards) and the shared configs live outside every
+    // workspace, so no workspace lint glob reaches them. Linted here so the
+    // "one baseline for the whole repo" claim in eslint.config.mjs holds.
+    "//#lint:root": {},
     "typecheck": {
       "dependsOn": ["^build"]
     },

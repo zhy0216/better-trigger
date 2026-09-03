@@ -52,7 +52,9 @@ export const sharedJsConfig = {
   files: ['**/*.{js,jsx,mjs,cjs}'],
   languageOptions: {
     ...js.configs.recommended.languageOptions,
-    ecmaVersion: 2020,
+    // ES2022 for the top-level await in apps/docs/validate-mermaid.mjs; the
+    // old 2020 ceiling rejected the file outright.
+    ecmaVersion: 2022,
     // The daemon / kernel / SDK / harness packages run on Node. apps/web
     // merges browser globals over this in its own config.
     globals: globals.node,
@@ -72,12 +74,12 @@ export const sharedJsConfig = {
 
 /**
  * The TypeScript counterpart of `sharedJsConfig`: same recommended rules,
- * parsed by typescript-eslint so .ts/.tsx is actually linted. Parser-only —
+ * parsed by typescript-eslint so .ts/.tsx/.mts is actually linted. Parser-only —
  * no `project`/type-aware rules, so ESLint never doubles as a second type
  * checker and no program graph is rebuilt per run.
  */
 export const sharedTsConfig = {
-  files: ['**/*.{ts,tsx}'],
+  files: ['**/*.{ts,tsx,mts}'],
   languageOptions: {
     parser: tseslint.parser,
     // Same default as the JS baseline: Node globals for every package;

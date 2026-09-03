@@ -21,7 +21,10 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - '5432:5432'
+      # Loopback only, same rule as the worker's 4848 below: this is the default
+      # postgres/postgres credential pair, and '5432:5432' would hand it to
+      # every interface of the machine.
+      - '127.0.0.1:5432:5432'
     volumes:
       - better-trigger-pgdata:/var/lib/postgresql/data
     healthcheck:

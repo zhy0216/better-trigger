@@ -20,6 +20,8 @@
 | `POST /runs/:id/cancel` | `{ ok }` |
 | `POST /runs/:id/retry` | `{ runId }`（仅 failed/canceled；创建全新 run） |
 
+`POST /runs/:id/retry` 还支持一个可选的 `Idempotency-Key` 请求头（最长 200 字符，超长返回 `400 bad_request`，纯空白视为未提供）。该键把重试作用域限定在 `(projectId, env, sourceRunId, Idempotency-Key)`：同一意图重复投递会以 200 重放**第一次**调用返回的 `{ runId }`，不再创建第二个 run；映射与新 run 在同一事务内写入，所以从未提交成功的请求同样不会留下任何东西。不带该头时保持旧语义——每次投递都是一次全新重试，不记录。
+
 ## Dashboard API
 
 | 方法 · 路径 | 响应 |

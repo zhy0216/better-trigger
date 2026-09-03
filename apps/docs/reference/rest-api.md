@@ -21,6 +21,15 @@ ISO-8601 strings. Types are the authoritative ones in `apps/worker/src/types.ts`
 | `POST /runs/:id/cancel` | `{ ok }` |
 | `POST /runs/:id/retry` | `{ runId }` (failed/canceled only; creates a fresh run) |
 
+`POST /runs/:id/retry` also accepts an optional `Idempotency-Key` request
+header (at most 200 characters — longer is a `400 bad_request`, whitespace-only
+counts as absent). The key scopes the retry to
+`(projectId, env, sourceRunId, Idempotency-Key)`: a repeated send of the same
+intent replays the FIRST call's `{ runId }` with a 200 instead of creating a
+second run, and the mapping is recorded in the same transaction as the new run,
+so a request that never committed created nothing either. Without the header the
+call keeps legacy semantics — every delivery is a fresh retry, nothing recorded.
+
 ## Dashboard API
 
 | Method · Path | Response |

@@ -41,20 +41,23 @@ timeline
 
 ### P2 — correctness hardening (in progress)
 
-Fingerprints + `NonDeterminismError` are shipped. Remaining:
+Fingerprints + `NonDeterminismError` are shipped, and so are the
+`LISTEN/NOTIFY` wakeups (`pg_notify` on the `bt` channel — the notification
+fast-path in the list above). Remaining:
 
 - Crash / fault-injection harnesses at every persistence boundary (throw /
   abort / connection drop / duplicate delivery)
-- `LISTEN/NOTIFY` wakeups to cut the polling cost (see below)
 
-**Polling cost today** — four wakeup paths are polling until NOTIFY lands:
+**Wakeup cost today** — notifications are the fast path and a latency
+optimization only: every path below keeps its polling fallback, so a lost
+notification costs at most one interval and never correctness.
 
-| Path | Current value |
+| Path | Fast path + polling fallback |
 |---|---|
-| trigger → start executing | idle slot backs off 300ms → 2s (jittered) |
-| `handle.result()` | server-side poll every 250ms per waiter (~4 QPS each) |
-| wait expiry wake | 50 wakes/s global cap (1s tick, `LIMIT 50`, unlocked phase-1 scan) |
-| cron fire | 50 fires/s, scales linearly with daemons (`SKIP LOCKED`) |
+| trigger → start executing | a `work` notification wakes the claim loops; otherwise the idle slot backs off 300ms → 2s (jittered) |
+| `handle.result()` | a `terminal` notification settles every waiter for that run; otherwise one shared 1s sweep per daemon (was ~4 QPS per waiter) |
+| wait expiry wake | 50 wakes/s global cap (1s tick, `LIMIT 50`, unlocked phase-1 scan); the re-enqueue it produces sends a `work` notification |
+| cron fire | 50 fires/s, scales linearly with daemons (`SKIP LOCKED`); each fire sends a `work` notification |
 
 ### P3 — interaction primitives
 

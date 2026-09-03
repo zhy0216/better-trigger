@@ -37,19 +37,18 @@ timeline
 
 ### P2 —— 正确性硬化（进行中）
 
-指纹 + `NonDeterminismError` 已交付。剩余：
+指纹 + `NonDeterminismError` 已交付，`LISTEN/NOTIFY` 唤醒也已交付（`bt` 频道上的 `pg_notify`，即上方清单里的通知快路径）。剩余：
 
 - 在每个持久化边界的崩溃 / 故障注入 harness（throw / abort / 连接断开 / 重复投递）
-- `LISTEN/NOTIFY` 唤醒，降低轮询代价（见下）
 
-**今日的轮询代价**——在 NOTIFY 落地前，四条唤醒路径都是轮询：
+**今日的唤醒代价**——通知只是快路径、只是延迟优化：下面每条路径都保留轮询兜底，丢一条通知最多贵一个轮询周期，永不影响正确性。
 
-| 路径 | 当前值 |
+| 路径 | 快路径 + 轮询兜底 |
 |---|---|
-| trigger → 开始执行 | 空闲槽退避 300ms → 2s（带 jitter） |
-| `handle.result()` | 每个等待者服务端每 250ms 轮询一次（约 4 QPS） |
-| wait 到期唤醒 | 全局上限 50 次/秒（1s tick、`LIMIT 50`、phase 1 无锁扫描） |
-| cron 触发 | 50 次/秒，随 daemon 数线性放大（`SKIP LOCKED`） |
+| trigger → 开始执行 | `work` 通知唤醒 claim 循环；否则空闲槽退避 300ms → 2s（带 jitter） |
+| `handle.result()` | `terminal` 通知一次结算该 run 的全部等待者；否则每个 daemon 一个共享 1s 扫描（原来是每等待者约 4 QPS） |
+| wait 到期唤醒 | 全局上限 50 次/秒（1s tick、`LIMIT 50`、phase 1 无锁扫描）；它产生的重新入队会发一条 `work` 通知 |
+| cron 触发 | 50 次/秒，随 daemon 数线性放大（`SKIP LOCKED`）；每次触发发一条 `work` 通知 |
 
 ### P3 —— 交互原语
 
