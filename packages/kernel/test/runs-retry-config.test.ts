@@ -76,6 +76,8 @@ const makePool = (src: SourceRun = {}) => {
           ],
         };
       }
+      // createRunIn's database-clock read (T1).
+      if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
       if (/INSERT INTO runs/.test(sql)) return { rows: [{ id: 'run_new' }] };
       return { rows: [] };
     },

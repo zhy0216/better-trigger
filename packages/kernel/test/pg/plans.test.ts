@@ -22,7 +22,7 @@ import { assertIndexScan, describePg, planNodeTypes, withPg } from './helpers';
      - STEP_SQL / LOGS_SQL: runs.ts snapshotRun (run detail page).
       - TIMER_WAITS_SQL / ORPHAN_WAITS_SQL: orchestrator.ts scanWaits phase 1
         (the due-wait sweep, split into a timer scan and an orphan scan).
-     - RUNS_SQL: runs.ts getRunRow / lockRunRow (runs PK detail).
+     - RUNS_SQL: runs.ts lockRunRow (runs PK detail).
 
    Plans are only pinned where they are CORRECT today. The p1-06 waits-index
    gap landed its fix (migration 0012 + the namespace-scoped child-wake probe
@@ -122,7 +122,7 @@ const ORPHAN_WAITS_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerpr
     ORDER BY id ASC
     LIMIT 10`;
 
-/** The runs-row read — runs.ts getRunRow / lockRunRow, verbatim. */
+/** The runs-row read — runs.ts lockRunRow, verbatim. */
 const RUNS_SQL = `SELECT id, task_id, status, attempt, max_attempts,
             recoveries, max_recoveries, parent_run_id,
             payload, project_id, env, concurrency_key, priority, code_version, fencing_token

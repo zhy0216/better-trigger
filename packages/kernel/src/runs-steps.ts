@@ -23,6 +23,7 @@ import { createRunIn, createRunsInBatch, prepareBatchItems } from './runs-create
 import {
   assertBatchSize,
   assertOwnedRunning,
+  dbNow,
   errorMaxBytes,
   serializeErrorForStorage,
   stepOutputMaxBytes,
@@ -275,7 +276,24 @@ export async function suspendRun(
       args.namespace,
     );
 
-    if (resumeAt.getTime() <= Date.now()) {
+    // Clock contract (docs/architecture.md "时钟契约"): the wait-due scanner
+    // judges `resume_at <= now()` on the DATABASE clock, so both the due check
+    // below and the stored resume_at must sit on that same clock — a resume_at
+    // stamped from a host clock skewed ahead of the DB's keeps the run
+    // 'waiting' for the whole skew.
+    //   - kind 'duration': the executor computed resumeAt as hostNow+duration,
+    //     so re-anchor the REMAINING duration (resumeAt - host now) onto the DB
+    //     clock. This honors the caller's interval while evaluating it on the
+    //     clock that decides due-ness.
+    //   - kind 'until': resumeAt is an absolute instant the caller named —
+    //     respect it verbatim (an absolute point needs no re-anchoring).
+    const dbNowMs = (await dbNow(client)).getTime();
+    const effectiveResumeAt =
+      args.kind === 'duration'
+        ? new Date(dbNowMs + (resumeAt.getTime() - Date.now()))
+        : resumeAt;
+
+    if (effectiveResumeAt.getTime() <= dbNowMs) {
       // Already due — record the wait step as completed, keep running, with
       // the executor's fingerprint (the waits path below would carry it too).
       // The output is a literal null, so the write cannot actually fail its
@@ -312,7 +330,7 @@ export async function suspendRun(
         args.namespace.env,
         args.seq,
         args.kind,
-        resumeAt,
+        effectiveResumeAt,
         args.fingerprint ?? null,
       ],
     );
@@ -332,8 +350,9 @@ export async function suspendRun(
     // notifyWork): a run with no concurrency_key never gated another run, so
     // it notifies nothing and the notification stays a slot-release wake, not
     // a per-suspend ping. The already-due early return above never reaches
-    // this point (no slot was released there).
-    if (run.concurrency_key !== null) await notifyWork(client);
+    // this point (no slot was released there). Namespace rides on the wake
+    // (05-T3): the freed slot belongs to this run's namespace.
+    if (run.concurrency_key !== null) await notifyWork(client, args.namespace);
     return { resumed: false };
   });
 }
@@ -461,7 +480,9 @@ export async function waitForChildRun(
 
       // The child is new executable work — wake the claim loops from the
       // parent's tx. The idempotent early returns above never reach this point.
-      await notifyWork(client);
+      // The child inherits the parent's namespace (C2), so that is the namespace
+      // the wake names (05-T3).
+      await notifyWork(client, args.namespace);
 
       return { childRunId: child.runId };
     });
@@ -623,8 +644,9 @@ export async function batchTriggerChild(
       }),
     });
     // The children are new executable work; the idempotent early return above
-    // (existing step row) never reaches this point.
-    await notifyWork(client);
+    // (existing step row) never reaches this point. The children inherit the
+    // parent's namespace (C2), so that is the namespace the wake names (05-T3).
+    await notifyWork(client, args.namespace);
     return stepOutcome.ok
       ? { ok: true as const, runIds }
       : { ok: false as const, failure: stepOutcome };

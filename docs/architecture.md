@@ -124,6 +124,22 @@ better-trigger-worker(daemon)
 - `workers`:daemon 注册表(执行节点写心跳),供 dashboard 展示
 - P3 新增:`events`(signal 语义:原子入库 + 唤醒,离线不丢,恰好消费一次)
 
+## 时钟契约(05-T1)
+
+**一切调度判定都用数据库时钟**(pg 的 `now()`):claim 扫描 `available_at <= now()`、wait 扫描 `resume_at <= now()`、cron 的 `next_run_at <= now()`、lease 的 `lease_until <= now()`。因此**凡是「从现在起多久之后可用/到期」的写入,时间戳必须盖数据库时钟,而不是 daemon 的宿主时钟**——否则宿主钟相对 DB 超前多少,这条记录就对扫描器隐身多久。
+
+具体规则:
+
+- **相对时刻(延迟/退避/时长)→ 数据库时钟 + 偏移**。内核在自己的事务里读一次 `now()`(pg 的 `now()` 即事务开始时刻,与判定方用的是同一个值),再加偏移:
+  - 新 run 的 `available_at`(trigger/batch/cron 触发的入队、`options.delay`);
+  - 失败重试的 `available_at`(`failRun` 退避);
+  - wait 到期恢复与父唤醒后的重新入队(「现在即可用」= 数据库的 `now()`);
+  - `wait.for(d)` 挂起:executor 传来的 `resumeAt` 是宿主钟算的绝对值,内核把它折算成**剩余时长**(`resumeAt − 宿主 now()`)再锚到数据库时钟上存 `resume_at`——宿主钟偏斜只会影响「折算瞬间」的取值,不会把整个偏斜量带进存储。
+- **绝对时刻(`wait.until`)→ 原样尊重**。调用方指定的是一个确定的时间点,不需要(也不应该)重新锚定,直接存。
+- **cron 的下次触发** 同样按数据库时钟计算,并被钳到 `now() + 1s` 之后(见 p1-09),偏斜的宿主钟不可能让同一 schedule 连续两次触发。
+
+宿主时钟唯一合法的出现处:纯展示/信息性字段(如 `failRun` 返回的 `nextAttemptAt`),以及「已到期就同步恢复」这类只在宿主进程内比较的快路径——它们不参与数据库判定。判定与写入同钟,是「触发后立即可见、延迟恰好是延迟」的前提;`packages/kernel/test/pg/clock-skew.test.ts` 把宿主钟拨快 5 分钟,逐条钉住上述路径。
+
 ## 包布局
 
 ```

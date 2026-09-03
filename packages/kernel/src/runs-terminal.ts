@@ -16,6 +16,7 @@ import { enqueue, removeFromQueue, TERMINAL_STATUSES } from './queue';
 import { createRunIn } from './runs-create';
 import {
   assertOwnedRunning,
+  dbNow,
   isUniqueViolation,
   lockQueueRow,
   lockRunRow,
@@ -51,13 +52,18 @@ import { upsertStep } from './runs-steps';
  * because children inherit their parent's namespace (C2). The predicate lets
  * `waits_child_run_idx` (project_id, env, child_run_id) bind its leading
  * columns instead of full-scanning waits on every child completion.
+ *
+ * Returns the number of pending waits actually resolved — the orchestrator's
+ * lost-wake self-heal uses the SAME function and counts its repairs with it
+ * (a concurrent resolver leaves nothing pending here, so a heal that raced the
+ * real wake counts 0 and reports no duplicate).
  */
 export async function wakeParentIfWaiting(
   client: PoolClient,
   childRunId: string,
   namespace: Namespace,
   result: { ok: boolean; output?: unknown; error?: SerializedError },
-): Promise<void> {
+): Promise<number> {
   // Locate the parents' pending waits WITHOUT locking them — each wait row may
   // only be locked after its parent's queue + runs rows (lock order 1→2→3).
   // fingerprint rides along: the executor computed it (taskId + payload +
@@ -84,6 +90,7 @@ export async function wakeParentIfWaiting(
   if (result.output !== undefined) stepOutput.output = result.output;
   if (result.error !== undefined) stepOutput.error = result.error;
 
+  let resolved = 0;
   for (const wait of waitRes.rows) {
     const parentNs: Namespace = { projectId: wait.project_id, env: wait.env };
     // Parent rows in canonical order: queue row (absent while the parent is
@@ -101,6 +108,7 @@ export async function wakeParentIfWaiting(
       [wait.id, parentNs.projectId, parentNs.env],
     );
     if (!lockedWait.rows[0]) continue; // canceled/completed while ordering locks
+    resolved += 1;
 
     await client.query(
       `UPDATE waits SET status = 'completed' WHERE id = $1
@@ -149,10 +157,12 @@ export async function wakeParentIfWaiting(
         // deleted the parent's queue row, and enqueue() defaults an omitted priority
         // to 0 *and* writes it over any surviving row (priority = EXCLUDED.priority),
         // so leaving it out demotes a high-priority parent every time a child
-        // finishes (todos/01-correctness.md C7).
+        // finishes (todos/01-correctness.md C7). "Available now" is the DATABASE's
+        // now: a host-clock Date ahead of the DB would keep the woken parent
+        // invisible to the claim scan for the skew (docs/architecture.md "时钟契约").
         await enqueue(client, {
           runId: wait.run_id,
-          availableAt: new Date(),
+          availableAt: await dbNow(client),
           priority: parent.priority,
           concurrencyKey: parent.concurrency_key,
           namespace: parentNs,
@@ -160,6 +170,7 @@ export async function wakeParentIfWaiting(
       }
     }
   }
+  return resolved;
 }
 
 /**
@@ -250,9 +261,10 @@ export async function completeRun(pool: Pool, args: CompleteRunArgs): Promise<vo
     // it may also be claimable again — the extra `work` notification is
     // harmless when it was not (the claim scan just comes back empty).
     // Completing a run also releases its concurrency slot, so a run waiting on
-    // that concurrency limit needs a wake even when there is no parent.
+    // that concurrency limit needs a wake even when there is no parent. The
+    // wake carries the run's namespace so foreign daemons can drop it (05-T3).
     await notifyTerminal(client, args.runId, args.namespace);
-    if (run.parent_run_id || run.concurrency_key) await notifyWork(client);
+    if (run.parent_run_id || run.concurrency_key) await notifyWork(client, args.namespace);
   });
 }
 
@@ -293,14 +305,18 @@ export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult
       // one to wake. The extra `work` notification is harmless when no parent
       // actually got re-enqueued. Failing a run also releases its concurrency
       // slot, so a run waiting on that concurrency limit needs a wake even when
-      // there is no parent.
+      // there is no parent (namespace on the wake, 05-T3).
       await notifyTerminal(client, args.runId, args.namespace);
-      if (run.parent_run_id || run.concurrency_key) await notifyWork(client);
+      if (run.parent_run_id || run.concurrency_key) await notifyWork(client, args.namespace);
       return { willRetry: false };
     }
 
     const backoff = computeBackoffMs(run.attempt, args.retry);
-    const nextAt = new Date(Date.now() + backoff);
+    // The retry's availability is the backoff applied to the DATABASE clock,
+    // read inside THIS tx — the claim scan judges `available_at <= now()` on
+    // the same clock, so a host clock skewed ahead of the DB's cannot keep the
+    // retry invisible for the skew (docs/architecture.md "时钟契约").
+    const nextAt = new Date((await dbNow(client)).getTime() + backoff);
     await client.query(
       `UPDATE runs
           SET status = 'queued', attempt = attempt + 1, error = $2, updated_at = now()
@@ -317,8 +333,8 @@ export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult
     // Retry branch: the run is NOT terminal, so waiters must keep waiting —
     // only the claim loops get the `work` notification (the run is claimable
     // again after its backoff; a wake before available_at just comes back
-    // empty).
-    await notifyWork(client);
+    // empty). Namespace rides on the wake (05-T3).
+    await notifyWork(client, args.namespace);
     return { willRetry: true, nextAttemptAt: nextAt.toISOString() };
   });
 }
@@ -360,9 +376,9 @@ export async function cancelRun(
     // been re-enqueued — harmless when it was not). Canceling a run also
     // releases its concurrency slot, so a run waiting on that concurrency limit
     // needs a wake even when there is no parent. The already-terminal no-op
-    // early return above never reaches this point.
+    // early return above never reaches this point (namespace on the wake, 05-T3).
     await notifyTerminal(client, runId, namespace);
-    if (run.parent_run_id || run.concurrency_key) await notifyWork(client);
+    if (run.parent_run_id || run.concurrency_key) await notifyWork(client, namespace);
   });
 }
 
@@ -445,7 +461,7 @@ export async function retryRun(
           [namespace.projectId, namespace.env, runId, operationKey, created.runId],
         );
       }
-      await notifyWork(client);
+      await notifyWork(client, namespace);
       return { runId: created.runId };
     });
   } catch (err) {

@@ -62,18 +62,24 @@ CORS(`hono/cors`):默认只放行 dashboard 自己的来源 —— http/https + 
 
 ## 2. 数据库 schema(Drizzle,Postgres)
 
-单租户:所有业务表带 `project_id text NOT NULL DEFAULT 'default'` 与 `env text NOT NULL DEFAULT 'prod'`(下表省略)。迁移用 drizzle-kit 生成 SQL 并提交,server 启动时自动 `migrate()`。
+单租户:所有业务表带 `project_id text NOT NULL DEFAULT 'default'` 与 `env text NOT NULL DEFAULT 'prod'`。
+除 tasks/schedules/run_retry_operations 三张表的复合主键与下文逐一列出的索引外,下表
+的列清单里省略这两列,但**几乎所有索引都以 (project_id, env) 打头**(C2 命名空间隔离;
+唯一例外是 `*_fk_idx` 一族 FK 支撑索引,见各表说明)。迁移用 drizzle-kit 生成 SQL 并提交,
+host 启动时自动 `migrate()`。
 
 ```
-tasks        id text PK · name text · file_path text · trigger_source text('api'|'schedule')
+tasks        复合 PK (project_id, env, id)(同一 task id 在每个命名空间独立存在,C2)
+             · name text · file_path text · trigger_source text('api'|'schedule',**CHECK**)
              · cron_pattern text · cron_tz text · retry jsonb · concurrency_limit int
              · latest_code_version text · created_at/updated_at timestamptz
 
-runs         id text PK ('run_'+随机) · task_id text · status text
+runs         id text PK ('run_'+随机,全局唯一;命名空间只是作用域谓词,不是键成分)
+             · task_id text · status text
              ('queued'|'running'|'waiting'|'completed'|'failed'|'canceled',
              **CHECK 约束**,见下)
              · payload jsonb · output jsonb · error jsonb({message,stack?,name?})
-             · trigger_type text('api'|'schedule'|'subtask'|'retry'|'dashboard')
+             · trigger_type text('api'|'schedule'|'subtask'|'retry'|'dashboard',**CHECK**)
              · parent_run_id text(**FK → runs(id) ON DELETE SET NULL**:
                父 run 被删时子 run 活着,只清血缘指针 —— CASCADE 会误删还在执行的
                子 run,RESTRICT 会让 prune 在批量删除父子对时失败;见 C5)
@@ -83,6 +89,9 @@ runs         id text PK ('run_'+随机) · task_id text · status text
              · attempt int DEFAULT 1 · max_attempts int(锁定触发时的策略)
              · recoveries int DEFAULT 0 · max_recoveries int DEFAULT 10
                (基础设施接管预算,与 attempt 分开记账;见 §3.5)
+             · fencing_token bigint NOT NULL DEFAULT 0(**每 run 单调递增的写入凭证**:
+               只有 claim 会 +1,一切写回校验它;放在 runs 行而非 queue 行,使 queue 行
+               被删除/重建(挂起/恢复、重试)也不会重置水位)
              · concurrency_key text(见 §3.5)· priority int DEFAULT 0
                (**调度器不读这两列**,它读的是 queue 行上的同名列;这里是创建时的
                 冗余副本 —— queue 行在终态/挂起时就被删了,而"这个 run 当初是按什么
@@ -92,12 +101,21 @@ runs         id text PK ('run_'+随机) · task_id text · status text
                 再重建,写死 0 就等于"等过一次就掉到队尾"。失败重试 / reaper 接管 /
                 优雅关停归还走的是 UPDATE,queue 行还在,priority 自然保住)
              · queued_at/started_at/finished_at/created_at/updated_at timestamptz
-             UNIQUE (task_id, idempotency_key)(部分索引 WHERE idempotency_key IS NOT NULL)
-             CHECK(attempt >= 1)、CHECK(0 <= recoveries <= max_recoveries)
+             UNIQUE (project_id, env, task_id, idempotency_key)
+               (部分索引 WHERE idempotency_key IS NOT NULL;命名空间作用域 ——
+                同一 task+key 在两个命名空间是两个独立 run)
+             索引:runs_task_created_idx (project_id, env, task_id, created_at)、
+             runs_status_concurrency_idx (project_id, env, status, concurrency_key)、
+             runs_created_idx (project_id, env, created_at)、
+             runs_parent_run_id_fk_idx (parent_run_id) —— 最后一个**故意不带命名空间
+             前缀**:ON DELETE SET NULL 自引用 FK 只按被引用列查找,前缀帮不上它
+             · CHECK(attempt >= 1)、CHECK(0 <= recoveries <= max_recoveries)
 
 run_steps    run_id text + seq int 复合 PK(run_id **FK → runs(id) ON DELETE CASCADE**)
              · kind text('step'|'wait'|'trigger-and-wait'|
              'batch-trigger'|'now'|'random'|'uuid',**CHECK**) · label text
+             · fingerprint text(C1 重放指纹:kind+label+可持久化输入+code version 的
+               稳定哈希;写入时盖章、重放时比对。指纹出现之前的旧行为 NULL,重放宽容跳过)
              · status text('completed'|'failed',**CHECK**) · output jsonb · error jsonb
              · attempt int(**CHECK >= 1**) · started_at/finished_at timestamptz
 
@@ -106,14 +124,18 @@ queue        id bigserial PK · run_id text UNIQUE(**FK → runs(id) ON DELETE C
              · available_at timestamptz · priority int DEFAULT 0
              · locked_by text · locked_at timestamptz · lease_until timestamptz · concurrency_key text
              (**`locked_by IS NULL` = 未被占用**;三列同进同出,claim 一起写、归还/reaper 一起清)
-             索引 (available_at, priority desc) 与 (concurrency_key),外加两个部分索引,
-             各自对应 §3.5 里一条一直在跑的扫描:
-               queue_claimable_idx   (priority desc nulls first, id) WHERE locked_by IS NULL
-                                     —— claim 的候选扫描(每个执行槽每轮都跑)
-               queue_lease_until_idx (lease_until)       WHERE lease_until IS NOT NULL
+             索引(全部以 (project_id, env) 打头):
+               queue_claimable_idx   (project_id, env, priority desc nulls first, id)
+                                     WHERE locked_by IS NULL
+                                     —— claim 的候选扫描(每个执行槽每轮都跑;键序即
+                                        扫描的 ORDER BY,扫到 LIMIT 就停,不必先排序)
+               queue_lease_until_idx (project_id, env, lease_until) WHERE lease_until IS NOT NULL
                                      —— reaper 的过期租约扫描(每 10s)
-             两个谓词都只覆盖各自那一小撮行(可领取的 / 在飞的),把积压里占绝大多数的
-             「已 claim 且租约未到期」整个排除在索引之外
+               queue_concurrency_idx (project_id, env, concurrency_key)
+                                     —— 为并发计数迁到 queue 上预留的形状(当前内核读的是
+                                        runs.concurrency_key,见 §3.5;索引先行保留,见 p2-29)
+             两个部分索引的谓词都只覆盖各自那一小撮行(可领取的 / 在飞的),把积压里占
+             绝大多数的「已 claim 且租约未到期」整个排除在索引之外
 
 waits        id bigserial PK · run_id text(**FK → runs(id) ON DELETE CASCADE**)
              · step_seq int · kind text('duration'|'until'|'run',**CHECK**)
@@ -122,36 +144,74 @@ waits        id bigserial PK · run_id text(**FK → runs(id) ON DELETE CASCADE*
              run 由编排器 wait 扫描判失败(ChildLostError)—— CASCADE 会把父 run
              永久卡在 'waiting'(无 wait 无 queue,无路径恢复);prune 只删终态子
              run,其父 wait 早已被 wakeParentIfWaiting 解决,置 NULL 的只是历史指针)
+             · fingerprint text(执行器在创建 wait 时从**声明的 wait**(时长串 / until
+               时刻)计算;到期恢复/子完成唤醒把同一个值盖章到已完成的 run_steps 行,
+               使重放比对的是声明的 wait,而不是重算出的绝对时刻)
              · status text('pending'|'completed'|'canceled',**CHECK**)
-             · created_at timestamptz;索引 (status, resume_at) 与 (child_run_id)
+             · created_at timestamptz
+             索引:
+               waits_status_resume_idx  (project_id, env, status, resume_at) —— 到期扫描
+               waits_child_run_idx      (project_id, env, child_run_id) —— 子完成时的父唤醒探测
+               waits_run_idx            (project_id, env, run_id, step_seq) —— 按 run 查
+                                          wait(终态清理、子等待探测、run 详情页)
+               waits_pending_step_uniq  UNIQUE (project_id, env, run_id, step_seq, kind)
+                                          WHERE status = 'pending' —— 每个 durable step 至多
+                                          一个活 wait;waitForChildRun 并发重放的串行化点
+               waits_run_id_fk_idx (run_id)、waits_child_run_id_fk_idx (child_run_id)
+                 —— 两个**故意不带命名空间前缀**的 FK 支撑索引:级联删除与 SET NULL 只按
+                    run_id / child_run_id 查找(语句从不提命名空间),命名空间前缀索引帮不
+                    上它们,只会让 prune 每个被删 run 全表扫两遍
 
 logs         id bigserial PK · run_id text(**FK → runs(id) ON DELETE CASCADE**)
              · step_seq int · level text('debug'|'info'|'warn'|'error',**CHECK**) · message text
-             · data jsonb · ts timestamptz;索引 (run_id, id)
+             · data jsonb · ts timestamptz
+             索引:logs_run_id_idx (run_id, project_id, env, id) —— run_id 打头,一个索引
+             干两件事:日志分页(`WHERE run_id=… AND project_id=… AND env=… ORDER BY id DESC`
+             绑定全部三个等值列再读 id 尾部)与 FK 级联(`DELETE FROM logs WHERE run_id=…`
+             从不提命名空间,也吃这个索引)
 
-schedules    id text PK ('sch_'+随机) · task_id text UNIQUE(**复合 FK
-             (project_id, env, task_id) → tasks(project_id, env, id) ON DELETE CASCADE**:
-             删 task 即删它的 cron 注册;syncSchedules 与 task upsert 同事务,不会造出
-             没有 task 的 schedule) · cron_pattern text · cron_tz text
+schedules    id text PK ('sch_'+随机) · 每命名空间每 task 至多一个 schedule:
+             UNIQUE (project_id, env, task_id)(**复合 FK (project_id, env, task_id)
+             → tasks(project_id, env, id) ON DELETE CASCADE**:删 task 即删它的 cron
+             注册;syncSchedules 与 task upsert 同事务,不会造出没有 task 的 schedule)
+             · cron_pattern text · cron_tz text
              · enabled boolean DEFAULT true · next_run_at timestamptz · last_run_at timestamptz
              · last_run_id text · created_at/updated_at
+             索引:schedules_next_run_idx (project_id, env, next_run_at) —— cron 到期扫描
 
-workers      id text PK ('wkr_'+随机) · name text · code_version text · runtime text
-             · tasks jsonb(string[]) · concurrency int · started_at · last_heartbeat_at
+workers      id text PK ('wkr_'+随机) · name text · code_version text NOT NULL · runtime text NOT NULL
+             · tasks jsonb(**[{id, codeVersion}]**;旧版本写过裸字符串数组 ["id"],读侧
+               两种形状都认) · namespaces jsonb NOT NULL(该 worker 参与 claim 的命名空间
+               列表,**[{projectId, env}]**,缺省 [{'default','prod'}])
+             · concurrency int · started_at · last_heartbeat_at
              · status text('online'|'offline',**CHECK**)
              (**每次进程启动插一行新的**,下线只改 status —— 靠 §2.1 的保留策略清理)
+             索引:workers_online_heartbeat_idx (last_heartbeat_at) WHERE status = 'online'
+             —— 表是只增历史,而所有热扫描(离线标记、served-task 探测、stranded 扫描、
+             注册接管检查)只要在线的那几行;键序即心跳窗口,谓词把索引收缩到活集合
+
+run_retry_operations  手动重试的请求级幂等记录(§3.7):
+             复合 PK (project_id, env, source_run_id, operation_key)
+             · source_run_id text NOT NULL(**FK → runs(id) ON DELETE CASCADE**)
+             · retry_run_id text NOT NULL(**FK → runs(id) ON DELETE CASCADE**)
+             · created_at timestamptz
+             索引:run_retry_operations_source_run_id_fk_idx (source_run_id)、
+             run_retry_operations_retry_run_id_fk_idx (retry_run_id) —— 两个不带命名空间
+             前缀的 FK 支撑索引(两端级联都只按 run id 查找)
 ```
 
-以上 FK / CHECK 全部来自迁移 0011(C5,todos/01-correctness.md)。迁移先扫描并清理
+以上 FK / CHECK 来自迁移 0011(状态/种类/级别的闭集 CHECK 与 FK,C5)、0015
+(run_retry_operations)与 0016(0011 漏掉的 trigger_type / trigger_source 两个闭集
+CHECK、`*_fk_idx` 一族 FK 支撑索引、workers 在线部分索引)。0011 先扫描并清理
 orphan(不存在的 run/task 的 queue / waits 行直接删除,孤儿 `parent_run_id` 与
 `waits.child_run_id` 置 NULL —— 与 FK 自身的 ON DELETE 行为一致),再加约束,所以带脏数据
 的旧库也能自动迁移;之后**手工 DELETE 或非法状态写不进去**。注意两个 ON DELETE SET NULL
 的语义:`runs.parent_run_id` 被置 NULL 的子 run 照常执行(只丢血缘指针);
 `waits.child_run_id` 被置 NULL 的父 run 会被编排器的 wait 扫描以 `ChildLostError`
 判失败(子 run 被删,结果永远不会来;不判失败父 run 会永远 'waiting' 卡死)。
-CHECK 约束假定存量 status/kind/level 值已在合法集合内(引擎写出的值必然如此):若
-库里有手工写入的非法值,0011 的 `ADD CONSTRAINT CHECK` 会失败并停掉所有 daemon 的
-启动,此时需先手工修复该行(具体 UPDATE 语句见 0011 头部注释),迁移不会替你猜。
+CHECK 约束假定存量 status/kind/level/trigger 值已在合法集合内(引擎写出的值必然如此):若
+库里有手工写入的非法值,对应迁移的 `ADD CONSTRAINT CHECK` 会失败并停掉所有 daemon 的
+启动,此时需先手工修复该行(具体 UPDATE 语句见各迁移头部注释),迁移不会替你猜。
 priority 没有 CHECK:应用层显式允许 int32 范围内任意值(负优先级合法,见 §3.5),与列类型一致即可。
 
 ### 2.1 数据保留(默认不删任何东西)
@@ -213,12 +273,16 @@ queue 是规范锁序的 1 号位(见 §3.2),先拿它再拿 runs,才能避免�
 ```sql
 SELECT q.id AS queue_id, q.run_id,
        r.task_id, r.payload, r.attempt, r.max_attempts,
-       r.code_version, r.env, r.concurrency_key,
+       r.code_version, r.project_id, r.env, r.concurrency_key,
        t.concurrency_limit
   FROM queue q
   JOIN runs r ON r.id = q.run_id
+             AND r.project_id = q.project_id AND r.env = q.env
   LEFT JOIN tasks t ON t.id = r.task_id
+                 AND t.project_id = r.project_id AND t.env = r.env
  WHERE q.available_at <= now() AND q.locked_by IS NULL
+   AND r.status = 'queued'           -- 可领性谓词本身(p2-39,见下)
+   AND q.project_id = $3 AND q.env = $4   -- 命名空间等值(每命名空间各跑一遍扫描)
    AND r.task_id = ANY($1::text[])   -- 该 worker 注册的 task 集合
  ORDER BY q.priority DESC, q.id ASC
  LIMIT $2                            -- claimWindow(limit) = max(limit * 2, 10)
@@ -228,6 +292,8 @@ SELECT q.id AS queue_id, q.run_id,
 逐条读法:
 
 - **`locked_by IS NULL` 是「未被占用」的唯一判据**(不是 `locked_at`)。`locked_by/locked_at/lease_until` 三列同进同出,所以**租约过期的行不是 claim 的候选** —— 它 `locked_by` 还在,回收只归 reaper 一家。两条路径的候选集因此不相交(`locked_by IS NULL` vs `lease_until` 有值),claim 永远不做接管。
+- **`r.status = 'queued'` 是可领性谓词本身**(p2-39):queue 行只有在它的 run 仍是 queued 时才可被领取 —— 终态/挂起 run 的残留 queue 行在这里就不可见,永远不会被「复活」。它与下面第 2 步的 0 行翻转守卫是同一个不变量的两半。
+- **候选扫描按命名空间逐个跑**(p1-08):worker 服务 N 个命名空间就发 N 条候选扫描,每条是一对 (project_id, env) 常量等值(`queue_claimable_idx` 的前导列直接绑定),`limit` 预算按轮转顺序共享,扫满即停(没轮到的命名空间经 `onScanSkipped` 上报,`rotateFrom` 保证每个命名空间都会轮到队首)。单命名空间时 SQL 与合并写法完全相同。
 - **task 过滤在 SQL 里**(`r.task_id = ANY($1::text[])`),不是取回来再在应用层丢掉:只注册了 2 个 task 的 worker,不会因为队头堆着别人的 run 就把整个候选窗口浪费掉。
 - **版本钉死(`--pin-code-version`,默认关)**:开启后 `claimRuns` 多收一个与 `taskIds` **按位平行**的 `codeVersions`,task 过滤从「只按 id」换成「按 (id, version) 对」——
 
@@ -244,16 +310,16 @@ SELECT q.id AS queue_id, q.run_id,
 - **窗口大小是参数化的 `claimWindow(limit) = max(limit * 2, 10)`**,不是写死的 10(PF3)。比 `limit` 宽,是因为候选被锁住之后仍可能被下面的并发限流跳过 —— 窗口正好等于 `limit` 时,队头挤着一批已达上限的 run 就会让这次 claim 空手而归,而下一行明明可领。也不能宽太多:窗口里每一行都被 `FOR UPDATE SKIP LOCKED` 按住整个事务,锁住却不领走 = 对其他 worker 隐身(它们 SKIP LOCKED 跳过)+ 削弱全局优先级序。`2x` 是能容忍跳过的最小倍数;下限 10 兜住最常见的 `limit: 1`。
 - **`JOIN runs` + `LEFT JOIN tasks` 是为了消掉 N+1**(PF4):payload / attempt / max_attempts / code_version / env / concurrency_key / concurrency_limit 一次取回,而不是每个候选再发两条查询(窗口 10 行 = 一次 claim 20+ 条往返,而它通常只领走 1 个)。`JOIN runs` 是内连接:run 行已经不在的 queue 行直接不算候选。`LEFT JOIN tasks` 是外连接:没注册过的 task 表示「没有并发上限」,不是「不可领取」。
 - **`FOR UPDATE OF q` 只锁 queue 行**,`runs` / `tasks` 只读不锁 —— 所以 claim 仍然只占规范锁序的第 1 位(queue),runs 行第一次被锁是下面那条 claim UPDATE(第 2 位)。在同一条语句里读 runs 的列是安全的:每一条改 run 的路径都先拿它的 queue 行 `FOR UPDATE`,所以与我们相争的事务要么正持有那个 queue 行(我们 SKIP LOCKED 跳过,根本看不见这一行),要么还没提交 —— 那它的 pre-image 里 `locked_by` 非空,过不了候选谓词。
-- **索引**:`queue_claimable_idx (priority desc nulls first, id) WHERE locked_by IS NULL`(PF2)的键序就是这里的 ORDER BY、谓词就是这里的 `locked_by IS NULL`,扫到 LIMIT 就停,不必先排序再截断(`nulls first` 不是装饰:Postgres 里 DESC 默认就是 NULLS FIRST,空值序不一致的索引满足不了这个排序)。积压里绝大多数是已 claim 的行,而它们正是这条扫描以前要读出来再丢掉的;`available_at <= now()` 只能留作 filter(`now()` 不是 immutable,进不了部分索引的谓词)。
+- **索引**:`queue_claimable_idx (project_id, env, priority desc nulls first, id) WHERE locked_by IS NULL`(PF2)的前两列绑定命名空间等值,键序的其余部分就是这里的 ORDER BY、谓词就是这里的 `locked_by IS NULL`,扫到 LIMIT 就停,不必先排序再截断(`nulls first` 不是装饰:Postgres 里 DESC 默认就是 NULLS FIRST,空值序不一致的索引满足不了这个排序)。积压里绝大多数是已 claim 的行,而它们正是这条扫描以前要读出来再丢掉的;`available_at <= now()` 只能留作 filter(`now()` 不是 immutable,进不了部分索引的谓词)。
 
-拿到候选后**在同一个事务里逐个处理**,领满 `limit` 就停(剩下的候选连看都不看,随 COMMIT 一起放开):
+拿到候选后**在同一个事务里逐个处理**,领满 `limit` 就停(剩下的候选连看都不看,随 COMMIT 一起放开);账本快照在 COMMIT **之后**单独读(见第 3 步):
 
 1. **并发限流**(仅当该 task 有 `concurrency_limit`;key = `runs.concurrency_key`,缺省 task_id):先取事务级 advisory lock `pg_advisory_xact_lock($classid, hashtext('bt:cc:' || key))`,`$classid = 0x62746363`(`'btcc'`,kernel 里的 `CONCURRENCY_LOCK_CLASS`)。用两参数版是为了把 better-trigger 的锁放进自己的命名空间,不与「共库的业务代码自己调 `pg_advisory_lock`」重叠,`pg_locks` 里也能一眼看出锁的主人(PF7)。这个锁是必需的:SKIP LOCKED 并不能让「两个 worker 各拿同一 key 的不同 queue 行」互相串行,先数后改会一起越过上限;锁随 COMMIT/ROLLBACK 释放,从不手动 unlock。
    然后 `SELECT count(*) FROM runs WHERE status='running' AND concurrency_key = $key`,`≥ limit` → **跳过这一行**(不改任何列,行留在队列里)。
    - 计数走 runs 而不是 join queue,**因此 runs 表也冗余存 `concurrency_key`**。默认 key = task_id;trigger options 可覆盖。
-2. **领走**:`UPDATE queue SET locked_by=workerId, locked_at=now(), lease_until=now()+leaseMs`(queue 行,锁序第 1 位,已经在候选窗口里锁着),再 `UPDATE runs SET status='running', started_at=COALESCE(started_at, now()), fencing_token=fencing_token+1 RETURNING fencing_token`(runs 行,第 2 位)。**只有 claim 会推进 `fencing_token`**,返回的这个值就是本次 claim 的写入凭证,任何一次后来的 claim 都让它作废(fencing 语义见 architecture.md 与 `runs.ts` 头注释)。`attempt` / `recoveries` 都不动。
-3. **读账本**:`SELECT seq, kind, label, status, output, error FROM run_steps WHERE run_id=$1 ORDER BY seq` —— 唯一保留的 per-run 查询(只有真正领到的 run 才需要它,而那是候选窗口里的一小撮)。
-4. 循环结束 → COMMIT,每个领到的 run 交给执行器的是 `{ id, taskId, payload, attempt, maxAttempts, codeVersion, env, steps, fencingToken }`。
+2. **领走**(顺序是**先翻 runs,再写租约**,见 `queue.ts` 注释):先 `UPDATE runs SET status='running', started_at=COALESCE(started_at, now()), updated_at=now(), fencing_token=fencing_token+1 WHERE id=$1 AND … AND status='queued' RETURNING fencing_token`(runs 行,锁序第 2 位)—— `status='queued'` 是期望旧状态守卫,**0 行翻转 = 候选已陈旧**(run 在扫描之后被别的路径推进了):此时不写租约、不读账本、不推进凭证,并按残留形态清理 —— run 已终态/挂起(或行已不在)⇒ 它名下的 queue 行是死状态,在当前已持有的锁下直接删掉;run 仍在跑/排队 ⇒ 是别处的活 claim,原样留下。翻转成功才 `UPDATE queue SET locked_by=workerId, locked_at=now(), lease_until=now()+leaseMs`(queue 行,锁序第 1 位,已经在候选窗口里锁着)。**只有 claim 会推进 `fencing_token`**,返回的这个值就是本次 claim 的写入凭证,任何一次后来的 claim 都让它作废(fencing 语义见 architecture.md 与 `runs.ts` 头注释)。`attempt` / `recoveries` 都不动。
+3. **读账本**(在 claim 事务 COMMIT **之后**,窗口锁已全部释放,胖账本不再卡住同伴 —— p1-07):`SELECT seq, kind, label, status, output, error, fingerprint FROM run_steps WHERE run_id=$1 ORDER BY seq` —— 唯一保留的 per-run 查询(只有真正领到的 run 才需要它,而那是候选窗口里的一小撮)。设置 `maxSteps` 时读 `maxSteps+1` 行,溢出即把该 run 标记 `stepsTruncated` 交给执行器判死。
+4. 循环结束 → COMMIT,每个领到的 run 交给执行器的是 `{ id, taskId, payload, attempt, maxAttempts, codeVersion, projectId, env, steps, fencingToken }`。
 
 其余(租约、心跳、关停):
 

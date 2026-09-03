@@ -82,7 +82,18 @@ describePg('suspend state machine', () => {
       expect(waits.rows).toHaveLength(1);
       expect(waits.rows[0]!.kind).toBe('duration');
       expect(waits.rows[0]!.status).toBe('pending');
-      expect(waits.rows[0]!.resume_at.toISOString()).toBe(resumeAt);
+      // Clock contract (T1): a duration wait is stored as "this far from the
+      // DATABASE clock", not as the host's absolute instant — the due-scan
+      // judges `resume_at <= now()` on the DB clock, so the stored value must
+      // sit ~60s after the DB's now() regardless of any host↔DB skew. Assert
+      // the offset, not equality with the host-computed timestamp.
+      const rel = await pool.query<{ secs: number }>(
+        `SELECT extract(epoch FROM (resume_at - now()))::float AS secs
+           FROM waits WHERE run_id = $1`,
+        [runId],
+      );
+      expect(rel.rows[0]!.secs).toBeGreaterThan(55);
+      expect(rel.rows[0]!.secs).toBeLessThanOrEqual(61);
       expect(waits.rows[0]!.fingerprint).toBe('fp1');
 
       const run = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [runId]);

@@ -204,7 +204,8 @@ describePg('suspend work notification (p2-41)', () => {
         const msg = await nextNotification(listener.received, baseline, 2_000);
         expect(msg).not.toBeNull();
         expect(msg!.channel).toBe(NOTIFY_CHANNEL);
-        expect(msg!.payload).toEqual({ type: 'work' });
+        // 05-T3: the wake names the namespace the slot was released in.
+        expect(msg!.payload).toEqual({ type: 'work', projectId: NS.projectId, env: NS.env });
         // Latency evidence: pg_notify is delivered at COMMIT, i.e. milliseconds
         // after suspendRun resolved — far under the claim loop's 300ms idle
         // backoff floor (and its ~2s ceiling), so a sleeping claim loop wakes
@@ -482,7 +483,9 @@ describePg('suspend work notification (p2-41)', () => {
         // released slot — rather than a weaker "at least one".
         const msgs = await nextNotifications(listener.received, baseline, 2, 2_000);
         expect(msgs).toHaveLength(2);
-        for (const msg of msgs) expect(msg.payload).toEqual({ type: 'work' });
+        for (const msg of msgs) {
+          expect(msg.payload).toEqual({ type: 'work', projectId: NS.projectId, env: NS.env });
+        }
 
         // State machine result unchanged: both waiting, queue rows gone, and
         // the queued successor claimable.

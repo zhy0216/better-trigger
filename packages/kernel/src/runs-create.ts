@@ -19,6 +19,7 @@ import { notifyWork } from './notify';
 import { enqueue, enqueueMany } from './queue';
 import {
   assertBatchSize,
+  dbNow,
   maxBatchPayloadBytes,
   maxRecoveries,
   parseCreateRunOptions,
@@ -59,7 +60,7 @@ export interface CreateRunArgs {
 export async function createRun(pool: Pool, args: CreateRunArgs): Promise<CreatedRun> {
   return withTx(pool, async (c) => {
     const created = await createRunIn(c, args);
-    if (!created.idempotent) await notifyWork(c);
+    if (!created.idempotent) await notifyWork(c, args.namespace);
     return created;
   });
 }
@@ -85,13 +86,17 @@ export async function createRunIn(
   // code version currently registered for the task — stamped on the run below).
   // Scoped to the run's namespace: a staging trigger must never resolve the
   // prod task's retry/concurrency/version (C2).
+  // `now() AS db_now` rides the lookup for free: availability is computed from
+  // the DATABASE clock (the very now() the claim scan judges it against), not
+  // the host's — docs/architecture.md "时钟契约".
   const taskRes = await client.query<{
     id: string;
     retry: RetryPolicy | null;
     concurrency_limit: number | null;
     latest_code_version: string | null;
+    db_now: Date;
   }>(
-    `SELECT id, retry, concurrency_limit, latest_code_version
+    `SELECT id, retry, concurrency_limit, latest_code_version, now() AS db_now
        FROM tasks WHERE project_id = $1 AND env = $2 AND id = $3`,
     [args.namespace.projectId, args.namespace.env, args.taskId],
   );
@@ -114,7 +119,16 @@ export async function createRunIn(
   // (the queue row is deleted at terminal / suspend), so a manual retry can
   // reproduce the run's scheduling config instead of silently dropping to 0.
   const priority = parsed.priority;
-  const availableAt = parsed.availableAt;
+  // Availability is the delay applied to the DATABASE clock (pg's now() is the
+  // tx-start timestamp, so the claim scan that judges `available_at <= now()`
+  // and this stamp sit on one clock even when the host's clock is skewed —
+  // docs/architecture.md "时钟契约"). The clock rides the task lookup above;
+  // only when there was no task row (an unregistered task on a non-requireTask
+  // path) does it cost its own read.
+  const dbClockMs = task?.db_now instanceof Date
+    ? task.db_now.getTime()
+    : (await dbNow(client)).getTime();
+  const availableAt = new Date(dbClockMs + parsed.delayMs);
 
   const id = genRunId();
 
@@ -263,8 +277,9 @@ export async function batchTrigger(
     });
     // One aggregate `work` notification for the whole batch (the payload is
     // run-id-less by design, so 500 items cost one NOTIFY, far under the
-    // 8000-byte cap) — only when at least one NEW run was enqueued.
-    if (out.createdAny) await notifyWork(client);
+    // 8000-byte cap) — only when at least one NEW run was enqueued. The batch
+    // shares one namespace, and it rides on the wake (05-T3).
+    if (out.createdAny) await notifyWork(client, namespace);
     return out.runIds;
   });
   return { runIds };
@@ -284,7 +299,9 @@ export interface PreparedBatchItem {
   /** The caller's concurrencyKey option; the task's default is applied later
    *  (it needs the preloaded task config). */
   concurrencyKey: string | null;
-  availableAt: Date;
+  /** Availability as a relative delay; createRunsInBatch applies it to the
+   *  DATABASE clock (one reading for the whole batch). */
+  delayMs: number;
 }
 
 /**
@@ -315,7 +332,7 @@ export function prepareBatchItems(items: TriggerItem[]): PreparedBatchItem[] {
       priority: parsed.priority,
       idempotencyKey: parsed.idempotencyKey,
       concurrencyKey: parsed.concurrencyKey,
-      availableAt: parsed.availableAt,
+      delayMs: parsed.delayMs,
     });
   }
   return prepared;
@@ -363,7 +380,10 @@ export async function createRunsInBatch(
   // itself — an empty VALUES list would be a syntax error.
   if (args.items.length === 0) return { runIds: [], createdAny: false };
 
-  // 1. Task config, one preload over the deduplicated task ids.
+  // 1. Task config, one preload over the deduplicated task ids. `now() AS
+  // db_now` rides the same statement for free: availability is computed from
+  // the DATABASE clock, not the host's (docs/architecture.md "时钟契约"), and
+  // folding it in keeps the batch at its constant statement count (PF5).
   const taskIds = [...new Set(args.items.map((p) => p.taskId))];
   const preloadStart = 1;
   const preloadValues = taskIds
@@ -378,12 +398,18 @@ export async function createRunsInBatch(
     retry: RetryPolicy | null;
     concurrency_limit: number | null;
     latest_code_version: string | null;
+    db_now: Date;
   }>(
-    `SELECT id, retry, concurrency_limit, latest_code_version
+    `SELECT id, retry, concurrency_limit, latest_code_version, now() AS db_now
        FROM tasks WHERE (project_id, env, id) IN (VALUES ${preloadValues})`,
     taskIds.flatMap((id) => [projectId, env, id]),
   );
   const tasks = new Map(taskRes.rows.map((t) => [t.id, t]));
+  // The DATABASE-clock reading every per-item delay is applied to (identical on
+  // every preload row — pg's now() is the tx-start timestamp). Stays undefined
+  // only when the preload matched no task at all.
+  const preloadDbNowMs =
+    taskRes.rows[0]?.db_now instanceof Date ? taskRes.rows[0].db_now.getTime() : undefined;
 
   // 2. Resolve each item against its task and build the runs INSERT. The run id
   // is generated here, before the statement: RETURNING alone cannot say WHICH
@@ -399,7 +425,9 @@ export async function createRunsInBatch(
     concurrencyKey: string | null;
     policy: RetryPolicy;
     codeVersion: string | null;
-    availableAt: Date;
+    /** Availability as a relative delay; applied to the database clock at
+     *  enqueue time (only for the runs that actually enqueue — see step 4). */
+    delayMs: number;
     priority: number;
     idempotencyKey: string | null;
   }
@@ -418,7 +446,7 @@ export async function createRunsInBatch(
       concurrencyKey: hasLimit ? p.concurrencyKey ?? p.taskId : p.concurrencyKey ?? null,
       policy: resolveRetryPolicy(task?.retry ?? undefined),
       codeVersion: task?.latest_code_version ?? null,
-      availableAt: p.availableAt,
+      delayMs: p.delayMs,
       priority: p.priority,
       idempotencyKey: p.idempotencyKey,
     };
@@ -495,13 +523,21 @@ export async function createRunsInBatch(
   const runIds: string[] = [];
   const toEnqueue = [];
   let createdAny = false;
+  // Every per-item delay is applied to the DATABASE-clock reading that rode
+  // the preload — never to the host clock, which a skew would otherwise stamp
+  // ahead of the DB's `available_at <= now()` (docs/architecture.md "时钟契约").
+  // pg's now() is the tx-start timestamp, so this is the very clock the claim
+  // scan judges availability against. A batch whose preload matched no task
+  // row at all (non-requireTask) falls back to a single clock read.
+  let batchNowMs = preloadDbNowMs ?? null;
   for (const r of resolved) {
     if (insertedIds.has(r.runId)) {
+      if (batchNowMs === null) batchNowMs = (await dbNow(client)).getTime();
       runIds.push(r.runId);
       createdAny = true;
       toEnqueue.push({
         runId: r.runId,
-        availableAt: r.availableAt,
+        availableAt: new Date(batchNowMs + r.delayMs),
         priority: r.priority,
         concurrencyKey: r.concurrencyKey,
         namespace: args.namespace,

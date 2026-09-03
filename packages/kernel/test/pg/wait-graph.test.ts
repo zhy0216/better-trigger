@@ -33,12 +33,11 @@ const TASK_B = 'wait-graph-b';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** Claim exactly one run with bounded retry — trigger stamps available_at
- *  from the host clock while the claim predicate compares against the
- *  database's now(), so a sub-millisecond skew between the two can make a
- *  freshly created run briefly invisible to claim and `claimRuns(...)[0]!`
- *  throw a TypeError on a perfectly healthy run. Retrying a short window
- *  absorbs the skew without weakening any race under test. */
+/** Claim exactly one run with bounded retry. Since 05-T1 the trigger stamps
+ *  available_at from the DATABASE clock (the same now() the claim predicate
+ *  compares against), so there is no host↔DB skew to absorb; the short retry
+ *  window is kept as a plain scheduling-timing defense so a healthy-but-not-
+ *  yet-visible run never makes `claimRuns(...)[0]!` throw a TypeError. */
 async function claimOne(
   kernel: Kernel,
   args: {
@@ -90,8 +89,8 @@ interface Claim {
 }
 
 /** Trigger `taskId` and claim its single queued run (each scenario keeps the
- *  queue drained, so limit 1 is deterministic; the bounded retry absorbs the
- *  host-clock vs db-clock available_at skew on the fresh trigger). */
+ *  queue drained, so limit 1 is deterministic; the bounded retry is a plain
+ *  scheduling-timing defense — available_at is stamped on the DB clock, 05-T1). */
 async function triggerAndClaim(
   ctx: PgContext,
   workerId: string,
@@ -458,8 +457,8 @@ describePg('wait-graph invariants (p1-37)', () => {
     });
   });
 
-  it('a terminal child followed by a late pending wait (linearization hole, raw SQL) is OBSERVED by the scanner gauge', async () => {
-    await withPg('wg_stuck_observed', async (ctx) => {
+  it('a terminal child followed by a late pending wait (linearization hole, raw SQL) is HEALED by the scanner re-running the wake', async () => {
+    await withPg('wg_stuck_healed', async (ctx) => {
       const { pool } = ctx;
       await register(ctx);
 
@@ -470,7 +469,8 @@ describePg('wait-graph invariants (p1-37)', () => {
       // the child row via the waits FK, which CONFLICTS with A's FOR UPDATE,
       // so B parks until A commits — and lands after A's pending-wait scan is
       // already past. Result: a pending 'run' wait on an already-terminal
-      // child, with no further terminal event to ever fire.
+      // child, with no further terminal event to ever fire. Pre-05-T2 this
+      // stranded the parent forever; the scanner now heals it.
       await pool.query(
         `INSERT INTO runs (id, project_id, env, task_id, status, trigger_type, parent_run_id)
          VALUES ($1, $2, $3, $4, 'waiting', 'api', NULL)`,
@@ -488,7 +488,8 @@ describePg('wait-graph invariants (p1-37)', () => {
         await a.query('BEGIN');
         await a.query(`SELECT id FROM runs WHERE id = 'stuck-child' FOR UPDATE`);
         await a.query(
-          `UPDATE runs SET status = 'completed', finished_at = now() WHERE id = 'stuck-child'`,
+          `UPDATE runs SET status = 'completed', output = '{"n":7}'::jsonb, finished_at = now()
+             WHERE id = 'stuck-child'`,
         );
 
         let bLanded: 'blocked' | 'done' = 'blocked';
@@ -528,17 +529,17 @@ describePg('wait-graph invariants (p1-37)', () => {
       );
       expect(stuck.rows[0]!.n).toBe(1);
 
-      // The wait-due scanner's gauge observes it — and it is a GAUGE: a stable
-      // 1 tick after tick (the transition is logged once), not a rate that
-      // climbs by one every tick. A fresh kernel over the same pool so the
-      // violation log is capturable instead of spamming the console.
-      const errors: string[] = [];
+      // The scanner's self-heal (05-T2) must now re-run the terminal tx's own
+      // wake: resolve the pending wait, fill the parent's step row with the
+      // child's recorded result, flip the parent waiting→queued and re-enqueue
+      // it. A fresh kernel over the same pool so the heal log is capturable.
+      const warns: string[] = [];
       const logger: KernelLogger = {
-        warn: () => {},
-        error: (...args: unknown[]) => errors.push(String(args[0])),
+        warn: (...args: unknown[]) => warns.push(String(args[0])),
+        error: () => {},
       };
-      const observing = createKernel({ pool, logger });
-      const orch = observing.startOrchestrator({
+      const healer = createKernel({ pool, logger });
+      const orch = healer.startOrchestrator({
         namespaces: [NS],
         timerIntervalMs: 50,
         cron: false,
@@ -546,26 +547,57 @@ describePg('wait-graph invariants (p1-37)', () => {
         workerOffline: false,
       });
       try {
-        const deadline = Date.now() + 3_000;
-        while (observing.waitGraph.terminalChildPendingWait !== 1) {
+        const deadline = Date.now() + 5_000;
+        let parentStatus = '';
+        for (;;) {
+          const r = await pool.query<{ status: string }>(
+            `SELECT status FROM runs WHERE id = 'stuck-parent'`,
+          );
+          parentStatus = r.rows[0]!.status;
+          if (parentStatus === 'queued') break;
           if (Date.now() > deadline) {
-            throw new Error(
-              `scanner gauge never observed the stuck wait (got ` +
-                `${observing.waitGraph.terminalChildPendingWait})`,
-            );
+            throw new Error(`self-heal never woke the parent (status '${parentStatus}')`);
           }
           await sleep(20);
         }
-        // Several more ticks later it is STILL exactly 1: per-tick assignment,
-        // not accumulation (the old += would read ~1 + ticks elapsed).
-        await sleep(300);
-        expect(observing.waitGraph.terminalChildPendingWait).toBe(1);
-        // The parent HAS a pending wait, so the other gauge stays clear.
-        expect(observing.waitGraph.waitingWithoutPendingWait).toBe(0);
-        // The scanner said it out loud (transition log, once).
-        expect(errors.some((m) => m.includes('wait-graph') && m.includes('pending wait'))).toBe(
-          true,
+
+        // The wake resolved the wait exactly once ...
+        const wait = await pool.query<{ status: string }>(
+          `SELECT status FROM waits WHERE run_id = 'stuck-parent' AND step_seq = 0 AND kind = 'run'`,
         );
+        expect(wait.rows).toHaveLength(1);
+        expect(wait.rows[0]!.status).toBe('completed');
+
+        // ... filled the parent's step row with the child's recorded result and
+        // the wait's fingerprint (the same fill wakeParentIfWaiting does) ...
+        const step = await pool.query<{ output: unknown; fingerprint: string | null }>(
+          `SELECT output, fingerprint FROM run_steps WHERE run_id = 'stuck-parent' AND seq = 0`,
+        );
+        expect(step.rows).toHaveLength(1);
+        expect(step.rows[0]!.output).toEqual({ id: 'stuck-child', ok: true, output: { n: 7 } });
+        expect(step.rows[0]!.fingerprint).toBe('fp-stuck');
+
+        // ... and re-enqueued the parent exactly once (no duplicate wake).
+        const queue = await pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM queue WHERE run_id = 'stuck-parent'`,
+        );
+        expect(queue.rows[0]!.n).toBe(1);
+
+        // The heal was counted once and said out loud ...
+        expect(orch.counters.waitGraphHealed).toBe(1);
+        expect(warns.some((m) => m.includes('healed a lost wake'))).toBe(true);
+
+        // ... and stays counted once: several more ticks must find nothing left
+        // to heal (the wait is no longer pending), so the counter does not climb
+        // and the parent is not woken again.
+        await sleep(400);
+        expect(orch.counters.waitGraphHealed).toBe(1);
+        const queueAgain = await pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM queue WHERE run_id = 'stuck-parent'`,
+        );
+        expect(queueAgain.rows[0]!.n).toBe(1);
+        // The violation gauge drains back to zero once the heal lands.
+        expect(healer.waitGraph.terminalChildPendingWait).toBe(0);
       } finally {
         orch.stop();
       }

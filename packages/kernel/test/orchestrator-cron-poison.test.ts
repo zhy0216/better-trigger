@@ -77,6 +77,9 @@ function cronPool(schedules: DueSchedule[], served: string[] | 'all') {
         return { rows: ids.filter((id) => servedSet.includes(id)).map((task_id) => ({ task_id })) };
       }
       if (/INSERT INTO runs/.test(sql)) return { rows: [{ id: 'run_new' }], rowCount: 1 };
+      // createRunIn's database-clock read (T1): same tx ⇒ same now() the
+      // due-scan carried as db_now.
+      if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }], rowCount: 1 };
       return { rows: [], rowCount: 0 };
     },
     release: () => {},

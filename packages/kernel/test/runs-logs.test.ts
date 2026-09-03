@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { LogEntry } from '@better-trigger/core';
 import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import { appendLogs } from '../src/runs';
+import { truncateUtf8 } from '../src/runs-logs';
 import type { KernelLogger } from '../src/kernel';
 
 afterEach(() => {
@@ -273,5 +274,74 @@ describe('appendLogs', () => {
       /\[runs:logs\] dropped 1 log line\(s\): each exceeds the log batch cap/,
     );
     expect(warns[0]).toMatch(/BETTER_TRIGGER_LOG_BATCH_MAX_BYTES/);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * truncateUtf8 — the per-line message cap (05-T4)
+ * ------------------------------------------------------------------------- */
+
+describe('truncateUtf8', () => {
+  const utf8Len = (s: string): number => new TextEncoder().encode(s).length;
+
+  it('returns the string unchanged when it fits the budget', () => {
+    expect(truncateUtf8('hello', 10)).toBe('hello');
+    expect(truncateUtf8('hello', 5)).toBe('hello'); // exactly at the cap
+    expect(truncateUtf8('', 1)).toBe('');
+  });
+
+  it('truncates an ASCII string to the budget and appends the ellipsis', () => {
+    // Budget 8: keep at most 8 - 3 = 5 bytes, then '…' (3 bytes) → 8 total.
+    const out = truncateUtf8('hello world', 8);
+    expect(out).toBe('hello…');
+    expect(utf8Len(out)).toBe(8);
+  });
+
+  it('never splits a multi-byte character (cuts at a code-point boundary)', () => {
+    // Each CJK char is 3 UTF-8 bytes. Budget 8 → keep ≤5 bytes: exactly one
+    // 3-byte char fits (a second would need 6 > 5), so the cut lands between
+    // characters, never mid-character.
+    const out = truncateUtf8('你好世界', 8);
+    expect(out).toBe('你…');
+    expect(utf8Len(out)).toBe(6); // 3 + 3, under the cap
+  });
+
+  it('handles a budget that lands exactly on a multi-byte boundary', () => {
+    // Budget 9 → keep ≤6 bytes = exactly two 3-byte chars.
+    const out = truncateUtf8('你好世界', 9);
+    expect(out).toBe('你好…');
+    expect(utf8Len(out)).toBe(9);
+  });
+
+  it('never emits a lone surrogate when cutting a 4-byte (astral) character', () => {
+    // '😀' is one code point but TWO UTF-16 code units (a surrogate pair) and
+    // 4 UTF-8 bytes. Budget 6 → keep ≤3 bytes: the emoji does not fit, so the
+    // result must not contain a half of it (a lone surrogate would be invalid).
+    const out = truncateUtf8('😀😀', 6);
+    expect(utf8Len(out)).toBeLessThanOrEqual(6);
+    // No lone surrogates: every code unit pairs up or stands alone as a full
+    // code point — re-encoding then decoding round-trips the exact string.
+    expect(new TextDecoder().decode(new TextEncoder().encode(out))).toBe(out);
+    expect(out.endsWith('…')).toBe(true);
+    expect(out).not.toMatch(/[\uD800-\uDBFF]$/); // no trailing lone high surrogate
+  });
+
+  it('keeps at least the ellipsis even for a tiny budget', () => {
+    // Budget below the ellipsis size degrades to the ellipsis alone (the line
+    // survives, its content does not) — same shape as the old implementation.
+    expect(truncateUtf8('hello', 3)).toBe('…');
+    expect(truncateUtf8('hello', 0)).toBe('…');
+  });
+
+  it('stays within the budget for mixed single- and multi-byte content', () => {
+    const s = 'a你b😀c'; // 1 + 3 + 1 + 4 + 1 = 10 UTF-8 bytes
+    for (const cap of [4, 5, 6, 7, 8, 9]) {
+      const out = truncateUtf8(s, cap);
+      expect(utf8Len(out)).toBeLessThanOrEqual(cap);
+      expect(out.endsWith('…')).toBe(true);
+    }
+    // At and above the full length nothing is cut.
+    expect(truncateUtf8(s, 10)).toBe(s);
+    expect(truncateUtf8(s, 12)).toBe(s);
   });
 });

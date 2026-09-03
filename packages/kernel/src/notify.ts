@@ -10,15 +10,18 @@
    Two payload shapes, deliberately minimal (PF2 §4 — ids/namespace only,
    never business payload):
 
-     - { type: 'work' }            — something became claimable. Three sources:
-       (1) a fresh enqueue (trigger / batch / retry / child fan-out / cron),
-       (2) a waiting run re-enqueued by its wait resolving (orchestrator
+     - { type: 'work', projectId?, env? } — something became claimable. Three
+       sources: (1) a fresh enqueue (trigger / batch / retry / child fan-out /
+       cron), (2) a waiting run re-enqueued by its wait resolving (orchestrator
        resume, parent wakeup), and (3) a concurrency slot released by a
        run that stopped counting as 'running' — the terminal paths
        (complete/fail/cancel of a concurrency-keyed run) and the
        non-immediate suspend path (p2-41). No run id on purpose: the
-       receiver's job is just "go claim", and the claim scan's SKIP LOCKED
-       is namespace-safe by itself, so there is nothing to filter.
+       receiver's job is just "go claim". The namespace pair rides along (05-T3)
+       so a daemon serving other namespaces can drop the wake instead of
+       running an idle claim cycle it can never win; a payload WITHOUT the pair
+       (the pre-05-T3 shape, still sent by the multi-namespace releaseClaims
+       hand-back) wakes everyone — the historical, always-safe behavior.
        Aggregate-safe too: a 500-item batch sends one notification, which is
        also what keeps the payload far under pg's 8000-byte NOTIFY cap.
 
@@ -45,15 +48,27 @@ import type { Namespace } from '@better-trigger/core';
 /** The single channel every daemon LISTENs on (PF2 §channel). */
 export const NOTIFY_CHANNEL = 'bt';
 
-/** `work` payload — a bare marker, no run id (see file header). */
+/** `work` payload without a namespace — the pre-05-T3 shape, still understood
+ *  by every receiver and still the right shape when the work spans several
+ *  namespaces at once (releaseClaims). A bare marker, no run id (file header). */
 const WORK_PAYLOAD = JSON.stringify({ type: 'work' });
 
 /**
  * Send the `work` notification on the caller's transaction connection. Must be
  * the last statement of the tx: it only lands when the tx commits.
+ *
+ * `namespace` is optional (05-T3): when given, it rides in the payload so a
+ * daemon that does NOT serve that namespace can drop the wake instead of
+ * spinning an idle claim cycle; when omitted (the multi-namespace hand-back in
+ * releaseClaims, and any caller that predates the parameter) the payload stays
+ * the bare marker, which every receiver treats as "wake all" — the historical,
+ * always-safe behavior.
  */
-export function notifyWork(client: PoolClient): Promise<unknown> {
-  return client.query(`SELECT pg_notify($1, $2)`, [NOTIFY_CHANNEL, WORK_PAYLOAD]);
+export function notifyWork(client: PoolClient, namespace?: Namespace): Promise<unknown> {
+  const payload = namespace
+    ? JSON.stringify({ type: 'work', projectId: namespace.projectId, env: namespace.env })
+    : WORK_PAYLOAD;
+  return client.query(`SELECT pg_notify($1, $2)`, [NOTIFY_CHANNEL, payload]);
 }
 
 /**

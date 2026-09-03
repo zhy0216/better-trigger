@@ -259,14 +259,27 @@ describe('LISTEN connection lifecycle', () => {
         channel: NOTIFY_CHANNEL,
         payload: '{"type":"terminal","runId":"run_1","projectId":"default","env":"prod"}',
       });
+      // 05-T3: a namespaced work wake carries the pair through to onNotify ...
+      client.emit('notification', {
+        channel: NOTIFY_CHANNEL,
+        payload: '{"type":"work","projectId":"acme","env":"staging"}',
+      });
+      // ... and a half-stamped one (projectId only) falls back to the bare,
+      // always-wake shape instead of dispatching a broken namespace.
+      client.emit('notification', {
+        channel: NOTIFY_CHANNEL,
+        payload: '{"type":"work","projectId":"acme"}',
+      });
       // Wrong channel, bad JSON and wrong shape must all be dropped.
       client.emit('notification', { channel: 'other', payload: '{"type":"work"}' });
       client.emit('notification', { channel: NOTIFY_CHANNEL, payload: 'not json' });
       client.emit('notification', { channel: NOTIFY_CHANNEL, payload: '{"type":"terminal"}' });
-      await waitFor(() => onNotify.mock.calls.length >= 2);
+      await waitFor(() => onNotify.mock.calls.length >= 4);
       expect(onNotify.mock.calls).toEqual([
         [{ type: 'work' }],
         [{ type: 'terminal', runId: 'run_1', projectId: 'default', env: 'prod' }],
+        [{ type: 'work', projectId: 'acme', env: 'staging' }],
+        [{ type: 'work' }],
       ]);
     } finally {
       await listener.stop();

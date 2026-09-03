@@ -3,10 +3,10 @@
    todos/02-performance.md) send pg_notify inside their transactions.
 
    Every notification source must (a) run `SELECT pg_notify($1, $2)` on the
-   channel 'bt', (b) send the right payload shape ({ type: 'work' } vs
-   { type: 'terminal', runId, projectId, env }), and (c) only send when the tx
-   actually did the thing — an idempotency conflict, an early no-op return or
-   a branch that changes nothing must not notify.
+   channel 'bt', (b) send the right payload shape ({ type: 'work', projectId,
+   env } — 05-T3 — vs { type: 'terminal', runId, projectId, env }), and (c)
+   only send when the tx actually did the thing — an idempotency conflict, an
+   early no-op return or a branch that changes nothing must not notify.
 
    No Postgres: the kernel functions take a Pool, so a stub client that answers
    by query shape is enough — and it can record the exact notify statements the
@@ -87,6 +87,9 @@ function stubPool(opts: {
     query: (async (text: string, params?: unknown[]) => {
       texts.push(text);
       if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [] };
+      // The DB-clock reads (T1): answered generically so the per-test handler
+      // lists below stay about the mutations they pin.
+      if (/^SELECT now\(\)/.test(text)) return { rows: [{ now: new Date() }] };
       if (/pg_notify/.test(text)) {
         notified.push({
           text,
@@ -111,6 +114,11 @@ function stubPool(opts: {
       // orphan scan is a separate LIMIT-10 query and must return nothing here
       // (it would otherwise hand the same due rows back a second time).
       if (/child_run_id IS NULL/.test(text)) return { rows: [] };
+      // The p1-37 wait-graph invariant scans (and the 05-T2 self-heal they
+      // feed) find nothing in these tests — answer them empty so they neither
+      // consume mutation handlers nor trigger a heal.
+      if (/r\.status = 'waiting'/.test(text)) return { rows: [] }; // no-wait runs
+      if (/w\.kind = 'run'/.test(text)) return { rows: [] }; // stuck run-waits
       return opts.phase1(text, params);
     }) as Pool['query'],
   } as unknown as Pool;
@@ -145,8 +153,15 @@ const expectNotifyIsLastInTx = (texts: string[]): void => {
   }
 };
 
+/** 05-T3: the `work` wake carries the namespace the new work appeared in. */
+const WORK_PAYLOAD = {
+  type: 'work',
+  projectId: DEFAULT_NAMESPACE.projectId,
+  env: DEFAULT_NAMESPACE.env,
+};
+
 const expectWork = (n: NotifiedCall[]) =>
-  expect(n.map((c) => c.payload)).toEqual([{ type: 'work' }]);
+  expect(n.map((c) => c.payload)).toEqual([WORK_PAYLOAD]);
 
 function expectTerminal(n: NotifiedCall[], runId = 'run_1') {
   expect(n.map((c) => c.payload)).toEqual([
@@ -331,7 +346,7 @@ describe('notify sources — terminal notifications', () => {
     });
     expect(notified.map((c) => c.payload)).toEqual([
       { type: 'terminal', runId: 'run_1', projectId: 'default', env: 'prod' },
-      { type: 'work' },
+      WORK_PAYLOAD,
     ]);
     expectNotifyIsLastStatement(texts);
   });
@@ -408,7 +423,7 @@ describe('notify sources — concurrency-slot release wakes waiting runs', () =>
     });
     expect(notified.map((c) => c.payload)).toEqual([
       { type: 'terminal', runId: 'run_1', projectId: DEFAULT_NAMESPACE.projectId, env: DEFAULT_NAMESPACE.env },
-      { type: 'work' },
+      WORK_PAYLOAD,
     ]);
     expectNotifyIsLastStatement(texts);
   });
@@ -435,7 +450,7 @@ describe('notify sources — concurrency-slot release wakes waiting runs', () =>
     expect(res.willRetry).toBe(false);
     expect(notified.map((c) => c.payload)).toEqual([
       { type: 'terminal', runId: 'run_1', projectId: DEFAULT_NAMESPACE.projectId, env: DEFAULT_NAMESPACE.env },
-      { type: 'work' },
+      WORK_PAYLOAD,
     ]);
     expectNotifyIsLastStatement(texts);
   });
@@ -455,7 +470,7 @@ describe('notify sources — concurrency-slot release wakes waiting runs', () =>
     await cancelRun(pool, 'run_1', DEFAULT_NAMESPACE);
     expect(notified.map((c) => c.payload)).toEqual([
       { type: 'terminal', runId: 'run_1', projectId: DEFAULT_NAMESPACE.projectId, env: DEFAULT_NAMESPACE.env },
-      { type: 'work' },
+      WORK_PAYLOAD,
     ]);
     expectNotifyIsLastStatement(texts);
   });
@@ -478,7 +493,7 @@ describe('notify sources — concurrency-slot release wakes waiting runs', () =>
       namespace: DEFAULT_NAMESPACE,
     });
     expectTerminal(notified);
-    expect(notified.map((c) => c.payload)).not.toContainEqual({ type: 'work' });
+    expect(notified.map((c) => c.payload)).not.toContainEqual(WORK_PAYLOAD);
     expectNotifyIsLastStatement(texts);
   });
 });

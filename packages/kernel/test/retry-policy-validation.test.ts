@@ -75,6 +75,8 @@ describe('createRunIn trigger-path retry validation', () => {
     const client = {
       query: async (sql: string) => {
         sqls.push(sql);
+        // The database-clock read (T1).
+        if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
         return {
           rows: [{ id: 't', retry: taskRetry, concurrency_limit: null, latest_code_version: null }],
         };

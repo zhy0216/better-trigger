@@ -20,8 +20,8 @@ import {
  * Logs (no fencing; strict terminal boundary via the runs row lock, p2-40)
  * ------------------------------------------------------------------------- */
 
-/** Rows per INSERT. 5 bind params each (+1 shared run_id) → 5001 params, well
- *  under pg's 65535. */
+/** Rows per INSERT. 5 bind params each (+3 shared: run_id + the namespace
+ *  pair) → 5003 params, well under pg's 65535. */
 const LOG_INSERT_CHUNK = 1000;
 /** Fixed per-row allowance for the VALUES syntax, casts and separators around
  *  one row's parameters, added to the parameter bytes when packing chunks. */
@@ -55,23 +55,28 @@ function isWritableLogLine(e: LogEntry): boolean {
   );
 }
 
-const utf8Bytes = (s: string): number => new TextEncoder().encode(s).length;
+/** ONE shared encoder/decoder pair: the old per-call `new TextEncoder()` made
+ *  a 64 KiB-over-limit message pay ~64k encoder constructions (one per code
+ *  point) plus a full-string encode just to measure — this is the log hot
+ *  path (05-T4). */
+const UTF8_ENCODER = new TextEncoder();
+const UTF8_DECODER = new TextDecoder();
+
+const utf8Bytes = (s: string): number => UTF8_ENCODER.encode(s).length;
 
 /** Truncate a string to at most maxBytes UTF-8 bytes, appending '…' (3 bytes)
- *  when it was cut. Iterates code points so a multi-byte character is never
- *  split. */
-function truncateUtf8(s: string, maxBytes: number): string {
-  if (utf8Bytes(s) <= maxBytes) return s;
+ *  when it was cut. Encodes ONCE, backs the cut off to a code-point boundary
+ *  (a continuation byte is 0b10xxxxxx, so walking back lands on the lead byte
+ *  of the character the budget split — which is then dropped whole), and
+ *  decodes the kept prefix once: O(bytes) instead of one encode per code
+ *  point. */
+export function truncateUtf8(s: string, maxBytes: number): string {
+  const bytes = UTF8_ENCODER.encode(s);
+  if (bytes.length <= maxBytes) return s;
   const budget = Math.max(0, maxBytes - 3);
-  let out = '';
-  let used = 0;
-  for (const ch of s) {
-    const b = utf8Bytes(ch);
-    if (used + b > budget) break;
-    out += ch;
-    used += b;
-  }
-  return `${out}…`;
+  let end = Math.min(budget, bytes.length);
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return `${UTF8_DECODER.decode(bytes.subarray(0, end))}…`;
 }
 
 function preparedRowBytes(r: PreparedLogRow): number {

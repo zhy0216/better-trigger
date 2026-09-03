@@ -18,6 +18,8 @@ const makeClient = () => {
   const client = {
     query: async (sql: string) => {
       sqls.push(sql);
+      // The database-clock read (T1).
+      if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
       return {
         rows: [{ id: 't', retry: null, concurrency_limit: null, latest_code_version: null }],
       };

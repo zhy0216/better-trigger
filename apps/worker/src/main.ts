@@ -255,6 +255,19 @@ async function main(): Promise<void> {
     counters: notifyCounters,
     onNotify: (payload: NotifyPayload) => {
       if (payload.type === 'work') {
+        // 05-T3: a namespaced wake that this daemon does not serve is dropped —
+        // its claim scan could only come back empty, so the sleep stays parked.
+        // A bare wake (multi-namespace hand-back, or a pre-05-T3 kernel) keeps
+        // the historical always-wake behavior.
+        if (
+          payload.projectId !== undefined &&
+          payload.env !== undefined &&
+          !opts.namespaces.some(
+            (ns) => ns.projectId === payload.projectId && ns.env === payload.env,
+          )
+        ) {
+          return;
+        }
         notifyCounters.claimWakes += 1;
         wake.emit();
         return;

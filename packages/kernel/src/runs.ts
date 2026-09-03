@@ -4,7 +4,7 @@
 export {
   withTx,
   type RunRow,
-  getRunRow,
+  dbNow,
   lockRunRow,
   tryLockRunRow,
   RETRY_OPERATION_UNIQUE_CONSTRAINT,

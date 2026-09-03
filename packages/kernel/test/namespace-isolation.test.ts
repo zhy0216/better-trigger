@@ -49,6 +49,8 @@ function conflictClient() {
           rows: [{ id: 't', retry: null, concurrency_limit: null, latest_code_version: null }],
         };
       }
+      // createRunIn's database-clock read (T1).
+      if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
       if (/INSERT INTO runs/.test(sql)) return { rows: [] };
       if (/SELECT id FROM runs/.test(sql)) return { rows: [{ id: 'existing_run' }] };
       return { rows: [] };

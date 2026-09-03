@@ -317,6 +317,20 @@ export async function createEmbeddedRuntime(
         counters: notifyCounters,
         onNotify: (payload: NotifyPayload) => {
           if (payload.type === 'work') {
+            // 05-T3: a namespaced wake this runtime does not serve is dropped —
+            // its claim scan could only come back empty. A bare wake
+            // (multi-namespace hand-back, or a pre-05-T3 kernel) keeps the
+            // historical always-wake behavior.
+            if (
+              payload.projectId !== undefined &&
+              payload.env !== undefined &&
+              !namespaces.some(
+                (namespace) =>
+                  namespace.projectId === payload.projectId && namespace.env === payload.env,
+              )
+            ) {
+              return;
+            }
             notifyCounters.claimWakes += 1;
             wake.emit();
             return;

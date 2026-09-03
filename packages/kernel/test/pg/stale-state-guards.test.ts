@@ -49,12 +49,12 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const TERMINAL = ['completed', 'failed', 'canceled'];
 
 /**
- * Claim exactly one run with bounded retry. trigger stamps available_at from
- * the host clock while the claim predicate compares against the database's
- * now() — a sub-millisecond skew between the two can make a freshly triggered
- * run briefly invisible to claim, so `claimRuns(...)[0]!` can throw a
- * TypeError on a healthy run. Retrying for a short window absorbs the skew
- * without weakening the race being tested (only the settle timing changes).
+ * Claim exactly one run with bounded retry. Since 05-T1 the trigger stamps
+ * available_at from the DATABASE clock (the same now() the claim predicate
+ * compares against), so there is no host↔DB skew to absorb; the short retry
+ * window is kept as a plain scheduling-timing defense so a healthy-but-not-
+ * yet-visible run never makes `claimRuns(...)[0]!` throw a TypeError, without
+ * weakening the race being tested (only the settle timing changes).
  */
 async function claimOne(
   kernel: Kernel,

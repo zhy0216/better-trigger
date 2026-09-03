@@ -27,9 +27,14 @@ const { Client } = pg;
 /** The single channel every daemon LISTENs on (kernel/src/notify.ts). */
 export const NOTIFY_CHANNEL = 'bt';
 
-/** Payloads the kernel sends inside its transactions (see kernel notify.ts). */
+/** Payloads the kernel sends inside its transactions (see kernel notify.ts).
+ *  A `work` payload carries the namespace that got new claimable work when the
+ *  sender knows it (05-T3); the pair is ABSENT for wakes that span several
+ *  namespaces at once (releaseClaims) and on payloads from kernels that
+ *  predate the field — receivers treat a missing pair as "wake all", the
+ *  historical always-safe behavior. */
 export type NotifyPayload =
-  | { type: 'work' }
+  | { type: 'work'; projectId?: string; env?: string }
   | { type: 'terminal'; runId: string; projectId: string; env: string };
 
 /** Sink for LISTEN lifecycle messages; structurally `console`. */
@@ -219,7 +224,15 @@ export function createNotifyListener(deps: NotifyListenerDeps): NotifyListener {
       }
       const p = parsed as Record<string, unknown>;
       if (p?.type === 'work') {
-        onNotify({ type: 'work' });
+        // Carry the namespace when the sender stamped one (05-T3) so the
+        // daemon can drop wakes for scopes it does not serve. A payload with
+        // no usable pair (multi-namespace hand-back, or a pre-05-T3 kernel)
+        // dispatches bare — every receiver reads that as "wake all".
+        if (typeof p.projectId === 'string' && typeof p.env === 'string') {
+          onNotify({ type: 'work', projectId: p.projectId, env: p.env });
+        } else {
+          onNotify({ type: 'work' });
+        }
         return;
       }
       if (

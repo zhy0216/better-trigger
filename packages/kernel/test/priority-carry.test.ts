@@ -119,6 +119,8 @@ describe('scanWaits re-enqueues a resumed run at its own priority', () => {
     const client = {
       query: async (sql: string, params: unknown[] = []) => {
         stmts.push({ sql, params });
+        // The resume's database-clock read (T1).
+        if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
         if (/FROM runs WHERE id = \$1/.test(sql)) {
           return { rows: [runRow({ id: 'run_1', status: 'waiting', priority })] };
         }
@@ -190,6 +192,8 @@ describe('wakeParentIfWaiting re-enqueues the parent at its own priority', () =>
     const client = {
       query: async (sql: string, params: unknown[] = []) => {
         stmts.push({ sql, params });
+        // The wake's database-clock read (T1).
+        if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
         if (/FROM queue WHERE run_id = \$1/.test(sql)) {
           return { rows: [{ run_id: params[0], locked_by: 'w1' }] };
         }
@@ -265,6 +269,8 @@ describe('the UPDATE re-enqueue paths never touch priority', () => {
     const client = {
       query: async (sql: string, params: unknown[] = []) => {
         stmts.push({ sql, params });
+        // The retry's database-clock read (T1).
+        if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
         if (/FROM queue WHERE run_id = \$1/.test(sql)) {
           return { rows: [{ run_id: params[0], locked_by: 'w1' }] };
         }

@@ -67,6 +67,9 @@ function stubPool(opts: StubOptions = {}) {
     query: async (text: string, params?: unknown[]) => {
       texts.push(text);
 
+      // The resume's database-clock read (T1).
+      if (/^SELECT now\(\)/.test(text)) return { rows: [{ now: new Date() }] };
+
       // Canonical position 2 — the runs row.
       if (/FROM runs WHERE id = \$1/.test(text)) {
         const runId = String(params?.[0]);

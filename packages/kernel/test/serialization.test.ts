@@ -80,6 +80,8 @@ function makeClient() {
       if (sql.includes('FROM queue') && sql.includes('locked_by')) {
         return { rows: [{ locked_by: 'w1' }], rowCount: 1 };
       }
+      // The create paths' database-clock read (T1).
+      if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }], rowCount: 1 };
       if (/UPDATE queue|UPDATE runs|UPDATE waits|DELETE FROM queue/.test(sql)) {
         return { rows: [], rowCount: 1 };
       }

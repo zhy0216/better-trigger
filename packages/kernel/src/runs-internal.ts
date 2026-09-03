@@ -229,7 +229,12 @@ export interface ParsedRunOptions {
   priority: number;
   idempotencyKey: string | null;
   concurrencyKey: string | null;
-  availableAt: Date;
+  /** Availability as a RELATIVE offset, applied to the DATABASE clock when the
+   *  run is enqueued (dbNow + delayMs — see docs/architecture.md "时钟契约").
+   *  Never a host-clock Date: a run stamped with a host clock that runs ahead
+   *  of the DB's stays invisible to the claim scan (`available_at <= now()`)
+   *  for the whole skew. */
+  delayMs: number;
 }
 
 /**
@@ -299,17 +304,31 @@ export function parseCreateRunOptions(
   if (delayMs > MAX_DELAY_MS) {
     throw new KernelError('bad_request', 'delay exceeds maximum of 10 years');
   }
-  const availableAt = new Date(Date.now() + delayMs);
-  if (Number.isNaN(availableAt.getTime())) {
-    throw new KernelError('bad_request', 'delay produces an invalid date');
-  }
 
   return {
     priority,
     idempotencyKey: opts.idempotencyKey ?? null,
     concurrencyKey: opts.concurrencyKey ?? null,
-    availableAt,
+    // Relative, not a Date: the enqueue path applies it to the DATABASE
+    // clock (see ParsedRunOptions.delayMs).
+    delayMs,
   };
+}
+
+/**
+ * The DATABASE's current time, read inside the caller's transaction. pg's
+ * now() is the transaction-start timestamp, so every statement of the same tx
+ * reads the same value — the clock every scheduler predicate uses
+ * (`available_at <= now()`, `resume_at <= now()`, `next_run_at <= now()`).
+ * Timestamps that mean "this far from NOW" (a trigger delay, a retry backoff,
+ * a resume-after) are computed from THIS reading, never from the host clock:
+ * a host clock skewed ahead of the DB's would otherwise stamp rows the claim
+ * / wait scans keep seeing as not-yet-due for the whole skew
+ * (docs/architecture.md "时钟契约").
+ */
+export async function dbNow(db: Pool | PoolClient): Promise<Date> {
+  const res = await db.query<{ now: Date }>(`SELECT now() AS now`);
+  return res.rows[0]!.now;
 }
 
 /**
@@ -402,18 +421,6 @@ export interface RunRow {
 const RUN_ROW_COLS = `id, task_id, status, attempt, max_attempts,
             recoveries, max_recoveries, parent_run_id,
             payload, project_id, env, concurrency_key, priority, code_version, fencing_token`;
-
-export async function getRunRow(
-  db: Pool | PoolClient,
-  id: string,
-  namespace: Namespace,
-): Promise<RunRow | null> {
-  const res = await db.query<RunRow>(
-    `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
-    [id, namespace.projectId, namespace.env],
-  );
-  return res.rows[0] ?? null;
-}
 
 /**
  * Lock + read a runs row (canonical lock position 2 — the caller must already

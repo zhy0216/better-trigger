@@ -30,16 +30,23 @@
    position where peers actually collide, and leaves what it cannot get to the
    next tick — the wait scanner at positions 2 and 3 (tryLockRunRow, then the
    wait row), the reaper at position 1 (its expired-lease queue scan).
-   Their *other* positions are plain blocking FOR UPDATE, deliberately, and
-   still cannot end up waiting on a peer:
-     - wait scanner, position 1 — a suspended run has no queue row (suspendRun
-       deleted it), so it is a 0-row no-op on this path; it is taken at all to
-       stop the closing INSERT ... ON CONFLICT on queue from inverting 2→1.
-     - reaper, position 2 (lockRunRow) — by then it already holds that run's
-       queue row, and since every kernel path takes queue before runs, no peer
-       can be holding the runs row it is asking for.
-   runs.ts spells out the scanner case ("Position 1 stays blocking on purpose")
-   and the disjoint candidate sets the reaper's queue scan relies on.
+    Their *other* positions are plain blocking FOR UPDATE, deliberately, and
+    still cannot end up waiting on a peer in a way that closes a cycle:
+      - wait scanner, position 1 — a suspended run has no queue row (suspendRun
+        deleted it), so it is a 0-row no-op on this path; it is taken at all to
+        stop the closing INSERT ... ON CONFLICT on queue from inverting 2→1.
+      - reaper, position 2 (lockRunRow) — by then it already holds that run's
+        queue row. Every MULTI-row kernel path takes queue before runs, so none
+        of them can be holding the runs row here — but appendLogs is the
+        deliberate single-row exception (runs.ts LOG BOUNDARY): it takes ONLY
+        the runs row, so the reaper CAN briefly wait behind one in-flight log
+        INSERT. That wait cannot cycle: appendLogs holds the runs row for
+        exactly one INSERT and never waits on a queue row itself, so it always
+        commits and hands the runs row over — the reaper's 1→2 order and
+        appendLogs' runs-only footprint share no edge a deadlock could walk.
+    runs.ts spells out the scanner case ("Position 1 stays blocking on purpose"),
+    the appendLogs exception ("LOG BOUNDARY"), and the disjoint candidate sets
+    the reaper's queue scan relies on.
    See docs/backend-contract.md §3.2, §3.5, §3.6. Loop errors are swallowed
    (logged via the kernel logger) so loops never die.
    ============================================================================= */
@@ -50,6 +57,7 @@ import {
   KernelError,
   assertNamespace,
   type Namespace,
+  type SerializedError,
 } from '@better-trigger/core';
 import type { KernelLogger, WaitGraphCounters } from './kernel';
 import { prune } from './prune';
@@ -63,10 +71,12 @@ import {
 } from './queue';
 import {
   createRunIn,
+  dbNow,
   lockRunRow,
   terminalFail,
   tryLockRunRow,
   upsertStep,
+  wakeParentIfWaiting,
   withTx,
 } from './runs';
 import { notifyTerminal, notifyWork } from './notify';
@@ -106,11 +116,12 @@ const GC_INTERVAL_MS = 3_600_000;
  * one transaction lock every expired queue row at once and walk them one by
  * one, and for that whole transaction the claim path's SKIP LOCKED bounces off
  * all of them — a recovery storm that stalls execution instead of restoring it.
- * The bound turns it into 100 rows per 10s tick, which cannot starve: the scan
- * takes the OLDEST leases first (ORDER BY lease_until ASC) and every row it
- * processes leaves the candidate set (lease_until := NULL on requeue, the queue
- * row deleted on terminal fail), so the remainder is strictly closer to the
- * head on the next tick. Rows another daemon holds are skipped, not lost —
+ * The bound turns it into 100 rows per NAMESPACE per 10s tick (the stale scan
+ * runs once per namespace, each with its own LIMIT), which cannot starve: the
+ * scan takes the OLDEST leases first (ORDER BY lease_until ASC) and every row
+ * it processes leaves the candidate set (lease_until := NULL on requeue, the
+ * queue row deleted on terminal fail), so the remainder is strictly closer to
+ * the head on the next tick. Rows another daemon holds are skipped, not lost —
  * whoever holds them is reaping them.
  */
 const REAP_BATCH = 100;
@@ -249,6 +260,16 @@ export interface OrchestratorCounters {
    * each occurrence is also named by a warn.
    */
   cronPoisoned: number;
+  /**
+   * Pending run-waits on an already-terminal child that the wait-graph
+   * self-heal RESOLVED (05-T2): each one is a lost parent wake (p1-37) the
+   * scanner repaired by re-running the terminal tx's own wake path. Monotonic
+   * total; every occurrence is also named by a warn. Stays 0 in a healthy
+   * system — a nonzero reading means something outside the engine broke the
+   * wait graph AND the engine repaired it. (The per-tick GAUGES that observe
+   * the violations live on WaitGraphCounters; this counts the repairs.)
+   */
+  waitGraphHealed: number;
   /** Loop iterations that threw, per loop. Each one is logged too, but a rate
    *  is what says "the cron loop has been failing all afternoon". */
   loopErrors: {
@@ -281,6 +302,7 @@ export function createOrchestratorCounters(): OrchestratorCounters {
     stranded: { groups: [], truncated: false },
     cronSkippedUnserved: 0,
     cronPoisoned: 0,
+    waitGraphHealed: 0,
     loopErrors: { waits: 0, cron: 0, reaper: 0, workers: 0, gc: 0, stranded: 0 },
     // 0 = "this loop has never ticked" — the metrics reader emits only loops
     // that have actually run, so a deliberately-disabled loop (e.g. waits on
@@ -337,7 +359,6 @@ type WaitRow = {
   step_seq: number;
   fingerprint: string | null;
   kind: string;
-  child_run_id: string | null;
 };
 
 async function scanDueWaits(
@@ -354,7 +375,7 @@ async function scanDueWaits(
     const timerParams: unknown[] = [];
     const timerPredicate = nsPredicateFor('waits', ns, timerParams);
     const timerRows = await pool.query<WaitRow>(
-      `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
+      `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind
          FROM waits
         WHERE status = 'pending'
           AND kind IN ('duration','until')
@@ -366,8 +387,11 @@ async function scanDueWaits(
     );
     const orphanParams: unknown[] = [];
     const orphanPredicate = nsPredicateFor('waits', ns, orphanParams);
+    // child_run_id stays in the orphan predicate (NULL = the child vanished)
+    // but is not selected: phase 2 branches on `kind = 'run'` alone and never
+    // reads it, so fetching it would be dead weight on every row.
     const orphanRows = await pool.query<WaitRow>(
-      `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
+      `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind
          FROM waits
         WHERE status = 'pending'
           AND kind = 'run'
@@ -419,16 +443,31 @@ async function scanNoWaitRuns(
  *  stays single-sourced even inside a literal query (p2-10 C4). */
 const TERMINAL_STATUS_SQL = TERMINAL_STATUSES.map((s) => `'${s}'`).join(', ');
 
+/** One pending run-wait whose child is ALREADY terminal — the lost-wake shape
+ *  (p1-37). Carries the child id and both namespaces so the self-heal below
+ *  can re-run the terminal tx's wake without any extra lookups. */
+interface StuckWaitRow {
+  id: number;
+  run_id: string;
+  child_run_id: string;
+  project_id: string;
+  env: string;
+}
+
 async function scanStuckWaits(
   pool: Pool,
   namespaces: readonly Namespace[],
-): Promise<number> {
-  let stuckWaits = 0;
+): Promise<StuckWaitRow[]> {
+  const stuck: StuckWaitRow[] = [];
   for (const ns of namespaces) {
     const stuckParams: unknown[] = [];
     const stuckPredicate = nsPredicateFor('w', ns, stuckParams);
-    const stuckRows = await pool.query<{ id: number }>(
-      `SELECT w.id FROM waits w
+    // LIMIT 10 IS the self-heal throttle: at most ten waits per namespace per
+    // tick ever reach the heal path below, so a hand-poisoned backlog drains
+    // gradually instead of bursting one transaction (05-T2).
+    const stuckRows = await pool.query<StuckWaitRow>(
+      `SELECT w.id, w.run_id, w.child_run_id, w.project_id, w.env
+         FROM waits w
         WHERE w.kind = 'run' AND w.status = 'pending' AND w.child_run_id IS NOT NULL
           AND ${stuckPredicate}
           AND EXISTS (
@@ -439,9 +478,122 @@ async function scanStuckWaits(
         LIMIT 10`,
       stuckParams,
     );
-    stuckWaits += stuckRows.rows.length;
+    stuck.push(...stuckRows.rows);
   }
-  return stuckWaits;
+  return stuck;
+}
+
+/**
+ * Lost-wake self-heal (05-T2). A pending run-wait whose child already reached
+ * a terminal state can only exist if the child's terminal tx missed its wake
+ * (p1-37's invariant broken by something outside the engine — a hand edit, a
+ * replication glitch): left alone, the parent sits 'waiting' forever, no
+ * queue row, no path back, and the only remedy used to be manual SQL.
+ *
+ * The repair re-runs EXACTLY the wake the terminal tx would have run — the
+ * same wakeParentIfWaiting, same canonical lock order (child queue → child
+ * runs → each parent's queue → runs → wait row; child before parent, see the
+ * runs.ts header), same step-row fill and expected-state parent flip. That
+ * makes the heal idempotent by construction: it serializes on the child's runs
+ * row exactly like a real terminal tx, re-checks every wait under its lock,
+ * and a concurrent resolver (the real wake landing late, a peer daemon
+ * healing the same row) leaves nothing pending, so the loser counts 0 and no
+ * parent is woken twice.
+ *
+ * Guardrails: per-tick per-namespace LIMIT (scanStuckWaits), one counter
+ * fold per actually-resolved wait, and one warn per heal naming parent and
+ * child. The heal only TOUCHES parents that are still 'waiting' — the flip's
+ * `AND status = 'waiting'` predicate + affected-row check keep a parent that
+ * moved on (canceled/terminal) from being resurrected, exactly as in the
+ * terminal paths. Runs whose child row vanished between the scan and the heal
+ * (pruned mid-flight) are skipped here; their wait's child_run_id is then
+ * ON DELETE SET NULL'd, and the orphan run-wait recovery (C5) fails the parent
+ * with ChildLostError — a child that never delivers a result is not the same
+ * as a delivered one.
+ */
+async function healStuckWaits(
+  pool: Pool,
+  logger: KernelLogger,
+  stuck: readonly StuckWaitRow[],
+): Promise<number> {
+  // Group by child: wakeParentIfWaiting resolves ALL pending waiters of one
+  // child in a single pass (stable id ASC), so one tx per child both matches
+  // the terminal tx's shape and can never double-wake a shared parent set.
+  const byChild = new Map<string, StuckWaitRow[]>();
+  for (const w of stuck) {
+    const group = byChild.get(w.child_run_id);
+    if (group) group.push(w);
+    else byChild.set(w.child_run_id, [w]);
+  }
+
+  let healed = 0;
+  for (const [childRunId, waits] of byChild) {
+    const childNs: Namespace = { projectId: waits[0]!.project_id, env: waits[0]!.env };
+    try {
+      const resolved = await withTx(pool, async (client) => {
+        // Canonical order for the CHILD first (positions 1→2): the queue row
+        // is 0 rows for a terminal run (already held nowhere, deleted at
+        // terminal) but the statement keeps this tx's acquisition order
+        // identical to the terminal tx this replays.
+        await client.query(
+          `SELECT run_id FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
+          [childRunId, childNs.projectId, childNs.env],
+        );
+        const child = await lockRunRow(client, childRunId, childNs);
+        // Pruned between scan and heal → nothing to replay (the orphan scan
+        // owns the NULL'd wait now); desynced back to non-terminal → not a
+        // lost wake, leave it to whoever owns the child.
+        if (!child || !TERMINAL_STATUSES.includes(child.status)) return 0;
+        // The child's recorded result, read under its row lock — the same
+        // values the terminal tx handed to wakeParentIfWaiting.
+        const outRes = await client.query<{ output: unknown; error: unknown }>(
+          `SELECT output, error FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
+          [childRunId, childNs.projectId, childNs.env],
+        );
+        const row = outRes.rows[0]!;
+        const result =
+          child.status === 'completed'
+            ? {
+                ok: true,
+                ...(row.output !== null && row.output !== undefined
+                  ? { output: row.output }
+                  : {}),
+              }
+            : {
+                ok: false,
+                // cancelRun never records an error on the run row; the wake it
+                // sends carries this exact stub (see cancelRun).
+                error: (row.error ?? { message: 'child canceled' }) as SerializedError,
+              };
+        const n = await wakeParentIfWaiting(client, childRunId, childNs, result);
+        // A re-enqueued parent is new claimable work: wake the claim loops
+        // exactly like the terminal tx does after its wake (the tx's LAST
+        // statement — delivered at COMMIT, rolled back to nothing with it).
+        // Children inherit their parent's namespace (C2), so the child's
+        // namespace covers every parent this pass re-enqueued.
+        if (n > 0) await notifyWork(client, childNs);
+        return n;
+      });
+      if (resolved > 0) {
+        healed += resolved;
+        logger.warn(
+          `[orchestrator:wait-graph] healed a lost wake: ${resolved} pending wait(s) ` +
+            `(${waits.map((w) => `${w.run_id}#${w.id}`).join(', ')}) on already-terminal ` +
+            `child ${childRunId} — parent(s) re-woken via the terminal tx's own wake path`,
+        );
+      }
+    } catch (err) {
+      // A failed heal must never take the waits loop down: the rows stay stuck
+      // and come back next tick (the gauge keeps reporting them), and the loop
+      // error counter + log name the failure.
+      logger.error(
+        `[orchestrator:wait-graph] self-heal failed for child ${childRunId} — ` +
+          `the stuck wait(s) stay visible and are retried next tick`,
+        err,
+      );
+    }
+  }
+  return healed;
 }
 
 // Phase 2 — one short tx per wait, acquiring the canonical lock order
@@ -501,9 +653,10 @@ async function resumeOneWait(pool: Pool, logger: KernelLogger, w: WaitRow): Prom
             `no result can ever arrive; parent failed`,
         });
         // The wait's run went terminal: wake its result waiters, and the
-        // claim loops if it may have woken a parent of its own.
+        // claim loops if it may have woken a parent of its own (the wake names
+        // the wait's namespace, 05-T3).
         await notifyTerminal(client, w.run_id, wNs);
-        if (run.parent_run_id) await notifyWork(client);
+        if (run.parent_run_id) await notifyWork(client, wNs);
       } else {
         // Defensive: a run that is not 'waiting' cannot be stranded by its
         // wait — never clobber its state, just retire the stale wait row.
@@ -593,10 +746,13 @@ async function resumeOneWait(pool: Pool, logger: KernelLogger, w: WaitRow): Prom
     // (todos/01-correctness.md C7). `preserveSurvivor: true` keeps a
     // surviving queue row's OWN priority/concurrency_key: reaching the
     // conflict branch means a row survived the suspend, and that row's
-    // value is then the more trustworthy of the two.
+    // value is then the more trustworthy of the two. "Available now" is the
+    // DATABASE's now: a host-clock Date ahead of the DB would keep the
+    // resumed run invisible to the claim scan for the skew
+    // (docs/architecture.md "时钟契约").
     await enqueue(client, {
       runId: w.run_id,
-      availableAt: new Date(),
+      availableAt: await dbNow(client),
       priority: run.priority,
       concurrencyKey: run.concurrency_key,
       namespace: wNs,
@@ -604,8 +760,9 @@ async function resumeOneWait(pool: Pool, logger: KernelLogger, w: WaitRow): Prom
     });
     // The resumed run is claimable again — wake the claim loops. This is
     // the "resume → work" notification PF2 asks for; a resume that rolled
-    // back (or an early no-op return above) sends nothing.
-    await notifyWork(client);
+    // back (or an early no-op return above) sends nothing. The wake names the
+    // wait's namespace (05-T3).
+    await notifyWork(client, wNs);
   });
 }
 
@@ -729,8 +886,14 @@ export function startOrchestrator(
     // as a rate climbing by one every second — the transition LOG below is
     // what makes a newly-stuck row stand out, not a counter that only grows.
     waitGraphCounters.waitingWithoutPendingWait = noWaitRuns;
-    waitGraphCounters.terminalChildPendingWait = stuckWaits;
-    logWaitGraphViolations(noWaitRuns, stuckWaits);
+    waitGraphCounters.terminalChildPendingWait = stuckWaits.length;
+    logWaitGraphViolations(noWaitRuns, stuckWaits.length);
+
+    // Lost-wake self-heal (05-T2): a pending run-wait on an already-terminal
+    // child is the one violation class with a safe, well-defined repair — the
+    // terminal tx's own wake, re-run. Resolve them BEFORE the due-row resumes
+    // so a freshly-woken parent is claimable in the same tick.
+    counters.waitGraphHealed += await healStuckWaits(pool, logger, stuckWaits);
 
     for (const w of dueRows) {
       await resumeOneWait(pool, logger, w);
@@ -885,10 +1048,16 @@ export function startOrchestrator(
           [s.id, created.runId, next, s.project_id, s.env],
         );
       }
-      // At least one schedule fired in this tx → wake the claim loops with a
-      // single aggregate `work` notification (see runs.ts batchTrigger).
-      // Skipped-unserved schedules created no run, so they wake nothing.
-      if (fired.length > 0) await notifyWork(client);
+      // At least one schedule fired in this tx → wake the claim loops. One
+      // aggregate `work` notification PER NAMESPACE that fired (05-T3): a
+      // single bare wake would spin every daemon's idle claim cycle even where
+      // nothing became claimable for it. Skipped-unserved schedules created no
+      // run, so they wake nothing.
+      if (fired.length > 0) {
+        const firedNs = new Map<string, Namespace>();
+        for (const s of fired) firedNs.set(`${s.project_id}\u0000${s.env}`, { projectId: s.project_id, env: s.env });
+        for (const ns of firedNs.values()) await notifyWork(client, ns);
+      }
       await client.query('COMMIT');
       // Folded after COMMIT like the reaper's tallies: a rolled-back tick
       // created no runs and consumed no fires (next_run_at reverts with it),
@@ -948,6 +1117,10 @@ export function startOrchestrator(
     // notifications: they are sent inside the tx, so a rollback delivers none.
     let requeued = 0;
     let failed = 0;
+    // Namespaces that had at least one run requeued this tick — one `work`
+    // notification per namespace (05-T3), keyed so a namespace requeued many
+    // times still notifies once.
+    const requeuedNs = new Map<string, Namespace>();
     // (runId, namespace, hasParent) of the runs this tick failed terminally —
     // for the per-run `terminal` notifications sent before COMMIT.
     const failedTerminal: Array<{ runId: string; qNs: Namespace; hasParent: boolean }> = [];
@@ -1084,15 +1257,17 @@ export function startOrchestrator(
             [q.id, qNs.projectId, qNs.env],
           );
           requeued += 1;
+          requeuedNs.set(`${qNs.projectId}\u0000${qNs.env}`, qNs);
         }
       }
       // Inside the tx, so only a COMMIT delivers them: requeued runs are
       // claimable again (`work`), worker-lost runs went terminal (`terminal`,
-      // plus `work` when the terminal-fail woke a waiting parent).
-      if (requeued > 0) await notifyWork(client);
+      // plus `work` when the terminal-fail woke a waiting parent). Each `work`
+      // wake names its namespace so foreign daemons can drop it (05-T3).
+      for (const ns of requeuedNs.values()) await notifyWork(client, ns);
       for (const t of failedTerminal) {
         await notifyTerminal(client, t.runId, t.qNs);
-        if (t.hasParent) await notifyWork(client);
+        if (t.hasParent) await notifyWork(client, t.qNs);
       }
       await client.query('COMMIT');
       counters.reaperRequeued += requeued;

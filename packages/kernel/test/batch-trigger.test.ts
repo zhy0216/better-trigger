@@ -30,6 +30,8 @@ interface TaskRow {
   retry: unknown;
   concurrency_limit: number | null;
   latest_code_version: string | null;
+  /** 05-T1: the preload carries the database clock for availability stamps. */
+  db_now: Date;
 }
 
 /**
@@ -53,6 +55,9 @@ const makePool = (tasks: TaskRow[]) => {
       stmts.push({ sql, params });
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
       if (/pg_notify/.test(sql)) return { rows: [] };
+      // createRunsInBatch's single database-clock read (T1): every per-item
+      // delay is applied to this, never to the host clock.
+      if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
       if (/FROM tasks/.test(sql)) {
         // Params: projectId, env, id per task — ids at index 2 of each triple.
         const ids: string[] = [];
@@ -108,6 +113,7 @@ const TASK = (id: string, concurrencyLimit: number | null = null): TaskRow => ({
   retry: null,
   concurrency_limit: concurrencyLimit,
   latest_code_version: null,
+  db_now: new Date(),
 });
 
 const items = <T>(n: number, make: (i: number) => T): T[] =>
@@ -135,6 +141,8 @@ describe('batchTrigger statement count is O(1) in the item count', () => {
 
     expect(res.runIds).toHaveLength(500);
     const data = dataStmts(stmts);
+    // Still exactly the four PF5 statements — the database clock (T1) rides the
+    // task preload as `now() AS db_now`, so it adds no round trip.
     expect(data).toHaveLength(4);
     // Task preload: one SELECT over the DEDUPLICATED task ids — 500 items of
     // one task is a single VALUES tuple, not 500 lookups.
