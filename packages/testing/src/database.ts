@@ -16,10 +16,13 @@ import type { AddressInfo } from 'node:net';
 
 export const DEFAULT_DATABASE_URL = 'postgres://localhost:5432/better_trigger';
 
-/** Strip the database path off a postgres URL → protocol://user@host:port */
+/** Strip the database path (and query/hash — they belonged to the source db)
+ *  off a postgres URL → protocol://user@host:port */
 export function baseUrl(raw: string = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL): string {
   const url = new URL(raw);
   url.pathname = '';
+  url.search = '';
+  url.hash = '';
   return url.toString().replace(/\/+$/, '');
 }
 
@@ -28,10 +31,17 @@ export function databaseUrlFor(name: string): string {
   return `${baseUrl()}/${name}`;
 }
 
-/** Read a numeric port from the environment, falling back to `fallback`. */
+/** Read a numeric port from the environment, falling back to `fallback`. A
+ *  present-but-garbage value throws naming the variable instead of silently
+ *  becoming `--port NaN` on a daemon's command line. */
 export function portFromEnv(envVar: string, fallback: number): number {
   const raw = process.env[envVar];
-  return raw ? Number(raw) : fallback;
+  if (!raw) return fallback;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error(`${envVar} must be an integer TCP port, got ${JSON.stringify(raw)}`);
+  }
+  return port;
 }
 
 /** An OS-assigned free port, released before the caller binds it. There is a
@@ -107,7 +117,12 @@ export async function resetDb(opts: ResetDbOptions): Promise<TestDatabase> {
 
   const url = databaseUrlFor(name);
   const pool = createPool(url);
-  if (opts.migrate ?? true) await migrate(pool);
+  try {
+    if (opts.migrate ?? true) await migrate(pool);
+  } catch (err) {
+    await pool.end();
+    throw err;
+  }
 
   let ended = false;
   const end = async (): Promise<void> => {

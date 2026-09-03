@@ -6,14 +6,14 @@
    daemon is run through bun so it can import TypeScript task modules directly.
 
    Two daemon shapes are used across the scenarios:
-     - an API node (no --tasks flag) that serves HTTP and runs the lease reaper —
-       it survives the kills, so the scenario's client keeps working while
-       executors die;
-     - executor nodes (`--tasks <module> --no-serve`) that claim and run.
+      - an API node (no --tasks flag) that serves HTTP and runs the lease reaper —
+        it survives the kills, so the scenario's client keeps working while
+        executors die;
+      - executor nodes (`--tasks <module> --no-serve`) that claim and run.
    ============================================================================= */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { sleep, waitFor } from './poll';
+import { waitFor } from './poll';
 
 /** apps/worker's entry, run from source so `.ts` task modules just work. */
 const WORKER_ENTRY =
@@ -53,14 +53,14 @@ export interface Daemon {
   stop(graceMs?: number): Promise<void>;
 }
 
-function waitExit(proc: ChildProcess): Promise<void> {
-  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
-  return new Promise((r) => proc.once('exit', () => r()));
-}
-
-/** Spawn a daemon. Does NOT wait for readiness — see waitForHealth(). */
 export function spawnDaemon(opts: DaemonOptions): Daemon {
   const serve = opts.serve ?? true;
+  if (serve && opts.port === undefined) {
+    throw new Error(
+      'spawnDaemon: `port` is required when the daemon serves HTTP ' +
+        '(pass serve: false for an executor-only node, or freePort() for an ephemeral one)',
+    );
+  }
   const args: string[] = [WORKER_ENTRY];
   if (opts.tasks) args.push('--tasks', opts.tasks);
   if (serve) args.push('--port', String(opts.port));
@@ -81,38 +81,71 @@ export function spawnDaemon(opts: DaemonOptions): Daemon {
     env: { ...process.env, ...opts.env, DATABASE_URL: opts.databaseUrl },
     stdio: ['ignore', 'inherit', 'inherit'],
   });
-  proc.on('error', (err) => {
-    console.error(`\n✗ failed to spawn worker daemon: ${err.message}\n`);
-    process.exit(1);
+
+  // A failed spawn (ENOENT, EACCES) fires 'error' and may never fire 'exit' —
+  // surface it to whoever waits on the process instead of calling
+  // process.exit() from here, which would skip the scenario's teardown
+  // (see the design note in scenario.ts).
+  const spawnFailure = new Promise<never>((_resolve, reject) => {
+    proc.once('error', (err) => {
+      reject(new Error(`failed to spawn worker daemon: ${err.message}`, { cause: err }));
+    });
   });
+  // Keep the rejection "handled" even when nobody is mid-await; every waiter
+  // below still receives it.
+  void spawnFailure.catch(() => {});
+  const exited = new Promise<void>((resolve) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) resolve();
+    else proc.once('exit', () => resolve());
+  });
+  const waitExit = (): Promise<void> => Promise.race([exited, spawnFailure]);
 
   return {
     proc,
     url: serve ? `http://localhost:${opts.port}` : null,
     async kill(signal: NodeJS.Signals = 'SIGKILL') {
       proc.kill(signal);
-      await waitExit(proc);
+      await waitExit();
     },
     async stop(graceMs = 10_000) {
       proc.kill('SIGTERM');
-      const exited = await Promise.race([
-        waitExit(proc).then(() => true),
-        sleep(graceMs).then(() => false),
-      ]);
-      if (!exited) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let exitedFirst: boolean;
+      try {
+        exitedFirst = await Promise.race([
+          waitExit().then(() => true),
+          new Promise<false>((r) => {
+            timer = setTimeout(() => r(false), graceMs);
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (!exitedFirst) {
         proc.kill('SIGKILL');
-        await waitExit(proc);
+        await waitExit();
       }
     },
   };
 }
 
-/** Poll GET /api/v1/health until the daemon answers, or throw. */
+/**
+ * Poll GET /api/v1/health until the daemon answers, or throw. Each probe is
+ * bounded by the remaining deadline via AbortSignal.timeout — a daemon that
+ * accepts connections but never answers cannot park the loop inside `fetch`.
+ */
 export async function waitForHealth(url: string, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   await waitFor(
     `daemon at ${url} to become healthy`,
     timeoutMs,
-    async () => (await fetch(`${url}/api/v1/health`)).ok,
+    async () => {
+      const remaining = Math.max(0, deadline - Date.now());
+      const res = await fetch(`${url}/api/v1/health`, {
+        signal: AbortSignal.timeout(remaining),
+      });
+      return res.ok;
+    },
     { intervalMs: 150 },
   );
 }
@@ -120,7 +153,14 @@ export async function waitForHealth(url: string, timeoutMs = 30_000): Promise<vo
 /** Spawn a daemon and wait for its HTTP surface to answer. */
 export async function startDaemon(opts: DaemonOptions & { port: number }): Promise<Daemon> {
   const daemon = spawnDaemon(opts);
-  await waitForHealth(daemon.url!);
+  try {
+    await waitForHealth(daemon.url!);
+  } catch (err) {
+    // Nobody else owns the child yet — a daemon that never became healthy must
+    // not be left running as an orphan.
+    await daemon.kill().catch(() => {});
+    throw err;
+  }
   return daemon;
 }
 

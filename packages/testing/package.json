@@ -17,7 +17,8 @@
   "types": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "lint": "eslint --no-error-on-unmatched-pattern '**/*.{js,jsx,mjs,cjs,ts,tsx}'"
+    "lint": "eslint --no-error-on-unmatched-pattern '**/*.{js,jsx,mjs,cjs,ts,tsx}'",
+    "test": "vitest run"
   },
   "dependencies": {
     "@better-trigger/db": "workspace:*",

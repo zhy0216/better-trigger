@@ -7,6 +7,7 @@
    reached this status".
    ============================================================================= */
 import { AssertionFailure, describeError } from './assert';
+import { TERMINAL_STATUSES } from './invariants';
 
 /** Structural namespace shape — testing has no dependency on @better-trigger/core. */
 interface Namespace {
@@ -17,6 +18,16 @@ interface Namespace {
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Replaceable clock for the wait loops: injecting it lets a test drive the
+ * timeout / backoff / abort semantics deterministically (virtual time) instead
+ * of sleeping through wall-clock waits.
+ */
+export interface WaitClock {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
+
+/**
  * What one poll of a `waitFor` predicate concluded: satisfied, not yet, or
  * `{ abort }` — the state being waited for has become unreachable, so waiting
  * out the rest of the timeout can only turn a diagnosable failure into a slow
@@ -24,6 +35,9 @@ export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
  * will never be 'running' again no matter how long anyone waits.
  */
 export type WaitOutcome = boolean | { abort: string };
+
+/** Thrown by `waitFor` when the deadline passes (vs. an `{ abort }` verdict). */
+class WaitTimeout extends AssertionFailure {}
 
 /**
  * Poll `cond` until it returns true. Throws (→ scenario failure) on timeout,
@@ -36,13 +50,16 @@ export async function waitFor(
   label: string,
   timeoutMs: number,
   cond: () => Promise<WaitOutcome> | WaitOutcome,
-  opts: { intervalMs?: number } = {},
+  opts: { intervalMs?: number; clock?: WaitClock } = {},
 ): Promise<void> {
   const intervalMs = opts.intervalMs ?? 100;
-  const deadline = Date.now() + timeoutMs;
+  const clock = opts.clock;
+  const now = clock ? () => clock.now() : Date.now;
+  const nap = clock ? (ms: number) => clock.sleep(ms) : sleep;
+  const deadline = now() + timeoutMs;
   let lastError: unknown = null;
   let abort: string | null = null;
-  while (Date.now() < deadline) {
+  while (now() < deadline) {
     try {
       const outcome = await cond();
       if (outcome === true) return;
@@ -56,10 +73,10 @@ export async function waitFor(
     if (abort !== null) {
       throw new AssertionFailure(`gave up waiting for: ${label} — ${abort}`);
     }
-    await sleep(intervalMs);
+    await nap(Math.min(intervalMs, Math.max(0, deadline - now())));
   }
   const because = lastError ? ` (last error: ${describeError(lastError)})` : '';
-  throw new AssertionFailure(`timed out after ${timeoutMs}ms waiting for: ${label}${because}`);
+  throw new WaitTimeout(`timed out after ${timeoutMs}ms waiting for: ${label}${because}`);
 }
 
 /**
@@ -73,33 +90,53 @@ export type RunStatusReader =
   | ((runId: string) => Promise<string>)
   | { getRun(runId: string, namespace?: Namespace): Promise<{ status: string }> };
 
-function readStatus(reader: RunStatusReader): (runId: string) => Promise<string> {
+function readStatus(
+  reader: RunStatusReader,
+): (runId: string, namespace?: Namespace) => Promise<string> {
   if (typeof reader === 'function') return reader;
-  return async (runId) => (await reader.getRun(runId)).status;
+  return async (runId, namespace) => (await reader.getRun(runId, namespace)).status;
 }
 
-/** Poll a run until it reports `status`; throws on timeout. */
+/**
+ * Poll a run until it reports `status`; throws on timeout. A run observed in a
+ * terminal status aborts immediately (there is no coming back from it) and the
+ * `{ abort }` verdict's message is preserved rather than rewrapped as a
+ * generic timeout.
+ */
 export async function waitForStatus(
   reader: RunStatusReader,
   runId: string,
   status: string,
-  opts: { timeoutMs?: number; intervalMs?: number } = {},
+  opts: {
+    timeoutMs?: number;
+    intervalMs?: number;
+    namespace?: Namespace;
+    clock?: WaitClock;
+  } = {},
 ): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const get = readStatus(reader);
   let last = 'unknown';
-  await waitFor(
-    `run ${runId} to reach '${status}' (last seen '${last}')`,
-    timeoutMs,
-    async () => {
-      last = await get(runId);
-      return last === status;
-    },
-    { intervalMs: opts.intervalMs },
-  ).catch(() => {
-    throw new AssertionFailure(
-      `timed out after ${timeoutMs}ms waiting for run ${runId} to reach '${status}' ` +
-        `(last status: '${last}')`,
+  try {
+    await waitFor(
+      `run ${runId} to reach '${status}' (last seen '${last}')`,
+      timeoutMs,
+      async () => {
+        last = await get(runId, opts.namespace);
+        if (last !== status && (TERMINAL_STATUSES as readonly string[]).includes(last)) {
+          return { abort: `run reached terminal status '${last}'` };
+        }
+        return last === status;
+      },
+      { intervalMs: opts.intervalMs, clock: opts.clock },
     );
-  });
+  } catch (err) {
+    if (err instanceof WaitTimeout) {
+      throw new AssertionFailure(
+        `timed out after ${timeoutMs}ms waiting for run ${runId} to reach '${status}' ` +
+          `(last status: '${last}')`,
+      );
+    }
+    throw err;
+  }
 }

@@ -41,6 +41,6 @@ export {
   type StepRow,
 } from './invariants';
 export { createMarker, type Marker } from './marker';
-export { sleep, waitFor, waitForStatus, type RunStatusReader } from './poll';
+export { sleep, waitFor, waitForStatus, type RunStatusReader, type WaitClock } from './poll';
 export { countQueueRows, readLatestCodeVersion, waitForTasks } from './probe';
 export { runScenario, type Scenario, type ScenarioMeta } from './scenario';

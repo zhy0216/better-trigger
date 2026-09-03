@@ -15,7 +15,7 @@
 | 07 | [07-worker-runtime-executor-hardening.md](./done/07-worker-runtime-executor-hardening.md) | P2 | medium | ✅ 已完成 · ctx.wait 确定性参数错误被可重试化、startWorkerRuntime 库 API 跳过校验、背压日志打 "undefined"、静态资源整体缓冲、shebang 仅注入 bin、engines/target 对齐（T1–T5 全部落地） |
 | 08 | [08-web-robustness-perf-a11y.md](./done/08-web-robustness-perf-a11y.md) | P1 | medium | ✅ 已完成 · fetch 无超时杀死轮询、Ruler DOM 无界增长、Sparkline NaN、chevronUp 缺失、错误边界、a11y 与 key 修补 |
 | 09 | [09-web-schedules-reconciliation.md](./done/09-web-schedules-reconciliation.md) | P1 | medium | ✅ 已完成 · Schedules 乐观覆盖轮询确认即清除、并发点击按 id 串行化（序号 + 服务端确认值回滚）、Switch 可访问名 |
-| 10 | [10-testing-package-harness.md](./10-testing-package-harness.md) | P2 | medium | testing 包 10 处缺陷（超时/泄漏/孤儿进程/URL 解析）+ 注入式时钟与单元测试从零补齐 |
+| 10 | [10-testing-package-harness.md](./done/10-testing-package-harness.md) | P2 | medium | ✅ 已完成 · testing 包 harness 缺陷（waitForStatus 吞中止、探测无超时、--port undefined、stop 定时器残留、孤儿 daemon、spawn error 强退、URL query 泄漏、migrate 池泄漏、NaN 端口）修复 + 注入式时钟/namespace 转发 + 40 条自有单测接入 turbo |
 | 11 | [11-toolchain-ci-docs.md](./11-toolchain-ci-docs.md) | P2 | medium | 4 条 lint warning、root scripts 零 lint 覆盖、CI turbo 缓存与 SHA pin、docs PR 门禁、docker-compose PG 暴露、文档漂移 |
 
 ## 文件
@@ -31,7 +31,7 @@
 7. `07-worker-runtime-executor-hardening.md`（P2）✅ 已完成，归档至 `done/`
 8. `08-web-robustness-perf-a11y.md`（P1）✅ 已完成，归档至 `done/`
 9. `09-web-schedules-reconciliation.md`（P1）✅ 已完成，归档至 `done/`
-10. `10-testing-package-harness.md`（P2）
+10. `10-testing-package-harness.md`（P2）✅ 已完成，归档至 `done/`
 11. `11-toolchain-ci-docs.md`（P2）
 
 可并行轨道：{01} {02→04→05} {03} {06,07} {08,09} {10} {11}。
