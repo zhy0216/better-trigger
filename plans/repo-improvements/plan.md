@@ -92,3 +92,34 @@
 - **P3 前置**：testing 包虚拟时间（本轮 10 已注入 injectable clock 铺路）
 - **P4**：`better-trigger-worker migrate` 子命令
 - **P5 agent 层**、**P6 plugin interceptors / eslint-plugin**
+
+## 执行结果（2026-09-03，Herdr Workflow 并行执行）
+
+全部 11 个任务完成并合入 main（`git merge --ff-only`，逐任务 rebase + 协调器独立复核校验）。
+
+| todo | commit | 模型 |
+|------|--------|------|
+| 01 core-sdk-type-holes | c0940ea | flash |
+| 02 kernel-validation-boundaries | a3c67ab | flash |
+| 03 db-fk-indexes-and-checks | b2e315d | flash |
+| 04 kernel-cron-poison-and-takeover | 033ec80 | max |
+| 05 kernel-quality-clock-selfheal | 0b11c03 | max |
+| 06 worker-api-cli-hardening | 2fb3daf | flash |
+| 07 worker-runtime-executor-hardening | b1cfc53 | flash |
+| 08 web-robustness-perf-a11y | d28f0e7 | flash |
+| 09 web-schedules-reconciliation | ed958f4 | flash |
+| 10 testing-package-harness | 3dee02e | flash |
+| 11 toolchain-ci-docs | 93fff79 | flash |
+
+归档：11 个 todo 文件全部移入 `todos/done/`，`todos/README.md` 状态同步更新。
+
+最终校验（协调器在合入后的 main 上独立运行，全绿）：`bun run typecheck`（14/14）、`bun run lint`（9/9，**0 warning**——既有 4 条 worker 由 11 清零、1 条 web react-refresh 由 08 顺带修复）、`bun run build`（7/7）、`bun run test`（13/13 含首次入列的 testing 包）、`check:deps` / `check:drift` / `check:exports`。kernel 的 04/05 与 03 的迁移均在隔离真 PG 容器下复跑通过（05 的 94 个真 PG 用例含新增 clock-skew 套件）。
+
+过程记录：
+- 05 的 OpenCode 进程在实现中途崩溃一次，通过会话恢复（`-s`）续接完成，工作未丢失；累计时长因此超出 2 小时常规阈值，属崩溃恢复而非失控，特此说明。
+- 探索期记录的"4 条 lint warning"实为 5 条（另有 `RunView.tsx:321` react-refresh），由 08 在其文件范围内顺带清零。
+- 协调器曾观察到共享 PG（localhost:5432）上既有 `pg/cron-skew.test.ts` 在干净 main 即失败（宿主钟与容器钟漂移）；05 的 T1（写路径 DB 时钟）落地后该用例转绿。
+- 04 的一个已知语义决策：被投毒但仍有服务的 cron schedule 会先触发当次合法到期的 run 再被 NULL 隔离（在 todo 允许的处置范围内）。
+- 10 遗留提示：`fencing.ts:452` 一条 NOTE 描述已过时（对象 reader 现已支持 namespace），因越界未改。
+
+无 blocked / deferred 项；本轮创建的全部 Herdr workspace、worktree 与任务分支已清理。
