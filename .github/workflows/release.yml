@@ -8,11 +8,16 @@
 #
 #   core → db → kernel → sdk → worker   (worker ships last)
 #
-# Requires the NPM_TOKEN repository secret (an npm automation access token
-# with publish rights). The final push uses the workflow's GITHUB_TOKEN
-# (permissions: contents: write below); if `main` is branch-protected that
-# push is rejected and the tag must be pushed manually — every publish has
-# already succeeded at that point, so nothing gets re-run.
+# Publishes via npm trusted publishing (OIDC): the job's short-lived
+# id-token is exchanged for a one-time publish credential by npm >= 11.5.1,
+# and every tarball ships a signed provenance attestation pointing at this
+# repo, workflow and commit. No long-lived npm token is read anywhere here.
+# External prerequisite: the npm account must list this repo +
+# .github/workflows/release.yml as a trusted publisher for all five packages.
+# The final push uses the workflow's GITHUB_TOKEN (permissions:
+# contents: write below); if `main` is branch-protected that push is
+# rejected and the tag must be pushed manually — every publish has already
+# succeeded at that point, so nothing gets re-run.
 # =============================================================================
 name: Release
 
@@ -33,6 +38,8 @@ on:
 
 permissions:
   contents: write
+  # npm trusted publishing: the OIDC id-token is the ONLY publish credential.
+  id-token: write
 
 # P2-20 C4: publishing is the one CI step that cannot be undone, so two
 # overlapping dispatches interleaving across bump/publish is the failure mode
@@ -84,11 +91,35 @@ jobs:
           bun-version: 1.3.14
 
       # Node is only for npm (version bump + publish); builds and tests run
-      # under bun, like the main CI job.
+      # under bun, like the main CI job. No registry-url: it would make
+      # setup-node write an _authToken .npmrc, and trusted publishing must
+      # authenticate with the job's OIDC id-token instead. The default
+      # registry is already registry.npmjs.org.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 20
-          registry-url: https://registry.npmjs.org
+          node-version: 22
+
+      # npm trusted publishing needs Node >= 22.14 and npm >= 11.5.1. Pin
+      # npm exactly (setup-node's bundled npm is older than 11.5.1 on both
+      # the 20 and 24 lines) and assert both minimums before anything else
+      # touches the registry.
+      - name: Assert Node/npm meet the trusted publishing minimums
+        run: |
+          set -euo pipefail
+          npm install --global --no-audit --no-fund npm@11.5.1
+          node -e '
+            const cp = require("child_process");
+            const gte = (v, min) => {
+              const a = v.split(".").map(Number), b = min.split(".").map(Number);
+              for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+              return true;
+            };
+            const node = process.versions.node;
+            const npm = cp.execSync("npm -v", { encoding: "utf8" }).trim();
+            console.log("node " + node + " / npm " + npm);
+            if (!gte(node, "22.14.0")) throw new Error("npm trusted publishing requires Node >= 22.14");
+            if (!gte(npm, "11.5.1")) throw new Error("npm trusted publishing requires npm >= 11.5.1");
+          '
 
       # P2-20: same lockfile-keyed bun cache as ci.yml (see its comment).
       - name: Cache bun dependencies
@@ -253,23 +284,24 @@ jobs:
             }
           '
 
-      # Publish in the fixed dependency order. If any publish fails the
-      # workflow stops here: no commit, no tag. Retry with a NEW explicit
-      # version (npm refuses to overwrite a published version).
+      # Publish in the fixed dependency order via OIDC trusted publishing:
+      # npm exchanges the job's id-token (permissions above) for a one-time
+      # credential and signs a provenance attestation for each tarball. No
+      # long-lived token is read. If any publish fails the workflow stops
+      # here: no commit, no tag. Retry with a NEW explicit version (npm
+      # refuses to overwrite a published version).
       - name: Publish to npm (core → db → kernel → sdk → worker)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           # 1. core
-          npm publish --access public "$PACK_DIR"/better-trigger-core-*.tgz
+          npm publish --access public --provenance "$PACK_DIR"/better-trigger-core-*.tgz
           # 2. db
-          npm publish --access public "$PACK_DIR"/better-trigger-db-*.tgz
+          npm publish --access public --provenance "$PACK_DIR"/better-trigger-db-*.tgz
           # 3. kernel
-          npm publish --access public "$PACK_DIR"/better-trigger-kernel-*.tgz
+          npm publish --access public --provenance "$PACK_DIR"/better-trigger-kernel-*.tgz
           # 4. sdk (name on the registry is `better-trigger`)
-          npm publish --access public "$PACK_DIR"/better-trigger-[0-9]*.tgz
+          npm publish --access public --provenance "$PACK_DIR"/better-trigger-[0-9]*.tgz
           # 5. worker — last: depends on every package above
-          npm publish --access public "$PACK_DIR"/better-trigger-worker-*.tgz
+          npm publish --access public --provenance "$PACK_DIR"/better-trigger-worker-*.tgz
 
       # Only after every publish succeeded: record the bump. The committed
       # apps/worker/src/generated/build-info.ts was rewritten by the

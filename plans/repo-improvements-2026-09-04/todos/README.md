@@ -13,7 +13,7 @@
 | [05-wait-poll-contract.md](./done/05-wait-poll-contract.md) | P2 | easy | ✅ 已完成 · 保留 `pollMs` 兼容输入，但明确 daemon waiter 忽略它，只有 embedded kernel fallback 使用 |
 | [06-published-package-metadata.md](./06-published-package-metadata.md) | P2 | easy | 为五个发布包补齐 Node 运行时下限，并基于入口副作用审计声明 `sideEffects` |
 | [07-ci-delivery-gates.md](./07-ci-delivery-gates.md) | P1 | hard | 把 artifact、audit、容器和包元数据的针对性验收集中接入 CI |
-| [08-npm-trusted-publishing.md](./08-npm-trusted-publishing.md) | P2 | medium | 将 release workflow 迁移到 npm OIDC trusted publishing 与 provenance，移除长期 token 引用 |
+| [08-npm-trusted-publishing.md](./done/08-npm-trusted-publishing.md) | P2 | medium | ✅ 仓库侧已完成 · release 迁移到 npm OIDC trusted publishing（`id-token: write`、Node 22 + npm 11.5.1 断言、五包顺序发布带 `--provenance`、不再读长期 token）；T2 的 npm trusted publisher 配置与真实发布/provenance 验证 deferred，待维护者明确授权 |
 | [09-dependency-automation-security-policy.md](./done/09-dependency-automation-security-policy.md) | P2 | easy | ✅ 已完成 · Dependabot 周更（根 bun.lock npm 生态 + GitHub Actions 生态，minor/patch 分组、major 独立 PR、限并发、清晰 label/前缀、无自动合并）；根 `SECURITY.md` 发布支持版本与 GH Advisories 私下报告入口，无固定修复 SLA/个人邮箱 |
 
 ## 文件
@@ -27,7 +27,7 @@
 5. `05-wait-poll-contract.md`（P2，easy）✅ 已完成，归档至 `done/`。
 6. `06-published-package-metadata.md`（P2，easy）— 依赖 01、02；复用 01 的 pack/artifact guard，并避开与 02 对 `packages/db/package.json` 的并行修改。
 7. `07-ci-delivery-gates.md`（P1，hard）— 依赖 01、02、04、06；统一修改 `.github/workflows/ci.yml`。
-8. `08-npm-trusted-publishing.md`（P2，medium）— 依赖 01、02；另依赖 npm 账户侧为五个包配置 trusted publisher。
+8. `08-npm-trusted-publishing.md`（P2，medium）✅ 仓库侧已完成，归档至 `done/` — T1 迁移 release 到 OIDC trusted publishing + provenance；T2 依赖 npm 账户侧 trusted publisher 与维护者授权，deferred。
 9. `09-dependency-automation-security-policy.md`（P2，easy）✅ 已完成，归档至 `done/`。
 
 可并行轨道：首轮 `{01} {02} {03} {04}`；随后 `{03→05} {01+02→06} {02→09}`；`07` 在 01/02/04/06 完成后执行，`08` 在 01/02 与外部 npm 前置满足后可和 07/09 并行。

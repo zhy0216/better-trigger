@@ -21,3 +21,9 @@ difficulty: medium
 ## 本文件验证
 
 仓库侧：workflow YAML/actionlint、五包 build/pack/post-bump consistency dry-run、`rg 'NPM_TOKEN|NODE_AUTH_TOKEN' .github/workflows/release.yml`，以及 `bun run typecheck && bun run lint && bun run build && bun run test && bun run check:exports`。外部侧：仅在明确授权后验证一次 OIDC publish 和 npm provenance。
+
+## 执行记录（2026-09-04）
+
+- T1 仓库侧完成：`.github/workflows/release.yml` 增加 `id-token: write`（保留 `contents: write`）；publish 用 Node 22 + 固定安装 `npm@11.5.1`，并在运行时打印/断言 Node >= 22.14、npm >= 11.5.1；五个 tarball 仍按 core→db→kernel→sdk→worker 顺序发布且带 `--provenance`；不再读取 `secrets.NPM_TOKEN`/`NODE_AUTH_TOKEN`（`rg` 零命中），注释与 OIDC trusted publishing 一致；pack、post-bump consistency、发布顺序与成功后 commit/tag 防护未改动。setup-node 去掉 `registry-url` 以免写出 `_authToken` .npmrc 干扰 OIDC。
+- 验证通过：actionlint、五包 pack + clean-install + post-bump 依赖一致性 dry-run、`typecheck`/`lint`/`build`/`test`/`check:exports`/`check:deps` 全绿。
+- T2 deferred（外部前置，未获授权，不得执行）：npm 账户尚未为 `@better-trigger/core`、`@better-trigger/db`、`@better-trigger/kernel`、`better-trigger`、`@better-trigger/worker` 配置指向本仓库 + `.github/workflows/release.yml` 的 trusted publisher；真实 OIDC publish + provenance 验证与 GitHub 侧 `NPM_TOKEN` secret 删除均需维护者对具体测试版本的明确授权后由维护者操作，本 commit 不声称已完成任何账户侧变更。
