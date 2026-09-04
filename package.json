@@ -8,7 +8,7 @@
     "url": "git+https://github.com/zhy0216/better-trigger.git"
   },
   "homepage": "https://github.com/zhy0216/better-trigger#readme",
-  "packageManager": "bun@1.3.14",
+  "packageManager": "bun@1.4.0",
   "workspaces": [
     "apps/*",
     "packages/*",

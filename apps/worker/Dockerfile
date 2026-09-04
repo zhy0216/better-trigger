@@ -13,10 +13,10 @@
 # for it) so `docker compose up` executes a real task set on a machine that has
 # never run `bun install` — nothing is expected to be mounted from the host.
 # =============================================================================
-# Tag pinned to the repo's `packageManager` (bun@1.3.14) and CI's Bun version so
+# Tag pinned to the repo's `packageManager` (bun@1.4.0) and CI's Bun version so
 # the image build is reproducible. A digest pin needs a multi-arch update
 # policy first — deferred.
-FROM oven/bun:1.3.14-slim AS base
+FROM oven/bun:1.4.0-slim AS base
 WORKDIR /app
 
 # ---- manifests ---------------------------------------------------------------
@@ -95,7 +95,7 @@ RUN bun install --frozen-lockfile --production
 # so every COPY below is bun-owned and the tree is effectively read-only — no
 # world-writable /app, no `USER 0` fallback. Mount your own task module `:ro`
 # alongside its node_modules (see docker-compose.yml) and it resolves the same.
-FROM oven/bun:1.3.14-slim AS runtime
+FROM oven/bun:1.4.0-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=4848

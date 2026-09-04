@@ -2,7 +2,7 @@
 
 ## Bun is the package manager and runtime
 
-Use Bun exclusively for this repository. The project declares Bun `1.3.14` in
+Use Bun exclusively for this repository. The project declares Bun `1.4.0` in
 `package.json`; use that version (or a compatible newer Bun release) for local
 work.
 
