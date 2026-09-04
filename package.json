@@ -25,6 +25,7 @@
     "check:audit": "node scripts/check-audit.mjs",
     "check:deps": "node scripts/check-deps.mjs",
     "check:drift": "node scripts/check-drift.mjs",
+    "check:pkg-meta": "node scripts/check-package-meta.mjs",
     "check:exports": "bun run --cwd apps/worker check:artifacts && publint --strict packages/core && publint --strict packages/db && publint --strict packages/kernel && publint --strict packages/sdk && publint --strict apps/worker && attw --pack packages/core && attw --pack packages/db && attw --pack packages/kernel && attw --pack packages/sdk && attw --pack apps/worker"
   },
   "devDependencies": {

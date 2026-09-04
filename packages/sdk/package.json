@@ -34,6 +34,7 @@
     }
   },
   "files": ["dist", "README.md"],
+  "sideEffects": ["./dist/*.js", "./dist/*.cjs"],
   "keywords": [
     "trigger",
     "background-jobs",

@@ -19,6 +19,7 @@
     }
   },
   "files": ["dist"],
+  "sideEffects": false,
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -26,6 +27,9 @@
     "directory": "packages/core"
   },
   "homepage": "https://github.com/zhy0216/better-trigger#readme",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
