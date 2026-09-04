@@ -383,9 +383,110 @@ describe('disabling the rate limit', () => {
     expect(cfg).toEqual({ rps: 50, globalRps: 200, readRps: 200, readGlobalRps: 1000, burst: 200 });
   });
 
+  it('a negative BURST falls back to the default capacity', () => {
+    process.env.BETTER_TRIGGER_RATE_LIMIT_BURST = '-2';
+    expect(rateLimitConfigFromEnv().burst).toBe(200);
+  });
+
   it('burst defaults to the larger of the two rates', () => {
     process.env.BETTER_TRIGGER_RATE_LIMIT_RPS = '7';
     process.env.BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS = '12';
     expect(rateLimitConfigFromEnv().burst).toBe(12);
+  });
+
+  it('disabling both write rates does not zero the read capacity', () => {
+    // RPS=0 / GLOBAL_RPS=0 disable only the write dimensions; the read buckets
+    // must keep a real capacity instead of a derived burst of 0.
+    process.env.BETTER_TRIGGER_RATE_LIMIT_RPS = '0';
+    process.env.BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS = '0';
+    expect(rateLimitConfigFromEnv().burst).toBe(1000);
+  });
+
+  it('BURST=0 disables the whole limiter: writes and reads run without bound', async () => {
+    // Rates stay at their strict write defaults, so only the burst short-circuit
+    // can keep 12 consecutive same-bucket requests out of 429. Covers per-key
+    // (two source addresses, two keys) and the global buckets.
+    process.env.BETTER_TRIGGER_RATE_LIMIT_BURST = '0';
+    delete process.env.BETTER_TRIGGER_API_KEYS;
+    delete process.env.BETTER_TRIGGER_API_KEY;
+    const app = makeApp();
+    const get = (path: string, key?: string) =>
+      new Request(`http://localhost:4848${path}`, {
+        headers: key !== undefined ? { Authorization: `Bearer ${key}` } : undefined,
+      });
+    const bodies: Record<string, unknown> = {
+      '/api/v1/trigger': { taskId: 't', payload: null },
+      '/api/v1/batch-trigger': { items: [] },
+      '/api/v1/schedules/sched_1': { enabled: true },
+    };
+    const req = (path: string, method: string, key?: string) =>
+      new Request(`http://localhost:4848${path}`, {
+        method,
+        headers: {
+          ...(bodies[path] !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          ...(key !== undefined ? { Authorization: `Bearer ${key}` } : {}),
+        },
+        body: bodies[path] !== undefined ? JSON.stringify(bodies[path]) : undefined,
+      });
+    const sweep = async (keys: Array<string | undefined>) => {
+      for (let i = 0; i < 6; i++) {
+        for (const key of keys) {
+          // All five write endpoints + the shared read bucket, with the
+          // per-key and global write buckets in play on every pass.
+          expect((await app.fetch(req('/api/v1/trigger', 'POST', key))).status).toBe(200);
+          expect((await app.fetch(req('/api/v1/batch-trigger', 'POST', key))).status).toBe(200);
+          expect((await app.fetch(req('/api/v1/runs/run_1/cancel', 'POST', key))).status).toBe(200);
+          expect((await app.fetch(req('/api/v1/runs/run_1/retry', 'POST', key))).status).toBe(200);
+          expect((await app.fetch(req('/api/v1/schedules/sched_1', 'PATCH', key))).status).not.toBe(429);
+        }
+        expect((await app.fetch(get('/api/v1/tasks', keys[0]))).status).toBe(200);
+        expect((await app.fetch(get('/api/v1/runs', keys[keys.length - 1]))).status).toBe(200);
+      }
+    };
+    // Keyless: the per-IP bucket identity. With keys configured: per-key.
+    await sweep([undefined]);
+    try {
+      process.env.BETTER_TRIGGER_API_KEYS = 'key-a,key-b';
+      await sweep(['key-a', 'key-b']);
+    } finally {
+      delete process.env.BETTER_TRIGGER_API_KEYS;
+    }
+  });
+
+  it('flipping BURST 0→1 re-arms the limiter on the very next request', async () => {
+    perKeyOnly();
+    process.env.BETTER_TRIGGER_RATE_LIMIT_BURST = '0';
+    const app = makeApp();
+    const hit = async () =>
+      (await app.fetch(post('/api/v1/trigger', { taskId: 't', payload: null }))).status;
+    expect(await hit()).toBe(200);
+    expect(await hit()).toBe(200); // burst 0: no bucket is consumed
+    process.env.BETTER_TRIGGER_RATE_LIMIT_BURST = '1';
+    expect(await hit()).toBe(200); // the (fresh) bucket now holds one token
+    expect(await hit()).toBe(429);
+  });
+
+  it('flipping BURST 1→0 clears an exhausted bucket on the very next request', async () => {
+    perKeyOnly(); // BURST=1: the second request 429s
+    const app = makeApp();
+    const hit = async () =>
+      (await app.fetch(post('/api/v1/trigger', { taskId: 't', payload: null }))).status;
+    expect(await hit()).toBe(200);
+    expect(await hit()).toBe(429);
+    process.env.BETTER_TRIGGER_RATE_LIMIT_BURST = '0';
+    expect(await hit()).toBe(200);
+    expect(await hit()).toBe(200);
+  });
+
+  it('BURST=1 keeps throttling the second request of the same bucket', async () => {
+    // The disable path must not leak: one token per key plus an explicit
+    // burst of 1 still 429s the same bucket's second request.
+    perKeyOnly();
+    process.env.BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS = '1';
+    const app = makeApp();
+    const hit = async () =>
+      (await app.fetch(post('/api/v1/trigger', { taskId: 't', payload: null }))).status;
+    expect(await hit()).toBe(200);
+    expect(await hit()).toBe(429);
   });
 });

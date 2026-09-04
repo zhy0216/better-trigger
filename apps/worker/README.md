@@ -202,7 +202,7 @@ across modules are an error unless they are literally the same handle.
 | `BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS` | `200` | Per-endpoint token-bucket rate over all keys (tokens per second). `0` disables the global bucket. In-memory per process — see "Network exposure" for the multi-daemon boundary |
 | `BETTER_TRIGGER_RATE_LIMIT_READ_RPS` | `200` | Per-key token-bucket rate across the read surface — every `/api/v1` read: `/runs/:id/record`, `/runs/:id/result`, `/runs`, `/tasks`, `/schedules`, `/workers`, `/metrics` (tokens per second). Deliberately loose (see "Rate limiting"); `0` disables the per-key read bucket |
 | `BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS` | `1000` | Token-bucket rate over all keys across the whole read surface (tokens per second). `0` disables the global read bucket. In-memory per process, like the write buckets |
-| `BETTER_TRIGGER_RATE_LIMIT_BURST` | _larger write rate above_ | Token-bucket capacity (max burst) for both buckets; negative or unparseable values fall back to the default, `0` is honoured |
+| `BETTER_TRIGGER_RATE_LIMIT_BURST` | _larger write rate above_ | Token-bucket capacity (max burst) for both buckets; `0` disables the whole rate limiter (no buckets are created or consumed); negative or unparseable values fall back to the default |
 | `BETTER_TRIGGER_PIN_CODE_VERSION` | _(unset)_ | `1`/`true` = same as `--pin-code-version` |
 | `BETTER_TRIGGER_VERSION` | _(build identity)_ | Code version reported on registration. Defaults to the build identity (`0.1.0+<git sha>`, the same value `/health` reports; version-only outside git); setting it overrides the worker-level version AND every per-task version at once |
 
@@ -359,8 +359,11 @@ the global bucket remains the fleet-wide backstop.
 Knobs (see the env table): `BETTER_TRIGGER_RATE_LIMIT_RPS` (per key per
 endpoint, default 50/s), `BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS` (per endpoint
 over all keys, default 200/s), `BETTER_TRIGGER_RATE_LIMIT_BURST` (bucket
-capacity, default the larger of the two rates). `0` disables that bucket —
-e.g. set both to `0` for the pre-O6 behaviour.
+capacity, default the larger of the two rates; when both write rates are `0`
+the default follows the larger read rate instead). `0` on a rate knob disables
+that bucket — e.g. set both write knobs to `0` for the pre-O6 behaviour; `0`
+on `BETTER_TRIGGER_RATE_LIMIT_BURST` disables the whole limiter (no bucket is
+created or consumed).
 
 **Reads are bucketed too, but loosely (p1-14).** Every `/api/v1` read — `GET
 /runs/:id/record`, `/runs/:id/result`, `/runs`, `/tasks`, `/schedules`,

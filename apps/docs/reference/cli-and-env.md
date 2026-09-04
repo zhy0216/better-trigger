@@ -64,10 +64,11 @@ source.
 | `BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS` | `200` | Per-endpoint global write rate |
 | `BETTER_TRIGGER_RATE_LIMIT_READ_RPS` | `200` | Per-key read rate |
 | `BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS` | `1000` | Global read rate |
-| `BETTER_TRIGGER_RATE_LIMIT_BURST` | _larger write rate_ | Token-bucket capacity |
+| `BETTER_TRIGGER_RATE_LIMIT_BURST` | _larger write rate_ | Token-bucket capacity; `0` disables the whole limiter |
 | `BETTER_TRIGGER_PIN_CODE_VERSION` | _(unset)_ | `1`/`true` = `--pin-code-version` |
 | `BETTER_TRIGGER_VERSION` | _(build identity)_ | Code version reported on registration (overrides per-task versions) |
 
-Set any rate-limit knob to `0` to disable that bucket. An absent, zero,
-negative or unparseable value falls back to the default rather than switching a
-cap off.
+Set an RPS rate-limit knob to `0` to disable just that bucket; set
+`BETTER_TRIGGER_RATE_LIMIT_BURST` to `0` to disable the whole limiter (no
+bucket is created or consumed). An absent, negative or unparseable value falls
+back to the default rather than switching a cap off.

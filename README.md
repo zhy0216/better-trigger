@@ -222,8 +222,9 @@ detail):
   old requests drain, remove the old one.
 - **Rate limiting** — `trigger` / `batch-trigger` / `retry` / `cancel` are
   token-bucket limited per key and per endpoint (defaults 50/s and 200/s,
-  knobs `BETTER_TRIGGER_RATE_LIMIT_RPS` / `_GLOBAL_RPS` / `_BURST`, `0`
-  disables), answered `429 rate_limited` — a hostile or misconfigured client
+  knobs `BETTER_TRIGGER_RATE_LIMIT_RPS` / `_GLOBAL_RPS` / `_BURST`: `0` on a
+  rate knob disables that bucket, `0` on `_BURST` disables the limiter
+  entirely), answered `429 rate_limited` — a hostile or misconfigured client
   cannot create runs without bound. In-memory per process: for an exact
   fleet-wide cap, rate-limit at the reverse proxy.
 - **Audit log** — one JSON line per API request to stdout (`requestId`, key

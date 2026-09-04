@@ -60,8 +60,8 @@ daemon 二进制是 `better-trigger-worker`。每个 flag 都有对应的环境�
 | `BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS` | `200` | 每端点全局写限流 |
 | `BETTER_TRIGGER_RATE_LIMIT_READ_RPS` | `200` | 每 key 读限流 |
 | `BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS` | `1000` | 全局读限流 |
-| `BETTER_TRIGGER_RATE_LIMIT_BURST` | _较大写速率_ | 令牌桶容量 |
+| `BETTER_TRIGGER_RATE_LIMIT_BURST` | _较大写速率_ | 令牌桶容量；`0` 禁用整个限流器 |
 | `BETTER_TRIGGER_PIN_CODE_VERSION` | _(未设)_ | `1`/`true` = `--pin-code-version` |
 | `BETTER_TRIGGER_VERSION` | _(构建身份)_ | 注册时上报的代码版本（覆盖所有 per-task 版本） |
 
-任意限流旋钮设 `0` 即关闭该桶。缺失、为零、为负或无法解析的值回落到默认值，而不会把上限关掉。
+将 RPS 限流旋钮设为 `0` 只关闭对应维度的桶；将 `BETTER_TRIGGER_RATE_LIMIT_BURST` 设为 `0` 会禁用整个限流器（不创建也不消费任何桶）。缺失、为负或无法解析的值回落到默认值，而不会把上限关掉。

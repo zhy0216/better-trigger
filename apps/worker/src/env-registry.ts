@@ -198,7 +198,7 @@ export const ENV_KNOBS: EnvKnob[] = [
     name: 'BETTER_TRIGGER_RATE_LIMIT_BURST',
     category: 'rate-limit',
     default: 'larger write rate above',
-    help: 'Token-bucket burst capacity (max burst) for both write and read buckets. 0 is honoured; negative or unparseable values fall back to the default.',
+    help: 'Token-bucket burst capacity (max burst) for both write and read buckets. 0 disables the whole rate limiter (no buckets are created or consumed); negative or unparseable values fall back to the default.',
   },
 
   // ---- tuning -----------------------------------------------------------

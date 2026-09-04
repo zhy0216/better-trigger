@@ -39,14 +39,16 @@
    process, not an exact fleet-wide meter — for an exact fleet-wide cap,
    put the limit at the reverse proxy (see README "Network exposure").
 
-   Configuration (all read per request, so tests can flip them; 0 disables
-   that dimension; negative or unparseable values fall back to the default):
+   Configuration (all read per request, so tests can flip them; 0 on a rate
+   knob disables that dimension, 0 on BURST disables the whole limiter — no
+   bucket is created or consumed on that path; negative or unparseable
+   values fall back to the default):
 
      BETTER_TRIGGER_RATE_LIMIT_RPS              per-key write tokens/s  (default 50)
      BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS       per-endpoint write cap (default 200)
      BETTER_TRIGGER_RATE_LIMIT_READ_RPS         per-key read tokens/s   (default 200)
      BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS  read cap over all keys  (default 1000)
-     BETTER_TRIGGER_RATE_LIMIT_BURST            bucket capacity/burst   (default = larger write rate)
+     BETTER_TRIGGER_RATE_LIMIT_BURST            bucket capacity/burst   (default = larger write rate; 0 disables the limiter)
 
    Over the limit the middleware throws KernelError('rate_limited') →
    429 `{ error: { code: 'rate_limited', message } }` via app.onError, and
@@ -107,7 +109,8 @@ export interface RateLimitConfig {
   readRps: number;
   /** Tokens per second across all reads over all keys; 0 disables the global bucket. */
   readGlobalRps: number;
-  /** Token bucket capacity (max burst), shared by all four dimensions. */
+  /** Token bucket capacity (max burst), shared by all four dimensions;
+   *  0 (explicitly set) disables the entire limiter. */
   burst: number;
 }
 
@@ -133,7 +136,14 @@ export function rateLimitConfigFromEnv(env = process.env): RateLimitConfig {
     env.BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS,
     DEFAULT_READ_GLOBAL_RPS,
   );
-  const burst = envInt(env.BETTER_TRIGGER_RATE_LIMIT_BURST, Math.max(rps, globalRps));
+  // A burst of 0 disables the whole limiter (see the middleware). The derived
+  // default must not hit 0 just because both WRITE rates are 0 while the read
+  // buckets are still active — a zero-capacity bucket would 429 every read.
+  const writeMax = Math.max(rps, globalRps);
+  const burst = envInt(
+    env.BETTER_TRIGGER_RATE_LIMIT_BURST,
+    writeMax > 0 ? writeMax : Math.max(readRps, readGlobalRps),
+  );
   return { rps, globalRps, readRps, readGlobalRps, burst };
 }
 
@@ -213,6 +223,10 @@ export function rateLimitMiddleware(now?: () => number): MiddlewareHandler<{ Var
     const endpoint = endpointOf(c.req.method, c.req.path);
     if (endpoint === null) return next();
     const cfg = rateLimitConfigFromEnv();
+    // `BURST=0` disables the entire limiter: short-circuit before the bucket
+    // identity is even computed, so no per-key or global read/write bucket is
+    // created or consumed on this path.
+    if (cfg.burst === 0) return next();
     // Per-key identity: an authenticated key is its fingerprint; with no key
     // configured the per-key dimension falls back to the source address so one
     // local process exhausting the rate cannot starve its neighbours (p2-31).
