@@ -1,0 +1,49 @@
+# Dependency automation for the Bun workspace monorepo (plan F9).
+# Single root bun.lock covers apps/*, packages/* and examples/*, so the npm
+# ecosystem is configured once at the repo root; no per-package directories.
+# Version updates are grouped per ecosystem for minor/patch; majors stay in
+# individual PRs so toolchain breakage (Vitest, tsdown, ...) is reviewed one
+# step at a time. No auto-merge and no CI bypass is configured here.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+    commit-message:
+      prefix: "deps(npm)"
+    groups:
+      npm-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "deps(ci)"
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

@@ -21,3 +21,12 @@ difficulty: easy
 ## 本文件验证
 
 校验 `.github/dependabot.yml` YAML/schema 与 `SECURITY.md` 链接；确认 `bun run typecheck && bun run lint && bun run build && bun run test` 不受配置文件新增影响。
+
+## 完成状态
+
+✅ 已完成（2026-09-04）。
+
+- T1：新增 `.github/dependabot.yml`：npm 生态仅配置根目录 `/`（单一根 `bun.lock` 覆盖 apps/*、packages/*、examples/*）；GitHub Actions 生态独立配置；均为每周一 UTC 06:00；minor+patch 按生态分组合并（`update-types` 不含 major，major 保持独立 PR）；`open-pull-requests-limit` 分别限 10/5；label `dependencies`+生态标签，commit 前缀 `deps(npm)`/`deps(ci)`；无自动合并、无绕过 CI 配置。通过 `Bun.YAML.parse` 与 schemastore dependabot-2.0 JSON schema（ajv-cli）校验。
+- T2：新增根 `SECURITY.md`：支持版本表（0.1.x，仅最新发布线）、GitHub Security Advisories 私下报告入口（`https://github.com/zhy0216/better-trigger/security/advisories/new`，HTTP 200）、报告应含信息、首次响应为"数个工作日内确认"的非承诺边界、明确不承诺固定修复 SLA、要求修复前不开公开 issue；无个人邮箱/虚构联系人。仓库根路径符合 GitHub 安全政策识别约定。
+- 未触碰 `.github/workflows/ci.yml`、`release.yml`、package.json audit 相关脚本。
+- 校验：`bun run typecheck && bun run lint && bun run build && bun run test` 全绿（13/13 tasks，worker 485 tests passed）。
