@@ -146,6 +146,29 @@ describe('waiter registry', () => {
     reg.stop();
   });
 
+  // F6: `pollMs` is deprecated/inert on the daemon path — the shared sweep is
+  // the registry's own fixed interval, never a per-request knob. Two waiters
+  // registered with wildly different opts.pollMs values must still share the
+  // registry-level sweep: the fast value does not speed it into per-waiter
+  // polling, the slow value does not stall it.
+  it('opts.pollMs changes neither the sweep cadence nor the query count', async () => {
+    const { reg, runs, selects } = registry(); // registry sweep every 20ms
+    runs.set('run_p1', { id: 'run_p1', status: 'running' });
+    const p1 = reg.register('run_p1', NS, { timeoutMs: 5_000, pollMs: 50 });
+    const p2 = reg.register('run_p1', NS, { timeoutMs: 5_000, pollMs: 5_000 });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(selects()).toBe(2); // two initial reads only
+    await new Promise((r) => setTimeout(r, 60));
+    const delta = selects() - 2;
+    expect(delta).toBeGreaterThanOrEqual(1); // the 5000 waiter did not stall the sweep
+    expect(delta).toBeLessThanOrEqual(4); // the 50 waiter did not multiply queries (≈3 batched sweeps)
+    runs.set('run_p1', { id: 'run_p1', status: 'completed', output: 'ok' });
+    const [r1, r2] = await Promise.all([p1, p2]); // one sweep settles both
+    expect(r1.status).toBe('completed');
+    expect(r2.status).toBe('completed');
+    reg.stop();
+  });
+
   // p2-18 C4: sweep had no re-entrancy guard — a sweep slower than pollMs
   // (degraded database) kept launching overlapping batch reads. isPending
   // already prevented double-settling, but the redundant concurrent queries

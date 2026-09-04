@@ -15,6 +15,7 @@ import type { Pool } from 'pg';
 import type { Kernel } from '@better-trigger/kernel';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
+import type { WaiterRegistry } from '../src/waiters';
 
 /** Records what the routes reached, so we can assert nothing did on a 400. */
 interface Calls {
@@ -24,7 +25,7 @@ interface Calls {
   waitForResult: unknown[];
 }
 
-const makeApp = () => {
+const makeApp = (waiters?: WaiterRegistry) => {
   const calls: Calls = { trigger: [], batchTrigger: [], query: [], waitForResult: [] };
   const kernel = {
     trigger: async (input: unknown) => {
@@ -49,7 +50,7 @@ const makeApp = () => {
         : { rows: [] };
     },
   } as unknown as Pool;
-  return { app: createApp({ kernel, pool }), calls };
+  return { app: createApp(waiters ? { kernel, pool, waiters } : { kernel, pool }), calls };
 };
 
 const send = (method: string, path: string, body?: string) =>
@@ -291,5 +292,43 @@ describe('GET /runs query params', () => {
     };
     expect(highOpts.timeoutMs).toBe(30_000);
     expect(highOpts.pollMs).toBe(5_000);
+  });
+});
+
+/* ------------------------------------------------------- F6: waiter path */
+
+describe('GET /runs/:id/result with a daemon waiter registry (F6)', () => {
+  const stubWaiters = () => {
+    const registers: unknown[][] = [];
+    const waiters = {
+      register: async (...args: unknown[]) => {
+        registers.push(args);
+        return { status: 'completed', output: 'ok' };
+      },
+      resolve: async () => {},
+      pending: () => 0,
+      stop: () => {},
+    } as unknown as WaiterRegistry;
+    return { waiters, registers };
+  };
+
+  it('never forwards pollMs to the registry, whatever the query says', async () => {
+    const { waiters, registers } = stubWaiters();
+    const { app, calls } = makeApp(waiters);
+    // Same registry, two pollMs values far apart: both requests must be
+    // accepted (no 400 — the query stays legal for old SDKs) and the
+    // registration must carry only the real wait budget. The shared sweep is
+    // the registry's own fixed interval; a single request cannot tune it,
+    // and nothing pretends otherwise in the args.
+    expect((await app.fetch(get('/runs/run_1/result?timeoutMs=1000&pollMs=50'))).status).toBe(200);
+    expect((await app.fetch(get('/runs/run_1/result?timeoutMs=1000&pollMs=5000'))).status).toBe(200);
+    expect(registers).toHaveLength(2);
+    for (const args of registers) {
+      const opts = args[2] as Record<string, unknown>;
+      expect(opts).toEqual({ timeoutMs: 1000 });
+      expect('pollMs' in opts).toBe(false);
+    }
+    // And the kernel poll loop is not used at all on this path.
+    expect(calls.waitForResult).toHaveLength(0);
   });
 });

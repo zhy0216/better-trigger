@@ -5,8 +5,10 @@
 > (claim + lease/fencing;fencing 语义见 architecture.md),中间没有协议。
 > §5 的 REST 形状仍在用,并且现在**也是 SDK 的传输面**(`betterTrigger({url})`),另加两个端点:
 > `GET /runs/:id/record`(单个 run 行)与 `GET /runs/:id/result?timeoutMs=&pollMs=`(服务端 long-poll 到终态;
-> 内部已改为等待者注册表(`apps/worker/src/waiters.ts`)+ `terminal` 通知即时结算,`pollMs` 现在是**共享**
-> 兜底扫描的间隔(默认 1s),不再是每等待者各跑一条 `pollMs` SELECT —— 轮询代价的完整数字见
+> 内部已改为等待者注册表(`apps/worker/src/waiters.ts`)+ `terminal` 通知即时结算。daemon 路径上
+> `pollMs` 已 **deprecated/inert**(F6):共享兜底扫描是注册表自身的固定间隔(默认 1s),任何单个请求的
+> `pollMs` 都调节不了它;该 query 仅为兼容旧客户端继续接受(不报 400),且只对没有注册表的 embedded
+> kernel fallback(`kernel.waitForResult`)生效 —— 轮询代价的完整数字见
 > architecture.md「P2 · 轮询代价」)。
 > `configure()`/`BETTER_TRIGGER_API_URL` 不复存在,改为 `betterTrigger({ url })` / `BETTER_TRIGGER_URL`。
 > **§3 引擎语义(重放不变量、退避公式、suspend/resume、cron、并发)继续有效且规范。**

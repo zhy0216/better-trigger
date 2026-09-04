@@ -550,7 +550,7 @@ describe('waitForResult — long-poll slicing (p2-36)', () => {
   });
 });
 
-describe('waitForResult — namespace + pollMs propagation (p2-36)', () => {
+describe('waitForResult — namespace + compat pollMs query (p2-36)', () => {
   it('sends no query when polling with an undefined namespace', async () => {
     const { fetch, calls } = scriptedFetch([terminalResponse('completed', { ok: 1 })]);
     const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
@@ -561,7 +561,10 @@ describe('waitForResult — namespace + pollMs propagation (p2-36)', () => {
     expect(url.searchParams.has('env')).toBe(false);
   });
 
-  it('sends the namespace and pollMs on every long-poll query', async () => {
+  // F6: pollMs stays on the wire for old-server compatibility, but it is
+  // inert on a daemon (fixed shared sweep) — the test pins that the SDK
+  // forwards it, not that it controls anything server-side.
+  it('sends the namespace and the compat pollMs on every long-poll query', async () => {
     const { fetch, calls } = scriptedFetch([terminalResponse('completed', { ok: 1 })]);
     const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
     await trigger.waitForResult(

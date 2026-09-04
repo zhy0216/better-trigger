@@ -10,7 +10,7 @@
 | [02-deterministic-dependency-audit.md](./done/02-deterministic-dependency-audit.md) | P1 | medium | ✅ 已完成 · `check:audit` 固定官方 registry 并按 advisory+解析版本+lock 依赖链精确报告（0.25.x 安全 esbuild 不误报）；vitepress→vite ^6.4.3、@esbuild-kit/core-utils→esbuild ^0.25.12 最小 override 清除 1 high + 3 moderate，docs build/dev、db:generate、drift 全绿 |
 | [03-rate-limit-zero-contract.md](./done/03-rate-limit-zero-contract.md) | P1 | easy | ✅ 已完成 · 将 `BETTER_TRIGGER_RATE_LIMIT_BURST=0` 统一为真正禁用限流，并同步测试与中英文说明 |
 | [04-non-root-pinned-worker-image.md](./done/04-non-root-pinned-worker-image.md) ✅ | P1 | medium | 固定 Bun runtime 镜像并让 worker 容器默认以非 root 用户运行（已完成：base/runtime 对齐 `oven/bun:1.3.14-slim`，runtime `USER bun`（uid/gid 1000）+ 全量 `COPY --chown`；本地 docker 验证通过 T1/T2） |
-| [05-wait-poll-contract.md](./05-wait-poll-contract.md) | P2 | easy | 保留 `pollMs` 兼容输入，但明确 daemon waiter 忽略它，只有 embedded kernel fallback 使用 |
+| [05-wait-poll-contract.md](./done/05-wait-poll-contract.md) | P2 | easy | ✅ 已完成 · 保留 `pollMs` 兼容输入，但明确 daemon waiter 忽略它，只有 embedded kernel fallback 使用 |
 | [06-published-package-metadata.md](./06-published-package-metadata.md) | P2 | easy | 为五个发布包补齐 Node 运行时下限，并基于入口副作用审计声明 `sideEffects` |
 | [07-ci-delivery-gates.md](./07-ci-delivery-gates.md) | P1 | hard | 把 artifact、audit、容器和包元数据的针对性验收集中接入 CI |
 | [08-npm-trusted-publishing.md](./08-npm-trusted-publishing.md) | P2 | medium | 将 release workflow 迁移到 npm OIDC trusted publishing 与 provenance，移除长期 token 引用 |
@@ -24,7 +24,7 @@
 2. `02-deterministic-dependency-audit.md`（P1，medium）✅ 已完成，归档至 `done/`。
 3. `03-rate-limit-zero-contract.md`（P1，easy）✅ 已完成，归档至 `done/`。
 4. `04-non-root-pinned-worker-image.md`（P1，medium）✅ 已完成，归档至 `done/` — 无依赖。
-5. `05-wait-poll-contract.md`（P2，easy）— 依赖 03；两者共享 `apps/worker/README.md`。
+5. `05-wait-poll-contract.md`（P2，easy）✅ 已完成，归档至 `done/`。
 6. `06-published-package-metadata.md`（P2，easy）— 依赖 01、02；复用 01 的 pack/artifact guard，并避开与 02 对 `packages/db/package.json` 的并行修改。
 7. `07-ci-delivery-gates.md`（P1，hard）— 依赖 01、02、04、06；统一修改 `.github/workflows/ci.yml`。
 8. `08-npm-trusted-publishing.md`（P2，medium）— 依赖 01、02；另依赖 npm 账户侧为五个包配置 trusted publisher。

@@ -76,29 +76,37 @@ export function runRoutes(deps: { kernel: Kernel; waiters?: WaiterRegistry }): H
     // them should not turn a wait into a 400). The choice is explicit here via
     // onInvalid:'clamp' — the API's OTHER numeric params refuse garbage (p2-32).
     const timeoutMs = intQuery(c, 'timeoutMs', { min: 0, max: MAX_RESULT_WAIT_MS, fallback: 5_000 }, { onInvalid: 'clamp' });
-    const pollMs = intQuery(c, 'pollMs', { min: 50, max: 5_000, fallback: 250 }, { onInvalid: 'clamp' });
     const namespace = namespaceFromQuery(c);
-    const opts = { timeoutMs, pollMs };
     // PF2: with an in-process waiter registry, N concurrent waiters share one
-    // 1s sweep (plus terminal notifications) instead of N independent 4-QPS
-    // poll loops. The kernel poll stays as the fallback for embedded hosts
-    // that do not own a registry.
-    if (!deps.waiters) {
-      const result = await kernel.waitForResult(id, namespace, opts);
-      return c.json(result);
+    // fixed 1s sweep (plus terminal notifications) instead of N independent
+    // 4-QPS poll loops. `?pollMs=` is deprecated on this path (F6): the query
+    // is still accepted for old clients (never a 400), but it is deliberately
+    // not parsed or forwarded here — the shared sweep belongs to the registry
+    // and a single request must not pretend to retune it. Only the real wait
+    // budget (timeoutMs) reaches register().
+    if (deps.waiters) {
+      // p1-14: the registry is told about the request's abort signal so a client
+      // that disconnects mid-poll frees its waiter immediately instead of
+      // hanging to the deadline on a dead socket. There is nothing to deliver to
+      // a gone client, so an abort answers 499 (Client Closed Request) rather
+      // than surfacing as a 500.
+      try {
+        const result = await deps.waiters.register(id, namespace, { timeoutMs }, c.req.raw.signal);
+        return c.json(result);
+      } catch (err) {
+        if (err instanceof ResultWaitAbortedError) return new Response(null, { status: 499 });
+        throw err;
+      }
     }
-    // p1-14: the registry is told about the request's abort signal so a client
-    // that disconnects mid-poll frees its waiter immediately instead of
-    // hanging to the deadline on a dead socket. There is nothing to deliver to
-    // a gone client, so an abort answers 499 (Client Closed Request) rather
-    // than surfacing as a 500.
-    try {
-      const result = await deps.waiters.register(id, namespace, opts, c.req.raw.signal);
-      return c.json(result);
-    } catch (err) {
-      if (err instanceof ResultWaitAbortedError) return new Response(null, { status: 499 });
-      throw err;
-    }
+    // Embedded fallback (no registry): pollMs still tunes the kernel's own
+    // polling loop, clamped so garbage never turns into a busy-spin or a
+    // 400. Tolerance params: out-of-range falls back to the bounds, not a 400
+    // (the SDK always sends well-formed values; a proxy mangling them should
+    // not turn a wait into an error) — explicit via onInvalid:'clamp', unlike
+    // the API's OTHER numeric params which refuse garbage (p2-32).
+    const pollMs = intQuery(c, 'pollMs', { min: 50, max: 5_000, fallback: 250 }, { onInvalid: 'clamp' });
+    const result = await kernel.waitForResult(id, namespace, { timeoutMs, pollMs });
+    return c.json(result);
   });
 
   return app;

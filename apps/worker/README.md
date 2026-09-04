@@ -612,6 +612,12 @@ SDK also parses are aliases of the read models in `@better-trigger/core`.
 | `POST /runs/:id/cancel` | `{ ok }` |
 | `POST /runs/:id/retry` | `{ runId }` (failed/canceled only; creates a fresh run) |
 
+`pollMs` is a deprecated compatibility knob: the daemon's waiter registry runs
+one fixed shared sweep (default 1s) that no single request tunes, so on a
+daemon the parameter is accepted (never a 400 from old clients) but inert. It
+only affects the embedded kernel `waitForResult` fallback on hosts without a
+waiter registry, where it is clamped to 50–5000ms.
+
 ### Dashboard API
 
 | Method · Path | Response |

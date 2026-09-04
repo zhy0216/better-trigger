@@ -443,6 +443,11 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
      * is rejected as a config error rather than arming a deadline that never (or
      * immediately) fires. `Infinity` is honored as "wait indefinitely" — every
      * hop still caps at MAX_LONGPOLL_MS, but the loop has no terminal deadline.
+     *
+     * `pollMs` is a deprecated compatibility knob (F6): it is still sent as a
+     * query for old servers, but it is inert on a daemon — the in-process
+     * waiter registry runs one fixed shared sweep no single request tunes. It
+     * only affects an embedded host without a registry (kernel fallback).
      */
     async waitForResult<T = unknown>(
       runId: string,
@@ -478,6 +483,9 @@ export function betterTrigger(options: BetterTriggerOptions = {}): BetterTrigger
         );
       }
       const deadline = Date.now() + timeoutMs;
+      // Compat passthrough (F6): forwarded verbatim as ?pollMs=. Daemons
+      // ignore it (fixed shared sweep); only an embedded no-registry kernel
+      // fallback would read it.
       const pollMs = opts?.pollMs;
       // Backoff base: 200ms, ×2 per retry, capped at 2s, ±20% jitter.
       let backoffMs = 200;

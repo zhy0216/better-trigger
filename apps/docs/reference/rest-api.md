@@ -21,6 +21,11 @@ ISO-8601 strings. Types are the authoritative ones in `apps/worker/src/types.ts`
 | `POST /runs/:id/cancel` | `{ ok }` |
 | `POST /runs/:id/retry` | `{ runId }` (failed/canceled only; creates a fresh run) |
 
+`pollMs` is a deprecated compatibility knob: on a daemon the result wait runs
+on one fixed shared sweep that no single request tunes, so the parameter is
+accepted (never a 400 from old clients) but inert. It only affects the
+embedded `kernel.waitForResult` fallback on hosts without a waiter registry.
+
 `POST /runs/:id/retry` also accepts an optional `Idempotency-Key` request
 header (at most 200 characters — longer is a `400 bad_request`, whitespace-only
 counts as absent). The key scopes the retry to
