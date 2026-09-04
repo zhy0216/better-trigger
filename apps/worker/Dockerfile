@@ -13,7 +13,10 @@
 # for it) so `docker compose up` executes a real task set on a machine that has
 # never run `bun install` — nothing is expected to be mounted from the host.
 # =============================================================================
-FROM oven/bun:1.3-slim AS base
+# Tag pinned to the repo's `packageManager` (bun@1.3.14) and CI's Bun version so
+# the image build is reproducible. A digest pin needs a multi-arch update
+# policy first — deferred.
+FROM oven/bun:1.3.14-slim AS base
 WORKDIR /app
 
 # ---- manifests ---------------------------------------------------------------
@@ -87,7 +90,12 @@ COPY --from=manifests /app ./
 RUN bun install --frozen-lockfile --production
 
 # ---- runtime ---------------------------------------------------------------
-FROM oven/bun:1.3-slim AS runtime
+# Runs as the slim image's built-in `bun` user (uid/gid 1000), not root. The
+# daemon never writes to disk (Postgres holds all state; static.ts only reads),
+# so every COPY below is bun-owned and the tree is effectively read-only — no
+# world-writable /app, no `USER 0` fallback. Mount your own task module `:ro`
+# alongside its node_modules (see docker-compose.yml) and it resolves the same.
+FROM oven/bun:1.3.14-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=4848
@@ -102,24 +110,24 @@ ENV BETTER_TRIGGER_HOST=0.0.0.0
 # from the production install. core is the one package with no dependency tree
 # to copy at all (zero runtime deps, so bun never creates packages/core/
 # node_modules) — that absence is the guarantee check:deps enforces.
-COPY --from=prod-deps /app/node_modules ./node_modules
-COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/packages/core/dist packages/core/dist
-COPY --from=build /app/packages/core/package.json packages/core/package.json
-COPY --from=build /app/packages/kernel/dist packages/kernel/dist
-COPY --from=build /app/packages/kernel/package.json packages/kernel/package.json
-COPY --from=prod-deps /app/packages/kernel/node_modules packages/kernel/node_modules
-COPY --from=build /app/packages/db/dist packages/db/dist
+COPY --chown=bun:bun --from=prod-deps /app/node_modules ./node_modules
+COPY --chown=bun:bun --from=build /app/package.json ./package.json
+COPY --chown=bun:bun --from=build /app/packages/core/dist packages/core/dist
+COPY --chown=bun:bun --from=build /app/packages/core/package.json packages/core/package.json
+COPY --chown=bun:bun --from=build /app/packages/kernel/dist packages/kernel/dist
+COPY --chown=bun:bun --from=build /app/packages/kernel/package.json packages/kernel/package.json
+COPY --chown=bun:bun --from=prod-deps /app/packages/kernel/node_modules packages/kernel/node_modules
+COPY --chown=bun:bun --from=build /app/packages/db/dist packages/db/dist
 # migrations are applied at boot; migrate() resolves them relative to db/dist.
-COPY --from=build /app/packages/db/migrations packages/db/migrations
-COPY --from=build /app/packages/db/package.json packages/db/package.json
-COPY --from=prod-deps /app/packages/db/node_modules packages/db/node_modules
-COPY --from=build /app/packages/sdk/dist packages/sdk/dist
-COPY --from=build /app/packages/sdk/package.json packages/sdk/package.json
-COPY --from=prod-deps /app/packages/sdk/node_modules packages/sdk/node_modules
-COPY --from=build /app/apps/worker/dist apps/worker/dist
-COPY --from=build /app/apps/worker/package.json apps/worker/package.json
-COPY --from=prod-deps /app/apps/worker/node_modules apps/worker/node_modules
+COPY --chown=bun:bun --from=build /app/packages/db/migrations packages/db/migrations
+COPY --chown=bun:bun --from=build /app/packages/db/package.json packages/db/package.json
+COPY --chown=bun:bun --from=prod-deps /app/packages/db/node_modules packages/db/node_modules
+COPY --chown=bun:bun --from=build /app/packages/sdk/dist packages/sdk/dist
+COPY --chown=bun:bun --from=build /app/packages/sdk/package.json packages/sdk/package.json
+COPY --chown=bun:bun --from=prod-deps /app/packages/sdk/node_modules packages/sdk/node_modules
+COPY --chown=bun:bun --from=build /app/apps/worker/dist apps/worker/dist
+COPY --chown=bun:bun --from=build /app/apps/worker/package.json apps/worker/package.json
+COPY --chown=bun:bun --from=prod-deps /app/apps/worker/node_modules apps/worker/node_modules
 
 # The example task set, so the image is executable on its own. Its sources need
 # no build step (bun runs the TypeScript), so they come straight from the build
@@ -130,9 +138,13 @@ COPY --from=prod-deps /app/apps/worker/node_modules apps/worker/node_modules
 # install never linked the example's devDependencies (@better-trigger/testing &c.)
 # at all here — nothing in src/ imports them, and the acceptance harnesses are
 # not part of the image.
-COPY --from=prod-deps /app/examples/basic/node_modules examples/basic/node_modules
-COPY examples/basic/package.json examples/basic/package.json
-COPY examples/basic/src examples/basic/src
+COPY --chown=bun:bun --from=prod-deps /app/examples/basic/node_modules examples/basic/node_modules
+COPY --chown=bun:bun examples/basic/package.json examples/basic/package.json
+COPY --chown=bun:bun examples/basic/src examples/basic/src
+
+# Drop to the non-root user for everything the container actually runs
+# (main.js, the healthcheck, task loading).
+USER bun
 
 EXPOSE 4848
 

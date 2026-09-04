@@ -9,7 +9,7 @@
 | [01-reproducible-worker-artifacts.md](./01-reproducible-worker-artifacts.md) | P1 | hard | 修正 worker 构建身份的缓存输入与 tracked source 污染，并阻止 orphan chunk、旧 sourcemap 和旧 SHA 进入发布物 |
 | [02-deterministic-dependency-audit.md](./02-deterministic-dependency-audit.md) | P1 | medium | 固定官方 registry 的安全审计入口，修复 VitePress/Drizzle Kit 工具链中的已知 high/moderate advisory |
 | [03-rate-limit-zero-contract.md](./03-rate-limit-zero-contract.md) | P1 | easy | 将 `BETTER_TRIGGER_RATE_LIMIT_BURST=0` 统一为真正禁用限流，并同步测试与中英文说明 |
-| [04-non-root-pinned-worker-image.md](./04-non-root-pinned-worker-image.md) | P1 | medium | 固定 Bun runtime 镜像并让 worker 容器默认以非 root 用户运行 |
+| [04-non-root-pinned-worker-image.md](./done/04-non-root-pinned-worker-image.md) ✅ | P1 | medium | 固定 Bun runtime 镜像并让 worker 容器默认以非 root 用户运行（已完成：base/runtime 对齐 `oven/bun:1.3.14-slim`，runtime `USER bun`（uid/gid 1000）+ 全量 `COPY --chown`；本地 docker 验证通过 T1/T2） |
 | [05-wait-poll-contract.md](./05-wait-poll-contract.md) | P2 | easy | 保留 `pollMs` 兼容输入，但明确 daemon waiter 忽略它，只有 embedded kernel fallback 使用 |
 | [06-published-package-metadata.md](./06-published-package-metadata.md) | P2 | easy | 为五个发布包补齐 Node 运行时下限，并基于入口副作用审计声明 `sideEffects` |
 | [07-ci-delivery-gates.md](./07-ci-delivery-gates.md) | P1 | hard | 把 artifact、audit、容器和包元数据的针对性验收集中接入 CI |
