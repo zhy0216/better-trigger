@@ -152,3 +152,22 @@ bun run check:exports
 - GitHub Advisory：`GHSA-fx2h-pf6j-xcff`、`GHSA-4w7w-66w2-5vf9`、`GHSA-v6wh-96g9-6wx3`、`GHSA-67mh-4wv8-2f99`
 - npm trusted publishing：<https://docs.npmjs.com/trusted-publishers/>
 - npm provenance：<https://docs.npmjs.com/generating-provenance-statements/>
+
+## 执行结果（2026-09-04/05 Herdr 并行收尾）
+
+9 个 todo 已全部合入 `main`（`34551d8` → `716b994`），各一个 worktree/agent/commit；`todos/` 下仅剩 `README.md`，9 文件均已归档到 `todos/done/`。
+
+| todo | commit | 说明 |
+|---|---|---|
+| 04 non-root worker image（P1/medium，opencode flash） | `6185653` | base/runtime 对齐 `oven/bun:1.3.14-slim`（后由 Bun1.4 任务升到 `1.4.0-slim`），runtime `USER bun` + 全量 `COPY --chown`，docker 验证 T1/T2 |
+| 03 rate-limit zero（P1/easy，flash） | `cc1af25` | `BURST=0` 禁用整套 token-bucket，文档统一为 0 disables |
+| 02 dependency audit（P1/medium，flash） | `2cc9a76` | `check:audit` 固定官方 registry，vite→^6.4.3 / esbuild→^0.25.12 最小 override，清 1 high+3 moderate；副作用：bun.lock v1→v3 |
+| 01 reproducible artifacts（P1/hard，codex yolo + gpt-5.6-sol） | `98dc582` | provenance 改 bundler define、无 tracked 写入、worker build 缓存禁用、artifact guard（33 dist/36 pack） |
+| 05 wait poll（P2/easy，flash） | `9510dfc` | daemon 不传 `pollMs`，仅 embedded fallback 使用，文档统一 |
+| 09 dep automation（P2/easy，flash） | `641f4cc` | Dependabot 周更 + 根 `SECURITY.md` |
+| 08 trusted publishing（P2/medium，flash） | `5718c33` | release 切 OIDC + provenance，不读长期 token；T2 外部发布/secret 删除 deferred 待授权 |
+| 06 package metadata（P2/easy，flash） | `73d664a` | 五包 `engines >=18` + 审计 `sideEffects`，新增 `check:pkg-meta` 40 项 |
+| Bun 1.4 pin（计划外，用户决策：保持 v3 lockfile，升级 pin） | `147e782` | packageManager/Dockerfile/CI/docs/release/agent.md `1.3.14`→`1.4.0`，消除 `UnknownLockfileVersion` |
+| 07 CI gates（P1/hard，codex yolo + gpt-5.6-sol） | `716b994` | ci.yml 接 audit/provenance/metadata/Node18-22 smoke 与非 root runtime smoke；曾被 Bun/lockfile 阻断，pin 升级后全绿归档 |
+
+Blocked/deferred：08-T2（npm trusted publisher 配置、真实 OIDC 发布与 provenance 验证、`NPM_TOKEN` 删除）待维护者对具体测试包/版本明确授权；F10/F11 仍为 roadmap 未执行。残留资源：无（本轮 10 个 workspace/worktree/分支已全部关闭删除）。最终 `git status --short` 为空，未 push、未创建 PR。
