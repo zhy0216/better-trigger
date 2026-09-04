@@ -22,6 +22,7 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "test:acceptance": "turbo run test:acceptance",
+    "check:audit": "node scripts/check-audit.mjs",
     "check:deps": "node scripts/check-deps.mjs",
     "check:drift": "node scripts/check-drift.mjs",
     "check:exports": "publint --strict packages/core && publint --strict packages/db && publint --strict packages/kernel && publint --strict packages/sdk && publint --strict apps/worker && attw --pack packages/core && attw --pack packages/db && attw --pack packages/kernel && attw --pack packages/sdk && attw --pack apps/worker"
@@ -36,6 +37,14 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.69.0",
     "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "vitepress": {
+      "vite": "^6.4.3"
+    },
+    "@esbuild-kit/core-utils": {
+      "esbuild": "^0.25.12"
+    }
   },
   "engines": {
     "node": ">=18"
