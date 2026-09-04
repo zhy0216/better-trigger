@@ -1,17 +1,17 @@
 # =============================================================================
-# CI — packaging guards, build, typecheck, unit tests, then the acceptance
-# harnesses.
+# CI — dependency audit, reproducible packaging guards, build, typecheck, unit
+# tests, then the acceptance harnesses and a real container runtime smoke.
 #
 # The acceptance suite (examples/basic/scripts) is the project's real
 # correctness evidence and needs a live Postgres, hence the service container.
 # `bun run test` is the DB-free half (pure functions) and runs first so a broken
 # unit-level invariant fails fast, before ~minutes of fault injection.
 #
-# The two packaging guards bracket the build because that is what they need:
+# The packaging guards bracket the build because that is what they need:
 # `check:deps` only reads package.json (so it runs first, failing in ms), while
-# `check:exports` resolves the actual dist/ artifacts and therefore has to run
-# after it. `check:drift` joins the cheap end: it reads packages/db only and
-# needs no database.
+# the artifact/export/package-metadata checks resolve the actual dist/tarballs
+# and therefore run after it. `check:drift` joins the cheap end: it reads
+# packages/db only and needs no database.
 # =============================================================================
 name: CI
 
@@ -65,8 +65,10 @@ jobs:
       # --frozen-lockfile against an identical tree is a fast no-op and
       # repairs any drift the cache could not carry. `.turbo/cache` rides the
       # same key: the core→db→kernel→sdk→worker→web build chain is otherwise
-      # rebuilt in full by every job, and turbo re-hashes inputs on restore so
-      # a stale entry is a miss rather than a false hit.
+      # rebuilt in full by every job. The worker build deliberately opts out of
+      # Turbo caching because its identity also follows live Git dirty state;
+      # the provenance-rollover build below proves that boundary while the
+      # other packages continue to use the restored cache.
       - name: Cache bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -83,6 +85,13 @@ jobs:
 
       - name: Install
         run: bun install --frozen-lockfile
+
+      # F3: check-audit pins the official npm advisory endpoint internally,
+      # resolves findings against the exact bun.lock chains, and never permits
+      # a high/critical exception. Keep it directly after install so a known
+      # vulnerability fails before either build or test consumes runner time.
+      - name: Dependency security audit
+        run: bun run check:audit
 
       # O5 (P2-20 extended it to .ts/.tsx): every workspace runs the shared
       # lint baseline (eslint.config.mjs) — web picks it up from its own
@@ -106,19 +115,41 @@ jobs:
       - name: Migration drift
         run: bun run check:drift
 
-      - name: Build
+      # F1/F2: exercise the real build boundary twice without clearing the
+      # restored Turbo cache. The first build stamps a previous-SHA fixture;
+      # the second must clean both that identity and a synthetic orphan before
+      # stamping the exact commit under test. check:artifacts walks the final
+      # entry/chunk/map graph AND Bun's pack list, so these assertions cover the
+      # bytes that health, metrics, workers.code_version and npm receive.
+      - name: Build + provenance rollover guard
         env:
-          # O4 build provenance: write-build-info.mjs prefers this trusted env
-          # over the live git checkout, so the build metadata (health, metrics,
-          # workers.code_version) is stamped with the exact commit under test.
-          BT_GIT_SHA: ${{ github.sha }}
-        run: bun run build
+          PREVIOUS_BUILD_SHA: 0000000000000000000000000000000000000000
+        run: |
+          set -euo pipefail
+          export BT_GIT_SHA="$PREVIOUS_BUILD_SHA"
+          bun run build
+          bun run --cwd apps/worker check:artifacts \
+            --expected-sha "$PREVIOUS_BUILD_SHA"
+
+          cp apps/worker/dist/index.js apps/worker/dist/runtime-ci-orphan.js
+          export BT_GIT_SHA="$GITHUB_SHA"
+          bun run build
+          bun run --cwd apps/worker check:artifacts \
+            --expected-sha "$GITHUB_SHA" \
+            --reject-sha "$PREVIOUS_BUILD_SHA"
 
       # publint + attw on the built tarballs: the dual ESM/CJS maps and the
       # ./internal + worker/embedded subpaths are the kind of thing that only
       # breaks after publish.
       - name: Package exports
         run: bun run check:exports
+
+      # F7: pack all five public packages, verify engines/sideEffects from the
+      # tarball manifests, exercise every ESM/CJS entry from a clean install,
+      # and prove the audited tree-shaking behavior. The Node matrix below
+      # reuses this same script rather than carrying a second manifest checker.
+      - name: Package metadata
+        run: bun run check:pkg-meta
 
       - name: Typecheck
         run: bun run typecheck
@@ -208,12 +239,11 @@ jobs:
       - name: Acceptance harnesses
         run: bun run test:acceptance
 
-  # Edge-import matrix: the SDK's engines field promises Node >= 18 and
-  # src/als.ts exists (three-tier lazy loading) precisely to smooth over
-  # Node version differences — but the main job only ever runs the tarball
-  # smoke on the runner's unpinned Node. This job pins Node 18/20/22 and
-  # imports every published entrypoint, ESM and CJS, on each: the dual
-  # package/exports fallback paths get exercised the way consumers hit them.
+  # Consumer matrix: every published package promises Node >= 18. The shared
+  # check:pkg-meta script packs all five tarballs, verifies engines/sideEffects
+  # in those tarballs, clean-installs the complete graph, and imports every
+  # public entry under process.execPath. Pinning Node 18/20/22 here therefore
+  # tests the actual consumer runtime rather than the Bun build toolchain.
   node-smoke:
     name: node-smoke (node ${{ matrix.node }})
     runs-on: ubuntu-latest
@@ -264,51 +294,18 @@ jobs:
           BT_GIT_SHA: ${{ github.sha }}
         run: bun run --bun build
 
-      # Lean version of the main job's O4 smoke: pack all five tarballs
-      # (bun pm pack rewrites workspace:* to exact versions), install them
-      # from a clean temp dir, then assert every published entry resolves
-      # and exports under the MATRIX Node — not bun. No --help / stale-dist
-      # checks here; those stay in the main job.
-      - name: Pack + edge-import smoke
-        run: |
-          set -euo pipefail
-          pack_dir=$(mktemp -d)
-          for pkg in packages/core packages/kernel packages/db packages/sdk apps/worker; do
-            (cd "$pkg" && bun pm pack --destination "$pack_dir" --quiet)
-          done
-          install_dir=$(mktemp -d)
-          (
-            cd "$install_dir"
-            npm init -y >/dev/null 2>&1
-            npm install --no-audit --no-fund "$pack_dir"/*.tgz
-          )
-          # SDK entry, both module systems.
-          (cd "$install_dir" && node -e \
-            "const bt = require('better-trigger'); if (typeof bt.task !== 'function') process.exit(1)")
-          (cd "$install_dir" && node --input-type=module -e \
-            "import('better-trigger').then((m) => { if (typeof m.task !== 'function') process.exit(1) })")
-          # Embedded worker subpath, both module systems (resolution and
-          # export shape only — starting it would need Postgres).
-          (cd "$install_dir" && node -e \
-            "const e = require('@better-trigger/worker/embedded'); if (typeof e.createEmbeddedRuntime !== 'function') process.exit(1)")
-          (cd "$install_dir" && node --input-type=module -e \
-            "import('@better-trigger/worker/embedded').then((m) => { if (typeof m.createEmbeddedRuntime !== 'function') process.exit(1) })")
-          # core / db / kernel entrypoints, require + import once each.
-          for pkg in @better-trigger/core @better-trigger/db @better-trigger/kernel; do
-            (cd "$install_dir" && node -e \
-              "if (typeof require('$pkg') !== 'object') process.exit(1)")
-            (cd "$install_dir" && node --input-type=module -e \
-              "import('$pkg').then((m) => { if (typeof m !== 'object') process.exit(1) })")
-          done
+      # Tree-shaking behavior is Bun-bundler-specific and is covered once in
+      # the main job. Manifest and ESM/CJS entry checks still run on every
+      # matrix Node through process.execPath.
+      - name: Pack + metadata + edge-import smoke
+        run: bun run check:pkg-meta -- --no-shake
 
-  # P2-20 C3: apps/worker/Dockerfile is the only image docker-compose ships,
-  # and no workflow ever built it — a broken Dockerfile reached users through
-  # `docker compose up`, not through CI. Build only: no push, no run (a compose
-  # smoke would need the whole stack; a silently broken build is what actually
-  # regressed). The build runs inside docker with its own install, so the
-  # actions/cache above does not apply here.
+  # apps/worker/Dockerfile is the image docker-compose ships. Build it without
+  # pushing, then run it with an internal-only PostgreSQL network: this catches
+  # runtime USER/permission, migration, task loading, deep-readiness and signal
+  # handling regressions that a successful image build cannot see.
   docker:
-    name: docker build (worker image)
+    name: docker build + runtime smoke (worker image)
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -322,3 +319,134 @@ jobs:
             --build-arg GIT_SHA="$GITHUB_SHA" \
             -t better-trigger-worker:ci \
             .
+
+      - name: Runtime smoke (non-root + PostgreSQL + graceful shutdown)
+        env:
+          WORKER_IMAGE: better-trigger-worker:ci
+        run: |
+          set -euo pipefail
+
+          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          network="better-trigger-ci-${suffix}"
+          postgres_container="better-trigger-postgres-${suffix}"
+          worker_container="better-trigger-worker-${suffix}"
+
+          cleanup() {
+            exit_status=$?
+            cleanup_status=0
+            trap - EXIT
+            for container in "$worker_container" "$postgres_container"; do
+              if docker container inspect "$container" >/dev/null 2>&1; then
+                docker rm --force "$container" >/dev/null || cleanup_status=1
+              fi
+            done
+            if docker network inspect "$network" >/dev/null 2>&1; then
+              docker network rm "$network" >/dev/null || cleanup_status=1
+            fi
+            if ((exit_status == 0 && cleanup_status != 0)); then
+              exit_status=$cleanup_status
+            fi
+            exit "$exit_status"
+          }
+          trap cleanup EXIT
+
+          runtime_uid="$(
+            docker run --rm --entrypoint bun "$WORKER_IMAGE" \
+              -e 'process.stdout.write(String(process.getuid?.() ?? 0))'
+          )"
+          configured_user="$(docker image inspect --format '{{.Config.User}}' "$WORKER_IMAGE")"
+          [[ "$runtime_uid" =~ ^[0-9]+$ ]] && ((runtime_uid != 0))
+          [[ -n "$configured_user" && "$configured_user" != "root" && "$configured_user" != "0" ]]
+
+          docker network create --internal "$network" >/dev/null
+          docker run --detach \
+            --name "$postgres_container" \
+            --network "$network" \
+            --network-alias postgres \
+            --env POSTGRES_USER=postgres \
+            --env POSTGRES_PASSWORD=postgres \
+            --env POSTGRES_DB=better_trigger \
+            postgres:16-alpine >/dev/null
+
+          postgres_ready=0
+          for _ in {1..30}; do
+            if docker exec "$postgres_container" \
+              pg_isready -U postgres -d better_trigger >/dev/null 2>&1; then
+              postgres_ready=1
+              break
+            fi
+            sleep 1
+          done
+          ((postgres_ready == 1))
+
+          task_source="${GITHUB_WORKSPACE}/examples/basic/src/tasks.ts"
+          [[ -r "$task_source" ]]
+          docker run --detach \
+            --name "$worker_container" \
+            --network "$network" \
+            --mount "type=bind,source=${task_source},target=/app/examples/basic/src/tasks.ts,readonly" \
+            --env DATABASE_URL=postgres://postgres:postgres@postgres:5432/better_trigger \
+            --env BETTER_TRIGGER_ALLOW_UNAUTHENTICATED=1 \
+            "$WORKER_IMAGE" \
+            bun apps/worker/dist/main.js \
+              --tasks /app/examples/basic/src/tasks.ts >/dev/null
+
+          [[ -z "$(docker port "$worker_container")" ]]
+          mount_rw="$(
+            docker inspect \
+              --format '{{range .Mounts}}{{if eq .Destination "/app/examples/basic/src/tasks.ts"}}{{.RW}}{{end}}{{end}}' \
+              "$worker_container"
+          )"
+          [[ "$mount_rw" == "false" ]]
+
+          health_status=""
+          for _ in {1..60}; do
+            container_state="$(docker inspect --format '{{.State.Status}}' "$worker_container")"
+            if [[ "$container_state" != "running" ]]; then
+              docker logs "$worker_container"
+              exit 1
+            fi
+            if health_status="$(
+              docker exec "$worker_container" bun -e '
+                const response = await fetch("http://127.0.0.1:4848/api/v1/health?deep=1");
+                const body = await response.json();
+                process.stdout.write(String(response.status));
+                process.exit(response.ok && body?.db?.ok === true ? 0 : 1);
+              ' 2>/dev/null
+            )"; then
+              break
+            fi
+            sleep 1
+          done
+          [[ "$health_status" =~ ^2[0-9][0-9]$ ]]
+
+          migration_count="$(
+            docker exec "$postgres_container" \
+              psql -U postgres -d better_trigger -Atqc \
+                'SELECT count(*) FROM drizzle.__drizzle_migrations'
+          )"
+          [[ "$migration_count" =~ ^[1-9][0-9]*$ ]]
+
+          docker exec "$worker_container" bun -e '
+            const response = await fetch("http://127.0.0.1:4848/api/v1/tasks");
+            const body = await response.json();
+            const loaded = response.ok && Array.isArray(body?.tasks) &&
+              body.tasks.some((task) => task.id === "hello-world");
+            if (!loaded) {
+              console.error(JSON.stringify({ status: response.status, body }));
+              process.exit(1);
+            }
+          '
+
+          shutdown_started=$SECONDS
+          docker stop --time 40 "$worker_container" >/dev/null
+          shutdown_elapsed=$((SECONDS - shutdown_started))
+          worker_exit="$(docker inspect --format '{{.State.ExitCode}}' "$worker_container")"
+          worker_logs="$(docker logs "$worker_container" 2>&1)"
+          [[ "$worker_exit" == "0" ]]
+          ((shutdown_elapsed < 40))
+          grep -Fq '[better-trigger] SIGTERM received, draining...' <<<"$worker_logs"
+          grep -Fq '[better-trigger] handoff complete:' <<<"$worker_logs"
+          printf 'uid=%s user=%s deep-health=%s migrations=%s shutdown=%ss exit=%s\n' \
+            "$runtime_uid" "$configured_user" "$health_status" "$migration_count" \
+            "$shutdown_elapsed" "$worker_exit"
