@@ -1,5 +1,14 @@
 import { defineConfig } from 'tsdown';
 
+const buildVersion = process.env.BT_WORKER_BUILD_VERSION;
+const buildSha = process.env.BT_WORKER_BUILD_SHA;
+
+if (!buildVersion) {
+  throw new Error(
+    'worker build metadata is missing; run `bun run build` instead of invoking tsdown directly',
+  );
+}
+
 export default defineConfig({
   entry: ['src/index.ts', 'src/embedded.ts', 'src/main.ts'],
   format: ['esm', 'cjs'],
@@ -7,6 +16,13 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   fixedExtension: false,
+  // scripts/write-build-info.mjs resolves these once, then passes them to the
+  // bundler without ever rewriting tracked source. An empty SHA means the
+  // explicit version-only fallback used outside a Git checkout.
+  define: {
+    __BETTER_TRIGGER_BUILD_VERSION__: JSON.stringify(buildVersion),
+    __BETTER_TRIGGER_BUILD_SHA__: buildSha ? JSON.stringify(buildSha) : 'undefined',
+  },
   // Matches engines.node in package.json (">=18"): the whole monorepo builds to
   // the Node 18 floor and the runtime never reaches for a Node 20-only API.
   target: 'node18',

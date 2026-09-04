@@ -1,24 +1,24 @@
 /* =============================================================================
    @better-trigger/worker — build metadata tests (O4).
 
-   The whole point of the injected build-info module is that version and build
-   cannot drift apart: BUILD_VERSION is read from apps/worker/package.json at
-   build time (the same file that ships in the published tarball), and
-   BUILD_SHA is the commit the build was made from. These tests pin the
-   contract: the injected version always equals the package version, and the
-   sha, when present, is a git short sha (with the -dirty marker when the
-   build came from an uncommitted tree).
+   Source execution intentionally uses version-only metadata. The build wrapper
+   resolves package version plus trusted/local provenance once and tsdown
+   replaces private identifiers without changing this tracked module.
 
-   resolveBuildSha (scripts/write-build-info.mjs) is exercised with injected
-   env/git so the resolution order — trusted env, then git, then undefined —
-   is pinned without touching the real repository.
+   All resolution paths are exercised with injected env/Git commands so tests
+   cover trusted input and clean/dirty/non-Git checkouts without mutating the
+   real repository.
    ============================================================================= */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { BUILD_SHA, BUILD_VERSION } from '../src/generated/build-info';
-import { resolveBuildSha } from '../scripts/write-build-info.mjs';
+import {
+  defaultGitSha,
+  resolveBuildInfo,
+  resolveBuildSha,
+} from '../scripts/write-build-info.mjs';
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
@@ -34,9 +34,8 @@ describe('build metadata (O4)', () => {
     expect(BUILD_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it('carries a git short sha, or none outside a git checkout', () => {
-    if (BUILD_SHA === undefined) return; // npm pack / Docker builds: version-only
-    expect(BUILD_SHA).toMatch(/^[0-9a-f]{7,}(-dirty)?$/);
+  it('keeps the tracked source fallback version-only', () => {
+    expect(BUILD_SHA).toBeUndefined();
   });
 });
 
@@ -56,6 +55,12 @@ describe('resolveBuildSha (write-build-info.mjs)', () => {
     expect(resolveBuildSha({ env: { GIT_SHA: 'deadbeef' }, git: () => 'wrong' })).toBe('deadbeef');
   });
 
+  it('ignores a blank BT_GIT_SHA before trying GIT_SHA', () => {
+    expect(
+      resolveBuildSha({ env: { BT_GIT_SHA: ' ', GIT_SHA: 'feedface' }, git: () => 'wrong' }),
+    ).toBe('feedface');
+  });
+
   it('uses the git checkout when no env is set', () => {
     expect(resolveBuildSha({ env: {}, git: () => 'cafebabe' })).toBe('cafebabe');
   });
@@ -70,5 +75,38 @@ describe('resolveBuildSha (write-build-info.mjs)', () => {
     expect(
       resolveBuildSha({ env: { BT_GIT_SHA: '   ' }, git: () => 'abcdef0' }),
     ).toBe('abcdef0');
+  });
+
+  it('resolves package version and sha as one build input', () => {
+    expect(resolveBuildInfo({ env: { BT_GIT_SHA: 'abc1234' }, root: join(dirname(fileURLToPath(import.meta.url)), '..') }))
+      .toEqual({ version: pkg.version, sha: 'abc1234' });
+  });
+});
+
+describe('defaultGitSha local checkout paths', () => {
+  it('returns short HEAD for a clean checkout', () => {
+    expect(
+      defaultGitSha({
+        git: (args) => (args[0] === 'rev-parse' ? '1234abc\n' : ''),
+      }),
+    ).toBe('1234abc');
+  });
+
+  it('marks tracked or untracked changes dirty', () => {
+    expect(
+      defaultGitSha({
+        git: (args) => (args[0] === 'rev-parse' ? '1234abc\n' : '?? local-file\n'),
+      }),
+    ).toBe('1234abc-dirty');
+  });
+
+  it('degrades to version-only outside a Git checkout', () => {
+    expect(
+      defaultGitSha({
+        git: () => {
+          throw new Error('not a git repository');
+        },
+      }),
+    ).toBeUndefined();
   });
 });

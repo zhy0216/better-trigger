@@ -1,98 +1,91 @@
 #!/usr/bin/env node
 /* =============================================================================
-   @better-trigger/worker — write the build metadata source (O4).
+   @better-trigger/worker — provenance-aware, clean build boundary.
 
-   Single source of truth for "what is this process": reads the package
-   version out of apps/worker/package.json (the very file that ships in the
-   published tarball) and the git commit it is being built from, then writes
-   src/generated/build-info.ts — the module /health, /metrics, the boot log
-   and workers.code_version all read. Runs at the START of `bun run build`
-   (before tsdown), so dist/ always carries the values the build was made from.
+   The historical script name is retained because release/Docker callers use
+   it, but it no longer writes src/generated/build-info.ts. It resolves one
+   build identity, removes dist explicitly, and passes immutable define values
+   to tsdown. Consequently success, failure, and interruption cannot modify a
+   tracked source input.
 
-   The commit identity resolves in this order:
-     1. BT_GIT_SHA / GIT_SHA env — the trusted build environment (CI injects
-        $GITHUB_SHA; the Docker build passes GIT_SHA as a build arg, because
-        the build stage has no .git).
-     2. `git rev-parse --short HEAD` in the source checkout; a non-empty
-        `git status --porcelain` appends `-dirty`, so a build made from an
-        uncommitted tree is never mistaken for the clean commit.
-     3. undefined — version-only (a packed release tarball).
-
-   Non-git builds degrade to version-only. The committed
-   src/generated/build-info.ts is the fallback for source checkouts that
-   typecheck without building — this script only overwrites it, it never
-   needs it to exist.
-
-   The file is written only when its content changes, so a rebuild on the
-   same commit leaves the working tree clean.
+   Provenance order:
+     1. non-empty BT_GIT_SHA, then GIT_SHA (trusted CI/Docker input);
+     2. local short HEAD, suffixed -dirty when tracked or untracked files differ;
+     3. undefined outside a Git checkout (an explicit version-only build).
    ============================================================================= */
-import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-/**
- * The commit identity for this build: trusted env first (CI / Docker build
- * arg), then the live git checkout, then undefined. Exported so the unit
- * tests can inject `env` and `git` instead of touching the real repo.
- */
-export function resolveBuildSha({ env = process.env, git = defaultGitSha } = {}) {
-  const envSha = env.BT_GIT_SHA ?? env.GIT_SHA;
-  if (typeof envSha === 'string' && envSha.trim() !== '') return envSha.trim();
-  return git();
+const workerRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+function trimmed(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
 }
 
-/** Short HEAD of the repo this build was made from; `-dirty` when the working
- *  tree has uncommitted changes; undefined outside a git checkout. */
-export function defaultGitSha() {
+/** Resolve clean/dirty local Git identity. The command runner is injectable so
+ * all three local paths are covered without mutating the real checkout. */
+export function defaultGitSha({ git = runGit } = {}) {
   try {
-    const sha = execSync('git rev-parse --short HEAD', {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    if (sha === '') return undefined;
-    const porcelain = execSync('git status --porcelain', {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).toString();
-    return porcelain.trim() === '' ? sha : `${sha}-dirty`;
+    const sha = trimmed(git(['rev-parse', '--short', 'HEAD']));
+    if (!sha) return undefined;
+    const status = git(['status', '--porcelain', '--untracked-files=normal']);
+    return status.trim() === '' ? sha : `${sha}-dirty`;
   } catch {
     return undefined;
   }
 }
 
-const workerRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+function runGit(args) {
+  return execFileSync('git', args, {
+    cwd: workerRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+}
 
-/** CLI entry — the write itself. Guarded by isMain so tests can import the
- *  pure resolveBuildSha without touching the repository. */
-function main() {
-  const pkg = JSON.parse(readFileSync(join(workerRoot, 'package.json'), 'utf8'));
-  const version = String(pkg.version ?? '');
-  const sha = resolveBuildSha();
+/** Trusted environment identity first, then the checkout, then version-only. */
+export function resolveBuildSha({ env = process.env, git = defaultGitSha } = {}) {
+  return trimmed(env.BT_GIT_SHA) ?? trimmed(env.GIT_SHA) ?? git();
+}
 
-  const content = `/* =============================================================================
-   AUTO-GENERATED by scripts/write-build-info.mjs — do not edit by hand.
+/** Package version and provenance resolved together for one build invocation. */
+export function resolveBuildInfo({ env = process.env, git = defaultGitSha, root = workerRoot } = {}) {
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  const version = trimmed(pkg.version);
+  if (!version) throw new Error('[worker] package.json must contain a non-empty version');
+  return { version, sha: resolveBuildSha({ env, git }) };
+}
 
-   Build metadata for @better-trigger/worker: the package version from
-   apps/worker/package.json plus the commit this build was made from
-   (git short sha, \`-dirty\` when the working tree was not clean, or the
-   BT_GIT_SHA/GIT_SHA the build environment injected — CI and the Docker
-   image have no .git). Regenerated at the start of every \`bun run build\`;
-   the committed copy is the fallback for source checkouts. /health,
-   /metrics, the boot log and workers.code_version all read these values, so
-   version, build and running artifact cannot drift.
-   ============================================================================= */
-export const BUILD_VERSION = ${JSON.stringify(version)};
-export const BUILD_SHA: string | undefined = ${sha === undefined ? 'undefined' : JSON.stringify(sha)};
-`;
-
-  const out = join(workerRoot, 'src', 'generated', 'build-info.ts');
-  if (readFileSync(out, 'utf8') !== content) {
-    writeFileSync(out, content);
+function run(command, args, env) {
+  const result = spawnSync(command, args, { cwd: workerRoot, env, stdio: 'inherit' });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const detail = result.signal ? `signal ${result.signal}` : `exit ${result.status}`;
+    throw new Error(`[worker] ${command} ${args.join(' ')} failed (${detail})`);
   }
+}
+
+function main() {
+  const { version, sha } = resolveBuildInfo();
+  const buildEnv = {
+    ...process.env,
+    BT_WORKER_BUILD_VERSION: version,
+    BT_WORKER_BUILD_SHA: sha ?? '',
+  };
+
+  // Explicitly clean at the task boundary. This remains correct even if a
+  // bundler changes its clean behaviour; Turbo caching is disabled for this
+  // task because Git dirty state is not a stable declared hash input.
+  rmSync(join(workerRoot, 'dist'), { recursive: true, force: true });
   console.log(
     `[worker] build info: version=${version}${sha ? ` sha=${sha}` : ' (no git checkout — version only)'}`,
   );
+
+  run('bunx', ['--bun', 'tsdown'], buildEnv);
+  run('bun', ['scripts/copy-public.mjs'], buildEnv);
+  run('bun', ['scripts/check-artifacts.mjs', ...(sha ? ['--expected-sha', sha] : [])], buildEnv);
 }
 
 const isMain =
