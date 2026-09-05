@@ -68,6 +68,15 @@ function run(command, args, env) {
 }
 
 function main() {
+  // A direct package/Docker invocation enters the same dependency graph as a
+  // root build. Turbo sets TURBO_HASH only while executing a scheduled task;
+  // that invocation already waited for ^build and @better-trigger/web#build.
+  // Never infer dashboard freshness from the presence of web/dist.
+  if (!process.env.TURBO_HASH) {
+    run('bunx', ['--bun', 'turbo', 'run', 'build', '--filter=@better-trigger/worker'], process.env);
+    return;
+  }
+
   const { version, sha } = resolveBuildInfo();
   const buildEnv = {
     ...process.env,

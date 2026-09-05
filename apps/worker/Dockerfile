@@ -66,16 +66,12 @@ COPY packages/kernel packages/kernel
 COPY packages/db packages/db
 COPY packages/sdk packages/sdk
 COPY apps/worker apps/worker
-# The dashboard (apps/web) is built inside the worker build step
-# (scripts/copy-public.mjs) and embedded into apps/worker/dist/public, so the
+# The worker build schedules apps/web through Turbo, then copy-public.mjs
+# embeds it into apps/worker/dist/public, so the
 # image serves it from the same 4848 port — no second container, port or CORS.
 COPY apps/web apps/web
-# Dependency order: core → (kernel, db, sdk) → worker.
-RUN bun run --cwd packages/core build \
- && bun run --cwd packages/kernel build \
- && bun run --cwd packages/db build \
- && bun run --cwd packages/sdk build \
- && bun run --cwd apps/worker build
+# The direct entry schedules core → (kernel, db, sdk, web) → worker.
+RUN bun run --cwd apps/worker build
 
 # ---- production dependencies -----------------------------------------------
 # The same frozen lockfile installed without devDependencies: ~26 packages

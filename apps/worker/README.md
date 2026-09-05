@@ -99,9 +99,15 @@ Run any number of daemons against one database — every claim and scan uses
 ### Serving the dashboard
 
 The worker **embeds the built dashboard** and serves it from the same port as
-the API (O3). The build pipeline (`scripts/copy-public.mjs`, part of `bun run
-build`) builds `apps/web` and copies its `dist` into `dist/public`, which
-travels with the published package and the Docker image. At runtime:
+the API (O3). Turbo builds or restores `apps/web` once, then the worker build
+copies its `dist` into `dist/public`, which travels with the published package
+and the Docker image. Both root `bun run build` and `bun run build` inside
+`apps/worker` use that dependency graph, including on a clean checkout. The
+direct entry (`scripts/write-build-info.mjs`) delegates to Turbo when outside
+a scheduled task (`TURBO_HASH` is absent). `copy-public.mjs` only copies the
+already-built dashboard; an existing `dist/index.html` never skips dependency
+validation. Worker bundles are always rebuilt with the current Git identity,
+even when the dashboard comes from cache. At runtime:
 
 - `/` and `/index.html` → the dashboard shell (`Cache-Control: no-cache`, so
   every load revalidates and a daemon restart always serves the new bundle).
