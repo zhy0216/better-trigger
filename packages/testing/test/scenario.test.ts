@@ -14,6 +14,7 @@ let stdout: string[];
 let stderr: string[];
 
 beforeEach(() => {
+  vi.stubEnv('BT_KEEP_TEST_DATABASE', undefined);
   stdout = [];
   stderr = [];
   vi.spyOn(console, 'log').mockImplementation((...args) => { stdout.push(format(...args)); });
@@ -33,6 +34,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   vi.mocked(resetDb).mockReset();
 });
@@ -45,7 +47,7 @@ async function expectVerdict(
   await expect(runScenario(meta, body)).rejects.toBe(exit);
   expect(process.exit).toHaveBeenCalledExactlyOnceWith(failed === 0 ? 0 : 1);
   expect(stdout.join('\n')).toContain(`${passed} passed, ${failed} failed`);
-  expect(db.end).toHaveBeenCalledTimes(1);
+  expect(db.drop).toHaveBeenCalledTimes(1);
   if (failed > 0) expect(stdout.join('\n')).not.toContain('checks passed.');
 }
 
@@ -91,7 +93,7 @@ describe('runScenario verdict', () => {
   it('attempts all cleanup in LIFO order and preserves body and cleanup failures', async () => {
     const order: string[] = [];
     const bodyError = new Error('original body failure');
-    vi.mocked(db.end).mockImplementation(async () => { order.push('pool'); });
+    vi.mocked(db.drop).mockImplementation(async () => { order.push('pool'); });
     await expectVerdict(async (s) => {
       s.cleanup(() => { order.push('first'); });
       s.cleanup(async () => {
@@ -113,8 +115,8 @@ describe('runScenario verdict', () => {
     expect(console.error).toHaveBeenCalledWith(bodyError);
   });
 
-  it('includes failure to close the database in the final verdict', async () => {
-    vi.mocked(db.end).mockRejectedValue(new Error('pool close failure'));
+  it('includes failure to drop the database in the final verdict', async () => {
+    vi.mocked(db.drop).mockRejectedValue(new Error('pool close failure'));
     await expectVerdict(async () => {}, 0, 1);
     expect(stdout.join('\n')).toContain('teardown step failed: pool close failure');
   });
@@ -178,5 +180,52 @@ describe('runScenario database identity', () => {
     db.url = 'postgres://fake_user:fake_password@[::1]/actual_probe_db';
     await expectVerdict(async () => {}, 0, 0);
     expect(stdout).toContain('  db [::1]:5432/actual_probe_db');
+  });
+});
+
+describe('runScenario database retention', () => {
+  it.each([false, true])('explicitly retains the database after body failure=%s', async (fail) => {
+    await expect(runScenario({ ...meta, keepDatabase: true }, async () => {
+      if (fail) throw new Error('body failed');
+    })).rejects.toBe(exit);
+    expect(process.exit).toHaveBeenCalledExactlyOnceWith(fail ? 1 : 0);
+    expect(db.end).toHaveBeenCalledTimes(1);
+    expect(db.drop).not.toHaveBeenCalled();
+    expect(stdout).toContain('  database retained (not dropped): actual_probe_db');
+    expect(stdout.join('\n')).not.toContain('fake_password');
+  });
+
+  it('allows scripts to opt into retention via BT_KEEP_TEST_DATABASE=1', async () => {
+    vi.stubEnv('BT_KEEP_TEST_DATABASE', '1');
+    await expect(runScenario(meta, async () => {})).rejects.toBe(exit);
+    expect(db.end).toHaveBeenCalledTimes(1);
+    expect(db.drop).not.toHaveBeenCalled();
+    expect(stdout.join('\n')).toContain('database retained (not dropped)');
+  });
+
+  it('lets explicit false override the environment and drop the database', async () => {
+    vi.stubEnv('BT_KEEP_TEST_DATABASE', '1');
+    await expect(runScenario({ ...meta, keepDatabase: false }, async () => {})).rejects.toBe(exit);
+    expect(db.drop).toHaveBeenCalledTimes(1);
+    expect(db.end).not.toHaveBeenCalled();
+    expect(stdout.join('\n')).not.toContain('retained');
+  });
+
+  it('does not mask pool-close failure when retaining the database', async () => {
+    vi.mocked(db.end).mockRejectedValueOnce(new Error('retained pool close failed'));
+    await expect(runScenario({ ...meta, keepDatabase: true }, async () => {})).rejects.toBe(exit);
+    expect(process.exit).toHaveBeenCalledExactlyOnceWith(1);
+    expect(db.drop).not.toHaveBeenCalled();
+    expect(stdout.join('\n')).toContain('teardown step failed: retained pool close failed');
+  });
+
+  it('keeps both the body failure and database cleanup diagnostics in the verdict', async () => {
+    vi.mocked(db.drop).mockRejectedValueOnce(new AggregateError([
+      new Error('pool close failed'), new Error('database drop failed'),
+    ], 'database cleanup failed'));
+    await expectVerdict(async () => { throw new Error('original body failure'); }, 0, 2);
+    for (const message of ['original body failure', 'pool close failed', 'database drop failed']) {
+      expect(stdout.join('\n')).toContain(message);
+    }
   });
 });

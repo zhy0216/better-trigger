@@ -51,7 +51,7 @@
    Env:
      DATABASE_URL   base connection derived from it; default
                     postgres://localhost:5432/better_trigger
-     BT_DRIFT_DB    provisioned database name (default better_trigger_drift)
+     BT_DRIFT_DB    database name prefix (default better_trigger_drift)
      BT_DRIFT_PORT  port the API node listens on (default 4903)
    ============================================================================= */
 import { fileURLToPath } from 'node:url';

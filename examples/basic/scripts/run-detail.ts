@@ -21,7 +21,7 @@
    Env:
      DATABASE_URL   base connection derived from it; default
                     postgres://localhost:5432/better_trigger
-     BT_RUN_DETAIL_DB   override the provisioned database name
+     BT_RUN_DETAIL_DB   override the database name prefix
      BT_RUN_DETAIL_PORT override the daemon's port (default 4909)
    ============================================================================= */
 import { fileURLToPath } from 'node:url';

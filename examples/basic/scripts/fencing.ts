@@ -24,7 +24,7 @@
    Env:
      DATABASE_URL    base connection derived from it; default
                      postgres://localhost:5432/better_trigger
-     BT_FENCING_DB   override the provisioned database name (default
+     BT_FENCING_DB   override the database name prefix (default
                      better_trigger_fencing)
    ============================================================================= */
 import { DEFAULT_NAMESPACE, type LogEntry } from '@better-trigger/core';
@@ -34,9 +34,6 @@ import { runScenario, sleep, waitForStatus, type Scenario } from '@better-trigge
 async function main(s: Scenario): Promise<void> {
   const pool = s.pool;
   const kernel = createKernel({ pool });
-  // The only scenario that hands its database back: its ledgers are synthetic
-  // (seqs written by hand), so there is nothing a post-mortem would want.
-  s.cleanup(() => s.db.drop());
 
   /* -------------------------------------------------------------------------
    * State-snapshot helpers — used to prove stale ops are rejected with ZERO

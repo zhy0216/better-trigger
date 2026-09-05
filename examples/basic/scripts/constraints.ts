@@ -37,7 +37,7 @@
    Env:
      DATABASE_URL      base connection derived from it; default
                        postgres://localhost:5432/better_trigger
-     BT_CONSTRAINTS_DB override the provisioned database name (default
+     BT_CONSTRAINTS_DB override the database name prefix (default
                        better_trigger_constraints)
    ============================================================================= */
 import { spawn } from 'node:child_process';
@@ -580,8 +580,6 @@ async function main(s: Scenario): Promise<void> {
     const orphans = await orphanCounts(s);
     s.assertEqual(orphans.queue + orphans.waits + orphans.parent + orphans.schedules, 0, 'no orphans after cancel+retry');
   });
-
-  s.cleanup(() => s.db.drop());
 }
 
 void runScenario(

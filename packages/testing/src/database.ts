@@ -1,34 +1,38 @@
 /* =============================================================================
    @better-trigger/testing — per-scenario database provisioning.
 
-   Every acceptance scenario owns its own database, derived from DATABASE_URL by
-   replacing the db name: DROP/CREATE against the <base>/postgres admin db, then
-   (optionally) migrate. Scenarios are therefore order-independent and rerunnable
-   without a manual cleanup step — which is the property the P2 fault-injection
-   suite needs when it runs the same harness dozens of times.
+   Every call creates a uniquely named database and owns only that instance.
+   Parallel scenarios/checkouts can share a logical prefix without resetting
+   each other's data or connections. Cleanup drops only a successful CREATE.
 
-   Env: DATABASE_URL supplies host/credentials only; its db name is ignored.
+   Env: DATABASE_URL supplies connection settings; its db name is replaced.
    ============================================================================= */
 import { createPool, migrate } from '@better-trigger/db';
 import type { Pool } from 'pg';
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 
 export const DEFAULT_DATABASE_URL = 'postgres://localhost:5432/better_trigger';
 
-/** Strip the database path (and query/hash — they belonged to the source db)
- *  off a postgres URL → protocol://user@host:port */
+/** Remove the database path and fragment, retaining connection parameters.
+ *  Use databaseUrlFor to select a database; do not append a path after query. */
 export function baseUrl(raw: string = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL): string {
   const url = new URL(raw);
   url.pathname = '';
-  url.search = '';
   url.hash = '';
-  return url.toString().replace(/\/+$/, '');
+  return url.toString();
 }
 
-/** `<base>/<name>`, where base comes from DATABASE_URL. */
-export function databaseUrlFor(name: string): string {
-  return `${baseUrl()}/${name}`;
+/** Replace the database pathname without changing credentials/transport. */
+export function databaseUrlFor(
+  name: string,
+  raw: string = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
+): string {
+  assertIdentifier(name);
+  const url = new URL(baseUrl(raw));
+  url.pathname = `/${name}`;
+  return url.toString();
 }
 
 /** Read a numeric port from the environment, falling back to `fallback`. A
@@ -60,22 +64,24 @@ export function freePort(): Promise<number> {
 }
 
 export interface TestDatabase {
-  /** Database name actually provisioned (after the env override). */
+  /** Actual lowercase database name, including the unique suffix. */
   name: string;
   /** Full connection string for the provisioned database. */
   url: string;
   /** Pool on the provisioned database, owned by the caller's scenario. */
   pool: Pool;
-  /** Close the pool. Safe to call twice. */
+  /** Close the pool once. Repeated/concurrent calls share its result, even failure. */
   end(): Promise<void>;
-  /** Close the pool and DROP the database (used by scenarios that clean up). */
+  /** Close the pool and DROP only this instance, even if closing fails.
+   *  Repeated/concurrent calls share the first cleanup result, even failure. */
   drop(): Promise<void>;
 }
 
 export interface ResetDbOptions {
-  /** Default database name. */
+  /** Logical prefix: ASCII identifier, lowercased and truncated to 30 bytes.
+   *  A random 32-hex suffix makes the actual name unique and at most 63 bytes. */
   name: string;
-  /** Env var that may override `name` (e.g. BT_CRASH_DB). */
+  /** Env var overriding the logical prefix (e.g. BT_CRASH_DB), never a DROP target. */
   envVar?: string;
   /**
    * Apply migrations before returning. Default true. Pass false when the
@@ -92,53 +98,81 @@ function assertIdentifier(name: string): void {
   }
 }
 
-async function withAdmin<T>(fn: (admin: Pool) => Promise<T>): Promise<T> {
-  const admin = createPool(`${baseUrl()}/postgres`);
+/** Preserve the original thrown value, attaching any secondary cleanup failure. */
+async function failAfterCleanup(
+  error: unknown,
+  cleanup: () => Promise<void>,
+  message: string,
+): Promise<never> {
+  const errors = [error];
   try {
-    return await fn(admin);
-  } finally {
-    await admin.end();
+    await cleanup();
+  } catch (cleanupError) {
+    errors.push(cleanupError);
   }
+  if (errors.length === 1) throw error;
+  throw new AggregateError(errors, message, { cause: error });
 }
 
-/**
- * DROP + CREATE the scenario's database and hand back a pool on it. This is the
- * `resetDb()` every scenario starts with; it replaces the copy-pasted admin-pool
- * block each script used to carry.
- */
-export async function resetDb(opts: ResetDbOptions): Promise<TestDatabase> {
-  const name = (opts.envVar ? process.env[opts.envVar] : undefined) ?? opts.name;
-  assertIdentifier(name);
-
-  await withAdmin(async (admin) => {
-    await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-    await admin.query(`CREATE DATABASE ${name}`);
-  });
-
-  const url = databaseUrlFor(name);
-  const pool = createPool(url);
+async function withAdmin<T>(url: string, fn: (admin: Pool) => Promise<T>): Promise<T> {
+  const admin = createPool(url);
+  let result: T;
   try {
-    if (opts.migrate ?? true) await migrate(pool);
-  } catch (err) {
-    await pool.end();
-    throw err;
+    result = await fn(admin);
+  } catch (error) {
+    return failAfterCleanup(error, () => admin.end(), 'admin operation and pool cleanup failed');
   }
+  await admin.end();
+  return result;
+}
 
-  let ended = false;
-  const end = async (): Promise<void> => {
-    if (ended) return;
-    ended = true;
-    await pool.end();
-  };
+/** CREATE a unique instance, optionally migrate, and return its owned handle. */
+export async function resetDb(opts: ResetDbOptions): Promise<TestDatabase> {
+  const prefix = (opts.envVar ? process.env[opts.envVar] : undefined) ?? opts.name;
+  assertIdentifier(prefix);
+  const name = `${prefix.toLowerCase().slice(0, 30)}_${randomUUID().replaceAll('-', '')}`;
+  // Capture both URLs now: a later environment change must not redirect DROP.
+  const raw = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
+  const adminUrl = databaseUrlFor('postgres', raw);
+  const url = databaseUrlFor(name, raw);
+  let owned = false;
+  let pool: Pool | undefined;
+  let ending: Promise<void> | undefined;
+  let dropping: Promise<void> | undefined;
 
-  return {
-    name,
-    url,
-    pool,
-    end,
-    async drop() {
+  const end = (): Promise<void> => (ending ??= Promise.resolve().then(() => pool?.end()));
+  const drop = (): Promise<void> => (dropping ??= (async () => {
+    const errors: unknown[] = [];
+    try {
       await end();
-      await withAdmin((admin) => admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`));
-    },
-  };
+    } catch (error) {
+      errors.push(error);
+    }
+    if (owned) {
+      try {
+        await withAdmin(adminUrl, async (admin) => {
+          await admin.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
+          owned = false;
+        });
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(errors, `database cleanup failed for ${name}`);
+    }
+  })());
+
+  try {
+    await withAdmin(adminUrl, async (admin) => {
+      await admin.query(`CREATE DATABASE "${name}"`);
+      owned = true;
+    });
+    pool = createPool(url);
+    if (opts.migrate ?? true) await migrate(pool);
+    return { name, url, pool, end, drop };
+  } catch (error) {
+    return failAfterCleanup(error, drop, `database provisioning and cleanup failed for ${name}`);
+  }
 }

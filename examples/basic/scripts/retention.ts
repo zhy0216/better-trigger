@@ -29,7 +29,7 @@
    Env:
      DATABASE_URL      base connection derived from it; default
                        postgres://localhost:5432/better_trigger
-     BT_RETENTION_DB   override the provisioned database name (default
+     BT_RETENTION_DB   override the database name prefix (default
                        better_trigger_retention)
    ============================================================================= */
 import { createHash } from 'node:crypto';
@@ -306,8 +306,6 @@ async function main(s: Scenario): Promise<void> {
     s.assertEqual(run.code, 0, 'prune exit code');
     s.assert(/deleted: 0 run\(s\)/.test(run.stdout), run.stdout);
   });
-
-  s.cleanup(() => s.db.drop());
 }
 
 void runScenario(

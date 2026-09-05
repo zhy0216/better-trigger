@@ -50,7 +50,7 @@
    Env:
      DATABASE_URL       base connection derived from it; default
                         postgres://localhost:5432/better_trigger
-     BT_CLAIM_SCAN_DB   override the provisioned database name
+     BT_CLAIM_SCAN_DB   override the database name prefix
    ============================================================================= */
 import { runScenario, type Scenario } from '@better-trigger/testing';
 import { createKernel, type ClaimRunsArgs } from '@better-trigger/kernel';
@@ -151,8 +151,6 @@ interface Plan {
 
 async function main(s: Scenario): Promise<void> {
   const pool = s.pool;
-  // Nothing here is a post-mortem candidate: the data is synthetic and huge.
-  s.cleanup(() => s.db.drop());
 
   /* -------------------------------------------------------------------------
    * Seed. One run per queue row; the queue rows are inserted in md5 order so

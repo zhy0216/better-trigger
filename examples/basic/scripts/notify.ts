@@ -30,7 +30,7 @@
    Env:
      DATABASE_URL  base connection derived from it; default
                    postgres://localhost:5432/better_trigger
-     BT_NOTIFY_DB  override the provisioned database name
+     BT_NOTIFY_DB  override the database name prefix
      BT_NOTIFY_PORT   the API node's port (default 4907)
      BT_NOTIFY_EXEC_PORT the executor node's port (default 4908)
    ============================================================================= */

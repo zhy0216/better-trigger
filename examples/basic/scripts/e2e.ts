@@ -2,7 +2,7 @@
    @better-trigger/example-basic — end-to-end smoke test.
 
    Runs on @better-trigger/testing: runScenario provisions the scenario's
-   database (better_trigger_e2e), owns the pool, runs teardown and folds every
+   database (prefix better_trigger_e2e), owns the pool, runs teardown and folds every
    ✓/✗ into the exit code; startDaemon spawns the worker over src/tasks.ts and
    waits for its health endpoint. Every check then goes through the HTTP client —
    exactly the path an application takes:
@@ -19,7 +19,7 @@
    Env:
      DATABASE_URL  base connection is derived from it (db name is replaced);
                    default postgres://localhost:5432/better_trigger
-     BT_E2E_DB     override the provisioned database name (default
+     BT_E2E_DB     override the database name prefix (default
                    better_trigger_e2e)
      BT_E2E_PORT   port the daemon listens on (default 4901)
    ============================================================================= */

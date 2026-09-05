@@ -43,6 +43,9 @@ export interface ScenarioMeta {
   what?: string;
   /** The database this scenario provisions for itself. */
   db: ResetDbOptions;
+  /** Retain the database for inspection after teardown (pool still closes).
+   *  Default: BT_KEEP_TEST_DATABASE=1, otherwise false. */
+  keepDatabase?: boolean;
 }
 
 export interface Scenario {
@@ -156,7 +159,14 @@ export async function runScenario(
 
   const s = new ScenarioImpl(db, createInvariants(db.pool));
   // Registered first → runs last: everything else may still need the pool.
-  s.cleanup(() => db.end());
+  s.cleanup(async () => {
+    if (meta.keepDatabase ?? (process.env.BT_KEEP_TEST_DATABASE === '1')) {
+      s.log(`database retained (not dropped): ${db.name}`);
+      await db.end();
+    } else {
+      await db.drop();
+    }
+  });
 
   let crashed = false;
   let crash: unknown;

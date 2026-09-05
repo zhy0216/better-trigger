@@ -19,7 +19,7 @@
    Env:
      DATABASE_URL  base connection derived from it; default
                    postgres://localhost:5432/better_trigger
-     BT_STATS_DB   override the provisioned database name
+     BT_STATS_DB   override the database name prefix
      BT_STATS_PORT override the daemon's port (default 4906)
    ============================================================================= */
 import { DEFAULT_NAMESPACE } from '@better-trigger/core';

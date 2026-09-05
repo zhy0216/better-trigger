@@ -29,7 +29,7 @@
    Env:
      DATABASE_URL      base connection derived from it; default
                        postgres://localhost:5432/better_trigger
-     BT_HEALTH_POOL_DB override the provisioned database name (default
+     BT_HEALTH_POOL_DB override the database name prefix (default
                        better_trigger_health_pool)
    ============================================================================= */
 import { createServer } from 'node:net';
@@ -218,8 +218,6 @@ async function main(s: Scenario): Promise<void> {
       await daemon.stop();
     }
   });
-
-  s.cleanup(() => s.db.drop());
 }
 
 void runScenario(

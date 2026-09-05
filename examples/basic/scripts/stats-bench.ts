@@ -28,7 +28,7 @@
    Env:
      DATABASE_URL    base connection derived from it; default
                      postgres://localhost:5432/better_trigger
-     BT_STATS_BENCH_DB  override the provisioned database name
+     BT_STATS_BENCH_DB  override the database name prefix
      BT_STATS_ROWS   total runs to seed (default 1_000_000)
    ============================================================================= */
 import { runScenario, type Scenario } from '@better-trigger/testing';
@@ -87,9 +87,6 @@ async function explain(s: Scenario, label: string): Promise<Plan> {
 }
 
 async function main(s: Scenario): Promise<void> {
-  // Nothing here is a post-mortem candidate: the data is synthetic and huge.
-  s.cleanup(() => s.db.drop());
-
   const oldShare = Math.floor(TOTAL * (1 - WINDOWED));
 
   await s.pool.query(

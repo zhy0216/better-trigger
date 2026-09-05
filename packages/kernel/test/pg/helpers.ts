@@ -11,7 +11,7 @@
    provisions one) runs the whole directory automatically.
 
    Each suite provisions its own database via @better-trigger/testing's
-   resetDb (DROP/CREATE + migrate), runs against it, and drops it on the way
+   resetDb (unique CREATE + migrate), runs against it, and drops it on the way
    out — order-independent and rerunnable, same contract as the acceptance
    harnesses.
    ============================================================================= */
@@ -39,7 +39,8 @@ export interface PgContext {
 /**
  * Provision a fresh migrated database for one suite, run `fn` against a kernel
  * over it, and drop the database afterwards. Databases are dropped rather than
- * merely truncated so a suite is rerunnable without manual cleanup.
+ * merely truncated so a suite is rerunnable without manual cleanup. `name`
+ * is a logical prefix; concurrent processes/checkouts receive distinct names.
  */
 export async function withPg(
   name: string,

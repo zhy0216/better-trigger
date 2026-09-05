@@ -96,9 +96,19 @@ would keep the runtime alive until its normal shutdown hook fires.
 
 ## Acceptance scripts
 
-Each script **provisions its own scratch database** (DROP/CREATE against the
-`postgres` admin db derived from `DATABASE_URL`), spawns whatever daemons it
-needs on its own port, and exits non-zero on any failed assertion:
+Each script **creates its own uniquely named scratch database** through the
+`postgres` admin db derived from `DATABASE_URL`, preserving connection parameters
+such as SSL settings. It spawns the daemons it needs and drops its database after
+teardown, pass or fail. Any assertion or cleanup failure produces a nonzero exit.
+The `BT_*_DB` overrides and the short database labels below are logical prefixes;
+the actual name is lowercased, length-bounded, and given a random suffix. Existing
+databases matching a prefix are untouched. Use the actual name printed in the
+credential-free scenario output for inspection.
+
+Set `BT_KEEP_TEST_DATABASE=1` to retain an instance after teardown for debugging.
+The pool still closes and the log explicitly reports that the database was
+retained. See the [testing harness documentation](../../packages/testing/README.md)
+for naming, URL derivation, and cleanup behavior.
 
 ```bash
 export DATABASE_URL=postgres://localhost:5432/better_trigger

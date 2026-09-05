@@ -23,7 +23,7 @@
    Env:
      DATABASE_URL        base connection derived from it; default
                          postgres://localhost:5432/better_trigger
-     BT_BATCH_PERF_DB    override the provisioned database name (default
+     BT_BATCH_PERF_DB    override the database name prefix (default
                          better_trigger_batch_perf)
    ============================================================================= */
 import { DEFAULT_NAMESPACE, KernelError, type TriggerItem } from '@better-trigger/core';
@@ -80,8 +80,6 @@ async function countRuns(s: Scenario): Promise<number> {
 }
 
 async function main(s: Scenario): Promise<void> {
-  // Synthetic fan-out data — nothing a post-mortem would want.
-  s.cleanup(() => s.db.drop());
   await s.pool.query(
     `INSERT INTO tasks (id, name, trigger_source) VALUES ('t1', 'batch t1', 'api')`,
   );

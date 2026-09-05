@@ -34,7 +34,7 @@
    Env:
      DATABASE_URL        base connection derived from it; default
                          postgres://localhost:5432/better_trigger
-     BT_LOOP_HANG_DB     override the provisioned database name (default
+     BT_LOOP_HANG_DB     override the database name prefix (default
                          better_trigger_loop_hang)
    ============================================================================= */
 import { fileURLToPath } from 'node:url';
@@ -250,13 +250,11 @@ async function main(s: Scenario): Promise<void> {
     );
     s.ok(`run ${runId} resumed after the lock was released and completed`);
   } finally {
-    // Always stop the daemon BEFORE the db is dropped below — teardown runs
+    // Always stop the daemon BEFORE the runner drops the db — teardown runs
     // LIFO, and a stop against an already-dropped database would turn the
     // handoff's release-claims / mark-offline steps into noise.
     await daemon.stop();
   }
-
-  s.cleanup(() => s.db.drop());
 }
 
 void runScenario(

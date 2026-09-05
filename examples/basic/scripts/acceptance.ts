@@ -19,7 +19,7 @@
    unable to poison its neighbours, and what turns "the script crashed" into a
    non-zero exit code rather than a hung suite.
 
-   They are deliberately run one at a time: each drops and recreates its own
+   They are deliberately run one at a time: each creates a unique scratch
    database and binds its own port, and several of them measure lease/reaper
    timing that a parallel neighbour would perturb.
 

@@ -36,7 +36,7 @@
    Env:
      DATABASE_URL  base connection derived from it; default
                    postgres://localhost:5432/better_trigger
-     BT_CRASH_DB   override the provisioned database name (default
+     BT_CRASH_DB   override the database name prefix (default
                    better_trigger_crash)
      BT_CRASH_PORT port the API node listens on (default 4902)
    ============================================================================= */

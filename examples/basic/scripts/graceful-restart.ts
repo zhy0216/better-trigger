@@ -49,7 +49,7 @@
    Env:
      DATABASE_URL              base connection derived from it; default
                                postgres://localhost:5432/better_trigger
-     BT_GRACEFUL_RESTART_DB    override the provisioned database name
+     BT_GRACEFUL_RESTART_DB    override the database name prefix
                                (default better_trigger_graceful_restart)
      BT_GRACEFUL_RESTART_PORT  port the API node listens on (default 4905)
      BT_GRACEFUL_RESTART_RESULT_PORT
