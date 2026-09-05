@@ -34,6 +34,7 @@
     "eslint": "^10.9.0",
     "globals": "^17.11.0",
     "publint": "^0.3.24",
+    "semver": "7.8.5",
     "turbo": "^2.10.11",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.69.0",

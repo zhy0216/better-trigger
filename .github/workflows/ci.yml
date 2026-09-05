@@ -90,6 +90,9 @@ jobs:
       # resolves findings against the exact bun.lock chains, and never permits
       # a high/critical exception. Keep it directly after install so a known
       # vulnerability fails before either build or test consumes runner time.
+      - name: Dependency audit offline regression tests
+        run: bun run check:audit -- --self-test
+
       - name: Dependency security audit
         run: bun run check:audit
 

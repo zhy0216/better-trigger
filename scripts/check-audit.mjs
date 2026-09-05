@@ -28,68 +28,120 @@
    ============================================================================= */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { Range, SemVer } from 'semver';
 
-const REGISTRY = 'https://registry.npmjs.org';
+export const REGISTRY = 'https://registry.npmjs.org';
+export const AUDIT_TIMEOUT_MS = 60_000;
 const root = fileURLToPath(new URL('..', import.meta.url));
 const lockfile = `${root}bun.lock`;
 const exceptionsFile = `${root}scripts/audit-exceptions.json`;
 
-/** Numeric [major, minor, patch]; prerelease suffixes are ignored for
- *  ordering (ponytail: enough for advisory ranges, which pin releases). */
-function parseVersion(v) {
-  return v
-    .replace(/^[~^>=<\s]+/, '')
-    .split(/[-+]/)[0]
-    .split('.')
-    .map((n) => Number(n) || 0);
+/** Advisory policy: include prereleases in SemVer ordering, without dropping
+ *  their suffixes. E.g. 2.0.0-rc.1 is below a <2.0.0 fix boundary. Build
+ *  metadata does not affect precedence. npm's default prerelease exclusion
+ *  is for dependency selection, not this conservative vulnerability gate.
+ *  https://github.com/npm/node-semver#prerelease-tags
+ *
+ *  Strict Range construction parses ALL AND/OR terms before any matching.
+ *  Never use semver.satisfies directly: it returns false for invalid ranges.
+ *  Empty groups are rejected even though npm treats them as wildcards. */
+function parseAdvisoryRange(range) {
+  if (typeof range !== 'string' || range.split('||').some((group) => !group.trim())) {
+    throw new Error('invalid advisory range: expected nonempty comparator groups');
+  }
+  try {
+    // semver 7.8.5 strips build metadata and stars before comparator parsing,
+    // even in malformed terms such as "+garbage" or "2.0.0*". Validate their
+    // placement first so that normalization cannot hide an invalid term.
+    // Metadata on partial/wildcard versions is deliberately refused.
+    for (const token of range.split(/\s+|\|\|/)) {
+      const version = token.replace(/^(?:[<>]=?|=|~>?|\^)/, '');
+      if (token.includes('+')) new SemVer(version);
+      if (token.includes('*') && !/^v?(?:\d+|[xX*])(?:\.(?:\d+|[xX*])){0,2}$/.test(version)) {
+        throw new Error(`invalid wildcard comparator ${JSON.stringify(token)}`);
+      }
+    }
+    return new Range(range, { loose: false, includePrerelease: true });
+  } catch (cause) {
+    throw new Error(`invalid advisory range ${JSON.stringify(range)}: ${cause.message}`);
+  }
 }
 
-function compareVersions(a, b) {
-  const pa = parseVersion(a);
-  const pb = parseVersion(b);
-  for (let i = 0; i < 3; i += 1) if (pa[i] !== pb[i]) return pa[i] - pb[i];
-  return 0;
+export function satisfies(version, range) {
+  const parsed = parseAdvisoryRange(range);
+  // SemVer throws for invalid resolved versions; Range.test(string) would
+  // silently return false and could hide a finding.
+  return parsed.test(new SemVer(version));
 }
 
-/** npm-style comparator subset used by GitHub advisories: "*" wildcard,
- *  "1.x", ">=a <b" AND groups and "||" OR groups.
- *  Unparseable ranges fail closed (treated as matching everything). */
-function satisfies(version, range) {
-  let parsed = true;
-  const matched = String(range)
-    .split('||')
-    .some((group) => {
-      const terms = group.trim().split(/\s+/).filter(Boolean);
-      return terms.every((term) => {
-        if (term === '*') return true;
-        const wildcard = /^(\d+)\.x(?:\.x)?$/.exec(term);
-        if (wildcard) return parseVersion(version)[0] === Number(wildcard[1]);
-        const m = /^([<>]=?|=)?\s*(\d+\.\d+\.\d+(?:[-+][\w.]+)?)$/.exec(term);
-        if (!m) {
-          parsed = false;
-          return false;
-        }
-        const c = compareVersions(version, m[2]);
-        switch (m[1]) {
-          case '<':
-            return c < 0;
-          case '<=':
-            return c <= 0;
-          case '>':
-            return c > 0;
-          case '>=':
-            return c >= 0;
-          default:
-            return c === 0;
-        }
-      });
-    });
-  return parsed ? matched : true;
+const SEVERITIES = new Set(['low', 'moderate', 'high', 'critical']);
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const isNonemptyString = (value) => typeof value === 'string' && value.trim().length > 0;
+
+/** npm's bulk advisory response is a package -> nonempty advisory array map.
+ *  Validate the required identity/report fields even when no lock version
+ *  matches. Extra registry metadata (e.g. cwe/cvss) is not used by the gate. */
+function validateAdvisories(report) {
+  if (!isRecord(report)) throw new Error('invalid audit response: expected a package advisory object');
+  for (const [name, advisories] of Object.entries(report)) {
+    if (!isNonemptyString(name) || !Array.isArray(advisories) || advisories.length === 0) {
+      throw new Error(`invalid audit response for ${JSON.stringify(name)}: expected a nonempty advisory array`);
+    }
+    for (const [index, advisory] of advisories.entries()) {
+      const label = `invalid advisory ${name}[${index}]`;
+      if (!isRecord(advisory)) throw new Error(`${label}: expected an object`);
+      if (!Number.isSafeInteger(advisory.id) || advisory.id <= 0) {
+        throw new Error(`${label}: id must be a positive safe integer`);
+      }
+      for (const field of ['url', 'title', 'vulnerable_versions']) {
+        if (!isNonemptyString(advisory[field])) throw new Error(`${label}: missing or invalid ${field}`);
+      }
+      let url;
+      try { url = new URL(advisory.url); } catch { /* rejected below */ }
+      if (!url || !['https:', 'http:'].includes(url.protocol) || url.username || url.password) {
+        throw new Error(`${label}: url must be an absolute HTTP(S) advisory URL without credentials`);
+      }
+      if (!SEVERITIES.has(advisory.severity)) throw new Error(`${label}: invalid severity`);
+      try { parseAdvisoryRange(advisory.vulnerable_versions); } catch (cause) {
+        throw new Error(`${label}: ${cause.message}`);
+      }
+    }
+  }
+  return report;
+}
+
+/** Bun 1.4.0 --json: clean is exit 0 + {}; vulnerabilities are exit 1 +
+ *  the bulk advisory map. Request failures ALSO exit 1, so status alone is
+ *  insufficient. Verified against the official registry with clean and
+ *  esbuild@0.18.20 locks; see https://bun.sh/docs/pm/cli/audit#exit-code.
+ *  Reject stderr as well: a partial/failed audit must never pass as clean. */
+export function parseAuditResult(audit) {
+  if (audit.error) {
+    const code = audit.error.code ?? 'unknown';
+    throw new Error(`bun audit process error (${code}): ${audit.error.message}`);
+  }
+  if (audit.signal) throw new Error(`bun audit terminated by signal ${audit.signal}`);
+  if (audit.status !== 0 && audit.status !== 1) {
+    throw new Error(`bun audit failed with exit ${audit.status}`);
+  }
+  if (typeof audit.stderr !== 'string' || audit.stderr.trim()) {
+    throw new Error('bun audit produced stderr diagnostics; report may be incomplete');
+  }
+  let report;
+  try { report = JSON.parse(audit.stdout); } catch {
+    throw new Error('bun audit returned invalid JSON');
+  }
+  validateAdvisories(report);
+  if (audit.status === 1 && Object.keys(report).length === 0) {
+    throw new Error('bun audit exited 1 without an advisory report');
+  }
+  return report;
 }
 
 /** bun.lock is JSON with trailing commas; the only non-JSON bit to strip. */
-function parseLock(text) {
+export function parseLock(text) {
   return JSON.parse(text.replace(/,(\s*[}\]])/g, '$1'));
 }
 
@@ -109,7 +161,7 @@ function keyToChain(key) {
 }
 
 /** Every resolved package instance in the lock: name, version, chain. */
-function lockEntries(lock) {
+export function lockEntries(lock) {
   const entries = [];
   for (const [key, value] of Object.entries(lock.packages ?? {})) {
     const [nameAtVersion] = value;
@@ -124,10 +176,13 @@ function lockEntries(lock) {
 }
 
 /** Real (advisory, resolved version, chain) triples from this lockfile. */
-function findFindings(advisoriesByPackage, entries) {
+export function findFindings(advisoriesByPackage, entries) {
+  validateAdvisories(advisoriesByPackage);
   const findings = [];
   for (const [advisoryPackage, advisories] of Object.entries(advisoriesByPackage)) {
-    for (const entry of entries.filter((e) => e.name === advisoryPackage)) {
+    const resolved = entries.filter((e) => e.name === advisoryPackage);
+    if (resolved.length === 0) throw new Error(`audit package ${advisoryPackage} is absent from bun.lock`);
+    for (const entry of resolved) {
       for (const advisory of advisories) {
         if (satisfies(entry.version, advisory.vulnerable_versions)) {
           findings.push({
@@ -149,7 +204,7 @@ const REQUIRED_EXCEPTION_FIELDS = ['url', 'version', 'chain', 'reason', 'exposur
 
 /** Rules: exact advisory+version+chain match; metadata complete; unexpired;
  *  only low/moderate may be exempted; stale exceptions fail. */
-function checkExceptions(findings, exceptions, now = new Date()) {
+export function checkExceptions(findings, exceptions, now = new Date()) {
   const errors = [];
   const findingKey = (f) => `${f.url}@${f.version}@${f.chain}`;
   const used = new Set();
@@ -194,125 +249,51 @@ function loadExceptions(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
-/* --------------------------------------------------------------------------
-   Self-test: offline checks of the matcher and the exception rules, using a
-   synthetic tree shaped like the pre-fix one (vulnerable 0.18/0.21 esbuild
-   alongside safe 0.25/0.28 copies, vulnerable vite 5 beside safe vite 8).
-   -------------------------------------------------------------------------- */
-function selfTest() {
-  const assert = (cond, msg) => {
-    if (!cond) {
-      console.error(`✗ self-test: ${msg}`);
-      process.exit(1);
-    }
-  };
-  assert(satisfies('0.18.20', '<=0.24.2'), '0.18.20 must be vulnerable to <=0.24.2');
-  assert(!satisfies('0.25.12', '<=0.24.2'), '0.25.12 must NOT be flagged by <=0.24.2');
-  assert(!satisfies('8.2.2', '<=6.4.2'), 'vite 8.2.2 must NOT be flagged by <=6.4.2');
-  assert(satisfies('5.4.21', '<=6.4.2'), 'vite 5.4.21 must be flagged by <=6.4.2');
-  assert(satisfies('1.2.3', '>=1.0.0 <2.0.0'), 'AND range');
-  assert(!satisfies('2.0.1', '>=1.0.0 <2.0.0'), 'AND range upper bound');
-  assert(satisfies('3.1.0', '2.x || 3.x'), 'OR range');
-  assert(satisfies('9.9.9', 'garbage range'), 'unparseable range must fail closed');
-
-  const entries = lockEntries(
-    parseLock(`{ "packages": {
-      "esbuild": ["esbuild@0.25.12", "url", {}, "sha"],
-      "vitepress/vite": ["vite@5.4.21", "url", {}, "sha"],
-      "vitepress/vite/esbuild": ["esbuild@0.21.5", "url", {}, "sha"],
-      "@esbuild-kit/core-utils/esbuild": ["esbuild@0.18.20", "url", {}, "sha"],
-      "some-parent/@scope/tool": ["@scope/tool@1.0.0", "url", {}, "sha"]
-    } }`),
-  );
-  assert(
-    entries.some((e) => e.name === '@scope/tool' && e.version === '1.0.0' && e.chain === 'some-parent > @scope/tool'),
-    'scoped package names and lock-key chains must parse',
-  );
-  const findings = findFindings(
-    {
-      esbuild: [{ url: 'https://github.com/advisories/GHSA-esbuild', severity: 'moderate', vulnerable_versions: '<=0.24.2' }],
-      vite: [{ url: 'https://github.com/advisories/GHSA-vite-high', severity: 'high', vulnerable_versions: '<=6.4.2' }],
-      '@scope/tool': [{ url: 'https://github.com/advisories/GHSA-tool', severity: 'critical', vulnerable_versions: '*' }],
-    },
-    entries,
-  );
-  const keys = findings.map((f) => `${f.package}@${f.version}@${f.chain}`).sort();
-  assert(
-    JSON.stringify(keys) ===
-      JSON.stringify([
-        '@scope/tool@1.0.0@some-parent > @scope/tool',
-        'esbuild@0.18.20@@esbuild-kit/core-utils > esbuild',
-        'esbuild@0.21.5@vitepress > vite > esbuild',
-        'vite@5.4.21@vitepress > vite',
-      ]),
-    `finding extraction mismatch: ${JSON.stringify(keys)}`,
-  );
-  assert(!keys.some((k) => k.startsWith('esbuild@0.25')), 'the safe esbuild 0.25 copy must not be flagged');
-
-  const esbuildKit = findings.find((f) => f.version === '0.18.20');
-  const tool = findings.find((f) => f.package === '@scope/tool');
-  const good = {
-    url: 'https://github.com/advisories/GHSA-esbuild',
-    version: '0.18.20',
-    chain: '@esbuild-kit/core-utils > esbuild',
-    reason: 'drizzle-kit 0.31 pins @esbuild-kit/core-utils ~0.18',
-    exposure: 'local migration generation only, dev tooling, no network surface',
-    owner: 'platform-team',
-    expires: '2099-01-01',
-  };
-  const rest = checkExceptions(findings, [good]);
-  assert(rest.length === 3 && rest.some((e) => e.includes('vite@5.4.21')), 'a moderate exception defers only its own chain; the vite high must stay fatal');
-  assert(
-    checkExceptions([esbuildKit], [{ ...good, expires: '2000-01-01' }]).some((e) => e.includes('expired')),
-    'expired exceptions must fail',
-  );
-  assert(
-    checkExceptions([esbuildKit], [{ ...good, version: '0.25.12' }]).some((e) => e.includes('matches no current finding')),
-    'widening a version must fail',
-  );
-  assert(
-    checkExceptions([tool], [{ ...good, url: tool.url, version: '1.0.0', chain: tool.chain }]).some((e) => e.includes('cannot be excepted')),
-    'critical findings must never be excepted',
-  );
-  assert(
-    checkExceptions([esbuildKit], [{ ...good, owner: '' }]).some((e) => e.includes('missing')),
-    'missing metadata must fail',
-  );
-  console.log('✓ check-audit self-test passed');
-}
-
-/* -------------------------------------------------------------------------- */
-function main() {
-  if (process.argv.includes('--self-test')) return selfTest();
-
-  const audit = spawnSync('bun', ['audit', '--json', '--registry', REGISTRY], {
-    encoding: 'utf8',
-    cwd: root,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let advisories;
+/** Injectable process/file/output boundary shared by the CLI and offline tests.
+ *  Only a completely validated process result and report can reach success. */
+export function main({
+  spawn = spawnSync,
+  readLock = () => readFileSync(lockfile, 'utf8'),
+  readExceptions = () => loadExceptions(exceptionsFile),
+  now = new Date(),
+  log = console.log,
+  error = console.error,
+} = {}) {
   try {
-    advisories = JSON.parse(audit.stdout);
-  } catch {
-    const detail = (audit.stderr || audit.stdout || '').trim().split('\n').slice(-3).join('\n');
-    console.error(`✗ \`bun audit --registry ${REGISTRY}\` failed (exit ${audit.status})\n${detail}`);
-    process.exit(1);
+    const audit = spawn('bun', ['audit', '--json', '--registry', REGISTRY], {
+      encoding: 'utf8',
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: AUDIT_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    const advisories = parseAuditResult(audit);
+    const findings = findFindings(advisories, lockEntries(parseLock(readLock())));
+    const exceptions = readExceptions();
+    const errors = checkExceptions(findings, exceptions, now);
+    for (const message of errors) error(`✗ ${message}`);
+    if (errors.length > 0) {
+      error('Fix the chains in bun.lock, or add an exact low/moderate advisory+version+chain exception.');
+      return 1;
+    }
+    log(`✓ audit clean against ${REGISTRY} — ${findings.length} finding(s), ${exceptions.length} exception(s) verified`);
+    return 0;
+  } catch (cause) {
+    error(`✗ audit failed against ${REGISTRY}: ${cause.message}`);
+    return 1;
   }
-
-  const findings = findFindings(advisories, lockEntries(parseLock(readFileSync(lockfile, 'utf8'))));
-  const exceptions = loadExceptions(exceptionsFile);
-  const errors = checkExceptions(findings, exceptions);
-
-  for (const error of errors) console.error(`✗ ${error}`);
-  if (errors.length > 0) {
-    console.error('\n  Fix the chains in bun.lock, or (moderate only) add a narrow');
-    console.error('  advisory+version+chain exception to scripts/audit-exceptions.json.');
-    process.exit(1);
-  }
-  console.log(
-    `✓ audit clean against ${REGISTRY} — ${findings.length} finding(s), ` +
-      `${exceptions.length} exception(s) verified`,
-  );
 }
 
-main();
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  if (process.argv.includes('--self-test')) {
+    import('./check-audit.test.mjs')
+      .then(({ selfTest }) => selfTest())
+      .catch((cause) => {
+        console.error(`✗ check-audit self-test: ${cause.stack ?? cause}`);
+        process.exitCode = 1;
+      });
+  } else {
+    process.exitCode = main();
+  }
+}
