@@ -23,7 +23,7 @@ herdr agent start <name> --kind codex --pane <id> -- \
 | [03-scenario-verdict-redaction.md](done/03-scenario-verdict-redaction.md) | P1 | medium | gpt-6-astra / xhigh | 验收结果可信度与日志脱敏 | 已完成 |
 | [04-isolated-test-databases.md](04-isolated-test-databases.md) | P1 | hard | gpt-6-astra / xhigh | 测试数据库隔离、连接参数与资源生命周期 | 待执行 |
 | [05-core-numeric-boundaries.md](05-core-numeric-boundaries.md) | P1 | medium | gpt-6-astra / xhigh | Duration 与 retry 的有限值和存储边界 | 待执行 |
-| [06-sdk-request-timeout-range.md](06-sdk-request-timeout-range.md) | P2 | medium | gpt-6-astra / xhigh | SDK 单次请求 timer 范围 | 待执行 |
+| [06-sdk-request-timeout-range.md](done/06-sdk-request-timeout-range.md) | P2 | medium | gpt-6-astra / xhigh | SDK 单次请求 timer 范围 | 已完成 |
 | [07-kernel-wait-contract.md](07-kernel-wait-contract.md) | P1 | hard | gpt-6-astra / xhigh | Kernel 等待选项与取消/超时语义 | 待执行 |
 | [08-audit-fail-closed.md](08-audit-fail-closed.md) | P1 | medium | gpt-6-astra / xhigh | 审计进程与范围解析必须拒绝异常输入 | 待执行 |
 | [09-dashboard-build-deduplication.md](09-dashboard-build-deduplication.md) | P2 | medium | gpt-6-astra / xhigh | 消除 worker 构建中重复的 dashboard 编译 | 待执行 |

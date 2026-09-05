@@ -111,6 +111,11 @@ const trigger = betterTrigger({
 
 - `apiKey` is required when the daemon runs with `BETTER_TRIGGER_API_KEY` set;
   it is sent as `Authorization: Bearer <key>`.
+- `timeoutMs` limits one HTTP request (default 30,000ms). It must be finite
+  and satisfy `0 < timeoutMs <= 2147483647` (about 24.8 days), including any
+  per-request override. Invalid values fail before fetch, timers, or abort
+  listeners are created. Positive fractions within this range remain valid
+  and are passed unchanged to the runtime timer.
 - **Runs in any JS environment** — this package has no runtime dependencies
   and never opens a database connection. `node:async_hooks` (used only to
   detect "am I inside a running task?") is loaded lazily, so importing it in an
@@ -123,6 +128,12 @@ const trigger = betterTrigger({
   over with `instance.setDefault()`.
 - Retry defaults, concurrency and orchestrator intervals are daemon-side
   concerns — see `better-trigger-worker --help`.
+
+The HTTP timer limit does not cap the total `waitForResult` / `result()`
+wait budget: `{ timeoutMs: Infinity }` still waits indefinitely by issuing
+successive long-polls, each with a finite request timeout. Durable waits such
+as `ctx.wait.for("30d")` and `ctx.wait.until(date)` persist a wake-up date;
+they may exceed 24.8 days and are not subject to this HTTP timer limit.
 
 ### Instance API
 

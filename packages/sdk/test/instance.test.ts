@@ -850,6 +850,27 @@ describe('waitForResult — argument hardening (01-core-sdk T5)', () => {
     ).resolves.toEqual({ status: 'completed', output: { ok: 1 } });
   });
 
+  it('keeps an Infinity wait budget across multiple finite long-poll requests', async () => {
+    vi.useFakeTimers();
+    try {
+      const { fetch, calls } = handledFetch([
+        slicePollingNonTerminal('running'),
+        slicePollingNonTerminal('waiting'),
+        () => terminalResponse('completed', { ok: 1 }),
+      ]);
+      const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });
+      const result = trigger.waitForResult('run_1', undefined, { timeoutMs: Infinity });
+      await vi.advanceTimersByTimeAsync(50_000);
+      await expect(result).resolves.toEqual({ status: 'completed', output: { ok: 1 } });
+      expect(calls.map((call) => new URL(call.url).searchParams.get('timeoutMs'))).toEqual([
+        '25000', '25000', '25000',
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('floors a fractional budget into an integer timeoutMs request param', async () => {
     const { fetch, calls } = handledFetch([() => terminalResponse('completed', { ok: 1 })]);
     const trigger = betterTrigger({ url: 'http://daemon.test:4848', fetch });

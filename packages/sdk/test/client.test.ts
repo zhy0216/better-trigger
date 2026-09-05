@@ -34,27 +34,38 @@ function client(fetchImpl: typeof globalThis.fetch, url = 'http://daemon.test:48
   return new HttpClient({ url, fetch: fetchImpl });
 }
 
+const invalidTimeouts = [
+  0,
+  -1,
+  Number.NaN,
+  Number.POSITIVE_INFINITY,
+  Number.NEGATIVE_INFINITY,
+  2_147_483_647.5,
+  2_147_483_648,
+  Number.MAX_VALUE,
+];
+const timeoutRangeError = /"timeoutMs".*finite.*0 < timeoutMs <= 2147483647/;
+
 describe('HttpClient — construction', () => {
   it('requires a url', () => {
     expect(() => new HttpClient({ url: '' })).toThrow(/"url" is required/);
   });
 
-  it('rejects a non-positive or non-finite timeoutMs at construction', () => {
-    // 0 / negative / NaN (or Infinity) would arm a setTimeout that fires
-    // immediately (or never), so every request would fail as a mystery
-    // timeout — fail loudly at construction instead.
-    const fetchImpl = (async () =>
-      new Response('{"ok":true}', { status: 200 })) as unknown as typeof globalThis.fetch;
-    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(
-        () =>
-          new HttpClient({ url: 'http://daemon.test:4848', fetch: fetchImpl, timeoutMs: bad }),
-      ).toThrow(/"timeoutMs" must be a positive number of milliseconds/);
+  it.each(invalidTimeouts)('rejects timeoutMs=%s before creating request resources', (timeoutMs) => {
+    const { fetch, calls } = stubFetch(new Response('{"ok":true}', { status: 200 }));
+    const timer = vi.spyOn(globalThis, 'setTimeout');
+    const listener = vi.spyOn(AbortSignal.prototype, 'addEventListener');
+    try {
+      expect(() => new HttpClient({ url: 'http://daemon.test:4848', fetch, timeoutMs })).toThrow(
+        timeoutRangeError,
+      );
+      expect(calls).toHaveLength(0);
+      expect(timer).not.toHaveBeenCalled();
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      timer.mockRestore();
+      listener.mockRestore();
     }
-    expect(
-      () =>
-        new HttpClient({ url: 'http://daemon.test:4848', fetch: fetchImpl, timeoutMs: 1 }),
-    ).not.toThrow();
   });
 
   it('strips trailing slashes so /api/v1 does not double up', () => {
@@ -65,6 +76,35 @@ describe('HttpClient — construction', () => {
       expect(calls[0].url).toBe('http://daemon.test:4848/api/v1/health');
     });
   });
+});
+
+describe.each(['constructor', 'request override'] as const)('HttpClient — %s timeout range', (source) => {
+  it.each([0.5, 1, 1.5, 2_147_483_646.5, 2_147_483_647])(
+    'passes a valid timeoutMs=%s to the timer unchanged',
+    async (timeoutMs) => {
+      vi.useFakeTimers();
+      const timer = vi.spyOn(globalThis, 'setTimeout');
+      try {
+        const { fetch, calls } = stubFetch(new Response('{"ok":true}', { status: 200 }));
+        const c = new HttpClient({
+          url: 'http://daemon.test:4848',
+          fetch,
+          timeoutMs: source === 'constructor' ? timeoutMs : 30_000,
+        });
+        await expect(
+          c.request('/runs', {
+            timeoutMs: source === 'request override' ? timeoutMs : undefined,
+          }),
+        ).resolves.toEqual({ ok: true });
+        expect(calls).toHaveLength(1);
+        expect(timer).toHaveBeenCalledExactlyOnceWith(expect.any(Function), timeoutMs);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        timer.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
 });
 
 describe('HttpClient — request shape', () => {
@@ -326,21 +366,27 @@ describe('HttpClient — error mapping', () => {
     expect((err as HttpError).message).toContain('timed out after 10ms');
   });
 
-  it('rejects an invalid per-request timeoutMs override before touching the network', async () => {
-    // The constructor guards timeoutMs; a per-request override must clear the
-    // same bar. A 0/NaN override used to arm an already-expired timer, so the
-    // request died as a mystery 'timeout' HttpError instead of a config error.
-    // It throws (rejects) rather than falling back to the client value — the
-    // same contract as the constructor path.
-    const { fetch, calls } = stubFetch(new Response('{"ok":true}', { status: 200 }));
-    const c = client(fetch);
-    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
-      await expect(c.request('/runs', { timeoutMs: bad })).rejects.toThrow(
-        /"timeoutMs" must be a positive number of milliseconds/,
-      );
-    }
-    expect(calls).toHaveLength(0);
-  });
+  it.each(invalidTimeouts)(
+    'rejects timeoutMs=%s override before creating request resources',
+    async (timeoutMs) => {
+      const { fetch, calls } = stubFetch(new Response('{"ok":true}', { status: 200 }));
+      const c = client(fetch);
+      const caller = new AbortController();
+      const timer = vi.spyOn(globalThis, 'setTimeout');
+      const listener = vi.spyOn(AbortSignal.prototype, 'addEventListener');
+      try {
+        await expect(c.request('/runs', { timeoutMs, signal: caller.signal })).rejects.toThrow(
+          timeoutRangeError,
+        );
+        expect(calls).toHaveLength(0);
+        expect(timer).not.toHaveBeenCalled();
+        expect(listener).not.toHaveBeenCalled();
+      } finally {
+        timer.mockRestore();
+        listener.mockRestore();
+      }
+    },
+  );
 
   it('aborts a mid-flight request when the caller signal fires, leaving no timer behind', async () => {
     // The stub never settles on its own — only the caller's abort can end it.

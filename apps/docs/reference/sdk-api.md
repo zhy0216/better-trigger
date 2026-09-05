@@ -76,6 +76,18 @@ const trigger = betterTrigger({
 });
 ```
 
+`timeoutMs` limits one HTTP request (default 30,000ms). It must be finite
+and satisfy `0 < timeoutMs <= 2147483647` (about 24.8 days), including any
+per-request override. Invalid values fail before fetch, timers, or abort
+listeners are created. Positive fractions within this range remain valid
+and are passed unchanged to the runtime timer.
+
+This limit does not cap the total `waitForResult` / `result()` wait budget:
+`{ timeoutMs: Infinity }` still waits indefinitely through successive
+long-polls, each with a finite request timeout. Durable waits such as
+`ctx.wait.for("30d")` and `ctx.wait.until(date)` persist a wake-up date;
+they may exceed 24.8 days and are not subject to the HTTP timer limit.
+
 The **first** `betterTrigger()` call becomes the module-level default;
 `instance.setDefault()` takes over later. Runs in any JS environment — edge
 functions and browsers included (`node:async_hooks` loads lazily).

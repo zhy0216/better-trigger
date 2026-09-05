@@ -71,6 +71,16 @@ const trigger = betterTrigger({
 });
 ```
 
+`timeoutMs` 限制单次 HTTP 请求（默认 30,000ms），必须是满足
+`0 < timeoutMs <= 2147483647` 的有限值（上限约 24.8 天），单次请求的 override
+也遵循同一范围。非法值会在调用 fetch、创建 timer 或注册 abort listener 前报错。
+范围内的正小数仍合法，原样传给运行时 timer 处理。
+
+该上限不限制 `waitForResult` / `result()` 的总等待预算：
+`{ timeoutMs: Infinity }` 仍可通过连续多段 long-poll 无限等待，每段使用有限的请求超时。
+`ctx.wait.for("30d")`、`ctx.wait.until(date)` 等 durable wait 持久化的是唤醒日期，
+可以超过 24.8 天，不受这个 HTTP timer 上限约束。
+
 **第一个** `betterTrigger()` 调用会成为模块级默认实例；之后可用 `instance.setDefault()` 接管。可在任何 JS 环境运行——包括 edge 函数与浏览器（`node:async_hooks` 懒加载）。
 
 ### 实例 API

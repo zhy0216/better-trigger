@@ -63,7 +63,10 @@ export interface HttpClientOptions {
   apiKey?: string;
   /** Injectable fetch (tests, proxies, custom agents). Defaults to global fetch. */
   fetch?: typeof globalThis.fetch;
-  /** Per-request timeout in ms. Default 30s; long-polls pass their own. */
+  /**
+   * Per-request timeout: finite, 0 < ms <= 2147483647.
+   * Default 30s; long-polls pass their own.
+   */
   timeoutMs?: number;
 }
 
@@ -72,7 +75,7 @@ export interface RequestOptions {
   body?: unknown;
   /** Caller cancellation, combined with the per-request timeout. */
   signal?: AbortSignal;
-  /** Overrides the client-level timeout for this request. */
+  /** Overrides the client-level timeout for this request; finite, 0 < ms <= 2147483647. */
   timeoutMs?: number;
   /**
    * Extra request headers, merged case-insensitively with the defaults: a
@@ -85,18 +88,20 @@ export interface RequestOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const MAX_TIMEOUT_MS = 2_147_483_647;
 const PREFIX = '/api/v1';
 
 /**
  * Shared timeoutMs guard for the constructor and the per-request override.
- * A 0 / negative / non-finite value arms a setTimeout that fires immediately
- * (or never), turning every request into a mystery 'timeout' HttpError — so
- * it fails loudly with the same config error instead.
+ * Reject invalid delays before allocating request resources: runtimes can
+ * reduce values above the signed 32-bit timer limit to 1ms. Valid fractional
+ * values pass through unchanged, retaining the runtime's timer precision.
  */
 function assertTimeoutMs(value: number): void {
-  if (!Number.isFinite(value) || value <= 0) {
+  if (!Number.isFinite(value) || value <= 0 || value > MAX_TIMEOUT_MS) {
     throw new Error(
-      `better-trigger: "timeoutMs" must be a positive number of milliseconds (got ${String(value)})`,
+      `better-trigger: "timeoutMs" must be a finite number of milliseconds ` +
+        `in the range 0 < timeoutMs <= ${MAX_TIMEOUT_MS} (got ${String(value)})`,
     );
   }
 }
