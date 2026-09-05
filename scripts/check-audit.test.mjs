@@ -9,7 +9,9 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { satisfies as semverSatisfies } from 'semver';
 import {
@@ -40,6 +42,27 @@ const result = (report = {}, fields = {}) => ({
   ...fields,
 });
 const report = (fields = {}) => ({ demo: [advisory(fields)] });
+// Observed with Bun 1.4.0 audit AND pm hash, including NODE_ENV unset,
+// development, production, test and staging: package commands load this group.
+const loadedEnvFiles = ['.env.production.local', '.env.local', '.env.production', '.env'];
+const envFiles = ['.env', '.env.local', ...['development', 'production', 'test']
+  .flatMap((mode) => [`.env.${mode}`, `.env.${mode}.local`])];
+const dotenvScenarios = [
+  { name: 'no-env', files: [], loaded: [] },
+  ...envFiles.map((file) => ({
+    name: file, files: [file], mode: file.match(/\.(development|production|test)/)?.[1],
+    loaded: loadedEnvFiles.includes(file) ? [file] : [],
+  })),
+  ...[undefined, 'development', 'production', 'test', 'staging'].map((mode) => ({
+    name: `all-${mode ?? 'unset'}`, files: envFiles, mode, loaded: loadedEnvFiles,
+  })),
+];
+const dotenvNotices = [
+  '[0.05ms] ".env"\n', '[12.34ms] ".env"\n', '[1000.00ms] ".env"\r\n',
+  ...dotenvScenarios.filter(({ loaded }) => loaded.length > 0)
+    .map(({ loaded }) => `[0.05ms] ${loaded.map((file) => JSON.stringify(file)).join(', ')}\n`),
+  '[0.05ms] ".env.local", ".env"\n',
+];
 const fixtureLock = JSON.stringify({ packages: { demo: ['demo@1.0.0', '', {}, ''] } });
 const now = new Date('2030-06-01T12:00:00Z');
 const exception = (fields = {}) => ({
@@ -84,6 +107,24 @@ const badProcesses = [
   ['failure-without-report', result({}, { status: 1 }), /without an advisory report/],
   ['stderr-with-clean-json', result({}, { stderr: 'audit request failed' }), /stderr/],
   ['stderr-with-valid-report', result(report(), { status: 1, stderr: 'partial audit failure' }), /stderr/],
+  ...[
+    null, undefined, Buffer.from(''),
+    `${dotenvNotices[0]}warning: partial response\n`,
+    `warning: partial response\n${dotenvNotices[0]}`,
+    '[0.05ms] ".env" warning: partial response\n',
+    '[0.05ms] ".env"\rwarning: partial response\n',
+    `${dotenvNotices[0]}${dotenvNotices[0]}`,
+    '[0.05ms] "error.log"\n', '[0.05ms] ".env.staging"\n',
+    '[0.05ms] ".env.development"\n', '[0.05ms] ".env.test"\n',
+    '[0.05ms] ".env", ".env.local"\n', '[0.05ms] ".env", ".env"\n',
+    '[0.05ms] ".env.local", "error.log", ".env"\n',
+    '[0.05ms] ".env.local", ".env", warning\n',
+    '[0.05ms] ".env" extra\n', '[0.05ms] ".env"',
+    'prefix [0.05ms] ".env"\n', ' [0.05ms] ".env"\n',
+    '[-0.05ms] ".env"\n', '[NaNms] ".env"\n',
+    '[0x05ms] ".env"\n', '[0.05s] ".env"\n',
+    '[0.05ms] "xenv"\n', '[0.05ms] ".env"\u0000\n',
+  ].map((stderr, index) => [`stderr-near-miss-${index}`, result({}, { stderr }), /stderr/]),
   ['invalid-json', result({}, { stdout: '{' }), /invalid JSON/],
   ['empty-output', result({}, { stdout: '' }), /invalid JSON/],
   ['array-response', result([]), /expected a package advisory object/],
@@ -119,6 +160,13 @@ const badProcesses = [
   ]),
 ];
 
+// A startup notice must not hide ANY existing process/JSON/schema/range failure.
+badProcesses.push(...badProcesses.map(([name, audit, diagnostic]) => [
+  `${name}-with-dotenv`,
+  { ...audit, stderr: dotenvNotices[0] + (typeof audit.stderr === 'string' ? audit.stderr : 'invalid stderr') },
+  diagnostic,
+]));
+
 function runFixture(audit, overrides = {}) {
   const logs = [];
   const errors = [];
@@ -134,6 +182,80 @@ function runFixture(audit, overrides = {}) {
   return { status, logs, errors };
 }
 
+// Every file is created by this test. Never copy or inspect a checkout's .env.
+// The minimal child environment excludes database URLs and registry credentials.
+function withDotenvFixtures(check, live = false) {
+  const directory = mkdtempSync(join(tmpdir(), 'check-audit-dotenv-'));
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  try {
+    if (live) {
+      mkdirSync(join(directory, 'scripts'));
+      for (const file of ['package.json', 'bun.lock', 'scripts/check-audit.mjs', 'scripts/check-audit.test.mjs']) {
+        copyFileSync(join(root, file), join(directory, file));
+      }
+      const exceptions = 'scripts/audit-exceptions.json';
+      if (existsSync(join(root, exceptions))) copyFileSync(join(root, exceptions), join(directory, exceptions));
+      symlinkSync(join(root, 'node_modules'), join(directory, 'node_modules'), 'junction');
+    } else {
+      writeFileSync(join(directory, 'package.json'), '{"name":"audit-dotenv-fixture","private":true}');
+      writeFileSync(join(directory, 'bun.lock'), JSON.stringify({
+        lockfileVersion: 1, configVersion: 1,
+        workspaces: { '': { name: 'audit-dotenv-fixture' } }, packages: {},
+      }));
+    }
+    for (const scenario of dotenvScenarios) {
+      for (const file of envFiles) rmSync(join(directory, file), { force: true });
+      for (const [index, file] of scenario.files.entries()) {
+        writeFileSync(join(directory, file), `AUDIT_DOTENV_FIXTURE_${index}=synthetic\n`);
+      }
+      check(scenario, {
+        cwd: directory,
+        env: { PATH: process.env.PATH, ...(scenario.mode ? { NODE_ENV: scenario.mode } : {}) },
+        encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL',
+      });
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+  assert.equal(existsSync(directory), false, 'synthetic dotenv fixture must be cleaned');
+}
+
+function assertDotenvOutput(child, scenario) {
+  assert.ifError(child.error);
+  assert.equal(child.signal, null, scenario.name);
+  assert.equal(child.status, 0, `${scenario.name}: ${child.stderr}`);
+  if (scenario.loaded.length === 0) {
+    assert.equal(child.stderr, '', scenario.name);
+  } else {
+    assert.match(child.stderr, /^\[\d+\.\d{2}ms\] /, scenario.name);
+    assert.equal(child.stderr.replace(/^\[\d+\.\d{2}ms\] /, ''),
+      `${scenario.loaded.map((file) => JSON.stringify(file)).join(', ')}\n`, scenario.name);
+  }
+}
+
+// Opt-in online regression: real registry response and unmodified package-script
+// entry point in disposable checkouts, including self-test with and without .env.
+// Run: bun scripts/check-audit.test.mjs --live-test
+function liveTest() {
+  withDotenvFixtures((scenario, options) => {
+    const audit = spawnSync('bun', ['audit', '--json', '--registry', REGISTRY], options);
+    assertDotenvOutput(audit, scenario);
+    parseAuditResult(audit);
+    const commands = [['run', 'check:audit']];
+    if (['no-env', '.env'].includes(scenario.name)) commands.push(['run', 'check:audit', '--', '--self-test']);
+    for (const args of commands) {
+      const child = spawnSync('bun', args, options);
+      assert.ifError(child.error);
+      assert.equal(child.signal, null, scenario.name);
+      assert.equal(child.status, 0, `${scenario.name}: ${child.stdout}\n${child.stderr}`);
+      assert.match(child.stdout, args.includes('--self-test') ? /self-test passed/ : /audit clean/);
+      console.log(`✓ ${scenario.name}: bun ${args.join(' ')}`);
+    }
+    console.log(JSON.stringify({ scenario: scenario.name, status: audit.status, stdout: audit.stdout, stderr: audit.stderr }));
+  }, true);
+  console.log(`✓ check-audit live-test passed — ${dotenvScenarios.length} dotenv scenarios; fixtures cleaned`);
+}
+
 export function selfTest() {
   for (const [name, audit, diagnostic] of badProcesses) {
     const outcome = runFixture(audit);
@@ -141,19 +263,31 @@ export function selfTest() {
     assert.equal(outcome.logs.length, 0, `${name} must not print success`);
     assert.match(outcome.errors.join('\n'), diagnostic, name);
   }
-  const clean = runFixture(result());
-  assert.equal(clean.status, 0);
-  assert.equal(clean.errors.length, 0);
-  assert.match(clean.logs.join('\n'), /audit clean.*0 finding/);
+  for (const stderr of ['', ...dotenvNotices]) {
+    const clean = runFixture(result({}, { stderr }));
+    assert.equal(clean.status, 0, `clean report with stderr ${JSON.stringify(stderr)}`);
+    assert.equal(clean.errors.length, 0);
+    assert.match(clean.logs.join('\n'), /audit clean.*0 finding/);
 
-  for (const status of [0, 1]) {
-    // A valid report is evaluated regardless of the accepted Bun status.
-    assert.equal(runFixture(result(report(), { status })).status, 1);
-    const deferred = runFixture(result(report(), { status }), { readExceptions: () => [exception()] });
-    assert.equal(deferred.status, 0);
-    assert.match(deferred.logs.join('\n'), /1 finding\(s\), 1 exception\(s\) verified/);
-    assert.equal(runFixture(result(report({ vulnerable_versions: '<1.0.0' }), { status })).status, 0);
+    for (const status of [0, 1]) {
+      // A valid report is evaluated regardless of the accepted Bun status.
+      assert.equal(runFixture(result(report(), { status, stderr })).status, 1);
+      const deferred = runFixture(result(report(), { status, stderr }), { readExceptions: () => [exception()] });
+      assert.equal(deferred.status, 0);
+      assert.match(deferred.logs.join('\n'), /1 finding\(s\), 1 exception\(s\) verified/);
+      assert.equal(runFixture(result(report({ vulnerable_versions: '<1.0.0' }), { status, stderr })).status, 0);
+    }
   }
+  // pm hash uses Bun's package-manager dotenv startup path without networking.
+  // Feed its real stderr into both clean reports and mixed-diagnostic failures.
+  withDotenvFixtures((scenario, options) => {
+    const startup = spawnSync('bun', ['pm', 'hash'], options);
+    assertDotenvOutput(startup, scenario);
+    assert.equal(runFixture(result({}, { stderr: startup.stderr })).status, 0, scenario.name);
+    for (const stderr of [`${startup.stderr}warning: partial audit\n`, `warning: partial audit\n${startup.stderr}`]) {
+      assert.throws(() => parseAuditResult(result({}, { stderr })), /stderr/, scenario.name);
+    }
+  });
   const thrown = runFixture(result(), { spawn: () => { throw new Error('spawn failed'); } });
   assert.equal(thrown.status, 1);
   assert.match(thrown.errors.join('\n'), /spawn failed/);
@@ -286,12 +420,16 @@ export function selfTest() {
   assert.equal(runFixture(result(report()), { readExceptions: () => [exception({ expires: '2000-01-01' })] }).status, 1);
   assert.equal(runFixture(result(report({ severity: 'high' })), { readExceptions: () => [exception()] }).status, 1);
   assert.equal(runFixture(result(), { readExceptions: () => [exception()] }).status, 1);
-  console.log(`✓ check-audit self-test passed — ${badProcesses.length} rejected fixtures (including child exit checks), ${ranges.length} range cases, process/lock/exception checks`);
+  console.log(`✓ check-audit self-test passed — ${badProcesses.length} rejected fixtures (including child exit checks), ${ranges.length} range cases, ${dotenvScenarios.length} real offline dotenv scenarios (cleaned), process/lock/exception checks`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const name = process.argv[process.argv.indexOf('--fixture') + 1];
-  const fixture = badProcesses.find(([candidate]) => candidate === name);
-  assert.ok(fixture, `unknown fixture ${name}`);
-  process.exitCode = main({ spawn: () => fixture[1], readLock: () => fixtureLock, readExceptions: () => [], now });
+  if (process.argv.includes('--live-test')) {
+    liveTest();
+  } else {
+    const name = process.argv[process.argv.indexOf('--fixture') + 1];
+    const fixture = badProcesses.find(([candidate]) => candidate === name);
+    assert.ok(fixture, `unknown fixture ${name}`);
+    process.exitCode = main({ spawn: () => fixture[1], readLock: () => fixtureLock, readExceptions: () => [], now });
+  }
 }

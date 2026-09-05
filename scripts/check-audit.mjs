@@ -112,11 +112,29 @@ function validateAdvisories(report) {
   return report;
 }
 
+/** Bun 1.4.0 package commands print one dotenv timing line, even with
+ *  --no-env-file. Accept only the observed default filenames in load order
+ *  (including subsets); unknown names, duplicates and all other stderr remain
+ *  diagnostics. NODE_ENV did not change this production group in audit/pm. */
+function stripDotenvNotice(stderr) {
+  const notice = /^\[\d+\.\d{2}ms\] ([^\r\n]+)\r?\n/.exec(stderr);
+  if (!notice) return stderr;
+  const loadOrder = ['".env.production.local"', '".env.local"', '".env.production"', '".env"'];
+  let previous = -1;
+  for (const file of notice[1].split(', ')) {
+    const index = loadOrder.indexOf(file);
+    if (index <= previous) return stderr;
+    previous = index;
+  }
+  return stderr.slice(notice[0].length);
+}
+
 /** Bun 1.4.0 --json: clean is exit 0 + {}; vulnerabilities are exit 1 +
  *  the bulk advisory map. Request failures ALSO exit 1, so status alone is
  *  insufficient. Verified against the official registry with clean and
  *  esbuild@0.18.20 locks; see https://bun.sh/docs/pm/cli/audit#exit-code.
- *  Reject stderr as well: a partial/failed audit must never pass as clean. */
+ *  Reject stderr diagnostics after the known dotenv startup notice: a
+ *  partial/failed audit must never pass as clean. */
 export function parseAuditResult(audit) {
   if (audit.error) {
     const code = audit.error.code ?? 'unknown';
@@ -126,7 +144,7 @@ export function parseAuditResult(audit) {
   if (audit.status !== 0 && audit.status !== 1) {
     throw new Error(`bun audit failed with exit ${audit.status}`);
   }
-  if (typeof audit.stderr !== 'string' || audit.stderr.trim()) {
+  if (typeof audit.stderr !== 'string' || stripDotenvNotice(audit.stderr).trim()) {
     throw new Error('bun audit produced stderr diagnostics; report may be incomplete');
   }
   let report;
