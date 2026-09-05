@@ -123,7 +123,7 @@ jobs:
       # bytes that health, metrics, workers.code_version and npm receive.
       - name: Build + provenance rollover guard
         env:
-          PREVIOUS_BUILD_SHA: 0000000000000000000000000000000000000000
+          PREVIOUS_BUILD_SHA: "0000000000000000000000000000000000000000"
         run: |
           set -euo pipefail
           export BT_GIT_SHA="$PREVIOUS_BUILD_SHA"
