@@ -27,6 +27,15 @@ import {
 import { resetDb, type ResetDbOptions, type TestDatabase } from './database';
 import { createInvariants, type Invariants } from './invariants';
 
+/** Formatting arbitrary thrown values must not interrupt cleanup or verdicts. */
+function describeScenarioError(err: unknown): string {
+  try {
+    return err === '' ? '""' : describeError(err);
+  } catch {
+    return '<unprintable thrown value>';
+  }
+}
+
 export interface ScenarioMeta {
   /** Selector-ish short name, e.g. 'crash'. Used in the header + summary. */
   name: string;
@@ -101,7 +110,7 @@ class ScenarioImpl implements Scenario {
       this.passed += 1;
       console.log(`  ✓ ${name} (${Date.now() - t0}ms)`);
     } catch (err) {
-      const msg = describeError(err);
+      const msg = describeScenarioError(err);
       this.failures.push(`${name}: ${msg}`);
       console.log(`  ✗ ${name} (${Date.now() - t0}ms)\n      ${msg}`);
     }
@@ -111,13 +120,15 @@ class ScenarioImpl implements Scenario {
     this.teardown.push(fn);
   }
 
-  /** LIFO, each guarded: a broken teardown must not mask the real failure. */
+  /** LIFO, each guarded: collect cleanup failures without masking the body. */
   async runTeardown(): Promise<void> {
     for (const fn of [...this.teardown].reverse()) {
       try {
         await fn();
       } catch (err) {
-        console.warn(`  ! teardown step failed: ${describeError(err)}`);
+        const failure = `teardown step failed: ${describeScenarioError(err)}`;
+        this.failures.push(failure);
+        console.warn(`  ! ${failure}`);
       }
     }
   }
@@ -139,26 +150,30 @@ export async function runScenario(
     db = await resetDb(meta.db);
   } catch (err) {
     // Unreachable Postgres lands here — it must still be a non-zero exit.
-    console.error(`\n✗ ${meta.name}: could not provision the database — ${describeError(err)}\n`);
+    console.error(`\n✗ ${meta.name}: could not provision the database — ${describeScenarioError(err)}\n`);
     process.exit(1);
   }
 
   const s = new ScenarioImpl(db, createInvariants(db.pool));
-  s.log(`db ${db.url}`);
   // Registered first → runs last: everything else may still need the pool.
   s.cleanup(() => db.end());
 
-  let crash: unknown = null;
+  let crashed = false;
+  let crash: unknown;
   try {
+    // Allowlist the instance identity: credentials, query and fragment stay private.
+    const { hostname, port } = new URL(db.url);
+    s.log(`db ${hostname}:${port || '5432'}/${db.name}`);
     await body(s);
   } catch (err) {
+    crashed = true;
     crash = err;
   }
   await s.runTeardown();
 
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
   console.log(`\n${'-'.repeat(48)}`);
-  const failed = s.failures.length + (crash ? 1 : 0);
+  const failed = s.failures.length + (crashed ? 1 : 0);
   console.log(`  ${s.passed} passed, ${failed} failed  (${elapsed}s)`);
 
   if (failed === 0) {
@@ -168,8 +183,8 @@ export async function runScenario(
 
   console.log('\nFailures:');
   for (const f of s.failures) console.log(`  ✗ ${f}`);
-  if (crash) {
-    console.log(`  ✗ ${describeError(crash)}`);
+  if (crashed) {
+    console.log(`  ✗ ${describeScenarioError(crash)}`);
     if (crash instanceof Error && crash.name !== 'AssertionFailure') {
       console.error(crash);
     }
