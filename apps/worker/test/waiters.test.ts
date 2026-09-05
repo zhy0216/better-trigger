@@ -22,7 +22,7 @@
    query shapes (single-run read, batch ANY read) is enough.
    ============================================================================= */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError, ResultTimeoutError as CoreResultTimeoutError } from '@better-trigger/core';
 import { ResultTimeoutError } from 'better-trigger';
 import type { Kernel } from '@better-trigger/kernel';
 import { createApp } from '../src/app';
@@ -244,6 +244,8 @@ describe('waiter registry', () => {
       .register('run_to', NS, { timeoutMs: 40, throwOnTimeout: true })
       .then(() => null, (e: unknown) => e);
     expect(err).toBeInstanceOf(ResultTimeoutError);
+    expect(err).toBeInstanceOf(CoreResultTimeoutError);
+    expect(ResultTimeoutError).toBe(CoreResultTimeoutError);
     expect((err as ResultTimeoutError).status).toBe('running');
     expect((err as Error).message).toContain('run_to');
     reg.stop();

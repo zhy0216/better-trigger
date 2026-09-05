@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from 'pg';
 import {
   assertNamespace,
   KernelError,
+  ResultTimeoutError,
   type LogLevel,
   type LogRecord,
   type Namespace,
@@ -272,11 +273,13 @@ async function readRunDetail(
   return { run, steps, stepsTruncated, waits, waitsTruncated, logs, logsNextCursor };
 }
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const MAX_TIMER_MS = 2_147_483_647;
 
 /**
  * Poll a run until it reaches a terminal state. On timeout the latest
- * (non-terminal) status is returned without output/error.
+ * (non-terminal) status is returned without output/error, or ResultTimeoutError
+ * is thrown when requested. A zero budget reads once, as in the waiter registry.
+ * Cancellation stops the wait, not the run or an already-dispatched SQL query.
  */
 export async function waitForResult(
   pool: Pool,
@@ -284,37 +287,95 @@ export async function waitForResult(
   namespace: Namespace,
   opts: WaitForResultOptions = {},
 ): Promise<WaitResult> {
+  const { signal } = opts;
+  if (signal?.aborted) throw signal.reason;
   assertNamespace(namespace);
-  const timeoutMs = opts.timeoutMs ?? 30_000;
-  const pollMs = opts.pollMs ?? 250;
-  // Same family as detailLimit/logsBefore: the HTTP route clamps pollMs to
-  // [50, 5000], but this function is also the embedded-host path and a public
-  // Kernel method. A 0/negative/NaN value turns sleep(pollMs) into a
-  // zero-delay timer and the whole timeout window into a tight SELECT loop
-  // against the database — a caller bug, refused before it can burn pool
-  // connections. Infinity is rejected for the same reason (no sleep at all).
-  if (!Number.isFinite(pollMs) || pollMs < 1) {
-    throw new KernelError('bad_request', `pollMs must be a finite number >= 1, got ${pollMs}`);
+  const timeoutMs = opts.timeoutMs === undefined ? 30_000 : opts.timeoutMs;
+  const pollMs = opts.pollMs === undefined ? 250 : opts.pollMs;
+  if (typeof timeoutMs !== 'number' || Number.isNaN(timeoutMs) || timeoutMs < 0) {
+    throw new KernelError('bad_request', 'timeoutMs must be a non-negative number of milliseconds or Infinity');
+  }
+  if (!Number.isFinite(pollMs) || pollMs < 1 || pollMs > MAX_TIMER_MS) {
+    throw new KernelError('bad_request', `pollMs must be a finite number between 1 and ${MAX_TIMER_MS}`);
   }
   const deadline = Date.now() + timeoutMs;
 
-  for (;;) {
-    const res = await pool.query<{ status: string; output: unknown; error: unknown }>(
-      `SELECT status, output, error FROM runs
-        WHERE id = $1 AND project_id = $2 AND env = $3`,
-      [runId, namespace.projectId, namespace.env],
-    );
-    const row = res.rows[0];
-    if (!row) throw new KernelError('not_found', `run ${runId} not found`);
-    const status = row.status as RunStatus;
-    if (TERMINAL_STATUSES.includes(status)) {
-      return {
-        status,
-        output: row.output ?? undefined,
-        error: (row.error as SerializedError | null) ?? undefined,
-      };
+  return new Promise<WaitResult>((resolve, reject) => {
+    let settled = false;
+    let lastStatus: RunStatus | undefined;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function finish(result: () => void): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(pollTimer);
+      clearTimeout(deadlineTimer);
+      signal?.removeEventListener('abort', onAbort);
+      result();
     }
-    if (Date.now() + pollMs >= deadline) return { status };
-    await sleep(pollMs);
-  }
+    function onAbort(): void {
+      finish(() => reject(signal!.reason));
+    }
+    function timeOut(): void {
+      if (lastStatus === undefined) return;
+      const status = lastStatus;
+      finish(() => opts.throwOnTimeout
+        ? reject(new ResultTimeoutError(runId, timeoutMs, status))
+        : resolve({ status }));
+    }
+    function armDeadline(): void {
+      if (deadline === Infinity) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        timeOut();
+        return;
+      }
+      // Long budgets remain legal without overflowing a native timer.
+      deadlineTimer = setTimeout(armDeadline, Math.min(MAX_TIMER_MS, Math.ceil(remaining)));
+    }
+    async function poll(): Promise<void> {
+      try {
+        const res = await pool.query<{ status: string; output: unknown; error: unknown }>(
+          `SELECT status, output, error FROM runs
+            WHERE id = $1 AND project_id = $2 AND env = $3`,
+          [runId, namespace.projectId, namespace.env],
+        );
+        // pg does not cancel SQL here. Consume late success/failure, but never
+        // schedule another poll or change the outcome after cancellation/timeout.
+        if (settled) return;
+        const row = res.rows[0];
+        if (!row) throw new KernelError('not_found', `run ${runId} not found`);
+        const status = row.status as RunStatus;
+        if (TERMINAL_STATUSES.includes(status)) {
+          finish(() => resolve({
+            status,
+            output: row.output ?? undefined,
+            error: (row.error as SerializedError | null) ?? undefined,
+          }));
+          return;
+        }
+        if (timeoutMs === 0) {
+          finish(() => resolve({ status }));
+          return;
+        }
+        // The initial read establishes a real status. After it, the deadline
+        // is independent of subsequent slow queries, using the original budget.
+        const firstRead = lastStatus === undefined;
+        lastStatus = status;
+        if (firstRead) armDeadline();
+        if (settled) return;
+        const remaining = deadline - Date.now();
+        pollTimer = setTimeout(() => {
+          if (Date.now() >= deadline) timeOut();
+          else void poll();
+        }, Math.ceil(Math.min(pollMs, remaining)));
+      } catch (error) {
+        finish(() => reject(error));
+      }
+    }
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+    void poll();
+  });
 }

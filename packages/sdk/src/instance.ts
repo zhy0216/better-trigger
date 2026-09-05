@@ -20,29 +20,13 @@ import type {
   WaitForResultOptions,
   WaitResult,
 } from '@better-trigger/core';
-import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError, ResultTimeoutError } from '@better-trigger/core';
 import { HttpClient, HttpError, type HttpClientOptions } from './client';
 import { applyConcurrencyKey } from './concurrency';
 import { registry } from './registry';
 import type { BatchItemOptions, BatchNamespaceOptions, TaskHandle } from './task';
 
-/**
- * Thrown by waitForResult / RunHandle.result() when `throwOnTimeout` is set and
- * the wait budget runs out before the run reaches a terminal state. `status` is
- * the latest status observed — undefined only when no poll ever succeeded (e.g.
- * every attempt hit a retriable 5xx / transport failure before the deadline).
- */
-export class ResultTimeoutError extends Error {
-  readonly status: RunStatus | undefined;
-  constructor(runId: string, timeoutMs: number, status: RunStatus | undefined) {
-    super(
-      `run ${runId} did not reach a terminal state within ${timeoutMs}ms` +
-        (status !== undefined ? ` (status ${status})` : ''),
-    );
-    this.name = 'ResultTimeoutError';
-    this.status = status;
-  }
-}
+export { ResultTimeoutError } from '@better-trigger/core';
 
 /** Returned by trigger / batchTrigger: the run id plus a result() poller. */
 export interface RunHandle<TOutput = unknown> {

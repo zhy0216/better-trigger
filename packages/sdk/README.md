@@ -170,6 +170,22 @@ Caller cancellation: pass `signal: AbortSignal` to `result()` /
 `waitForResult` to abort the long-poll mid-flight; the promise rejects with
 the signal's reason.
 
+`ResultTimeoutError` remains exported from `better-trigger` and is the same
+constructor the kernel and worker registry import from `@better-trigger/core`.
+Its `status` is the last observed status, or undefined if no SDK poll succeeded.
+Canceling a wait leaves the run running. The kernel honors cancellation before
+the first read (no query), during a query, and between polls; outstanding
+PostgreSQL SQL still completes or reaches its configured statement timeout.
+HTTP result waits map client cancellation to 499 with or without a registry.
+
+SDK wait budgets must be positive and may be `Infinity`. Direct kernel/registry
+waits additionally accept `timeoutMs: 0` for one read, returning its status even
+with `throwOnTimeout: true`. The kernel needs an initial read to establish a
+status before reporting a timeout; cancellation still interrupts that wait.
+Later reads cannot extend the deadline. Kernel `pollMs` must be finite and in
+1–2,147,483,647 ms; the last interval uses the remaining budget without returning
+early. The kernel rejects NaN, negative and non-number wait budgets.
+
 ---
 
 ## Tasks

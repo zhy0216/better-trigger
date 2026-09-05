@@ -12,7 +12,7 @@
    Routes are driven through createApp with stub deps (no Postgres involved).
    ============================================================================= */
 import type { Pool } from 'pg';
-import type { Kernel } from '@better-trigger/kernel';
+import { createKernel, type Kernel } from '@better-trigger/kernel';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
 import type { WaiterRegistry } from '../src/waiters';
@@ -330,5 +330,106 @@ describe('GET /runs/:id/result with a daemon waiter registry (F6)', () => {
     }
     // And the kernel poll loop is not used at all on this path.
     expect(calls.waitForResult).toHaveLength(0);
+  });
+});
+
+describe('GET /runs/:id/result without a waiter registry', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  function kernelApp() {
+    const query = vi.fn(async () => ({
+      rows: [{ status: 'running', output: null as unknown, error: null as unknown }],
+    }));
+    const pool = { query } as unknown as Pool;
+    const kernel = createKernel({ pool });
+    const app = createApp({ pool, kernel });
+    const controller = new AbortController();
+    const request = (params = '') => new Request(`http://localhost/api/v1/runs/run_1/result${params}`, {
+      signal: controller.signal,
+    });
+    return { query, pool, kernel, app, controller, request };
+  }
+
+  it('pre-abort returns 499 without any database read', async () => {
+    const { app, query, controller, request } = kernelApp();
+    controller.abort();
+    const response = await app.fetch(request());
+    expect(response.status).toBe(499);
+    expect(await response.text()).toBe('');
+    expect(query).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([undefined, new Error('client left'), null])('aborts a sleeping kernel wait with reason %s', async (reason) => {
+    const { app, query, controller, request } = kernelApp();
+    const response = app.fetch(request('?timeoutMs=30000&pollMs=50'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(query).toHaveBeenCalledTimes(1);
+    controller.abort(reason);
+    expect((await response).status).toBe(499);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('aborts a kernel query in flight and handles its late failure', async () => {
+    const { app, query, controller, request } = kernelApp();
+    let fail!: (error: Error) => void;
+    query.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const response = app.fetch(request());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(query).toHaveBeenCalledTimes(1);
+    controller.abort();
+    expect((await response).status).toBe(499);
+    fail(new Error('late database failure'));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['completed', 'failed', 'canceled'])('preserves the terminal %s response shape', async (status) => {
+    const { app, query, request } = kernelApp();
+    const result = { status, output: { value: 1 }, error: { name: 'Error', message: 'failed' } };
+    query.mockResolvedValueOnce({ rows: [result] });
+    const response = await app.fetch(request());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(result);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('preserves the timeout response after spending the entire budget', async () => {
+    const { app, request, query } = kernelApp();
+    const settled = vi.fn();
+    const pending = Promise.resolve(app.fetch(request('?timeoutMs=35&pollMs=250'))).then((response) => {
+      settled();
+      return response;
+    });
+    await vi.advanceTimersByTimeAsync(34);
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    const response = await pending;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: 'running' });
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not classify an unrelated AbortError as a client disconnect', async () => {
+    const { pool, kernel, controller, request } = kernelApp();
+    const failure = new Error('unrelated database failure');
+    failure.name = 'AbortError';
+    kernel.waitForResult = async () => {
+      controller.abort(new Error('client left too'));
+      throw failure;
+    };
+    const app = createApp({ pool, kernel });
+    const response = await app.fetch(request());
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ error: { code: 'internal_error' } });
+    expect(errorSpy).toHaveBeenCalledWith(expect.any(String), failure);
   });
 });

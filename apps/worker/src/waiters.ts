@@ -30,13 +30,13 @@
 import type { Pool } from 'pg';
 import {
   KernelError,
+  ResultTimeoutError,
   type Namespace,
   type RunStatus,
   type SerializedError,
   type WaitForResultOptions,
   type WaitResult,
 } from '@better-trigger/core';
-import { ResultTimeoutError } from 'better-trigger';
 import type { NotifyCounters } from './observability';
 
 const DEFAULT_TIMEOUT_MS = 30_000;

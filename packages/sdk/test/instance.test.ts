@@ -10,10 +10,11 @@
    immediately. No daemon, no Postgres — `fetch` is injected and the clock is
    faked.
    ============================================================================= */
-import { DEFAULT_NAMESPACE, KernelError, type Namespace, type WaitResult } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError, ResultTimeoutError as CoreResultTimeoutError, type Namespace, type WaitResult } from '@better-trigger/core';
 import { describe, expect, it, vi } from 'vitest';
 import { HttpError } from '../src/client';
 import { betterTrigger, ResultTimeoutError } from '../src/instance';
+import { ResultTimeoutError as PublicResultTimeoutError } from '../src/index';
 import { task } from '../src/task';
 
 /** A fetch stub answering calls from a scripted list; the last entry repeats. */
@@ -240,6 +241,11 @@ describe('waitForResult — budget discipline', () => {
 });
 
 describe('waitForResult — throwOnTimeout (p2-23)', () => {
+  it('keeps both SDK entry points identical to the core constructor', () => {
+    expect(ResultTimeoutError).toBe(CoreResultTimeoutError);
+    expect(PublicResultTimeoutError).toBe(CoreResultTimeoutError);
+  });
+
   it('throws ResultTimeoutError with the latest non-terminal status when the budget runs out', async () => {
     vi.useFakeTimers();
     try {

@@ -110,6 +110,18 @@ const settled = await run.result();
 
 `result()` 等待终态；超时（默认 30s）时返回最新的非终态 status。传 `{ throwOnTimeout: true }` 抛 `ResultTimeoutError`，或传 `signal: AbortSignal` 中断 long-poll。
 
+继续从 `better-trigger` 导入 `ResultTimeoutError`：SDK、worker waiter registry
+和 kernel 使用 `@better-trigger/core` 中的同一个构造器。其 `status` 是最近观测到的状态
+（SDK 没有任何成功轮询时为 undefined）。取消只结束等待，run 继续运行；SDK/kernel
+以 signal 的 reason 拒绝。预取消的 kernel 等待不查询数据库；查询在途时取消能结束等待，
+但不会取消 PostgreSQL SQL。HTTP result 等待在客户端取消时返回 499，无 registry 的宿主也一致。
+
+SDK 等待预算必须为正数，支持 `Infinity`。直接调用 kernel 或 registry 时还支持
+`timeoutMs: 0`：只读取一次，即使设置 `throwOnTimeout: true` 也返回该次状态。
+kernel 需要首次读取建立状态才能报告超时；该次读取仍可取消，后续查询不能延长期限。
+直接调用 kernel 的 `pollMs` 必须是 1～2,147,483,647 ms 范围内的有限数；超过剩余预算时，
+仍等待到期限才返回。kernel 拒绝 NaN、负数及非数字预算。
+
 ## 运行上下文（`ctx`）
 
 | 成员 | 说明 |

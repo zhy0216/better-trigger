@@ -121,6 +121,23 @@ const settled = await run.result();
 latest non-terminal status. Pass `{ throwOnTimeout: true }` to throw
 `ResultTimeoutError`, or `signal: AbortSignal` to cancel the long-poll.
 
+Keep importing `ResultTimeoutError` from `better-trigger`: the SDK, worker
+waiter registry and kernel use the same constructor from `@better-trigger/core`.
+Its `status` is the latest observed status (undefined if no SDK poll succeeded).
+Cancellation stops the wait, leaves the run running, and rejects with the
+signal's reason in the SDK/kernel. A pre-aborted kernel wait issues no query;
+aborting during a query stops waiting but does not cancel PostgreSQL SQL.
+HTTP result waits return 499 on client cancellation, including hosts without
+a waiter registry.
+
+SDK wait budgets must be positive; `Infinity` is supported. Direct kernel and
+registry waits also accept `timeoutMs: 0` for a single read, returning that
+status even with `throwOnTimeout: true`. The kernel requires an initial status
+read before it can report a timeout; that read remains cancellable. Subsequent
+reads cannot extend its deadline. Direct kernel `pollMs` must be finite and
+between 1 and 2,147,483,647 ms; when it exceeds the remaining budget, the wait
+still lasts until the deadline. The kernel rejects NaN, negative and non-number budgets.
+
 ## The run context (`ctx`)
 
 | Member | Description |

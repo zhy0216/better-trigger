@@ -105,8 +105,16 @@ export function runRoutes(deps: { kernel: Kernel; waiters?: WaiterRegistry }): H
     // not turn a wait into an error) — explicit via onInvalid:'clamp', unlike
     // the API's OTHER numeric params which refuse garbage (p2-32).
     const pollMs = intQuery(c, 'pollMs', { min: 50, max: 5_000, fallback: 250 }, { onInvalid: 'clamp' });
-    const result = await kernel.waitForResult(id, namespace, { timeoutMs, pollMs });
-    return c.json(result);
+    const signal = c.req.raw.signal;
+    try {
+      const result = await kernel.waitForResult(id, namespace, { timeoutMs, pollMs, signal });
+      return c.json(result);
+    } catch (err) {
+      // The kernel preserves the abort reason. Checking identity keeps a DB
+      // failure (even one named AbortError) from being hidden by a disconnect.
+      if (signal.aborted && err === signal.reason) return new Response(null, { status: 499 });
+      throw err;
+    }
   });
 
   return app;

@@ -401,16 +401,24 @@ export interface WorkersResponse {
 }
 
 export interface WaitForResultOptions {
-  /** Give up after this long (default 30s). */
+  /**
+   * Wait budget in milliseconds (default 30s); Infinity waits without a deadline.
+   * SDK HTTP waits require a positive number. Kernel/registry also accept 0 for
+   * one immediate read, returning its status even with throwOnTimeout enabled.
+   * Kernel needs the initial read to establish a status before timing out;
+   * signal can interrupt that read. NaN, negative and non-number values fail.
+   */
   timeoutMs?: number;
   /**
    * @deprecated Inert on the daemon path (PF2): the in-process waiter registry
    * is notification-driven with a shared 1s sweep, so this knob changes
    * nothing there. It only tunes the embedded `kernel.waitForResult` fallback
    * a host without a waiter registry would use.
+   * Direct kernel calls accept finite numbers from 1 through 2,147,483,647 ms.
    */
   pollMs?: number;
-  /** Caller cancellation; aborts the long-poll in-flight. */
+  /** Caller cancellation, including an in-flight read. Cancels the wait, not
+   * the run or PostgreSQL SQL; SDK/kernel reject with the signal's reason. */
   signal?: AbortSignal;
   /**
    * Throw a ResultTimeoutError instead of returning the latest non-terminal
