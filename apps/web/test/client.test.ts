@@ -7,7 +7,7 @@
    ApiError with the right status/message/code — including the production
    internal_error envelope whose requestId must survive for bug reports.
    ============================================================================= */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { api, ApiError, setApiKey } from '../src/api/client';
 
 const json = (body: unknown, status: number): Response =>
@@ -155,5 +155,183 @@ describe('request timeout', () => {
     ctrl.abort();
     await vi.advanceTimersByTimeAsync(0);
     expect(((await settled) as Error).name).toBe('AbortError');
+  });
+});
+
+/** Headers arrive independently of a partial JSON body, as with real fetch.
+ * Aborting the fetch signal errors the stream even after headers arrived. */
+function streamingResponse(signal: AbortSignal, status: number) {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const onAbort = () => controller.error(signal.reason);
+  const response = new Response(new ReadableStream<Uint8Array>({
+    start(ctrl) {
+      controller = ctrl;
+      ctrl.enqueue(new TextEncoder().encode('{"ok":'));
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    },
+  }), { status, statusText: 'Service Unavailable' });
+  return {
+    response,
+    finish() {
+      signal.removeEventListener('abort', onAbort);
+      controller.enqueue(new TextEncoder().encode('true}'));
+      controller.close();
+    },
+  };
+}
+
+describe('complete request lifetime', () => {
+  let caller: AbortController;
+  let added: MockInstance<AbortSignal['addEventListener']>;
+  let removed: MockInstance<AbortSignal['removeEventListener']>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    caller = new AbortController();
+    added = vi.spyOn(caller.signal, 'addEventListener');
+    removed = vi.spyOn(caller.signal, 'removeEventListener');
+  });
+
+  afterEach(async () => {
+    // Also release a stalled fixture when a regression assertion fails.
+    caller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function expectCleanedUp() {
+    expect(added).toHaveBeenCalledTimes(1);
+    expect(removed).toHaveBeenCalledExactlyOnceWith('abort', added.mock.calls[0]![1]);
+    expect(vi.getTimerCount()).toBe(0);
+  }
+
+  it.each([200, 503])('times out a stalled %i body at the original deadline', async (status) => {
+    fetchMock.mockImplementation((_url: unknown, init: RequestInit) =>
+      streamingResponse(init.signal!, status).response,
+    );
+    const outcome = vi.fn();
+    void api.health(caller.signal).then(outcome, outcome);
+
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(outcome).not.toHaveBeenCalled();
+    const signal = (fetchMock.mock.calls[0]![1] as RequestInit).signal!;
+    expect(signal.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    // Inspect settlement without awaiting a promise that the old code leaves
+    // pending forever. The body must actually error, not just own a timer.
+    expect(outcome).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      name: 'Error', message: 'Request timed out after 10000ms',
+    }));
+    expect(signal.aborted).toBe(true);
+    expectCleanedUp();
+  });
+
+  it('does not restart the deadline when delayed headers arrive', async () => {
+    let sendHeaders!: (response: Response) => void;
+    fetchMock.mockImplementation(() => new Promise<Response>((resolve) => { sendHeaders = resolve; }));
+    const outcome = vi.fn();
+    void api.health(caller.signal).then(outcome, outcome);
+
+    await vi.advanceTimersByTimeAsync(6_000);
+    const signal = (fetchMock.mock.calls[0]![1] as RequestInit).signal!;
+    sendHeaders(streamingResponse(signal, 200).response);
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(outcome).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(outcome).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      name: 'Error', message: 'Request timed out after 10000ms',
+    }));
+    expectCleanedUp();
+  });
+
+  it.each([200, 503])('preserves caller cancellation during a %i body', async (status) => {
+    fetchMock.mockImplementation((_url: unknown, init: RequestInit) =>
+      streamingResponse(init.signal!, status).response,
+    );
+    const outcome = vi.fn();
+    void api.health(caller.signal).then(outcome, outcome);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(outcome).not.toHaveBeenCalled();
+
+    const reason = new DOMException('User left the page', 'AbortError');
+    caller.abort(reason);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(outcome).toHaveBeenCalledExactlyOnceWith(reason);
+    expectCleanedUp();
+  });
+
+  it('waits for a streamed success and releases its listener and deadline', async () => {
+    let body!: ReturnType<typeof streamingResponse>;
+    fetchMock.mockImplementation((_url: unknown, init: RequestInit) => {
+      body = streamingResponse(init.signal!, 200);
+      return body.response;
+    });
+    const outcome = vi.fn();
+    void api.health(caller.signal).then(outcome, outcome);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(outcome).not.toHaveBeenCalled();
+    body.finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(outcome).toHaveBeenCalledExactlyOnceWith({ ok: true });
+    expectCleanedUp();
+
+    caller.abort();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).signal!.aborted).toBe(false);
+  });
+
+  it('cleans up after a non-JSON error body', async () => {
+    fetchMock.mockResolvedValue(new Response('<html>nope</html>', { status: 502, statusText: 'Bad Gateway' }));
+    await expect(api.health(caller.signal)).rejects.toMatchObject({
+      name: 'ApiError', status: 502, code: null, message: 'Bad Gateway',
+    });
+    expectCleanedUp();
+  });
+
+  it('preserves the 401 code and requestId and cleans up', async () => {
+    fetchMock.mockResolvedValue(json({
+      error: { code: 'unauthorized', message: 'invalid key', requestId: 'req_auth' },
+    }, 401));
+    await expect(api.health(caller.signal)).rejects.toMatchObject({
+      name: 'ApiError', status: 401, code: 'unauthorized', message: 'invalid key', requestId: 'req_auth',
+    });
+    expectCleanedUp();
+  });
+
+  it('cleans up after malformed success JSON', async () => {
+    fetchMock.mockResolvedValue(new Response('invalid JSON'));
+    await expect(api.health(caller.signal)).rejects.toBeInstanceOf(SyntaxError);
+    expectCleanedUp();
+  });
+
+  it('preserves a fetch failure and cleans up', async () => {
+    const error = new TypeError('Failed to fetch');
+    fetchMock.mockRejectedValue(error);
+    await expect(api.health(caller.signal)).rejects.toBe(error);
+    expectCleanedUp();
+  });
+
+  it('cleans up after timing out before headers', async () => {
+    fetchMock.mockImplementation((_url: unknown, init: RequestInit) => new Promise((_resolve, reject) => {
+      init.signal!.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+    }));
+    const outcome = vi.fn();
+    void api.health(caller.signal).then(outcome, outcome);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(outcome).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      name: 'Error', message: 'Request timed out after 10000ms',
+    }));
+    expectCleanedUp();
+  });
+
+  it('does not dispatch fetch or allocate resources for a pre-canceled request', async () => {
+    caller.abort();
+    await expect(api.health(caller.signal)).rejects.toBe(caller.signal.reason);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(added).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

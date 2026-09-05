@@ -619,6 +619,51 @@ describe('useRun stops polling on a terminal run (C1)', () => {
 });
 
 describe('usePoll survives a stalled request (T1)', () => {
+  it.each([200, 503])('recovers on the next poll after a stalled %i body times out', async (status) => {
+    let stalledResponse!: Response;
+    let signal!: AbortSignal;
+    fetchMock
+      .mockImplementationOnce((_url: unknown, init: RequestInit) => {
+        signal = init.signal!;
+        stalledResponse = new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{'));
+            signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+          },
+        }), { status });
+        return stalledResponse;
+      })
+      .mockImplementation(() => res(page(['recovered'], null)));
+    const { result, unmount } = renderHook(() => useRuns('prod'));
+    await flush();
+    expect(stalledResponse.bodyUsed).toBe(true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_999);
+    });
+    expect(result.current.loading).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(signal.aborted).toBe(true);
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBe('Request timed out after 10000ms');
+    expect(getConnection()).toBe('down');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.current.error).toBeNull();
+    expect(result.current.data?.map((r) => r.id)).toEqual(['recovered']);
+    expect(getConnection()).toBe('live');
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('records the timeout as an error and keeps scheduling ticks', async () => {
     // A daemon that accepts the connection but never answers: the request only
     // settles when the client timeout aborts it. Before the fix this hung the

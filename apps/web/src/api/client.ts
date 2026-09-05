@@ -93,7 +93,7 @@ interface RequestOptions {
 
 /**
  * Hard ceiling on a single request. A daemon that accepts the connection but
- * never answers would otherwise leave the fetch (and therefore the self-
+ * never finishes its response would otherwise leave the request (and the self-
  * rescheduling usePoll loop) unsettled forever: the endpoint stops polling and
  * the connection indicator never falls back. A stalled request aborts at this
  * deadline and surfaces as an ordinary poll error, so the loop keeps turning.
@@ -102,6 +102,7 @@ const REQUEST_TIMEOUT_MS = 10_000;
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, signal } = opts;
+  signal?.throwIfAborted();
   const headers: Record<string, string> = { ...(opts.headers ?? {}) };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
@@ -110,64 +111,59 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   // abort, but keep them distinguishable: usePoll must swallow a deliberate
   // cancel (AbortError) yet record a timeout as a real failure.
   const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort(signal?.reason);
   let timedOut = false;
   const timer = setTimeout(() => {
+    if (ctrl.signal.aborted) return;
     timedOut = true;
     ctrl.abort();
   }, REQUEST_TIMEOUT_MS);
-  if (signal) {
-    if (signal.aborted) ctrl.abort();
-    else signal.addEventListener('abort', () => ctrl.abort(), { once: true });
-  }
+  signal?.addEventListener('abort', onAbort, { once: true });
 
-  let res!: Response;
-  let failure: unknown;
-  let failed = false;
   try {
-    res = await fetch(API_BASE_URL + PREFIX + path, {
+    const res = await fetch(API_BASE_URL + PREFIX + path, {
       method,
       headers: Object.keys(headers).length > 0 ? headers : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: ctrl.signal,
     });
+    if (!res.ok) {
+      let msg = res.statusText;
+      let code: string | null = null;
+      let requestId: string | undefined;
+      try {
+        const j = await res.json();
+        // server error envelope is { error: { code, message } } (see 409 cases in
+        // contract §4); also tolerate flat { error: string } / { message: string }.
+        // Production internal_error adds requestId to the envelope — parsed the
+        // same way the SDK's HttpError does.
+        const err = j?.error;
+        if (err && typeof err === 'object') {
+          if (typeof err.message === 'string') msg = err.message;
+          if (typeof err.code === 'string') code = err.code;
+          if (typeof err.requestId === 'string') requestId = err.requestId;
+        } else if (typeof err === 'string') {
+          msg = err;
+        } else if (typeof j?.message === 'string') {
+          msg = j.message;
+        }
+        if (code == null && typeof j?.code === 'string') code = j.code;
+      } catch (e) {
+        // An aborted body must retain its cancellation/timeout semantics;
+        // only a non-JSON error body falls back to the HTTP status text.
+        if (ctrl.signal.aborted) throw e;
+      }
+      throw new ApiError(res.status, msg, code, requestId);
+    }
+    return (await res.json()) as T;
   } catch (e) {
-    failed = true;
-    failure = e;
+    // Keep one deadline through fetch AND body consumption. A timeout is a
+    // visible poll failure, while caller cancellation keeps its original error.
+    throw timedOut ? new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`) : e;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
   }
-  // Rethrown outside the catch so the caught error is preserved verbatim for a
-  // caller cancellation, while a stalled request becomes a plain timeout Error
-  // (not AbortError) — so usePoll records it as a poll failure instead of
-  // mistaking it for a deliberate cancel and swallowing it.
-  if (failed) throw timedOut ? new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`) : failure;
-  if (!res.ok) {
-    let msg = res.statusText;
-    let code: string | null = null;
-    let requestId: string | undefined;
-    try {
-      const j = await res.json();
-      // server error envelope is { error: { code, message } } (see 409 cases in
-      // contract §4); also tolerate flat { error: string } / { message: string }.
-      // Production internal_error adds requestId to the envelope — parsed the
-      // same way the SDK's HttpError does.
-      const err = j?.error;
-      if (err && typeof err === 'object') {
-        if (typeof err.message === 'string') msg = err.message;
-        if (typeof err.code === 'string') code = err.code;
-        if (typeof err.requestId === 'string') requestId = err.requestId;
-      } else if (typeof err === 'string') {
-        msg = err;
-      } else if (typeof j?.message === 'string') {
-        msg = j.message;
-      }
-      if (code == null && typeof j?.code === 'string') code = j.code;
-    } catch {
-      /* non-json error body */
-    }
-    throw new ApiError(res.status, msg, code, requestId);
-  }
-  return (await res.json()) as T;
 }
 
 /* ---- server JSON shapes (backend-contract §5) ---------------------------- */
