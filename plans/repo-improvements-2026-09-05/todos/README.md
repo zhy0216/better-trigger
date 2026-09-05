@@ -19,7 +19,7 @@ herdr agent start <name> --kind codex --pane <id> -- \
 | 文件 | 优先级 | 难度 | 模型 / 推理 | 说明 | 状态 |
 |---|---|---|---|---|---|
 | [01-dashboard-request-lifetime.md](done/01-dashboard-request-lifetime.md) | P1 | medium | gpt-6-astra / xhigh | Dashboard 完整请求生命周期 | 已完成 |
-| [02-waiter-lifecycle-deadlines.md](02-waiter-lifecycle-deadlines.md) | P1 | hard | gpt-6-astra / xhigh | Waiter 关闭竞态与数据库故障下的期限 | 待执行 |
+| [02-waiter-lifecycle-deadlines.md](done/02-waiter-lifecycle-deadlines.md) | P1 | hard | gpt-6-astra / xhigh | Waiter 关闭竞态与数据库故障下的期限 | 已完成 |
 | [03-scenario-verdict-redaction.md](done/03-scenario-verdict-redaction.md) | P1 | medium | gpt-6-astra / xhigh | 验收结果可信度与日志脱敏 | 已完成 |
 | [04-isolated-test-databases.md](04-isolated-test-databases.md) | P1 | hard | gpt-6-astra / xhigh | 测试数据库隔离、连接参数与资源生命周期 | 待执行 |
 | [05-core-numeric-boundaries.md](done/05-core-numeric-boundaries.md) | P1 | medium | gpt-6-astra / xhigh | Duration 与 retry 的有限值和存储边界 | 已完成 |

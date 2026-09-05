@@ -21,20 +21,35 @@
    No Postgres: the registry takes a Pool, so a fake pool that answers the two
    query shapes (single-run read, batch ANY read) is enough.
    ============================================================================= */
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
 import { ResultTimeoutError } from 'better-trigger';
 import type { Kernel } from '@better-trigger/kernel';
 import { createApp } from '../src/app';
 import { createNotifyCounters } from '../src/observability';
 import { createWakeSignal, sleepWithWake } from '../src/notify';
-import { createWaiterRegistry, type WaiterRegistry } from '../src/waiters';
+import {
+  createWaiterRegistry,
+  ResultWaitAbortedError,
+  WaiterRegistryStoppedError,
+  type WaiterRegistry,
+} from '../src/waiters';
 
 interface FakeRun {
   id: string;
   status: string;
   output?: unknown;
   error?: unknown;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 /** Fake pool: holds the runs table in memory, counts reads on `runs`. */
@@ -425,13 +440,314 @@ describe('waiter registry', () => {
     reg.stop();
   });
 
-  it('a run already terminal at register never attaches a listener', async () => {
+  it('a run already terminal at register leaves no listener attached', async () => {
     const { reg, runs } = registry();
     runs.set('run_l7', { id: 'run_l7', status: 'completed', output: 'ok' });
     const s = recordingSignal();
     await reg.register('run_l7', NS, { timeoutMs: 5_000 }, s.signal);
     expect(s.listeners.size).toBe(0);
     reg.stop();
+  });
+
+  describe('registration and deadline races', () => {
+    const registries: WaiterRegistry[] = [];
+    const running = { id: 'run_race', status: 'running' };
+    const completed = { ...running, status: 'completed', output: 'done' };
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      for (const reg of registries.splice(0)) reg.stop();
+      vi.useRealTimers();
+    });
+
+    function controlledRegistry(
+      query: (sql: string, params?: unknown[]) => Promise<{ rows: FakeRun[] }>,
+      pollMs = 10,
+    ) {
+      const counters = createNotifyCounters();
+      const reg = createWaiterRegistry({
+        pool: { query } as unknown as Parameters<typeof createWaiterRegistry>[0]['pool'],
+        counters,
+        pollMs,
+      });
+      registries.push(reg);
+      return { reg, counters };
+    }
+
+    // Observe settlement without awaiting a potentially orphaned promise;
+    // rejected late DB reads are also checked by Vitest's unhandled-error trap.
+    function observe(promise: Promise<unknown>) {
+      const settled = vi.fn();
+      void promise.then(settled, settled);
+      return settled;
+    }
+
+    describe.each(['stop', 'abort argument', 'abort option'] as const)('%s during the first read', (action) => {
+      it.each(['running', 'terminal', 'not_found', 'reject'] as const)(
+        'settles before a late %s and ignores that read afterwards',
+        async (late) => {
+          const read = deferred<{ rows: FakeRun[] }>();
+          const query = vi.fn(() => read.promise);
+          const { reg, counters } = controlledRegistry(query);
+          const s = recordingSignal();
+          const settled = observe(reg.register(running.id, NS, {
+            timeoutMs: 5,
+            signal: action === 'abort option' ? s.signal : undefined,
+          }, action === 'abort option' ? undefined : s.signal));
+          await vi.advanceTimersByTimeAsync(20);
+          // No state has been read yet: a timeout cannot invent one.
+          expect(settled).not.toHaveBeenCalled();
+          expect(s.listeners.size).toBe(1);
+
+          if (action === 'stop') reg.stop();
+          else s.emitAbort();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(settled).toHaveBeenCalledExactlyOnceWith(expect.any(
+            action === 'stop' ? WaiterRegistryStoppedError : ResultWaitAbortedError,
+          ));
+          expect(s.listeners.size).toBe(0);
+          expect(reg.pending()).toBe(0);
+          reg.stop();
+          reg.stop();
+
+          if (late === 'reject') read.reject(new Error('late database failure'));
+          else read.resolve({ rows: late === 'not_found' ? [] : [late === 'terminal' ? completed : running] });
+          await vi.advanceTimersByTimeAsync(100);
+          expect(settled).toHaveBeenCalledTimes(1);
+          expect(reg.pending()).toBe(0);
+          expect(query).toHaveBeenCalledTimes(1);
+          expect(counters.waiterResolutions).toBe(0);
+          expect(counters.waiterTimeouts).toBe(0);
+          expect(vi.getTimerCount()).toBe(0);
+        },
+      );
+    });
+
+    describe.each(['reading', 'pending'] as const)('stop/abort precedence while %s', (phase) => {
+      it.each(['stop', 'abort'] as const)('keeps the first %s outcome', async (first) => {
+        const read = deferred<{ rows: FakeRun[] }>();
+        const { reg, counters } = controlledRegistry(() => read.promise);
+        const s = recordingSignal();
+        const settled = observe(reg.register(running.id, NS, { timeoutMs: 30 }, s.signal));
+        if (phase === 'pending') read.resolve({ rows: [running] });
+        await vi.advanceTimersByTimeAsync(0);
+
+        if (first === 'stop') {
+          reg.stop();
+          s.emitAbort();
+        } else {
+          s.emitAbort();
+          reg.stop();
+        }
+        read.resolve({ rows: [running] });
+        await vi.advanceTimersByTimeAsync(100);
+        expect(settled).toHaveBeenCalledExactlyOnceWith(expect.any(
+          first === 'stop' ? WaiterRegistryStoppedError : ResultWaitAbortedError,
+        ));
+        expect(reg.pending()).toBe(0);
+        expect(s.listeners.size).toBe(0);
+        expect(counters.waiterResolutions + counters.waiterTimeouts).toBe(0);
+        expect(vi.getTimerCount()).toBe(0);
+      });
+    });
+
+    it('propagates an initial query error and removes its abort listener', async () => {
+      const error = new Error('initial database failure');
+      const { reg } = controlledRegistry(async () => { throw error; });
+      const s = recordingSignal();
+      await expect(reg.register(running.id, NS, {}, s.signal)).rejects.toBe(error);
+      expect(reg.pending()).toBe(0);
+      expect(s.listeners.size).toBe(0);
+      expect(vi.getTimerCount()).toBe(1); // only the shared poller remains
+    });
+
+    it('starts the full budget only after the first non-terminal observation', async () => {
+      const read = deferred<{ rows: FakeRun[] }>();
+      const { reg, counters } = controlledRegistry(() => read.promise, 100);
+      const settled = observe(reg.register(running.id, NS, { timeoutMs: 5 }));
+      await vi.advanceTimersByTimeAsync(50);
+      expect(settled).not.toHaveBeenCalled();
+      read.resolve({ rows: [running] });
+      await vi.advanceTimersByTimeAsync(4);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toHaveBeenCalledExactlyOnceWith({ status: 'running' });
+      expect(counters.waiterTimeouts).toBe(1);
+      expect(reg.pending()).toBe(0);
+    });
+
+    it.each([NaN, -1, -Infinity])('rejects invalid timeoutMs=%s before reading', async (timeoutMs) => {
+      const query = vi.fn(async () => ({ rows: [running] }));
+      const { reg } = controlledRegistry(query);
+      const s = recordingSignal();
+      await expect(reg.register(running.id, NS, { timeoutMs }, s.signal)).rejects.toMatchObject({ code: 'bad_request' });
+      expect(query).not.toHaveBeenCalled();
+      expect(reg.pending()).toBe(0);
+      expect(s.listeners.size).toBe(0);
+      expect(vi.getTimerCount()).toBe(1);
+    });
+
+    it.each([false, true])('keeps the single-read zero budget semantics (throwOnTimeout=%s)', async (throwOnTimeout) => {
+      const query = vi.fn(async () => ({ rows: [running] }));
+      const { reg, counters } = controlledRegistry(query);
+      const s = recordingSignal();
+      await expect(reg.register(running.id, NS, { timeoutMs: 0, throwOnTimeout }, s.signal)).resolves.toEqual({ status: 'running' });
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(reg.pending()).toBe(0);
+      expect(s.listeners.size).toBe(0);
+      expect(counters.waiterTimeouts).toBe(0);
+      expect(vi.getTimerCount()).toBe(1);
+    });
+
+    it('keeps Infinity pending without a deadline timer until cancellation', async () => {
+      const { reg } = controlledRegistry(async () => ({ rows: [running] }));
+      const s = recordingSignal();
+      const settled = observe(reg.register(running.id, NS, { timeoutMs: Infinity }, s.signal));
+      await vi.advanceTimersByTimeAsync(100);
+      expect(settled).not.toHaveBeenCalled();
+      expect(reg.pending()).toBe(1);
+      expect(vi.getTimerCount()).toBe(1);
+      s.emitAbort();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toHaveBeenCalledExactlyOnceWith(expect.any(ResultWaitAbortedError));
+      expect(s.listeners.size).toBe(0);
+    });
+
+    describe.each(['errors', 'hung read'] as const)('deadline with subsequent batch %s', (failure) => {
+      it.each([false, true])('uses the last observation at the deadline (throwOnTimeout=%s)', async (throwOnTimeout) => {
+        const batch = deferred<{ rows: FakeRun[] }>();
+        const query = vi.fn(async () => ({ rows: [running] }))
+          .mockResolvedValueOnce({ rows: [running] })
+          .mockResolvedValueOnce({ rows: [{ ...running, status: 'waiting' }] })
+          .mockImplementation(() => failure === 'errors' ? Promise.reject(new Error('database down')) : batch.promise);
+        const { reg, counters } = controlledRegistry(query);
+        const s = recordingSignal();
+        const settled = observe(reg.register(running.id, NS, { timeoutMs: 35, throwOnTimeout }, s.signal));
+        await vi.advanceTimersByTimeAsync(34);
+        expect(settled).not.toHaveBeenCalled();
+        expect(reg.pending()).toBe(1);
+        // A hung batch never causes overlapping retries; errors retry at the
+        // shared cadence without postponing the independent deadline.
+        expect(query).toHaveBeenCalledTimes(failure === 'errors' ? 4 : 3);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(settled).toHaveBeenCalledExactlyOnceWith(throwOnTimeout
+          ? expect.any(ResultTimeoutError)
+          : { status: 'waiting' });
+        if (throwOnTimeout) {
+          expect(settled.mock.calls[0]![0]).toMatchObject({ status: 'waiting' });
+          expect(settled.mock.calls[0]![0].message).toContain(`run ${running.id} did not reach a terminal state within 35ms`);
+        }
+        expect(reg.pending()).toBe(0);
+        expect(s.listeners.size).toBe(0);
+        expect(counters.waiterTimeouts).toBe(1);
+        expect(counters.waiterResolutions).toBe(0);
+        expect(vi.getTimerCount()).toBe(1);
+        batch.resolve({ rows: [completed] });
+        await vi.advanceTimersByTimeAsync(100);
+        expect(settled).toHaveBeenCalledTimes(1);
+        expect(counters.waiterTimeouts).toBe(1);
+        expect(counters.waiterResolutions).toBe(0);
+      });
+    });
+
+    it('a non-terminal notification read updates the status used by the deadline', async () => {
+      const query = vi.fn(async () => ({ rows: [running] }))
+        .mockResolvedValueOnce({ rows: [running] })
+        .mockResolvedValueOnce({ rows: [{ ...running, status: 'waiting' }] });
+      const { reg } = controlledRegistry(query, 100);
+      const settled = observe(reg.register(running.id, NS, { timeoutMs: 5 }));
+      await vi.advanceTimersByTimeAsync(0);
+      await reg.resolve(running.id);
+      await vi.advanceTimersByTimeAsync(5);
+      expect(settled).toHaveBeenCalledExactlyOnceWith({ status: 'waiting' });
+      expect(query).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(['terminal', 'not_found', 'deadline', 'abort', 'stop'] as const)(
+      'settles once when %s wins against an in-flight sweep and notifications',
+      async (winner) => {
+        const read = deferred<{ rows: FakeRun[] }>();
+        const query = vi.fn(() => read.promise).mockResolvedValueOnce({ rows: [running] });
+        const { reg, counters } = controlledRegistry(query);
+        const s = recordingSignal();
+        const settled = observe(reg.register(running.id, NS, { timeoutMs: 35 }, s.signal));
+        await vi.advanceTimersByTimeAsync(10); // one batch now in flight
+        const notifications = Promise.all([reg.resolve(running.id), reg.resolve(running.id)]);
+        if (winner === 'terminal' || winner === 'not_found') {
+          read.resolve({ rows: winner === 'terminal' ? [completed] : [] });
+          await notifications;
+        } else if (winner === 'deadline') await vi.advanceTimersByTimeAsync(25);
+        else if (winner === 'abort') s.emitAbort();
+        else reg.stop();
+        await vi.advanceTimersByTimeAsync(0);
+
+        const expected = winner === 'terminal' ? { status: 'completed', output: 'done', error: undefined }
+          : winner === 'not_found' ? expect.objectContaining({ code: 'not_found' })
+          : winner === 'deadline' ? { status: 'running' }
+          : expect.any(winner === 'abort' ? ResultWaitAbortedError : WaiterRegistryStoppedError);
+        expect(settled).toHaveBeenCalledExactlyOnceWith(expected);
+        expect(s.listeners.size).toBe(0);
+        expect(vi.getTimerCount()).toBe(winner === 'stop' ? 0 : 1);
+        s.emitAbort();
+        reg.stop();
+        read.resolve({ rows: [completed] });
+        await notifications;
+        await vi.advanceTimersByTimeAsync(100);
+        expect(settled).toHaveBeenCalledExactlyOnceWith(expected);
+        expect(counters.waiterResolutions).toBe(winner === 'terminal' || winner === 'not_found' ? 1 : 0);
+        expect(counters.waiterTimeouts).toBe(winner === 'deadline' ? 1 : 0);
+        expect(reg.pending()).toBe(0);
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+
+    it('splits deadlines longer than the signed 32-bit timer range without expiring early', async () => {
+      const maxTimerMs = 2_147_483_647;
+      const hung = deferred<{ rows: FakeRun[] }>();
+      const query = vi.fn(() => hung.promise).mockResolvedValueOnce({ rows: [running] });
+      const { reg, counters } = controlledRegistry(query, maxTimerMs);
+      const settled = observe(reg.register(running.id, NS, { timeoutMs: maxTimerMs + 5 }));
+      await vi.advanceTimersByTimeAsync(maxTimerMs + 4);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toHaveBeenCalledExactlyOnceWith({ status: 'running' });
+      expect(counters.waiterTimeouts).toBe(1);
+      expect(reg.pending()).toBe(0);
+      expect(vi.getTimerCount()).toBe(1);
+    });
+
+    it('shares one batch per tick across distinct runs and duplicate waiters', async () => {
+      const rows = [0, 1, 2].map((i) => ({ id: `run_${i}`, status: 'running' }));
+      const ids = rows.map((row) => row.id);
+      const query = vi.fn(async (sql: string, params?: unknown[]) => ({
+        rows: sql.includes('ANY') ? rows : rows.filter((row) => row.id === params?.[0]),
+      }));
+      const { reg, counters } = controlledRegistry(query);
+      const signals = [...ids, ids[0]!].map(() => recordingSignal());
+      const settled = [...ids, ids[0]!].map((id, i) => observe(
+        reg.register(id, NS, { timeoutMs: 100 }, signals[i]!.signal),
+      ));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reg.pending()).toBe(4);
+      expect(query).toHaveBeenCalledTimes(4);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(query).toHaveBeenCalledTimes(5);
+      expect(query).toHaveBeenLastCalledWith(expect.stringContaining('ANY'), [ids]);
+      for (const row of rows) row.status = 'completed';
+      await vi.advanceTimersByTimeAsync(10);
+      expect(query).toHaveBeenCalledTimes(6);
+      for (const result of settled) {
+        expect(result).toHaveBeenCalledExactlyOnceWith({ status: 'completed', output: undefined, error: undefined });
+      }
+      for (const s of signals) expect(s.listeners.size).toBe(0);
+      expect(reg.pending()).toBe(0);
+      expect(counters.waiterResolutions).toBe(4);
+      expect(counters.waiterTimeouts).toBe(0);
+      expect(vi.getTimerCount()).toBe(1);
+    });
   });
 
   /* ------------------------- route-level: a disconnect answers 499 */

@@ -12,10 +12,12 @@
        against a notification that was delivered before the waiter existed),
        then parks the waiter on a Map<runId, Set<entry>>;
      - a single shared poller (1s, unref'd) sweeps ALL pending waiters with one
-       `WHERE id = ANY(...)` query and settles terminal/vanished/expired ones.
+       `WHERE id = ANY(...)` query and settles terminal/vanished ones.
        This is the polling fallback — it keeps every waiter correct when the
        LISTEN connection is down or a notification is lost, at ~1 QPS per
        process instead of 4 QPS per waiter;
+     - each registered waiter has a clearable deadline timer, independent of
+       database availability, that returns its last observed status;
      - resolve(runId) — called by the notification dispatch when a `terminal`
        notification arrives — re-reads the run and settles every waiter for
        that runId at once.
@@ -39,6 +41,7 @@ import type { NotifyCounters } from './observability';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_MS = 1_000;
+const MAX_TIMER_MS = 2_147_483_647;
 const TERMINAL: ReadonlySet<RunStatus> = new Set(['completed', 'failed', 'canceled']);
 
 /** Monotonically increasing waiter id (p1-14): lets the registry name a
@@ -52,7 +55,9 @@ interface PendingWaiter {
   resolve: (r: WaitResult) => void;
   reject: (err: unknown) => void;
   deadline: number;
-  lastStatus: RunStatus;
+  /** Undefined while the initial read is in flight; never fabricate a status. */
+  lastStatus?: RunStatus;
+  deadlineTimer?: ReturnType<typeof setTimeout>;
   /** The caller's timeout budget, for the ResultTimeoutError message (p2-23). */
   timeoutMs: number;
   /** throwOnTimeout (p2-23): a timeout rejects with ResultTimeoutError instead
@@ -129,16 +134,32 @@ export function createWaiterRegistry(deps: {
   const { pool, counters } = deps;
   const pollMs = deps.pollMs ?? DEFAULT_POLL_MS;
   const pending = new Map<string, Set<PendingWaiter>>();
+  // Includes registrations whose first read is still in flight. They are
+  // cancellable, but cannot join a sweep or time out with an unknown status.
+  const active = new Set<PendingWaiter>();
   let stopped = false;
 
-  function remove(entry: PendingWaiter): void {
+  function remove(entry: PendingWaiter): boolean {
+    if (!active.delete(entry)) return false;
+    if (entry.deadlineTimer !== undefined) {
+      clearTimeout(entry.deadlineTimer);
+      entry.deadlineTimer = undefined;
+    }
     if (entry.abortSignal && entry.onAbort) {
       entry.abortSignal.removeEventListener('abort', entry.onAbort);
+      entry.abortSignal = undefined;
+      entry.onAbort = undefined;
     }
     const set = pending.get(entry.runId);
-    if (!set) return;
-    set.delete(entry);
-    if (set.size === 0) pending.delete(entry.runId);
+    if (set) {
+      set.delete(entry);
+      if (set.size === 0) pending.delete(entry.runId);
+    }
+    return true;
+  }
+
+  function reject(entry: PendingWaiter, error: unknown): void {
+    if (remove(entry)) entry.reject(error);
   }
 
   function isPending(entry: PendingWaiter): boolean {
@@ -163,19 +184,19 @@ export function createWaiterRegistry(deps: {
   }
 
   function settle(entry: PendingWaiter, row: RunRead): void {
-    remove(entry);
+    if (!remove(entry)) return;
     counters.waiterResolutions += 1;
     entry.resolve(toResult(row));
   }
 
   function settleGone(entry: PendingWaiter): void {
-    remove(entry);
+    if (!remove(entry)) return;
     counters.waiterResolutions += 1;
     entry.reject(new KernelError('not_found', `run ${entry.runId} not found`));
   }
 
   function settleTimeout(entry: PendingWaiter): void {
-    remove(entry);
+    if (entry.lastStatus === undefined || !remove(entry)) return;
     counters.waiterTimeouts += 1;
     // Latest non-terminal status — the exact waitForResult timeout semantics.
     // Unless the caller asked for the timeout to throw (p2-23): then reject
@@ -188,6 +209,52 @@ export function createWaiterRegistry(deps: {
     entry.resolve({ status: entry.lastStatus });
   }
 
+  function armDeadline(entry: PendingWaiter): void {
+    if (!isPending(entry) || entry.deadline === Infinity) return;
+    const remaining = entry.deadline - Date.now();
+    if (remaining <= 0) {
+      settleTimeout(entry);
+      return;
+    }
+    // A legal long wait must not overflow setTimeout's signed 32-bit delay
+    // into a 1ms timeout. Re-arm in bounded chunks, without another DB read.
+    entry.deadlineTimer = setTimeout(() => {
+      entry.deadlineTimer = undefined;
+      armDeadline(entry);
+    }, Math.min(MAX_TIMER_MS, Math.ceil(remaining)));
+    (entry.deadlineTimer as { unref?: () => void }).unref?.();
+  }
+
+  async function initialize(entry: PendingWaiter): Promise<void> {
+    try {
+      // One read up front also covers notifications delivered before the
+      // waiter existed. The read itself cannot be canceled by this registry;
+      // always consume its outcome, even after stop/abort won the race.
+      const row = await readRun(entry.runId, entry.namespace);
+      if (!active.has(entry)) return;
+      if (!row) {
+        reject(entry, new KernelError('not_found', `run ${entry.runId} not found`));
+        return;
+      }
+      if (TERMINAL.has(row.status) || entry.timeoutMs === 0) {
+        remove(entry);
+        entry.resolve(TERMINAL.has(row.status) ? toResult(row) : { status: row.status });
+        return;
+      }
+      entry.lastStatus = row.status;
+      entry.deadline = Date.now() + entry.timeoutMs;
+      let set = pending.get(entry.runId);
+      if (!set) {
+        set = new Set();
+        pending.set(entry.runId, set);
+      }
+      set.add(entry);
+      armDeadline(entry);
+    } catch (error) {
+      reject(entry, error);
+    }
+  }
+
   async function register(
     runId: string,
     namespace: Namespace,
@@ -195,61 +262,36 @@ export function createWaiterRegistry(deps: {
     signal?: AbortSignal,
   ): Promise<WaitResult> {
     if (stopped) throw new WaiterRegistryStoppedError(); // defensive: the server is closed first
+    signal ??= opts.signal;
     // An already-disconnected client: settle immediately, and do not even
     // spend the initial read on a request nobody will see the answer to.
     if (signal?.aborted) throw new ResultWaitAbortedError();
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    if (typeof timeoutMs !== 'number' || Number.isNaN(timeoutMs) || timeoutMs < 0) {
+      throw new KernelError('bad_request', 'timeoutMs must be a non-negative number of milliseconds or Infinity');
+    }
 
-    // One read up front: the run may already be terminal (or already gone).
-    // This is also the race guard — a notification delivered between the
-    // caller's check and this registration cannot be missed because the read
-    // below sees the terminal state directly.
-    const row = await readRun(runId, namespace);
-    if (!row) throw new KernelError('not_found', `run ${runId} not found`);
-    if (TERMINAL.has(row.status)) return toResult(row);
-    if (timeoutMs <= 0) return { status: row.status };
-
-    return new Promise<WaitResult>((resolve, reject) => {
+    return new Promise<WaitResult>((resolve, rejectPromise) => {
       const entry: PendingWaiter = {
         id: nextWaiterId++,
         runId,
         namespace,
         resolve,
-        reject,
-        deadline: Date.now() + timeoutMs,
-        lastStatus: row.status,
+        reject: rejectPromise,
+        deadline: Infinity,
         timeoutMs,
         throwOnTimeout: opts.throwOnTimeout ?? false,
       };
-      const onAbort = () => {
-        // Only an entry that is still pending may be settled here; a waiter
-        // the sweep or a notification already resolved must not be disturbed
-        // (its client got an answer, and the promise settles once).
-        if (!isPending(entry)) return;
-        remove(entry);
-        reject(new ResultWaitAbortedError());
-      };
-      // The aborted check is re-done in the executor: the pre-read guard above
-      // and this one bracket the async read, so an abort that lands while the
-      // read was in flight still frees the entry instead of registering it.
-      // The addEventListener is safe here — abort events are dispatched on the
-      // task queue, never synchronously, so a signal that reads `aborted ===
-      // false` now will deliver its abort to the listener.
-      if (signal?.aborted) {
-        reject(new ResultWaitAbortedError());
-        return;
-      }
+      // Stop and abort cover the initial read as well as the registered wait.
+      // The first event to remove the active entry wins; later events and DB
+      // continuations cannot settle it again or put it back in pending.
+      active.add(entry);
       if (signal) {
         entry.abortSignal = signal;
-        entry.onAbort = onAbort;
-        signal.addEventListener('abort', onAbort, { once: true });
+        entry.onAbort = () => reject(entry, new ResultWaitAbortedError());
+        signal.addEventListener('abort', entry.onAbort, { once: true });
       }
-      let set = pending.get(runId);
-      if (!set) {
-        set = new Set();
-        pending.set(runId, set);
-      }
-      set.add(entry);
+      void initialize(entry);
     });
   }
 
@@ -273,9 +315,10 @@ export function createWaiterRegistry(deps: {
       }
       return;
     }
-    if (!TERMINAL.has(row.status)) return; // stale notification — the poller owns it
     for (const e of entries) {
-      if (isPending(e)) settle(e, row);
+      if (!isPending(e)) continue;
+      if (TERMINAL.has(row.status)) settle(e, row);
+      else e.lastStatus = row.status; // latest observation for the deadline
     }
   }
 
@@ -345,18 +388,13 @@ export function createWaiterRegistry(deps: {
       stopped = true;
       clearInterval(pollTimer);
       // The daemon is exiting: no sweep will ever run again, so every
-      // still-pending waiter must be settled NOW or its promise hangs forever
+      // still-active waiter must be settled NOW or its promise hangs forever
       // (and its 1s poll timer would keep querying a pool that is about to
       // close). Reject — never resolve a fabricated status (see
       // WaiterRegistryStoppedError). A sweep already in flight cannot double-
       // settle: it re-checks isPending, and stop() already removed everyone.
       const err = new WaiterRegistryStoppedError();
-      for (const set of pending.values()) {
-        for (const e of [...set]) {
-          remove(e);
-          e.reject(err);
-        }
-      }
+      for (const e of active) reject(e, err);
     },
   };
 }
