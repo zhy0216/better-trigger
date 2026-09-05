@@ -70,7 +70,7 @@ jobs:
       # the provenance-rollover build below proves that boundary while the
       # other packages continue to use the restored cache.
       - name: Cache bun dependencies
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.bun/install/cache
@@ -273,7 +273,7 @@ jobs:
       # matters for the smoke assertions, not for what bun installs), so the
       # legs after the first restore instead of re-installing from scratch.
       - name: Cache bun dependencies
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.bun/install/cache
