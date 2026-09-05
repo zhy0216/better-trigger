@@ -21,12 +21,14 @@ export function validateRetryPolicy(policy?: RetryPolicy, label = 'retry'): void
     throw new KernelError('bad_request', `${label} must be an object`);
   }
   const { maxAttempts, baseMs, factor, maxMs } = policy;
-  // Integer: a fractional attempt count makes `attempt < maxAttempts`
-  // comparisons and the dashboard's attempt display meaningless.
-  if (maxAttempts !== undefined && (!Number.isInteger(maxAttempts) || maxAttempts < 1)) {
+  // The budget and attempt counter are PostgreSQL integer columns.
+  if (
+    maxAttempts !== undefined &&
+    (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 2_147_483_647)
+  ) {
     throw new KernelError(
       'bad_request',
-      `${label}.maxAttempts must be an integer >= 1, got ${String(maxAttempts)}`,
+      `${label}.maxAttempts must be an integer >= 1 and <= 2147483647, got ${String(maxAttempts)}`,
     );
   }
   if (baseMs !== undefined && (!Number.isFinite(baseMs) || baseMs < 0)) {
@@ -73,6 +75,8 @@ export function resolveRetryPolicy(policy?: RetryPolicy): Required<RetryPolicy> 
  * Delay before the next attempt, in ms.
  * `attempt` is the attempt that just failed (1-based).
  * delay = min(maxMs, baseMs * factor^(attempt-1)), then jittered ×[0.8, 1.2].
+ * Throws bad_request if jitter overflows; the caller must also range-check
+ * the resulting timestamp against the clock used to schedule the retry.
  */
 export function computeBackoffMs(
   attempt: number,
@@ -80,7 +84,15 @@ export function computeBackoffMs(
   rand: () => number = Math.random,
 ): number {
   const p = resolveRetryPolicy(policy);
-  const raw = Math.min(p.maxMs, p.baseMs * Math.pow(p.factor, Math.max(0, attempt - 1)));
+  // Keep zero delays at zero even when the exponent overflows (0 * Infinity
+  // is NaN). Positive overflow is safely capped by the finite maxMs.
+  const raw = p.baseMs === 0
+    ? 0
+    : Math.min(p.maxMs, p.baseMs * Math.pow(p.factor, Math.max(0, attempt - 1)));
   const jitter = 0.8 + rand() * 0.4;
-  return Math.round(raw * jitter);
+  const delay = Math.round(raw * jitter);
+  if (!Number.isFinite(delay)) {
+    throw new KernelError('bad_request', 'retry backoff is out of range — milliseconds must be finite');
+  }
+  return delay;
 }

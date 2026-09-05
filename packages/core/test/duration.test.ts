@@ -69,6 +69,16 @@ describe('parseDuration — strings', () => {
     // used to prove this and are now rejected — see the duplicate-unit test.)
     expect(parseDuration('0.9s500ms')).toBe(1_400);
     expect(parseDuration('2.5s')).toBe(2_500);
+    expect(parseDuration('0.0009s0.9ms')).toBe(1);
+  });
+
+  it.each([
+    ['numeric conversion', `${'9'.repeat(310)}w`],
+    ['unit multiplication', `1${'0'.repeat(300)}w`],
+    ['compound addition', `1${'0'.repeat(308)}ms1${'0'.repeat(305)}s`],
+  ])('rejects non-finite milliseconds from %s', (_cause, input) => {
+    expect(() => parseDuration(input)).toThrow(/invalid duration/);
+    expect(() => parseDuration(input)).toThrow(input);
   });
 
   it('rejects anything with no unit or with leftover text', () => {
@@ -111,6 +121,27 @@ describe('durationToDate', () => {
 
   it('propagates invalid durations instead of producing an Invalid Date', () => {
     expect(() => durationToDate('soon')).toThrow(/invalid duration/);
+  });
+
+  it('rejects an invalid source date as bad_request without changing it', () => {
+    const from = new Date(NaN);
+    const err = captureThrow(() => durationToDate(0, from));
+    expect(err).toBeInstanceOf(KernelError);
+    expect(err).toMatchObject({ code: 'bad_request', message: expect.stringMatching(/from.*valid Date/) });
+    expect(Number.isNaN(from.getTime())).toBe(true);
+  });
+
+  it('preserves both Date boundaries and large representable offsets', () => {
+    const min = new Date(-8.64e15);
+    const max = new Date(8.64e15);
+    expect(durationToDate(0, min).getTime()).toBe(-8.64e15);
+    expect(durationToDate(0, max).getTime()).toBe(8.64e15);
+    expect(durationToDate(8.64e15, new Date(0)).getTime()).toBe(8.64e15);
+    expect(durationToDate(1.728e16, min).getTime()).toBe(8.64e15);
+    expect(() => durationToDate(1, max)).toThrow(/out of range/);
+    expect(() => durationToDate(1.728e16 + 4, min)).toThrow(/out of range/);
+    expect(min.getTime()).toBe(-8.64e15);
+    expect(max.getTime()).toBe(8.64e15);
   });
 
   it('rejects an out-of-range duration as a KernelError naming the input, not an Invalid Date', () => {

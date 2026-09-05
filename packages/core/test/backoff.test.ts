@@ -62,6 +62,14 @@ describe('validateRetryPolicy (p1-16)', () => {
     expect(() => validateRetryPolicy({ maxAttempts: 1 })).not.toThrow();
   });
 
+  it('limits maxAttempts to PostgreSQL positive integers', () => {
+    expect(resolveRetryPolicy({ maxAttempts: 2_147_483_647 }).maxAttempts).toBe(2_147_483_647);
+    for (const maxAttempts of [2_147_483_648, Number.MAX_SAFE_INTEGER, Number.MAX_VALUE]) {
+      expect(() => validateRetryPolicy({ maxAttempts })).toThrow(/maxAttempts.*2147483647/);
+      expect(() => resolveRetryPolicy({ maxAttempts })).toThrow(KernelError);
+    }
+  });
+
   it('rejects a bad factor: NaN, Infinity, < 1', () => {
     for (const v of [NaN, Infinity, 0, 0.5, -2]) {
       expect(() => validateRetryPolicy({ factor: v })).toThrow(/factor/);
@@ -123,6 +131,28 @@ describe('computeBackoffMs', () => {
       Math.round(DEFAULT_RETRY.maxMs * 0.8),
     );
     expect(computeBackoffMs(2, { maxMs: 1_500 }, noJitter)).toBe(1_500);
+    expect(computeBackoffMs(20, undefined, () => 1)).toBe(
+      Math.round(DEFAULT_RETRY.maxMs * 1.2),
+    );
+  });
+
+  it('keeps a zero base at zero when exponentiation overflows', () => {
+    expect(computeBackoffMs(1025, { baseMs: 0, factor: 2 }, noJitter)).toBe(0);
+    expect(computeBackoffMs(2_147_483_647, { baseMs: 0, factor: Number.MAX_VALUE })).toBe(0);
+  });
+
+  it('caps overflowing positive delays before applying jitter', () => {
+    expect(computeBackoffMs(1025, undefined, noJitter)).toBe(DEFAULT_RETRY.maxMs);
+    expect(computeBackoffMs(3, { baseMs: Number.MAX_VALUE, factor: Number.MAX_VALUE }, noJitter))
+      .toBe(DEFAULT_RETRY.maxMs);
+    expect(computeBackoffMs(1025, { maxMs: 0 }, noJitter)).toBe(0);
+  });
+
+  it('rejects a non-finite jittered delay from an otherwise finite policy', () => {
+    const policy = { baseMs: Number.MAX_VALUE, maxMs: Number.MAX_VALUE };
+    expect(() => validateRetryPolicy(policy)).not.toThrow();
+    expect(() => computeBackoffMs(1, policy, () => 1)).toThrow(KernelError);
+    expect(() => computeBackoffMs(1, policy, () => 1)).toThrow(/backoff.*out of range/);
   });
 
   it('treats attempt 0 / negative as the first attempt (exponent floors at 0)', () => {

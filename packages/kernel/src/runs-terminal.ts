@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from 'pg';
 import {
   assertNamespace,
   computeBackoffMs,
+  durationToDate,
   KernelError,
   safeSerializeJson,
   type Namespace,
@@ -316,7 +317,8 @@ export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult
     // read inside THIS tx — the claim scan judges `available_at <= now()` on
     // the same clock, so a host clock skewed ahead of the DB's cannot keep the
     // retry invisible for the skew (docs/architecture.md "时钟契约").
-    const nextAt = new Date((await dbNow(client)).getTime() + backoff);
+    // Reject finite delays that exceed Date's range before any retry writes.
+    const nextAt = durationToDate(backoff, await dbNow(client));
     await client.query(
       `UPDATE runs
           SET status = 'queued', attempt = attempt + 1, error = $2, updated_at = now()

@@ -50,14 +50,21 @@ export function parseDuration(input: string | number): number {
   if (matches === 0 || leftover !== '') {
     throw new Error(`invalid duration: "${input}" (expected e.g. "30s", "10m", "24h")`);
   }
+  if (!Number.isFinite(total)) {
+    throw new Error(`invalid duration: "${input}" — milliseconds must be finite`);
+  }
   return Math.floor(total);
 }
 
 /** Resolve a duration (relative to `from`, default now) to an absolute Date. */
 export function durationToDate(input: string | number, from: Date = new Date()): Date {
   const ms = parseDuration(input);
-  const time = from.getTime() + ms;
-  if (time > DATE_MAX_MS || time < -DATE_MAX_MS) {
+  const fromMs = from.getTime();
+  if (!Number.isFinite(fromMs)) {
+    throw new KernelError('bad_request', 'duration from must be a valid Date');
+  }
+  const time = fromMs + ms;
+  if (!Number.isFinite(time) || time > DATE_MAX_MS || time < -DATE_MAX_MS) {
     // Not a plain "invalid duration" Error: this one is well-formed but too big
     // for a Date, so it used to silently produce an Invalid Date and only
     // explode at toISOString(). Naming the input keeps it debuggable.
