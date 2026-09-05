@@ -16,11 +16,11 @@
    ============================================================================= */
 import type { ClaimedRun } from '@better-trigger/core';
 import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import type { Kernel } from '@better-trigger/kernel';
 import { task } from 'better-trigger';
 import { describe, expect, it } from 'vitest';
 import { formatCrashContext } from '../src/observability';
 import { startWorkerRuntime } from '../src/runtime';
+import { runtimeTestKernel } from './helpers/kernel';
 
 function claimedRun(id: string): ClaimedRun {
   return {
@@ -40,19 +40,16 @@ function claimedRun(id: string): ClaimedRun {
 /** Hands out each run once, then nothing — two slots, two in-flight runs. */
 function fakeKernel(runs: ClaimedRun[]) {
   const queue = [...runs];
-  return {
-    registerWorker: async () => ({ workerId: 'w_crash' }),
-    startOrchestrator: () => ({ stop: () => {}, counters: {} }),
+  return runtimeTestKernel({
     claimRuns: async () => {
       const next = queue.shift();
       return next ? [next] : [];
     },
-    heartbeat: async () => ({ cancelRunIds: [], lostRunIds: [] }),
     reportStep: async () => {},
-    failRun: async () => {},
+    failRun: async () => ({ willRetry: false }),
     completeRun: async () => {},
     appendLogs: async () => {},
-  } as unknown as Kernel;
+  }, { workerId: 'w_crash', releasedRunIds: runs.map((run) => run.id) });
 }
 
 describe('formatCrashContext()', () => {
@@ -88,8 +85,9 @@ describe('WorkerHandle.inFlightRunIds()', () => {
       }),
     );
 
+    const { kernel, logger, expectStopped } = fakeKernel([claimedRun('run_a'), claimedRun('run_b')]);
     const handle = await startWorkerRuntime(
-      { kernel: fakeKernel([claimedRun('run_a'), claimedRun('run_b')]) },
+      { kernel, logger },
       { tasks: [parked], concurrency: 2, namespaces: [DEFAULT_NAMESPACE] },
     );
     await bothStarted;
@@ -107,6 +105,7 @@ describe('WorkerHandle.inFlightRunIds()', () => {
     } finally {
       await handle.stop();
     }
+    expectStopped(handle, [DEFAULT_NAMESPACE]);
 
     // Drained: nothing left to name.
     expect(handle.inFlightRunIds()).toEqual([]);

@@ -14,10 +14,11 @@
    ============================================================================= */
 import type { ClaimedRun } from '@better-trigger/core';
 import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import { KernelError, type Kernel } from '@better-trigger/kernel';
+import { KernelError } from '@better-trigger/kernel';
 import { task } from 'better-trigger';
 import { describe, expect, it } from 'vitest';
 import { startWorkerRuntime } from '../src/runtime';
+import { runtimeTestKernel } from './helpers/kernel';
 
 const RUN: ClaimedRun = {
   id: 'run_1',
@@ -41,15 +42,12 @@ interface Behavior {
 function fakeKernel(b: Behavior = {}) {
   const calls = { completeRun: 0, failRun: 0, suspendRun: 0 };
   let handedOut = false;
-  const kernel = {
-    registerWorker: async () => ({ workerId: 'w1' }),
-    startOrchestrator: () => ({ stop: () => {} }),
+  const fixture = runtimeTestKernel({
     claimRuns: async () => {
       if (handedOut) return [];
       handedOut = true;
       return [RUN];
     },
-    heartbeat: async () => ({ cancelRunIds: [], lostRunIds: [] }),
     reportStep: async () => {},
     completeRun: async () => {
       calls.completeRun += 1;
@@ -68,8 +66,8 @@ function fakeKernel(b: Behavior = {}) {
       return { resumed: false };
     },
     appendLogs: async () => {},
-  } as unknown as Kernel;
-  return { kernel, calls };
+  });
+  return { ...fixture, calls };
 }
 
 async function waitFor(pred: () => boolean, timeoutMs = 8_000): Promise<void> {
@@ -89,25 +87,27 @@ function outcomes(...counted: Array<'completed' | 'failed' | 'suspended' | 'aban
 
 describe('runs_total sources', () => {
   it('counts a run that returned as completed', async () => {
-    const { kernel, calls } = fakeKernel();
+    const { kernel, logger, expectStopped, calls } = fakeKernel();
     const handle = await startWorkerRuntime(
-      { kernel },
+      { kernel, logger },
       { tasks: [task('demo', async () => 'done')], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => calls.completeRun > 0);
     await handle.stop();
+    expectStopped(handle, [DEFAULT_NAMESPACE]);
 
     expect(handle.counters.runOutcomes).toEqual(outcomes('completed'));
   }, 15_000);
 
   it('counts a run that threw as failed', async () => {
-    const { kernel, calls } = fakeKernel();
+    const { kernel, logger, expectStopped, calls } = fakeKernel();
     const boom = task('demo', async () => {
       throw new Error('task blew up');
     });
-    const handle = await startWorkerRuntime({ kernel }, { tasks: [boom], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] });
+    const handle = await startWorkerRuntime({ kernel, logger }, { tasks: [boom], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] });
     await waitFor(() => calls.failRun > 0);
     await handle.stop();
+    expectStopped(handle, [DEFAULT_NAMESPACE]);
 
     // 'failed' is the executor's verdict on this attempt, not the run's final
     // status — the kernel may still schedule another one.
@@ -115,17 +115,18 @@ describe('runs_total sources', () => {
   }, 15_000);
 
   it('counts a run parked on a wait as suspended', async () => {
-    const { kernel, calls } = fakeKernel();
+    const { kernel, logger, expectStopped, calls } = fakeKernel();
     const waiting = task('demo', async (_payload: unknown, ctx) => {
       await ctx.wait.for('1h');
       return 'never reached in this pass';
     });
     const handle = await startWorkerRuntime(
-      { kernel },
+      { kernel, logger },
       { tasks: [waiting], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => calls.suspendRun > 0);
     await handle.stop();
+    expectStopped(handle, [DEFAULT_NAMESPACE]);
 
     expect(handle.counters.runOutcomes).toEqual(outcomes('suspended'));
     // The pass ended on the wait: nothing was completed or failed.
@@ -137,14 +138,15 @@ describe('runs_total sources', () => {
     // A lost lease: the run finished here, but the kernel says this worker no
     // longer owns it. The attempt is handed back silently, which is exactly the
     // outcome an operator cannot see any other way.
-    const { kernel, calls } = fakeKernel({ completeRunRejectsWith: 'stale_lease' });
+    const { kernel, logger, expectStopped, calls } = fakeKernel({ completeRunRejectsWith: 'stale_lease' });
     const handle = await startWorkerRuntime(
-      { kernel },
+      { kernel, logger },
       { tasks: [task('demo', async () => 'done')], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await waitFor(() => calls.completeRun > 0);
     await waitFor(() => handle.counters.runOutcomes.abandoned > 0);
     await handle.stop();
+    expectStopped(handle, [DEFAULT_NAMESPACE]);
 
     expect(handle.counters.runOutcomes).toEqual(outcomes('abandoned'));
     // Swallowed by the executor, not by the loop-level guard.
@@ -152,19 +154,17 @@ describe('runs_total sources', () => {
   }, 15_000);
 
   it('leaves every outcome at zero on a worker that claimed nothing', async () => {
-    const kernel = {
-      registerWorker: async () => ({ workerId: 'w1' }),
-      startOrchestrator: () => ({ stop: () => {} }),
+    const { kernel, logger, expectStopped } = runtimeTestKernel({
       claimRuns: async () => [],
-      heartbeat: async () => ({ cancelRunIds: [], lostRunIds: [] }),
-    } as unknown as Kernel;
+    });
 
     const handle = await startWorkerRuntime(
-      { kernel },
+      { kernel, logger },
       { tasks: [task('demo', async () => 'done')], concurrency: 1, namespaces: [DEFAULT_NAMESPACE] },
     );
     await new Promise((r) => setTimeout(r, 200));
     await handle.stop();
+    expectStopped(handle, [DEFAULT_NAMESPACE]);
 
     expect(handle.counters.runOutcomes).toEqual(outcomes());
   }, 15_000);

@@ -27,7 +27,7 @@ herdr agent start <name> --kind codex --pane <id> -- \
 | [07-kernel-wait-contract.md](07-kernel-wait-contract.md) | P1 | hard | gpt-6-astra / xhigh | Kernel 等待选项与取消/超时语义 | 待执行 |
 | [08-audit-fail-closed.md](08-audit-fail-closed.md) | P1 | medium | gpt-6-astra / xhigh | 审计进程与范围解析必须拒绝异常输入 | 待执行 |
 | [09-dashboard-build-deduplication.md](09-dashboard-build-deduplication.md) | P2 | medium | gpt-6-astra / xhigh | 消除 worker 构建中重复的 dashboard 编译 | 待执行 |
-| [10-runtime-test-lifecycle-stubs.md](10-runtime-test-lifecycle-stubs.md) | P2 | medium | gpt-6-astra / xhigh | 让运行时测试真正覆盖成功关闭 | 待执行 |
+| [10-runtime-test-lifecycle-stubs.md](done/10-runtime-test-lifecycle-stubs.md) | P2 | medium | gpt-6-astra / xhigh | 让运行时测试真正覆盖成功关闭 | 已完成 |
 
 ## 文件
 

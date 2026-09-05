@@ -13,6 +13,7 @@ import type { Kernel } from '@better-trigger/kernel';
 import { isRunAborted, task, type RunAbortedError } from 'better-trigger';
 import { describe, expect, it } from 'vitest';
 import { startWorkerRuntime } from '../src/runtime';
+import { runtimeTestKernel } from './helpers/kernel';
 
 const RUN: ClaimedRun = {
   id: 'run_1',
@@ -29,15 +30,13 @@ const RUN: ClaimedRun = {
 
 function fakeKernel() {
   const calls = {
-    reportStep: [] as any[],
-    failRun: [] as any[],
-    completeRun: [] as any[],
+    reportStep: [] as Parameters<Kernel['reportStep']>[0][],
+    failRun: [] as Parameters<Kernel['failRun']>[0][],
+    completeRun: [] as Parameters<Kernel['completeRun']>[0][],
     heartbeatRunIds: [] as string[][],
   };
   let handedOut = false;
-  const kernel = {
-    registerWorker: async () => ({ workerId: 'w1' }),
-    startOrchestrator: () => ({ stop: () => {} }),
+  const fixture = runtimeTestKernel({
     claimRuns: async () => {
       if (handedOut) return [];
       handedOut = true;
@@ -45,27 +44,28 @@ function fakeKernel() {
     },
     // What a cancel looks like on the wire: the run id comes back on the very
     // heartbeat that renews its lease.
-    heartbeat: async ({ runIds }: { runIds: string[] }) => {
+    heartbeat: async ({ runIds }) => {
       calls.heartbeatRunIds.push(runIds);
       return { cancelRunIds: runIds.filter((id) => id === RUN.id), lostRunIds: [] };
     },
-    reportStep: async (input: any) => {
+    reportStep: async (input) => {
       calls.reportStep.push(input);
     },
-    failRun: async (input: any) => {
+    failRun: async (input) => {
       calls.failRun.push(input);
+      return { willRetry: false };
     },
-    completeRun: async (input: any) => {
+    completeRun: async (input) => {
       calls.completeRun.push(input);
     },
     appendLogs: async () => {},
-  } as unknown as Kernel;
-  return { kernel, calls };
+  });
+  return { ...fixture, calls };
 }
 
 describe('heartbeat cancel', () => {
   it('aborts ctx.signal with reason "canceled" mid-step', async () => {
-    const { kernel, calls } = fakeKernel();
+    const { kernel, logger, expectStopped, calls } = fakeKernel();
     let sawAbort!: (reason: unknown) => void;
     const aborted = new Promise<unknown>((r) => {
       sawAbort = r;
@@ -89,11 +89,12 @@ describe('heartbeat cancel', () => {
 
     // leaseMs/3 floors at the 500ms heartbeat floor, so the first tick lands at 500ms.
     const handle = await startWorkerRuntime(
-      { kernel },
+      { kernel, logger },
       { tasks: [slow], concurrency: 1, leaseMs: 1_500, namespaces: [DEFAULT_NAMESPACE] },
     );
     const reason = (await aborted) as RunAbortedError;
     await handle.stop();
+    expectStopped(handle, [DEFAULT_NAMESPACE]);
 
     expect(isRunAborted(reason)).toBe(true);
     expect(reason.reason).toBe('canceled');
