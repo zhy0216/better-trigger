@@ -1,8 +1,9 @@
 difficulty: hard
+status: completed
 
 # Run 详情排查体验
 
-优先级：P1。模型：max。前置依赖：01-responsive-shell 全部完成并合并。一个 worktree、一个最终 commit；与 02、03、04 可并行。
+优先级：P1。前置依赖：01-responsive-shell 全部完成。由当前会话及内置 subagent 直接完成；与 02、03、04 可并行。
 
 ## T1 · 响应式 Trace 与 Inspector
 
@@ -31,3 +32,5 @@ difficulty: hard
 - **预计修改文件**：`apps/web/test/runView.test.tsx`、`apps/web/test/logStream.test.tsx`、`apps/web/test/runActions.test.tsx`，以及 T1–T3 的必要修正；不为视觉改进修改 `retryIntentKey.ts` 的协议。
 - **验收**：运行 `bun run --cwd apps/web typecheck`、`bun run --cwd apps/web lint`、`bun run --cwd apps/web test test/runView.test.tsx test/logStream.test.tsx test/runActions.test.tsx`。浏览器验证主尺寸、双主题/密度、多层 span/长 payload/失败 stack/无日志/分页错误/复制失败。取消重试只使用隔离 fixture 或明确的测试运行，不影响真实业务任务。
 - **前置依赖**：本文件 T1、T2、T3。
+
+完成记录：2026-09-05 已实现并通过集成验收。校验结果和浏览器证据见 [计划验收记录](../plan.md#实施验收记录) 与 [截图及报告](../evidence/README.md)。

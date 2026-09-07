@@ -4,6 +4,7 @@
 import React from 'react';
 import { Icon, IconButton } from './primitives';
 import { NAV, type NavEntry } from './navigation';
+import { Modal } from './Modal';
 import type { Route } from '../types';
 
 export const Logo = ({ size = 26 }: { size?: number }) => (
@@ -24,51 +25,61 @@ const ENVS = [
   { id: 'dev', label: 'Development', dot: 'var(--accent)' },
 ];
 
-export function Sidebar({ route, setRoute, collapsed }: { route: Route; setRoute: (r: Route) => void; collapsed: boolean }) {
-  const w = collapsed ? 60 : 224;
+export function Sidebar({ route, setRoute, collapsed, mobile = false, open = false, onClose = () => {} }: {
+  route: Route;
+  setRoute: (r: Route) => void;
+  collapsed: boolean;
+  mobile?: boolean;
+  open?: boolean;
+  onClose?: () => void;
+}) {
+  const compact = collapsed && !mobile;
   const navItem = (item: NavEntry) => {
     const on = route === item.id;
     return (
-      <button key={item.id} onClick={() => setRoute(item.id)}
-        title={collapsed ? item.label : undefined}
+      <button key={item.id} onClick={() => setRoute(item.id)} type="button"
+        title={compact ? `${item.label}${item.comingSoon ? ' — Coming soon' : ''}` : undefined}
+        aria-label={item.label}
+        aria-current={on ? 'page' : undefined}
         data-active={on}
         className="bt-nav-item"
-        style={{
-          display: 'flex', alignItems: 'center', gap: 10, width: '100%',
-          height: 36, padding: collapsed ? 0 : '0 10px', justifyContent: collapsed ? 'center' : 'flex-start',
-          borderRadius: 8, border: 'none', cursor: 'pointer', position: 'relative',
-          fontFamily: 'var(--font-sans)', fontSize: 13,
-        }}>
+        >
         <Icon name={item.icon} size={17} strokeWidth={on ? 2.2 : 2} />
-        {!collapsed && <span style={{ flex: 1, textAlign: 'left' }}>{item.label}</span>}
+        {!compact && <span className="bt-nav-label">{item.label}</span>}
+        {!compact && item.comingSoon && <span className="bt-soon">Soon</span>}
       </button>
     );
   };
-  return (
-    <aside style={{
-      width: w, flexShrink: 0, height: '100%', background: 'var(--panel-bg)',
-      borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column',
-      transition: 'width var(--dur-base) var(--ease-standard)',
-    }}>
-      {/* brand */}
-      <div style={{ height: 56, display: 'flex', alignItems: 'center', gap: 10, padding: '0 14px', borderBottom: '1px solid var(--divider)' }}>
-        <Logo />
-        {!collapsed && (
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, letterSpacing: '-0.01em', lineHeight: 1.15, whiteSpace: 'nowrap' }}>Better Trigger</div>
-            <div style={{ fontSize: 11, color: 'var(--fg-subtle)', lineHeight: 1.2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Self-hosted</div>
+  const content = (
+    <>
+      <div className="bt-brand">
+        <Logo size={30} />
+        {!compact && (
+          <div className="bt-brand-copy">
+            <strong>Better Trigger</strong>
+            <span>Task orchestration</span>
           </div>
         )}
+        {mobile && <IconButton name="close" title="Close navigation" onClick={onClose} />}
       </div>
-
-      {/* nav */}
-      <nav style={{ flex: 1, padding: collapsed ? '10px 8px' : '10px 12px', display: 'flex', flexDirection: 'column', gap: 2, overflowY: 'auto' }}>
+      <nav aria-label="Workspace" className="bt-navigation">
+        {!compact && <div className="bt-nav-section">Workspace</div>}
         {NAV.map(navItem)}
-        <div style={{ height: 1, background: 'var(--divider)', margin: collapsed ? '10px 4px' : '10px 6px' }} />
+        <div className="bt-nav-divider" />
         {navItem({ id: 'onboarding', label: 'Get started', icon: 'sparkle' })}
       </nav>
-    </aside>
+      <div className="bt-sidebar-footer">
+        <Icon name="bolt" size={15} />
+        {!compact && <span>Self-hosted. Your infrastructure.</span>}
+      </div>
+    </>
   );
+  if (mobile) return (
+    <Modal open={open} onClose={onClose} label="Workspace navigation" id="workspace-navigation" className="bt-nav-drawer">
+      <div className="bt-sidebar" data-collapsed="false">{content}</div>
+    </Modal>
+  );
+  return <aside id="workspace-navigation" className="bt-sidebar" data-collapsed={compact}>{content}</aside>;
 }
 
 export function EnvSwitcher({ env, setEnv }: { env: string; setEnv: (e: string) => void }) {
@@ -100,29 +111,21 @@ export function EnvSwitcher({ env, setEnv }: { env: string; setEnv: (e: string) 
   }, [open, env]);
 
   return (
-    <div style={{ position: 'relative' }}>
+    <div className="bt-env-switcher">
       <button ref={triggerRef} onClick={() => setOpen((o) => !o)}
         aria-haspopup="true" aria-expanded={open}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 8, height: 32, padding: '0 10px', borderRadius: 8,
-          border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--fg)', cursor: 'pointer',
-          fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 500,
-        }}>
+        className="bt-env-trigger" type="button">
         <span style={{ width: 7, height: 7, borderRadius: 9999, background: cur.dot }} />
-        {cur.label}
+        <span>{cur.label}</span>
         <Icon name="chevronDown" size={14} style={{ color: 'var(--fg-subtle)' }} />
       </button>
       {open && (
         <>
           <div onClick={() => setOpen(false)} aria-hidden="true" style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
-          <div role="group" aria-label="Environment" style={{
-            position: 'absolute', top: 38, left: 0, minWidth: 180, background: 'var(--panel-bg)',
-            border: '1px solid var(--border)', borderRadius: 10, boxShadow: 'var(--shadow-pop)', padding: 5, zIndex: 50,
-            animation: 'bt-fade-up 140ms var(--ease-standard)',
-          }}>
+          <div role="group" aria-label="Environment" className="bt-env-menu">
             {ENVS.map((e) => (
               <button key={e.id} ref={(el) => { optionRefs.current[e.id] = el; }}
-                onClick={() => { setEnv(e.id); setOpen(false); }}
+                onClick={() => { setEnv(e.id); close(true); }}
                 data-selected={env === e.id}
                 aria-pressed={env === e.id}
                 className="bt-menu-item"
@@ -144,7 +147,7 @@ export function EnvSwitcher({ env, setEnv }: { env: string; setEnv: (e: string) 
 }
 
 export function TopBar({
-  title, env, setEnv, onToggleSidebar, theme, setTheme, tweaksOpen, onToggleTweaks, children,
+  title, env, setEnv, onToggleSidebar, theme, setTheme, tweaksOpen, onToggleTweaks, children, sidebarExpanded = true,
 }: {
   title: string;
   env: string;
@@ -157,22 +160,23 @@ export function TopBar({
   tweaksOpen: boolean;
   onToggleTweaks: () => void;
   children?: React.ReactNode;
+  sidebarExpanded?: boolean;
 }) {
   return (
-    <header style={{
-      height: 56, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12, padding: '0 18px',
-      borderBottom: '1px solid var(--border)', background: 'var(--panel-bg)',
-    }}>
-      <IconButton name="menu" onClick={onToggleSidebar} title="Toggle sidebar" />
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, minWidth: 0 }}>
-        <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>{title}</span>
+    <header className="bt-topbar">
+      <div className="bt-topbar-heading">
+        <IconButton name="menu" onClick={onToggleSidebar} title="Toggle sidebar"
+          expanded={sidebarExpanded} controls="workspace-navigation" />
+        <span className="bt-topbar-separator" aria-hidden="true" />
+        <h1>{title}</h1>
       </div>
-      <div style={{ flex: 1 }} />
-      {children}
-      <EnvSwitcher env={env} setEnv={setEnv} />
-      <IconButton name={theme === 'dark' ? 'sun' : 'moon'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="Toggle theme" />
-      <IconButton name="settings" active={tweaksOpen} pressed={tweaksOpen}
-        onClick={onToggleTweaks} title="Toggle tweaks" />
+      <div className="bt-topbar-context">{children}</div>
+      <div className="bt-topbar-controls">
+        <EnvSwitcher env={env} setEnv={setEnv} />
+        <IconButton name={theme === 'dark' ? 'sun' : 'moon'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="Toggle theme" />
+        <IconButton name="settings" active={tweaksOpen} pressed={tweaksOpen}
+          onClick={onToggleTweaks} title="Display settings" id="display-settings-trigger" />
+      </div>
     </header>
   );
 }

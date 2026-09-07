@@ -1,8 +1,9 @@
 difficulty: medium
+status: completed
 
 # 集成验收与本地源码预览
 
-优先级：P2。模型：flash。前置依赖：02-runs-list、03-tasks-dashboard、04-schedules、05-run-details 全部完成并合并（01 的依赖由它们传递）。一个 worktree、一个最终 commit；本任务串行执行。
+优先级：P2。前置依赖：02-runs-list、03-tasks-dashboard、04-schedules、05-run-details 全部完成（01 的依赖由它们传递）。由当前会话及内置 subagent 直接完成；本任务串行执行。
 
 ## T1 · 合并后整仓校验与必要修复
 
@@ -31,3 +32,5 @@ difficulty: medium
 - **预计修改文件**：`plans/ui-improvements/plan.md`、必要的 `plans/ui-improvements/evidence/`、`apps/web/README.md`。
 - **验收**：用户能直接打开本次源码的预览；文档写清后端可用状态和实际端口，区分 live API 截图与 fixture 验证。未通过、未执行及环境限制均明确说明，浏览器错误页不计作 UI 截图。没有写用户业务数据库、清理卷、远程部署或推送。最终记录覆盖所有前述验收，不预填成功。
 - **前置依赖**：本文件 T1、T2、T3。
+
+完成记录：2026-09-05 已实现并通过集成验收。校验结果和浏览器证据见 [计划验收记录](../plan.md#实施验收记录) 与 [截图及报告](../evidence/README.md)。

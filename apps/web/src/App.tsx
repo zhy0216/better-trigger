@@ -3,6 +3,7 @@
    ============================================================================= */
 import React from 'react';
 import { useTweaks } from './hooks/useTweaks';
+import { useMediaQuery } from './hooks/useMediaQuery';
 import { Sidebar, TopBar } from './components/Shell';
 import { Button, Input } from './components/primitives';
 import {
@@ -31,8 +32,8 @@ const TWEAK_DEFAULTS = {
 
 /* URL routing — the daemon's SPA fallback (apps/worker/src/static.ts) serves
    index.html for deep links, so paths mirror the sidebar + run detail. There is
-   no 'workers' route (worker stats live on the tasks dashboard) and no path for
-   'alerts'/'deployments', so those fall back to the runs list when unknown. */
+   no 'workers' route (worker stats live on the tasks dashboard). Alerts and
+   deployments retain their deep links while their features are coming soon. */
 const STATIC_ROUTES: Array<[string, Route]> = [
   ['/tasks', 'tasks'],
   ['/schedules', 'schedules'],
@@ -61,6 +62,11 @@ export default function App() {
   const [route, setRoute] = React.useState<Route>(initial.route);
   const [env, setEnv] = React.useState('prod');
   const [collapsed, setCollapsed] = React.useState(false);
+  const mobile = useMediaQuery('(max-width: 767px)');
+  const [mobileNav, setMobileNav] = React.useState({ viewport: mobile, open: false });
+  // A breakpoint change dismisses the drawer instead of leaving an invisible
+  // modal active, or reopening it on a later resize back to mobile.
+  if (mobileNav.viewport !== mobile) setMobileNav({ viewport: mobile, open: false });
   // The Tweaks panel is controlled from here (p2-19): hidden by default,
   // toggled by the TopBar button, closed by the panel's own ✕.
   const [tweaksOpen, setTweaksOpen] = React.useState(false);
@@ -86,6 +92,7 @@ export default function App() {
     history.pushState(null, '', pathFor(nextRoute, nextRunId));
     setRunId(nextRoute === 'run' ? nextRunId : null);
     setRoute(nextRoute);
+    setMobileNav((state) => ({ ...state, open: false }));
   };
   const openRun = (id?: string) => navigate('run', id ?? null);
 
@@ -98,6 +105,7 @@ export default function App() {
       const next = parsePath(window.location.pathname);
       setRunId(next.runId);
       setRoute(next.route);
+      setMobileNav((state) => ({ ...state, open: false }));
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
@@ -109,6 +117,19 @@ export default function App() {
     el.setAttribute('data-theme', t.theme);
     el.setAttribute('data-density', t.density === 'compact' ? 'compact' : 'comfortable');
     el.style.setProperty('--accent', t.accent);
+    // Accent choices include bright green and orange. Choose readable text
+    // against the actual 82% accent / black solid button background.
+    const hex = /^#([\da-f]{6})$/i.exec(t.accent)?.[1];
+    if (hex) {
+      const linear = [0, 2, 4].map((offset) => {
+        const value = parseInt(hex.slice(offset, offset + 2), 16) * 0.82 / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+      const luminance = linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+      const lightText = 1.05 / (luminance + 0.05) >= (luminance + 0.05) / 0.05;
+      el.style.setProperty('--accent-fg', lightText ? '#ffffff' : '#000000');
+      el.style.setProperty('--accent-hover', `color-mix(in srgb, var(--accent) ${lightText ? 74 : 90}%, #000)`);
+    }
   }, [t.theme, t.density, t.accent]);
 
   const goTo = (r: Route) => navigate(r);
@@ -128,11 +149,20 @@ export default function App() {
   else if (route === 'onboarding') screen = <Onboarding setRoute={goTo} />;
 
   return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }} data-screen-label={titles[route]}>
-      <Sidebar route={activeNav} setRoute={navigate} collapsed={collapsed} />
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+    <div className="bt-app" data-screen-label={titles[route]}>
+      <a href="#main-content" className="bt-skip-link">Skip to content</a>
+      <Sidebar route={activeNav} setRoute={navigate} collapsed={collapsed}
+        mobile={mobile} open={mobile && mobileNav.open}
+        onClose={() => setMobileNav((state) => ({ ...state, open: false }))} />
+      <div className="bt-workspace">
         <TopBar title={titles[route]} env={env} setEnv={setEnv}
-          onToggleSidebar={() => setCollapsed((c) => !c)}
+          onToggleSidebar={() => {
+            if (mobile) {
+              setTweaksOpen(false);
+              setMobileNav((state) => ({ ...state, open: !state.open }));
+            } else setCollapsed((c) => !c);
+          }}
+          sidebarExpanded={mobile ? mobileNav.open : !collapsed}
           theme={t.theme} setTheme={(v) => setTweak('theme', v)}
           tweaksOpen={tweaksOpen} onToggleTweaks={() => setTweaksOpen((v) => !v)}>
           <ConnectionDot connection={connection} />
@@ -143,6 +173,7 @@ export default function App() {
           )}
           {route === 'tasks' && <Button variant="outline" size="sm" icon="plus" onClick={() => navigate('onboarding')}>New task</Button>}
         </TopBar>
+        <main id="main-content" className="bt-main" tabIndex={-1} aria-label={titles[route]}>
         {connection === 'unauthorized' ? (
           <ApiKeyPrompt
             source={apiKeySource}
@@ -167,9 +198,10 @@ export default function App() {
             }}
           />
         ) : screen}
+        </main>
       </div>
 
-      <TweaksPanel open={tweaksOpen} onOpenChange={setTweaksOpen}>
+      <TweaksPanel title="Display settings" open={tweaksOpen} onOpenChange={setTweaksOpen}>
         <TweakSection label="Theme" />
         <TweakRadio label="Mode" value={t.theme} options={['light', 'dark']} onChange={(v) => setTweak('theme', v)} />
         <TweakColor label="Accent" value={t.accent}
@@ -226,7 +258,7 @@ export function ApiKeyPrompt({
   onClear: () => void;
 }) {
   return (
-    <main style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: 'var(--app-bg)' }}>
+    <section style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: 'var(--app-bg)' }}>
       <div style={{ maxWidth: 560, margin: '0 auto', padding: '80px 24px' }}>
         <div style={{
           padding: 24, borderRadius: 12, border: '1px solid var(--orange-border)',
@@ -269,6 +301,6 @@ export function ApiKeyPrompt({
           )}
         </div>
       </div>
-    </main>
+    </section>
   );
 }

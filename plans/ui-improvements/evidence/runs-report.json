@@ -1,0 +1,3518 @@
+{
+  "layouts": [
+    {
+      "label": "1440-dark-comfortable",
+      "theme": "dark",
+      "density": "comfortable",
+      "viewport": 1440,
+      "documentWidth": 1440,
+      "containerWidth": 1144,
+      "rowHeight": 56,
+      "columnsVisible": true,
+      "overflow": []
+    },
+    {
+      "label": "1440-light-compact",
+      "theme": "light",
+      "density": "compact",
+      "viewport": 1440,
+      "documentWidth": 1440,
+      "containerWidth": 1144,
+      "rowHeight": 46,
+      "columnsVisible": true,
+      "overflow": []
+    },
+    {
+      "label": "768-light-compact",
+      "theme": "light",
+      "density": "compact",
+      "viewport": 768,
+      "documentWidth": 768,
+      "containerWidth": 492,
+      "rowHeight": 156.765625,
+      "columnsVisible": false,
+      "overflow": []
+    },
+    {
+      "label": "375-light-compact",
+      "theme": "light",
+      "density": "compact",
+      "viewport": 375,
+      "documentWidth": 375,
+      "containerWidth": 343,
+      "rowHeight": 160.765625,
+      "columnsVisible": false,
+      "overflow": []
+    },
+    {
+      "label": "720x480-200-percent-equivalent",
+      "theme": "light",
+      "density": "comfortable",
+      "viewport": 720,
+      "documentWidth": 720,
+      "containerWidth": 688,
+      "rowHeight": 164.765625,
+      "columnsVisible": false,
+      "overflow": []
+    },
+    {
+      "label": "long-375-light-compact",
+      "theme": "light",
+      "density": "compact",
+      "viewport": 375,
+      "documentWidth": 375,
+      "containerWidth": 343,
+      "rowHeight": 396.125,
+      "columnsVisible": false,
+      "overflow": []
+    },
+    {
+      "label": "long-768-dark-comfortable",
+      "theme": "dark",
+      "density": "comfortable",
+      "viewport": 768,
+      "documentWidth": 768,
+      "containerWidth": 492,
+      "rowHeight": 301.921875,
+      "columnsVisible": false,
+      "overflow": []
+    },
+    {
+      "label": "long-1440-light-compact",
+      "theme": "light",
+      "density": "compact",
+      "viewport": 1440,
+      "documentWidth": 1440,
+      "containerWidth": 1144,
+      "rowHeight": 46,
+      "columnsVisible": true,
+      "overflow": []
+    }
+  ],
+  "behavior": {
+    "longFocus": {
+      "width": 1142,
+      "scrollWidth": 1142,
+      "idScroll": 124,
+      "idWidth": 124
+    },
+    "filteredRequest": "/api/v1/runs?taskId=missing-task&status=failed&limit=50&projectId=default&env=prod",
+    "clearedRequest": "/api/v1/runs?limit=50&projectId=default&env=prod",
+    "clearFilter": true,
+    "pausedNoPolling": true,
+    "resumeImmediate": true,
+    "paginationFailurePreservesRows": true,
+    "paginationRetry": true,
+    "clearWhilePaused": true,
+    "clearPausedRequest": "/api/v1/runs?limit=50&projectId=default&env=prod",
+    "noRunsEmpty": true,
+    "enterOpens": true,
+    "spaceOpens": true
+  },
+  "errors": [
+    {
+      "type": "console",
+      "message": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)"
+    }
+  ],
+  "contrast": {
+    "dark": [
+      {
+        "text": "Run history",
+        "selector": "H1",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          17,
+          20,
+          27
+        ],
+        "ratio": 16.45,
+        "fontSize": "24px",
+        "fontWeight": "650"
+      },
+      {
+        "text": "Follow your tasks from trigger to completion.",
+        "selector": "P",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          17,
+          20,
+          27
+        ],
+        "ratio": 10.62,
+        "fontSize": "13px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Live tailing",
+        "selector": "bt-runs-live",
+        "color": "color(srgb 0.687255 0.687255 1)",
+        "bg": [
+          28,
+          31,
+          55
+        ],
+        "ratio": 8.03,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "All",
+        "selector": "bt-runs-filter",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 14.39,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "Running",
+        "selector": "bt-runs-filter",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          25,
+          28,
+          35
+        ],
+        "ratio": 9.79,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "Completed",
+        "selector": "bt-runs-filter",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          25,
+          28,
+          35
+        ],
+        "ratio": 9.79,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "Failed",
+        "selector": "bt-runs-filter",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          25,
+          28,
+          35
+        ],
+        "ratio": 9.79,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "Queued",
+        "selector": "bt-runs-filter",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          25,
+          28,
+          35
+        ],
+        "ratio": 9.79,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "Waiting",
+        "selector": "bt-runs-filter",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          25,
+          28,
+          35
+        ],
+        "ratio": 9.79,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "Canceled",
+        "selector": "bt-runs-filter",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          25,
+          28,
+          35
+        ],
+        "ratio": 9.79,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "6",
+        "selector": "STRONG",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          17,
+          20,
+          27
+        ],
+        "ratio": 16.45,
+        "fontSize": "11.5px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "runs",
+        "selector": "STRONG",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          17,
+          20,
+          27
+        ],
+        "ratio": 16.45,
+        "fontSize": "11.5px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "loaded",
+        "selector": "STRONG",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          17,
+          20,
+          27
+        ],
+        "ratio": 16.45,
+        "fontSize": "11.5px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "Following new runs",
+        "selector": "SPAN",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          17,
+          20,
+          27
+        ],
+        "ratio": 10.62,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Status",
+        "selector": "SPAN",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          36,
+          41,
+          51
+        ],
+        "ratio": 8.41,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Run",
+        "selector": "SPAN",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          36,
+          41,
+          51
+        ],
+        "ratio": 8.41,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Task",
+        "selector": "SPAN",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          36,
+          41,
+          51
+        ],
+        "ratio": 8.41,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Trigger",
+        "selector": "SPAN",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          36,
+          41,
+          51
+        ],
+        "ratio": 8.41,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Version",
+        "selector": "SPAN",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          36,
+          41,
+          51
+        ],
+        "ratio": 8.41,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Duration",
+        "selector": "SPAN",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          36,
+          41,
+          51
+        ],
+        "ratio": 8.41,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Started",
+        "selector": "SPAN",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          36,
+          41,
+          51
+        ],
+        "ratio": 8.41,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Running",
+        "selector": "SPAN",
+        "color": "rgb(175, 169, 255)",
+        "bg": [
+          38,
+          43,
+          71
+        ],
+        "ratio": 6.55,
+        "fontSize": "11px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "run_running",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "sync-warehouse",
+        "selector": "bt-runs-value",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 14.39,
+        "fontSize": "13px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "api",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "v_abcdef123456",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "running…",
+        "selector": "bt-runs-duration mono tnum bt-runs-duration-running",
+        "color": "color(srgb 0.687255 0.687255 1)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 7.98,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1m ago",
+        "selector": "bt-runs-started",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Completed",
+        "selector": "SPAN",
+        "color": "rgb(80, 223, 161)",
+        "bg": [
+          27,
+          54,
+          55
+        ],
+        "ratio": 7.64,
+        "fontSize": "11px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "run_complete",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "send-invoice",
+        "selector": "bt-runs-value",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 14.39,
+        "fontSize": "13px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "api",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "v_abcdef123456",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1.53s",
+        "selector": "bt-runs-duration mono tnum",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 14.39,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1m ago",
+        "selector": "bt-runs-started",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Failed",
+        "selector": "SPAN",
+        "color": "rgb(255, 155, 145)",
+        "bg": [
+          53,
+          37,
+          43
+        ],
+        "ratio": 7.14,
+        "fontSize": "11px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "run_failed",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "enrich-customer",
+        "selector": "bt-runs-value",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 14.39,
+        "fontSize": "13px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "api",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "v_abcdef123456",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1.53s",
+        "selector": "bt-runs-duration mono tnum",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 14.39,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1m ago",
+        "selector": "bt-runs-started",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Queued",
+        "selector": "SPAN",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          46,
+          52,
+          63
+        ],
+        "ratio": 7.21,
+        "fontSize": "11px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "run_queued",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "create-thumbnail",
+        "selector": "bt-runs-value",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 14.39,
+        "fontSize": "13px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "api",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "v_abcdef123456",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1.53s",
+        "selector": "bt-runs-duration mono tnum",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 14.39,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1m ago",
+        "selector": "bt-runs-started",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Frozen",
+        "selector": "SPAN",
+        "color": "rgb(197, 187, 255)",
+        "bg": [
+          42,
+          48,
+          71
+        ],
+        "ratio": 7.41,
+        "fontSize": "11px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "run_waiting",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "review-submission",
+        "selector": "bt-runs-value",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 14.39,
+        "fontSize": "13px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "api",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "v_abcdef123456",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1.53s",
+        "selector": "bt-runs-duration mono tnum",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 14.39,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1m ago",
+        "selector": "bt-runs-started",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Canceled",
+        "selector": "SPAN",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          46,
+          52,
+          63
+        ],
+        "ratio": 7.21,
+        "fontSize": "11px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "run_canceled",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "export-analytics",
+        "selector": "bt-runs-value",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 14.39,
+        "fontSize": "13px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "api",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "v_abcdef123456",
+        "selector": "bt-runs-value",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1.53s",
+        "selector": "bt-runs-duration mono tnum",
+        "color": "rgb(240, 242, 247)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 14.39,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1m ago",
+        "selector": "bt-runs-started",
+        "color": "rgb(189, 197, 212)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 9.28,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Filter by task id…",
+        "selector": "input::placeholder",
+        "color": "rgb(170, 179, 195)",
+        "bg": [
+          28,
+          33,
+          44
+        ],
+        "ratio": 7.63,
+        "fontSize": "13px",
+        "fontWeight": "400"
+      }
+    ],
+    "light": [
+      {
+        "text": "Run history",
+        "selector": "H1",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          245,
+          246,
+          250
+        ],
+        "ratio": 15.09,
+        "fontSize": "24px",
+        "fontWeight": "650"
+      },
+      {
+        "text": "Follow your tasks from trigger to completion.",
+        "selector": "P",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          245,
+          246,
+          250
+        ],
+        "ratio": 6.66,
+        "fontSize": "13px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Live tailing",
+        "selector": "bt-runs-live",
+        "color": "color(srgb 0.276078 0.267255 0.615294)",
+        "bg": [
+          228,
+          229,
+          251
+        ],
+        "ratio": 6.57,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "All",
+        "selector": "bt-runs-filter",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 16.3,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "Running",
+        "selector": "bt-runs-filter",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          238,
+          239,
+          243
+        ],
+        "ratio": 6.28,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "Completed",
+        "selector": "bt-runs-filter",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          238,
+          239,
+          243
+        ],
+        "ratio": 6.28,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "Failed",
+        "selector": "bt-runs-filter",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          238,
+          239,
+          243
+        ],
+        "ratio": 6.28,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "Queued",
+        "selector": "bt-runs-filter",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          238,
+          239,
+          243
+        ],
+        "ratio": 6.28,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "Waiting",
+        "selector": "bt-runs-filter",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          238,
+          239,
+          243
+        ],
+        "ratio": 6.28,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "Canceled",
+        "selector": "bt-runs-filter",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          238,
+          239,
+          243
+        ],
+        "ratio": 6.28,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "6",
+        "selector": "STRONG",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          245,
+          246,
+          250
+        ],
+        "ratio": 15.09,
+        "fontSize": "11.5px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "runs",
+        "selector": "STRONG",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          245,
+          246,
+          250
+        ],
+        "ratio": 15.09,
+        "fontSize": "11.5px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "loaded",
+        "selector": "STRONG",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          245,
+          246,
+          250
+        ],
+        "ratio": 15.09,
+        "fontSize": "11.5px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "Following new runs",
+        "selector": "SPAN",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          245,
+          246,
+          250
+        ],
+        "ratio": 6.66,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Status",
+        "selector": "SPAN",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          248,
+          248,
+          248
+        ],
+        "ratio": 6.77,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Run",
+        "selector": "SPAN",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          248,
+          248,
+          248
+        ],
+        "ratio": 6.77,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Task",
+        "selector": "SPAN",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          248,
+          248,
+          248
+        ],
+        "ratio": 6.77,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Trigger",
+        "selector": "SPAN",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          248,
+          248,
+          248
+        ],
+        "ratio": 6.77,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Version",
+        "selector": "SPAN",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          248,
+          248,
+          248
+        ],
+        "ratio": 6.77,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Duration",
+        "selector": "SPAN",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          248,
+          248,
+          248
+        ],
+        "ratio": 6.77,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Started",
+        "selector": "SPAN",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          248,
+          248,
+          248
+        ],
+        "ratio": 6.77,
+        "fontSize": "10px",
+        "fontWeight": "600"
+      },
+      {
+        "text": "Running",
+        "selector": "SPAN",
+        "color": "rgb(69, 60, 173)",
+        "bg": [
+          236,
+          236,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "run_running",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "sync-warehouse",
+        "selector": "bt-runs-value",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 16.3,
+        "fontSize": "13px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "api",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "v_abcdef123456",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "running…",
+        "selector": "bt-runs-duration mono tnum bt-runs-duration-running",
+        "color": "color(srgb 0.276078 0.267255 0.615294)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 8.16,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1m ago",
+        "selector": "bt-runs-started",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Completed",
+        "selector": "SPAN",
+        "color": "rgb(6, 112, 68)",
+        "bg": [
+          225,
+          247,
+          239
+        ],
+        "ratio": 5.5,
+        "fontSize": "11px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "run_complete",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "send-invoice",
+        "selector": "bt-runs-value",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 16.3,
+        "fontSize": "13px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "api",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "v_abcdef123456",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1.53s",
+        "selector": "bt-runs-duration mono tnum",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 16.3,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1m ago",
+        "selector": "bt-runs-started",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Failed",
+        "selector": "SPAN",
+        "color": "rgb(181, 44, 36)",
+        "bg": [
+          251,
+          230,
+          227
+        ],
+        "ratio": 5.23,
+        "fontSize": "11px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "run_failed",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "enrich-customer",
+        "selector": "bt-runs-value",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 16.3,
+        "fontSize": "13px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "api",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "v_abcdef123456",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1.53s",
+        "selector": "bt-runs-duration mono tnum",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 16.3,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1m ago",
+        "selector": "bt-runs-started",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Queued",
+        "selector": "SPAN",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          234,
+          235,
+          237
+        ],
+        "ratio": 6.03,
+        "fontSize": "11px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "run_queued",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "create-thumbnail",
+        "selector": "bt-runs-value",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 16.3,
+        "fontSize": "13px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "api",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "v_abcdef123456",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1.53s",
+        "selector": "bt-runs-duration mono tnum",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 16.3,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1m ago",
+        "selector": "bt-runs-started",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Frozen",
+        "selector": "SPAN",
+        "color": "rgb(101, 80, 180)",
+        "bg": [
+          240,
+          241,
+          255
+        ],
+        "ratio": 5.58,
+        "fontSize": "11px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "run_waiting",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "review-submission",
+        "selector": "bt-runs-value",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 16.3,
+        "fontSize": "13px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "api",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "v_abcdef123456",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1.53s",
+        "selector": "bt-runs-duration mono tnum",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 16.3,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1m ago",
+        "selector": "bt-runs-started",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Canceled",
+        "selector": "SPAN",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          234,
+          235,
+          237
+        ],
+        "ratio": 6.03,
+        "fontSize": "11px",
+        "fontWeight": "500"
+      },
+      {
+        "text": "run_canceled",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "export-analytics",
+        "selector": "bt-runs-value",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 16.3,
+        "fontSize": "13px",
+        "fontWeight": "550"
+      },
+      {
+        "text": "api",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "v_abcdef123456",
+        "selector": "bt-runs-value",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1.53s",
+        "selector": "bt-runs-duration mono tnum",
+        "color": "rgb(30, 32, 37)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 16.3,
+        "fontSize": "12.88px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "1m ago",
+        "selector": "bt-runs-started",
+        "color": "rgb(78, 88, 104)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 7.19,
+        "fontSize": "11.5px",
+        "fontWeight": "400"
+      },
+      {
+        "text": "Filter by task id…",
+        "selector": "input::placeholder",
+        "color": "rgb(89, 99, 115)",
+        "bg": [
+          255,
+          255,
+          255
+        ],
+        "ratio": 6.07,
+        "fontSize": "13px",
+        "fontWeight": "400"
+      }
+    ]
+  },
+  "finalColorPass": {
+    "layouts": [
+      {
+        "label": "1440-dark-comfortable",
+        "theme": "dark",
+        "density": "comfortable",
+        "viewport": 1440,
+        "documentWidth": 1440,
+        "containerWidth": 1144,
+        "rowHeight": 56,
+        "columnsVisible": true,
+        "overflow": []
+      },
+      {
+        "label": "1440-light-compact",
+        "theme": "light",
+        "density": "compact",
+        "viewport": 1440,
+        "documentWidth": 1440,
+        "containerWidth": 1144,
+        "rowHeight": 46,
+        "columnsVisible": true,
+        "overflow": []
+      },
+      {
+        "label": "768-light-compact",
+        "theme": "light",
+        "density": "compact",
+        "viewport": 768,
+        "documentWidth": 768,
+        "containerWidth": 492,
+        "rowHeight": 156.765625,
+        "columnsVisible": false,
+        "overflow": []
+      },
+      {
+        "label": "375-light-compact",
+        "theme": "light",
+        "density": "compact",
+        "viewport": 375,
+        "documentWidth": 375,
+        "containerWidth": 343,
+        "rowHeight": 160.765625,
+        "columnsVisible": false,
+        "overflow": []
+      },
+      {
+        "label": "375-dark-comfortable",
+        "theme": "dark",
+        "density": "comfortable",
+        "viewport": 375,
+        "documentWidth": 375,
+        "containerWidth": 343,
+        "rowHeight": 168.765625,
+        "columnsVisible": false,
+        "overflow": []
+      }
+    ],
+    "errors": [],
+    "contrast": {
+      "dark": [
+        {
+          "text": "Run history",
+          "selector": "H1",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 16.45,
+          "fontSize": "24px",
+          "fontWeight": "650"
+        },
+        {
+          "text": "Follow your tasks from trigger to completion.",
+          "selector": "P",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "fontSize": "13px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Live tailing",
+          "selector": "bt-runs-live",
+          "color": "color(srgb 0.687255 0.687255 1)",
+          "bg": [
+            28,
+            31,
+            55
+          ],
+          "ratio": 8.03,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "All",
+          "selector": "bt-runs-filter",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Running",
+          "selector": "bt-runs-filter",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            25,
+            28,
+            35
+          ],
+          "ratio": 9.79,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Completed",
+          "selector": "bt-runs-filter",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            25,
+            28,
+            35
+          ],
+          "ratio": 9.79,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Failed",
+          "selector": "bt-runs-filter",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            25,
+            28,
+            35
+          ],
+          "ratio": 9.79,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Queued",
+          "selector": "bt-runs-filter",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            25,
+            28,
+            35
+          ],
+          "ratio": 9.79,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Waiting",
+          "selector": "bt-runs-filter",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            25,
+            28,
+            35
+          ],
+          "ratio": 9.79,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Canceled",
+          "selector": "bt-runs-filter",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            25,
+            28,
+            35
+          ],
+          "ratio": 9.79,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "6",
+          "selector": "STRONG",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 16.45,
+          "fontSize": "11.5px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "runs",
+          "selector": "STRONG",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 16.45,
+          "fontSize": "11.5px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "loaded",
+          "selector": "STRONG",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 16.45,
+          "fontSize": "11.5px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "Following new runs",
+          "selector": "SPAN",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Status",
+          "selector": "SPAN",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            36,
+            41,
+            51
+          ],
+          "ratio": 8.41,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Run",
+          "selector": "SPAN",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            36,
+            41,
+            51
+          ],
+          "ratio": 8.41,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Task",
+          "selector": "SPAN",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            36,
+            41,
+            51
+          ],
+          "ratio": 8.41,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Trigger",
+          "selector": "SPAN",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            36,
+            41,
+            51
+          ],
+          "ratio": 8.41,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Version",
+          "selector": "SPAN",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            36,
+            41,
+            51
+          ],
+          "ratio": 8.41,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Duration",
+          "selector": "SPAN",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            36,
+            41,
+            51
+          ],
+          "ratio": 8.41,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Started",
+          "selector": "SPAN",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            36,
+            41,
+            51
+          ],
+          "ratio": 8.41,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Running",
+          "selector": "SPAN",
+          "color": "rgb(175, 169, 255)",
+          "bg": [
+            38,
+            43,
+            71
+          ],
+          "ratio": 6.55,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "run_running",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "sync-warehouse",
+          "selector": "bt-runs-value",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "fontSize": "13px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "api",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "v_abcdef123456",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "running…",
+          "selector": "bt-runs-duration mono tnum bt-runs-duration-running",
+          "color": "color(srgb 0.687255 0.687255 1)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 7.98,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1m ago",
+          "selector": "bt-runs-started",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Completed",
+          "selector": "SPAN",
+          "color": "rgb(80, 223, 161)",
+          "bg": [
+            27,
+            54,
+            55
+          ],
+          "ratio": 7.64,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "run_complete",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "send-invoice",
+          "selector": "bt-runs-value",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "fontSize": "13px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "api",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "v_abcdef123456",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1.53s",
+          "selector": "bt-runs-duration mono tnum",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1m ago",
+          "selector": "bt-runs-started",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Failed",
+          "selector": "SPAN",
+          "color": "rgb(255, 155, 145)",
+          "bg": [
+            53,
+            37,
+            43
+          ],
+          "ratio": 7.14,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "run_failed",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "enrich-customer",
+          "selector": "bt-runs-value",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "fontSize": "13px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "api",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "v_abcdef123456",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1.53s",
+          "selector": "bt-runs-duration mono tnum",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1m ago",
+          "selector": "bt-runs-started",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Queued",
+          "selector": "SPAN",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            46,
+            52,
+            63
+          ],
+          "ratio": 7.21,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "run_queued",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "create-thumbnail",
+          "selector": "bt-runs-value",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "fontSize": "13px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "api",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "v_abcdef123456",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1.53s",
+          "selector": "bt-runs-duration mono tnum",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1m ago",
+          "selector": "bt-runs-started",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Frozen",
+          "selector": "SPAN",
+          "color": "rgb(197, 187, 255)",
+          "bg": [
+            42,
+            48,
+            71
+          ],
+          "ratio": 7.41,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "run_waiting",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "review-submission",
+          "selector": "bt-runs-value",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "fontSize": "13px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "api",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "v_abcdef123456",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1.53s",
+          "selector": "bt-runs-duration mono tnum",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1m ago",
+          "selector": "bt-runs-started",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Canceled",
+          "selector": "SPAN",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            46,
+            52,
+            63
+          ],
+          "ratio": 7.21,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "run_canceled",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "export-analytics",
+          "selector": "bt-runs-value",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "fontSize": "13px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "api",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "v_abcdef123456",
+          "selector": "bt-runs-value",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1.53s",
+          "selector": "bt-runs-duration mono tnum",
+          "color": "rgb(240, 242, 247)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1m ago",
+          "selector": "bt-runs-started",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Filter by task id…",
+          "selector": "input::placeholder",
+          "color": "rgb(170, 179, 195)",
+          "bg": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 7.63,
+          "fontSize": "13px",
+          "fontWeight": "400"
+        }
+      ],
+      "light": [
+        {
+          "text": "Run history",
+          "selector": "H1",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 15.09,
+          "fontSize": "24px",
+          "fontWeight": "650"
+        },
+        {
+          "text": "Follow your tasks from trigger to completion.",
+          "selector": "P",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "fontSize": "13px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Live tailing",
+          "selector": "bt-runs-live",
+          "color": "color(srgb 0.276078 0.267255 0.615294)",
+          "bg": [
+            228,
+            229,
+            251
+          ],
+          "ratio": 6.57,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "All",
+          "selector": "bt-runs-filter",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Running",
+          "selector": "bt-runs-filter",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            238,
+            239,
+            243
+          ],
+          "ratio": 6.28,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Completed",
+          "selector": "bt-runs-filter",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            238,
+            239,
+            243
+          ],
+          "ratio": 6.28,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Failed",
+          "selector": "bt-runs-filter",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            238,
+            239,
+            243
+          ],
+          "ratio": 6.28,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Queued",
+          "selector": "bt-runs-filter",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            238,
+            239,
+            243
+          ],
+          "ratio": 6.28,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Waiting",
+          "selector": "bt-runs-filter",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            238,
+            239,
+            243
+          ],
+          "ratio": 6.28,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Canceled",
+          "selector": "bt-runs-filter",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            238,
+            239,
+            243
+          ],
+          "ratio": 6.28,
+          "fontSize": "12px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "6",
+          "selector": "STRONG",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 15.09,
+          "fontSize": "11.5px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "runs",
+          "selector": "STRONG",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 15.09,
+          "fontSize": "11.5px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "loaded",
+          "selector": "STRONG",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 15.09,
+          "fontSize": "11.5px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "Following new runs",
+          "selector": "SPAN",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Status",
+          "selector": "SPAN",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            248,
+            248,
+            248
+          ],
+          "ratio": 6.77,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Run",
+          "selector": "SPAN",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            248,
+            248,
+            248
+          ],
+          "ratio": 6.77,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Task",
+          "selector": "SPAN",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            248,
+            248,
+            248
+          ],
+          "ratio": 6.77,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Trigger",
+          "selector": "SPAN",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            248,
+            248,
+            248
+          ],
+          "ratio": 6.77,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Version",
+          "selector": "SPAN",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            248,
+            248,
+            248
+          ],
+          "ratio": 6.77,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Duration",
+          "selector": "SPAN",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            248,
+            248,
+            248
+          ],
+          "ratio": 6.77,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Started",
+          "selector": "SPAN",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            248,
+            248,
+            248
+          ],
+          "ratio": 6.77,
+          "fontSize": "10px",
+          "fontWeight": "600"
+        },
+        {
+          "text": "Running",
+          "selector": "SPAN",
+          "color": "rgb(69, 60, 173)",
+          "bg": [
+            236,
+            236,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "run_running",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "sync-warehouse",
+          "selector": "bt-runs-value",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "fontSize": "13px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "api",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "v_abcdef123456",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "running…",
+          "selector": "bt-runs-duration mono tnum bt-runs-duration-running",
+          "color": "color(srgb 0.276078 0.267255 0.615294)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 8.16,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1m ago",
+          "selector": "bt-runs-started",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Completed",
+          "selector": "SPAN",
+          "color": "rgb(6, 112, 68)",
+          "bg": [
+            225,
+            247,
+            239
+          ],
+          "ratio": 5.5,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "run_complete",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "send-invoice",
+          "selector": "bt-runs-value",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "fontSize": "13px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "api",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "v_abcdef123456",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1.53s",
+          "selector": "bt-runs-duration mono tnum",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1m ago",
+          "selector": "bt-runs-started",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Failed",
+          "selector": "SPAN",
+          "color": "rgb(181, 44, 36)",
+          "bg": [
+            251,
+            230,
+            227
+          ],
+          "ratio": 5.23,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "run_failed",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "enrich-customer",
+          "selector": "bt-runs-value",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "fontSize": "13px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "api",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "v_abcdef123456",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1.53s",
+          "selector": "bt-runs-duration mono tnum",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1m ago",
+          "selector": "bt-runs-started",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Queued",
+          "selector": "SPAN",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            234,
+            235,
+            237
+          ],
+          "ratio": 6.03,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "run_queued",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "create-thumbnail",
+          "selector": "bt-runs-value",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "fontSize": "13px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "api",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "v_abcdef123456",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1.53s",
+          "selector": "bt-runs-duration mono tnum",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1m ago",
+          "selector": "bt-runs-started",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Frozen",
+          "selector": "SPAN",
+          "color": "rgb(101, 80, 180)",
+          "bg": [
+            240,
+            241,
+            255
+          ],
+          "ratio": 5.58,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "run_waiting",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "review-submission",
+          "selector": "bt-runs-value",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "fontSize": "13px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "api",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "v_abcdef123456",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1.53s",
+          "selector": "bt-runs-duration mono tnum",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1m ago",
+          "selector": "bt-runs-started",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Canceled",
+          "selector": "SPAN",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            234,
+            235,
+            237
+          ],
+          "ratio": 6.03,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "run_canceled",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "export-analytics",
+          "selector": "bt-runs-value",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "fontSize": "13px",
+          "fontWeight": "550"
+        },
+        {
+          "text": "api",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "v_abcdef123456",
+          "selector": "bt-runs-value",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1.53s",
+          "selector": "bt-runs-duration mono tnum",
+          "color": "rgb(30, 32, 37)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "fontSize": "12.88px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "1m ago",
+          "selector": "bt-runs-started",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11.5px",
+          "fontWeight": "400"
+        },
+        {
+          "text": "Filter by task id…",
+          "selector": "input::placeholder",
+          "color": "rgb(89, 99, 115)",
+          "bg": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 6.07,
+          "fontSize": "13px",
+          "fontWeight": "400"
+        }
+      ]
+    }
+  }
+}

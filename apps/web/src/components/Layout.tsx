@@ -8,8 +8,8 @@ import { API_BASE_URL } from '../api/client';
 
 export function Page({ children, pad = true, scroll = true }: { children?: React.ReactNode; pad?: boolean; scroll?: boolean }) {
   return (
-    <div style={{ flex: 1, minHeight: 0, overflowY: scroll ? 'auto' : 'hidden', background: 'var(--app-bg)' }}>
-      <div style={{ maxWidth: 1180, margin: '0 auto', padding: pad ? '20px 24px 40px' : 0 }}>{children}</div>
+    <div className="bt-page" style={{ overflowY: scroll ? 'auto' : 'hidden' }}>
+      <div className="bt-page-inner" data-padded={pad}>{children}</div>
     </div>
   );
 }
@@ -101,7 +101,7 @@ export function ErrorState({ message }: { message?: string | null }) {
 
 export function SectionHead({ title, sub, action }: { title: string; sub?: string; action?: React.ReactNode }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 16, gap: 16 }}>
+    <div className="bt-section-head">
       <div>
         <h4 style={{ margin: 0, fontSize: 15, fontWeight: 600, letterSpacing: '-0.01em' }}>{title}</h4>
         {sub && <p style={{ margin: '3px 0 0', fontSize: 12.5, color: 'var(--fg-subtle)' }}>{sub}</p>}

@@ -48,6 +48,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -123,6 +124,14 @@ describe('RunsList status chips', () => {
 });
 
 describe('RunsList toolbar a11y', () => {
+  it('gives the task filter an accessible name', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(res(runsPage(['a1']))));
+    render(<RunsList env="prod" onOpenRun={() => {}} />);
+
+    expect(screen.getByRole('textbox', { name: 'Filter by task ID' })).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('a1')).toBeTruthy());
+  });
+
   it('exposes aria-pressed on the status filter group and the live toggle (T8)', async () => {
     fetchMock.mockImplementation(() => Promise.resolve(res(runsPage(['a1'], 'task-a'))));
     render(<RunsList env="prod" onOpenRun={() => {}} />);
@@ -142,5 +151,128 @@ describe('RunsList toolbar a11y', () => {
     expect(live.getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(live);
     expect(screen.getByRole('button', { name: /Paused/ }).getAttribute('aria-pressed')).toBe('false');
+  });
+});
+
+describe('RunsList empty states', () => {
+  it('explains an environment with no runs without suggesting active filters', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(res(runsPage([]))));
+    render(<RunsList env="prod" onOpenRun={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText('No runs yet.')).toBeTruthy());
+    expect(screen.getByText('0 runs loaded')).toBeTruthy();
+    expect(screen.queryByText('No runs match these filters.')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull();
+  });
+
+  it('clears status and task ID together while retaining the environment and live mode', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = new URL(String(input), 'http://localhost');
+      return Promise.resolve(res(url.searchParams.has('status') || url.searchParams.has('taskId')
+        ? runsPage([])
+        : runsPage(['a1'])));
+    });
+    render(<RunsList env="staging" onOpenRun={() => {}} />);
+    await waitFor(() => expect(screen.getByText('a1')).toBeTruthy());
+
+    fireEvent.click(within(screen.getByRole('group', { name: 'Status filter' })).getByRole('button', { name: 'Failed' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Filter by task ID' }), { target: { value: 'missing-task' } });
+    await waitFor(() => expect(screen.getByText('No runs match these filters.')).toBeTruthy());
+    const filteredUrl = new URL(String(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]?.[0]), 'http://localhost');
+    expect(filteredUrl.searchParams.get('taskId')).toBe('missing-task');
+    expect(filteredUrl.searchParams.get('status')).toBe('failed');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    await waitFor(() => expect(screen.getByText('a1')).toBeTruthy());
+
+    const url = new URL(String(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]?.[0]), 'http://localhost');
+    expect(url.searchParams.has('taskId')).toBe(false);
+    expect(url.searchParams.has('status')).toBe(false);
+    expect(url.searchParams.get('env')).toBe('staging');
+    expect((screen.getByRole('textbox', { name: 'Filter by task ID' }) as HTMLInputElement).value).toBe('');
+    expect(screen.getByRole('button', { name: 'All' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Live tailing' }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('keeps a cleared query paused until the user resumes', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(res(runsPage([]))));
+    render(<RunsList env="staging" onOpenRun={() => {}} />);
+    await waitFor(() => expect(screen.getByText('No runs yet.')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Waiting' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Filter by task ID' }), { target: { value: 'task-z' } });
+    await waitFor(() => expect(screen.getByText('No runs match these filters.')).toBeTruthy());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Live tailing' }));
+    const requestsWhilePaused = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(screen.getByRole('button', { name: 'Paused' }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByText('Updates are paused.')).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(requestsWhilePaused);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Resume live updates' }));
+    await waitFor(() => expect(screen.getByText('No runs yet.')).toBeTruthy());
+    const url = new URL(String(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]?.[0]), 'http://localhost');
+    expect(url.searchParams.has('taskId')).toBe(false);
+    expect(url.searchParams.has('status')).toBe(false);
+    expect(url.searchParams.get('env')).toBe('staging');
+  });
+});
+
+describe('RunsList loaded history', () => {
+  it('preserves loaded rows after a pagination failure and retries the same cursor', async () => {
+    fetchMock
+      .mockResolvedValueOnce(res(runsPage(['a1', 'a0'], 'task-a', 'older-runs')))
+      .mockRejectedValueOnce(new Error('Failed to fetch'))
+      .mockResolvedValueOnce(res(runsPage(['b1'], 'task-b')));
+    render(<RunsList env="prod" onOpenRun={() => {}} />);
+    await waitFor(() => expect(screen.getByText('2 runs loaded')).toBeTruthy());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+    expect(screen.getByText('a1')).toBeTruthy();
+    expect(screen.getByText('2 runs loaded')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry loading more' }));
+    await waitFor(() => expect(screen.getByText('3 runs loaded')).toBeTruthy());
+    expect(screen.getByText('b1')).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+    const cursorRequests = fetchMock.mock.calls.slice(1).map(([input]) => new URL(String(input), 'http://localhost').searchParams.get('cursor'));
+    expect(cursorRequests).toEqual(['older-runs', 'older-runs']);
+  });
+
+  it('holds loaded rows and stops polling while paused, then refreshes immediately on resume', async () => {
+    fetchMock.mockResolvedValue(res(runsPage(['a1'], 'task-a', 'older-runs')));
+    render(<RunsList env="prod" onOpenRun={() => {}} />);
+    await waitFor(() => expect(screen.getByText('1 run loaded')).toBeTruthy());
+    vi.useFakeTimers();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Live tailing' }));
+    const requestsWhilePaused = fetchMock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(fetchMock).toHaveBeenCalledTimes(requestsWhilePaused);
+    expect(screen.getByText('a1')).toBeTruthy();
+    expect(screen.getByText('Updates paused')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Load more' }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Paused' }));
+    expect(fetchMock).toHaveBeenCalledTimes(requestsWhilePaused + 1);
+    expect(screen.getByRole('button', { name: 'Live tailing' })).toBeTruthy();
+  });
+
+  it('preserves full identifiers in one native button per run', async () => {
+    const taskId = `task-${'very-long-task-name-'.repeat(8)}`;
+    const runId = `run-${'1234567890'.repeat(12)}`;
+    const onOpenRun = vi.fn();
+    fetchMock.mockResolvedValue(res(runsPage([runId], taskId)));
+    render(<RunsList env="prod" onOpenRun={onOpenRun} />);
+
+    const row = await screen.findByRole('button', { name: new RegExp(runId) });
+    expect(row.tagName).toBe('BUTTON');
+    expect(within(row).queryAllByRole('button')).toHaveLength(0);
+    expect(screen.getByTitle(runId)).toBeTruthy();
+    expect(screen.getByTitle(taskId)).toBeTruthy();
+    fireEvent.click(row);
+    expect(onOpenRun).toHaveBeenCalledWith(expect.objectContaining({ id: runId, task: taskId }));
   });
 });

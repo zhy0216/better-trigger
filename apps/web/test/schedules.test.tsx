@@ -14,7 +14,7 @@
    stale failure can't clobber a newer result (T2), and the switch carries an
    accessible name (T3).
    ============================================================================= */
-import { cleanup, fireEvent, render, screen, waitFor, act } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, act, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Schedules } from '../src/screens/Schedules';
 import { setApiKey } from '../src/api/client';
@@ -56,10 +56,8 @@ afterEach(() => {
 
 /** Drive one enable/disable click on the (single) schedule row. */
 async function clickSwitch(): Promise<HTMLElement> {
-  const row = screen.getByText('0 0 * * *').parentElement as HTMLElement;
-  // The schedule Switch is a real button[role=switch] (p2-19) — query it by
-  // role instead of the div+inline-cursor shape it used to have.
-  const track = row.querySelector<HTMLElement>('button[role="switch"]') as HTMLElement;
+  const row = screen.getByRole('group', { name: 't schedule' });
+  const track = within(row).getByRole('switch');
   fireEvent.click(track);
   await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit)?.method === 'PATCH')).toBe(true));
   return row;
@@ -82,10 +80,9 @@ describe('Schedules toggle errors (P1-17 C2)', () => {
     // The failure is shown (role=alert, like RunHeader's actionError)…
     await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
     expect(screen.getByText(/boom/)).toBeTruthy();
-    // …and the optimistic flip reverted: the row is back to enabled
-    // (opacity 1, accent-colored switch track).
-    expect(row.style.opacity).toBe('1');
-    expect(row.querySelector('[style*="background: var(--accent)"]')).toBeTruthy();
+    // The visible state and accessible switch both reflect the rollback.
+    expect(within(row).getByRole('switch').getAttribute('aria-checked')).toBe('true');
+    expect(within(row).getByText('Active')).toBeTruthy();
   });
 
   it('a 401 on the toggle feeds the shared connection error channel (P1-17 C2)', async () => {
@@ -179,7 +176,7 @@ describe('Schedules optimistic reconciliation (09 T1–T3)', () => {
     expect(isOn()).toBe(false);
   });
 
-  it('a failed first toggle superseded by a successful second stays in sync with the server and raises no error (T2)', async () => {
+  it('blocks duplicate clicks while pending and permits a successful retry after rollback (T2)', async () => {
     vi.useFakeTimers();
     let patch = 0;
     const state = { enabled: true };
@@ -196,12 +193,20 @@ describe('Schedules optimistic reconciliation (09 T1–T3)', () => {
     await flush();
     const btn = screen.getByRole('switch');
     fireEvent.click(btn); // disable — its PATCH will fail
-    fireEvent.click(btn); // enable — issued same tick, supersedes the first
+    fireEvent.click(btn); // the in-flight row cannot issue a second PATCH
+    expect(patch).toBe(1);
+    expect((btn as HTMLButtonElement).disabled).toBe(true);
     await flush();
-    expect(screen.queryByRole('alert')).toBeNull(); // superseded failure ignored
+    expect(screen.getByRole('alert')).toBeTruthy();
     expect(isOn()).toBe(true);
+    expect((btn as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(btn);
+    await flush();
+    expect(patch).toBe(2);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(isOn()).toBe(false);
     await poll();
-    expect(isOn()).toBe(true); // final UI matches the server (enabled)
+    expect(isOn()).toBe(false); // final UI follows the successful retry
   });
 
   it('exposes an accessible name on the toggle switch (T3)', async () => {
@@ -210,5 +215,69 @@ describe('Schedules optimistic reconciliation (09 T1–T3)', () => {
     await waitFor(() => expect(screen.getByText('0 0 * * *')).toBeTruthy());
     const sw = screen.getByRole('switch', { name: 'Toggle t schedule' });
     expect(sw.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('only disables the pending row and announces its saved paused state', async () => {
+    let finish!: (response: Response) => void;
+    fetchMock.mockImplementation((_i: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PATCH') return new Promise<Response>((resolve) => { finish = resolve; });
+      return Promise.resolve(json({ schedules: [schedule, { ...schedule, id: 's2', taskId: 'other-task' }] }, 200));
+    });
+    render(<Schedules />);
+    const first = await screen.findByRole('switch', { name: 'Toggle t schedule' });
+    const second = screen.getByRole('switch', { name: 'Toggle other-task schedule' });
+    fireEvent.click(first);
+    expect((first as HTMLButtonElement).disabled).toBe(true);
+    expect((second as HTMLButtonElement).disabled).toBe(false);
+    expect(first.getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByText('Saving…')).toBeTruthy();
+    fireEvent.click(first);
+    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit)?.method === 'PATCH')).toHaveLength(1);
+    await act(async () => finish(json({ ok: true }, 200)));
+    expect((first as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText('Paused')).toBeTruthy();
+    expect(screen.queryByText('Saving…')).toBeNull();
+  });
+
+  it('discards a late write failure after changing environment', async () => {
+    let finish!: (response: Response) => void;
+    fetchMock.mockImplementation((_i: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PATCH') return new Promise<Response>((resolve) => { finish = resolve; });
+      return Promise.resolve(json({ schedules: [schedule] }, 200));
+    });
+    const { rerender } = render(<Schedules env="prod" />);
+    fireEvent.click(await screen.findByRole('switch'));
+    expect(screen.getByText('Saving…')).toBeTruthy();
+    rerender(<Schedules env="dev" />);
+    const current = await screen.findByRole('switch');
+    expect(current.getAttribute('aria-checked')).toBe('true');
+    expect((current as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => finish(json({ error: { code: 'unauthorized', message: 'old environment failure' } }, 401)));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(recordConnectionError).not.toHaveBeenCalled();
+    expect(current.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('drops pending state for a removed row and ignores its late failure after it reappears', async () => {
+    vi.useFakeTimers();
+    let finish!: (response: Response) => void;
+    let rows = [schedule];
+    fetchMock.mockImplementation((_i: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PATCH') return new Promise<Response>((resolve) => { finish = resolve; });
+      return Promise.resolve(json({ schedules: rows }, 200));
+    });
+    render(<Schedules />);
+    await flush();
+    fireEvent.click(screen.getByRole('switch'));
+    rows = [];
+    await poll();
+    expect(screen.getByText('No schedules yet')).toBeTruthy();
+    rows = [schedule];
+    await poll();
+    const current = screen.getByRole('switch');
+    expect((current as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => finish(json({ error: { code: 'internal_error', message: 'stale failure' } }, 500)));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(current.getAttribute('aria-checked')).toBe('true');
   });
 });

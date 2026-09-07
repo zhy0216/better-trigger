@@ -1,0 +1,256 @@
+{
+  "layouts": [
+    {
+      "label": "1440-dark-comfortable",
+      "theme": "dark",
+      "density": "comfortable",
+      "viewport": 1440,
+      "documentWidth": 1440,
+      "containerWidth": 1144,
+      "rowHeight": 56,
+      "columnsVisible": true,
+      "overflow": []
+    },
+    {
+      "label": "1440-light-compact",
+      "theme": "light",
+      "density": "compact",
+      "viewport": 1440,
+      "documentWidth": 1440,
+      "containerWidth": 1144,
+      "rowHeight": 46,
+      "columnsVisible": true,
+      "overflow": []
+    },
+    {
+      "label": "768-light-compact",
+      "theme": "light",
+      "density": "compact",
+      "viewport": 768,
+      "documentWidth": 768,
+      "containerWidth": 492,
+      "rowHeight": 156.765625,
+      "columnsVisible": false,
+      "overflow": []
+    },
+    {
+      "label": "375-light-compact",
+      "theme": "light",
+      "density": "compact",
+      "viewport": 375,
+      "documentWidth": 375,
+      "containerWidth": 343,
+      "rowHeight": 160.765625,
+      "columnsVisible": false,
+      "overflow": []
+    },
+    {
+      "label": "375-dark-comfortable",
+      "theme": "dark",
+      "density": "comfortable",
+      "viewport": 375,
+      "documentWidth": 375,
+      "containerWidth": 343,
+      "rowHeight": 168.765625,
+      "columnsVisible": false,
+      "overflow": []
+    }
+  ],
+  "errors": [],
+  "minimums": {
+    "dark": {
+      "minimum": 6.55,
+      "live": {
+        "text": "Live tailing",
+        "selector": "bt-runs-live",
+        "color": "color(srgb 0.687255 0.687255 1)",
+        "bg": [
+          28,
+          31,
+          55
+        ],
+        "ratio": 8.03,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      "status": [
+        {
+          "text": "Running",
+          "selector": "SPAN",
+          "color": "rgb(175, 169, 255)",
+          "bg": [
+            38,
+            43,
+            71
+          ],
+          "ratio": 6.55,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Completed",
+          "selector": "SPAN",
+          "color": "rgb(80, 223, 161)",
+          "bg": [
+            27,
+            54,
+            55
+          ],
+          "ratio": 7.64,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Failed",
+          "selector": "SPAN",
+          "color": "rgb(255, 155, 145)",
+          "bg": [
+            53,
+            37,
+            43
+          ],
+          "ratio": 7.14,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Queued",
+          "selector": "SPAN",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            46,
+            52,
+            63
+          ],
+          "ratio": 7.21,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Frozen",
+          "selector": "SPAN",
+          "color": "rgb(197, 187, 255)",
+          "bg": [
+            42,
+            48,
+            71
+          ],
+          "ratio": 7.41,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Canceled",
+          "selector": "SPAN",
+          "color": "rgb(189, 197, 212)",
+          "bg": [
+            46,
+            52,
+            63
+          ],
+          "ratio": 7.21,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        }
+      ],
+      "failures": []
+    },
+    "light": {
+      "minimum": 5.23,
+      "live": {
+        "text": "Live tailing",
+        "selector": "bt-runs-live",
+        "color": "color(srgb 0.276078 0.267255 0.615294)",
+        "bg": [
+          228,
+          229,
+          251
+        ],
+        "ratio": 6.57,
+        "fontSize": "12px",
+        "fontWeight": "500"
+      },
+      "status": [
+        {
+          "text": "Running",
+          "selector": "SPAN",
+          "color": "rgb(69, 60, 173)",
+          "bg": [
+            236,
+            236,
+            255
+          ],
+          "ratio": 7.19,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Completed",
+          "selector": "SPAN",
+          "color": "rgb(6, 112, 68)",
+          "bg": [
+            225,
+            247,
+            239
+          ],
+          "ratio": 5.5,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Failed",
+          "selector": "SPAN",
+          "color": "rgb(181, 44, 36)",
+          "bg": [
+            251,
+            230,
+            227
+          ],
+          "ratio": 5.23,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Queued",
+          "selector": "SPAN",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            234,
+            235,
+            237
+          ],
+          "ratio": 6.03,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Frozen",
+          "selector": "SPAN",
+          "color": "rgb(101, 80, 180)",
+          "bg": [
+            240,
+            241,
+            255
+          ],
+          "ratio": 5.58,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        },
+        {
+          "text": "Canceled",
+          "selector": "SPAN",
+          "color": "rgb(78, 88, 104)",
+          "bg": [
+            234,
+            235,
+            237
+          ],
+          "ratio": 6.03,
+          "fontSize": "11px",
+          "fontWeight": "500"
+        }
+      ],
+      "failures": []
+    }
+  }
+}

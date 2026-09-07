@@ -1,8 +1,9 @@
 difficulty: medium
+status: completed
 
 # Runs 列表与筛选
 
-优先级：P1。模型：flash。前置依赖：01-responsive-shell 全部完成并合并。一个 worktree、一个最终 commit；与 03、04、05 可并行。
+优先级：P1。前置依赖：01-responsive-shell 全部完成。由当前会话及内置 subagent 直接完成；与 03、04、05 可并行。
 
 ## T1 · 响应式运行行与工具栏
 
@@ -24,3 +25,5 @@ difficulty: medium
 - **预计修改文件**：`apps/web/test/runsList.test.tsx`，以及 T1/T2 的必要修正。
 - **验收**：运行 `bun run --cwd apps/web typecheck`、`bun run --cwd apps/web lint`、`bun run --cwd apps/web test test/runsList.test.tsx`。用浏览器检查三个主尺寸、深/亮主题及 comfortable/compact，记录筛选/空态/加载更多/暂停恢复结果；CSS 布局不以 JSDOM 通过代替验证。不修改真实业务运行来制造测试状态。
 - **前置依赖**：本文件 T1、T2。
+
+完成记录：2026-09-05 已实现并通过集成验收。校验结果和浏览器证据见 [计划验收记录](../plan.md#实施验收记录) 与 [截图及报告](../evidence/README.md)。

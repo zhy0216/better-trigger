@@ -148,23 +148,23 @@ describe('TweaksPanel reachability (C2)', () => {
     );
     render(<App />);
 
-    expect(screen.queryByText('Tweaks')).toBeNull(); // closed by default
-    const toggle = screen.getByTitle('Toggle tweaks');
+    expect(screen.queryByText('Display settings')).toBeNull(); // closed by default
+    const toggle = screen.getByTitle('Display settings');
     expect(toggle.getAttribute('aria-pressed')).toBe('false');
 
     fireEvent.click(toggle);
-    expect(screen.getByText('Tweaks')).toBeTruthy();
+    expect(screen.getByText('Display settings')).toBeTruthy();
     expect(toggle.getAttribute('aria-pressed')).toBe('true');
 
     // The panel's own ✕ collapses it.
-    fireEvent.click(screen.getByLabelText('Close tweaks'));
-    expect(screen.queryByText('Tweaks')).toBeNull();
+    fireEvent.click(screen.getByLabelText('Close display settings'));
+    expect(screen.queryByText('Display settings')).toBeNull();
 
     // And the TopBar button toggles again.
     fireEvent.click(toggle);
-    expect(screen.getByText('Tweaks')).toBeTruthy();
+    expect(screen.getByText('Display settings')).toBeTruthy();
     fireEvent.click(toggle);
-    expect(screen.queryByText('Tweaks')).toBeNull();
+    expect(screen.queryByText('Display settings')).toBeNull();
   });
 
   it('renders only while `open` and notifies the controller on ✕', () => {

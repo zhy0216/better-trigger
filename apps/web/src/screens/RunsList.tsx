@@ -6,6 +6,7 @@ import { Icon, Badge, StatusDot, StatusBadge, Input } from '../components/primit
 import { Page, Card, ErrorState, LoadingState } from '../components/Layout';
 import { useRuns } from '../api/hooks';
 import type { Run } from '../types';
+import './runs-list.css';
 
 // filter id → server status (contract §5: queued|running|waiting|completed|failed|canceled)
 const FILTER_TO_SERVER: Record<string, string | undefined> = {
@@ -43,96 +44,110 @@ export function RunsList({ onOpenRun, env }: { onOpenRun: (run: Run) => void; en
     live,
   );
   const runs = source ?? [];
-
-  const colT = '112px 150px minmax(0,1fr) 96px 130px 96px 92px';
-  const Th = ({ children, style }: { children?: React.ReactNode; style?: React.CSSProperties }) => (
-    <div style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--fg-faint)', ...style }}>{children}</div>
-  );
+  const hasFilters = filter !== 'all' || q !== '';
+  const clearFilters = () => {
+    setFilter('all');
+    setQ('');
+  };
 
   return (
     <Page>
-      {/* toolbar */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
-        <div role="group" aria-label="Status filter" style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--fill)', borderRadius: 9999 }}>
+      <section className="bt-runs" aria-labelledby="bt-runs-title">
+      <header className="bt-runs-heading">
+        <div>
+          <h1 id="bt-runs-title">Run history</h1>
+          <p>Follow your tasks from trigger to completion.</p>
+        </div>
+        <button type="button" onClick={() => setLive((v) => !v)} aria-pressed={live}
+          className="bt-runs-live" title={live ? 'Pause automatic updates' : 'Resume automatic updates'}>
+          {live ? <span className="bt-live-dot" /> : <Icon name="pause" size={13} />}
+          {live ? 'Live tailing' : 'Paused'}
+        </button>
+      </header>
+
+      <div className="bt-runs-toolbar">
+        <div role="group" aria-label="Status filter" className="bt-runs-filters">
           {FILTERS.map((f) => (
-            <button key={f.id} onClick={() => setFilter(f.id)} aria-pressed={filter === f.id}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 6, height: 28, padding: '0 12px', borderRadius: 9999, border: 'none', cursor: 'pointer',
-                fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500,
-                background: filter === f.id ? 'var(--surface)' : 'transparent', color: filter === f.id ? 'var(--fg)' : 'var(--fg-muted)',
-                boxShadow: filter === f.id ? 'var(--shadow-sm)' : 'none',
-              }}>
+            <button key={f.id} type="button" onClick={() => setFilter(f.id)} aria-pressed={filter === f.id}
+              className="bt-runs-filter">
               {f.id !== 'all' && <StatusDot status={f.id === 'waiting' ? 'frozen' : f.id} size={6} />}{f.label}
             </button>
           ))}
         </div>
-        <div style={{ width: 220 }}><Input icon="search" placeholder="Filter by task id…" value={q} onChange={setQ} mono /></div>
-        <div style={{ flex: 1 }} />
-        <button onClick={() => setLive((v) => !v)} aria-pressed={live}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 7, height: 32, padding: '0 11px', borderRadius: 8, border: '1px solid var(--border)',
-            background: live ? 'var(--accent-fill)' : 'var(--surface)', color: live ? 'var(--accent)' : 'var(--fg-muted)', cursor: 'pointer', fontSize: 12.5, fontWeight: 500,
-          }}>
-          {live ? <span className="bt-live-dot" /> : <Icon name="pause" size={13} />} {live ? 'Live tailing' : 'Paused'}
-        </button>
+        <label className="bt-runs-search">
+          <span className="bt-runs-sr-only">Filter by task ID</span>
+          <Input icon="search" placeholder="Filter by task id…" value={q} onChange={setQ} mono />
+        </label>
       </div>
 
+      <div className="bt-runs-summary">
+        <p aria-live="polite" aria-atomic="true">
+          {source !== null && <strong>{runs.length} {runs.length === 1 ? 'run' : 'runs'} loaded</strong>}
+          <span>{live ? 'Following new runs' : 'Updates paused'}</span>
+        </p>
+        {hasFilters && (source === null || runs.length > 0) && (
+          <button type="button" className="bt-runs-clear" onClick={clearFilters}>Clear filters</button>
+        )}
+      </div>
       {source === null ? (
-        <Card>{error ? <ErrorState message={error} /> : <LoadingState />}</Card>
+        <Card>{error ? <ErrorState message={error} /> : !live ? (
+          <div className="bt-runs-empty">
+            <Icon name="pause" size={22} />
+            <h2>Updates are paused.</h2>
+            <p>Resume live updates to load runs for these filters.</p>
+            <button type="button" className="bt-runs-action" onClick={() => setLive(true)}>Resume live updates</button>
+          </div>
+        ) : <LoadingState />}</Card>
       ) : (
       <Card>
-        <div style={{ display: 'grid', gridTemplateColumns: colT, gap: 12, padding: '11px 16px', borderBottom: '1px solid var(--divider)' }}>
-          <Th>Status</Th><Th>Run</Th><Th>Task</Th><Th>Trigger</Th><Th>Version</Th><Th style={{ textAlign: 'right' }}>Duration</Th><Th style={{ textAlign: 'right' }}>Started</Th>
-        </div>
-        {runs.map((r, i) => (
-          // A real <button> row (p2-19): focusable, Enter/Space-openable. The
-          // box keeps the former div's grid/look; button UA defaults reset.
-          <button key={r.id} type="button" onClick={() => onOpenRun(r)}
-            style={{
-              appearance: 'none', border: 'none', padding: '0 16px', background: 'transparent',
-              font: 'inherit', fontFamily: 'var(--font-sans)', color: 'var(--fg)', textAlign: 'left', width: '100%',
-              display: 'grid', gridTemplateColumns: colT, gap: 12, height: 'var(--row-h)', alignItems: 'center', cursor: 'pointer',
-              borderBottom: i < runs.length - 1 ? '1px solid var(--divider)' : 'none', transition: 'background var(--dur-fast)',
-            }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--hover)')}
-            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
-            <div><StatusBadge status={r.status} size="sm" /></div>
-            <div className="mono" style={{ fontSize: 12, color: 'var(--fg-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.id}</div>
-            <div style={{ fontSize: 13, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
-              <Icon name="bolt" size={13} style={{ color: 'var(--accent)' }} />
-              <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.task}</span>
-              {r.env !== 'prod' && <Badge tone="orange" style={{ flexShrink: 0 }}>{r.env}</Badge>}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--fg-muted)' }}>{r.trigger}</div>
-            <div className="mono" style={{ fontSize: 11.5, color: 'var(--fg-subtle)' }}>{r.version}</div>
-            <div className="mono tnum" style={{ fontSize: 12.5, textAlign: 'right', color: r.status === 'running' ? 'var(--accent)' : 'var(--fg)' }}>
+        {runs.length > 0 && <div className="bt-runs-columns" aria-hidden="true">
+          <span>Status</span><span>Run</span><span>Task</span><span>Trigger</span><span>Version</span><span>Duration</span><span>Started</span>
+        </div>}
+        <div className="bt-runs-rows">
+        {runs.map((r) => (
+          <button key={r.id} type="button" onClick={() => onOpenRun(r)} className="bt-runs-row">
+            <span className="bt-runs-status"><StatusBadge status={r.status} size="sm" /></span>
+            <span className="bt-runs-id mono" title={r.id}><span className="bt-runs-field-label">Run </span><span className="bt-runs-value">{r.id}</span></span>
+            <span className="bt-runs-task">
+              <Icon name="bolt" size={13} />
+              <span className="bt-runs-value" title={r.task}>{r.task}</span>
+              {r.env !== 'prod' && <Badge tone="orange">{r.env}</Badge>}
+            </span>
+            <span className="bt-runs-trigger"><span className="bt-runs-field-label">Trigger </span><span className="bt-runs-value" title={r.trigger}>{r.trigger}</span></span>
+            <span className="bt-runs-version mono"><span className="bt-runs-field-label">Version </span><span className="bt-runs-value" title={r.version}>{r.version}</span></span>
+            <span className={`bt-runs-duration mono tnum${r.status === 'running' ? ' bt-runs-duration-running' : ''}`}>
+              <span className="bt-runs-field-label">Duration </span>
               {r.duration || (r.status === 'running' ? 'running…' : '—')}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--fg-subtle)', textAlign: 'right', whiteSpace: 'nowrap' }}>{r.started}</div>
+            </span>
+            <span className="bt-runs-started"><span className="bt-runs-field-label">Started </span>{r.started}</span>
           </button>
         ))}
+        </div>
         {runs.length === 0 && (
-          <div style={{ padding: '48px 0', textAlign: 'center', color: 'var(--fg-subtle)', fontSize: 13 }}>No runs match these filters.</div>
+          <div className="bt-runs-empty">
+            <span className="bt-runs-empty-icon"><Icon name={hasFilters ? 'search' : 'bolt'} size={22} /></span>
+            <h2>{hasFilters ? 'No runs match these filters.' : 'No runs yet.'}</h2>
+            <p>{hasFilters ? 'Try another status or task ID to find the run you need.' : 'Runs will appear here when a task is triggered in this environment.'}</p>
+            {hasFilters && <button type="button" className="bt-runs-action" onClick={clearFilters}>Clear filters</button>}
+          </div>
         )}
         {hasMore && (
-          <div style={{ padding: '10px 16px', borderTop: '1px solid var(--divider)' }}>
-            <button onClick={() => void loadMore()} disabled={loadingMore}
-              style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: 32, borderRadius: 8,
-                border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--fg-muted)', cursor: 'pointer',
-                fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500,
-              }}>
-              {loadingMore ? 'Loading…' : 'Load more'}
+          <div className="bt-runs-pagination">
+            <button type="button" onClick={() => void loadMore()} disabled={loadingMore || !live}
+              className="bt-runs-action" aria-busy={loadingMore}>
+              {loadingMore ? 'Loading…' : loadMoreError ? 'Retry loading more' : 'Load more'}
             </button>
+            {!live && <p className="bt-runs-pagination-hint">Resume live updates to load more runs.</p>}
             {loadMoreError && (
-              <div role="alert" style={{ marginTop: 8, fontSize: 12, color: 'var(--red-text)', textAlign: 'center' }}>
-                Load failed — retry
+              <div role="alert" className="bt-runs-pagination-error">
+                Could not load more runs. Your loaded runs are still available.
               </div>
             )}
           </div>
         )}
       </Card>
       )}
+      </section>
     </Page>
   );
 }

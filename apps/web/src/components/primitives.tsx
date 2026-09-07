@@ -94,7 +94,7 @@ export const Button = ({
     lg: { height: 40, padding: '0 16px', fontSize: 14, borderRadius: 8 },
   };
   const variants: Record<ButtonVariant, { background: string; color: string; borderColor: string }> = {
-    primary: { background: 'var(--accent)', color: 'var(--accent-fg)', borderColor: 'transparent' },
+    primary: { background: 'var(--accent-solid)', color: 'var(--accent-fg)', borderColor: 'transparent' },
     outline: { background: 'var(--surface)', color: 'var(--fg)', borderColor: 'var(--border-strong)' },
     ghost:   { background: active ? 'var(--fill)' : 'transparent', color: 'var(--fg)', borderColor: 'transparent' },
     subtle:  { background: 'var(--fill)', color: 'var(--fg)', borderColor: 'transparent' },
@@ -119,7 +119,6 @@ export const Button = ({
         cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.45 : 1,
         transition: 'background var(--dur-fast), border-color var(--dur-fast), opacity var(--dur-fast)',
         whiteSpace: 'nowrap', ...sizes[size],
-        background: 'var(--btn-bg)', color: 'var(--btn-fg)',
         ['--btn-bg' as string]: v.background,
         ['--btn-fg' as string]: v.color,
         ['--btn-hover-bg' as string]: hoverBackground[variant],
@@ -141,12 +140,22 @@ export interface IconButtonProps {
   size?: number;
   title?: string;
   box?: number;
+  expanded?: boolean;
+  controls?: string;
+  id?: string;
 }
 
-export const IconButton = ({ name, active, pressed, onClick, size = 16, title, box = 30 }: IconButtonProps) => (
-  <button type="button" onClick={onClick} title={title}
+export const IconButton = ({ name, active, pressed, onClick, size = 16, title, box = 32, expanded, controls, id }: IconButtonProps) => (
+  <button type="button" onClick={(event) => {
+    // Safari does not focus buttons on pointer activation. Modal openers need
+    // a stable return target regardless of how the button was activated.
+    event.currentTarget.focus();
+    onClick?.();
+  }} title={title} aria-label={title} id={id}
     data-active={active}
     aria-pressed={pressed}
+    aria-expanded={expanded}
+    aria-controls={controls}
     className="bt-icon-btn"
     style={{
       width: box, height: box, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -179,7 +188,7 @@ export const StatusBadge = ({ status, size = 'md' }: { status: string; size?: 's
       display: 'inline-flex', alignItems: 'center', gap: 6, padding: pad, borderRadius: 9999,
       fontSize: fs, fontWeight: 500, lineHeight: 1, whiteSpace: 'nowrap',
       background: `color-mix(in srgb, ${m.color} 13%, transparent)`,
-      color: m.color,
+      color: m.textColor,
       border: `1px solid color-mix(in srgb, ${m.color} 26%, transparent)`,
     }}>
       <StatusDot status={status} size={6} />
@@ -191,19 +200,19 @@ export const StatusBadge = ({ status, size = 'md' }: { status: string; size?: 's
 type BadgeTone = 'gray' | 'blue' | 'green' | 'orange' | 'red';
 
 export const Badge = ({ tone = 'gray', children, style }: { tone?: BadgeTone; children?: React.ReactNode; style?: React.CSSProperties }) => {
-  const map: Record<BadgeTone, { c: string }> = {
-    gray:   { c: 'var(--fg-muted)' },
-    blue:   { c: 'var(--accent)' },
-    green:  { c: 'var(--green-primary)' },
-    orange: { c: 'var(--orange-primary)' },
-    red:    { c: 'var(--red-primary)' },
+  const map: Record<BadgeTone, { c: string; text: string }> = {
+    gray:   { c: 'var(--fg-muted)', text: 'var(--fg-muted)' },
+    blue:   { c: 'var(--accent)', text: 'var(--accent-text)' },
+    green:  { c: 'var(--green-primary)', text: 'var(--green-text)' },
+    orange: { c: 'var(--orange-primary)', text: 'var(--orange-text)' },
+    red:    { c: 'var(--red-primary)', text: 'var(--red-text)' },
   };
-  const c = (map[tone] || map.gray).c;
+  const { c, text } = map[tone] || map.gray;
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 500,
       padding: '2px 8px', borderRadius: 9999, lineHeight: 1.4, whiteSpace: 'nowrap',
-      background: `color-mix(in srgb, ${c} 11%, transparent)`, color: c,
+      background: `color-mix(in srgb, ${c} 11%, transparent)`, color: text,
       border: `1px solid color-mix(in srgb, ${c} 22%, transparent)`, ...style,
     }}>{children}</span>
   );

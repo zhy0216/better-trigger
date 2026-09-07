@@ -1,0 +1,289 @@
+{
+  "matrix": [
+    {
+      "width": 1440,
+      "docWidth": 1440,
+      "trace": "flex",
+      "details": "block",
+      "theme": "dark",
+      "density": "comfortable",
+      "logHeight": 211,
+      "timelineHeight": 465,
+      "detailsAccessible": true
+    },
+    {
+      "width": 1440,
+      "docWidth": 1440,
+      "trace": "flex",
+      "details": "block",
+      "theme": "dark",
+      "density": "compact",
+      "logHeight": 211,
+      "timelineHeight": 465,
+      "detailsAccessible": true
+    },
+    {
+      "width": 1440,
+      "docWidth": 1440,
+      "trace": "flex",
+      "details": "block",
+      "theme": "light",
+      "density": "comfortable",
+      "logHeight": 211,
+      "timelineHeight": 465,
+      "detailsAccessible": true
+    },
+    {
+      "width": 1440,
+      "docWidth": 1440,
+      "trace": "flex",
+      "details": "block",
+      "theme": "light",
+      "density": "compact",
+      "logHeight": 211,
+      "timelineHeight": 465,
+      "detailsAccessible": true
+    },
+    {
+      "width": 768,
+      "docWidth": 768,
+      "trace": "flex",
+      "details": "none",
+      "theme": "dark",
+      "density": "comfortable",
+      "logHeight": 172,
+      "timelineHeight": 389,
+      "detailsAccessible": true
+    },
+    {
+      "width": 768,
+      "docWidth": 768,
+      "trace": "flex",
+      "details": "none",
+      "theme": "dark",
+      "density": "compact",
+      "logHeight": 172,
+      "timelineHeight": 389,
+      "detailsAccessible": true
+    },
+    {
+      "width": 768,
+      "docWidth": 768,
+      "trace": "flex",
+      "details": "none",
+      "theme": "light",
+      "density": "comfortable",
+      "logHeight": 172,
+      "timelineHeight": 389,
+      "detailsAccessible": true
+    },
+    {
+      "width": 768,
+      "docWidth": 768,
+      "trace": "flex",
+      "details": "none",
+      "theme": "light",
+      "density": "compact",
+      "logHeight": 172,
+      "timelineHeight": 389,
+      "detailsAccessible": true
+    },
+    {
+      "width": 390,
+      "docWidth": 390,
+      "trace": "flex",
+      "details": "none",
+      "theme": "dark",
+      "density": "comfortable",
+      "logHeight": 94,
+      "timelineHeight": 203,
+      "detailsAccessible": true
+    },
+    {
+      "width": 390,
+      "docWidth": 390,
+      "trace": "flex",
+      "details": "none",
+      "theme": "dark",
+      "density": "compact",
+      "logHeight": 94,
+      "timelineHeight": 203,
+      "detailsAccessible": true
+    },
+    {
+      "width": 390,
+      "docWidth": 390,
+      "trace": "flex",
+      "details": "none",
+      "theme": "light",
+      "density": "comfortable",
+      "logHeight": 94,
+      "timelineHeight": 203,
+      "detailsAccessible": true
+    },
+    {
+      "width": 390,
+      "docWidth": 390,
+      "trace": "flex",
+      "details": "none",
+      "theme": "light",
+      "density": "compact",
+      "logHeight": 94,
+      "timelineHeight": 203,
+      "detailsAccessible": true
+    },
+    {
+      "width": 375,
+      "docWidth": 375,
+      "trace": "flex",
+      "details": "none",
+      "theme": "dark",
+      "density": "comfortable",
+      "logHeight": 94,
+      "timelineHeight": 181,
+      "detailsAccessible": true
+    },
+    {
+      "width": 375,
+      "docWidth": 375,
+      "trace": "flex",
+      "details": "none",
+      "theme": "dark",
+      "density": "compact",
+      "logHeight": 94,
+      "timelineHeight": 181,
+      "detailsAccessible": true
+    },
+    {
+      "width": 375,
+      "docWidth": 375,
+      "trace": "flex",
+      "details": "none",
+      "theme": "light",
+      "density": "comfortable",
+      "logHeight": 94,
+      "timelineHeight": 181,
+      "detailsAccessible": true
+    },
+    {
+      "width": 375,
+      "docWidth": 375,
+      "trace": "flex",
+      "details": "none",
+      "theme": "light",
+      "density": "compact",
+      "logHeight": 94,
+      "timelineHeight": 181,
+      "detailsAccessible": true
+    }
+  ],
+  "interactions": [
+    "All 16 width/theme/density combinations keep trace/details accessible and avoid page overflow.",
+    "Enter selects a child span; ArrowRight/Home operate compact tabs; selection survives desktop/mobile resize.",
+    "Large collapsed payload copies in full; long JSON only scrolls locally; denied clipboard reports failure; another span clears feedback and copies its own output.",
+    {
+      "paging": "Scope counts, paging error/retry, stable anchor and Jump to latest pass.",
+      "before": {
+        "id": "129",
+        "offset": -0.5,
+        "top": 689
+      },
+      "after": {
+        "id": "129",
+        "offset": -0.21875,
+        "top": 1752
+      }
+    },
+    {
+      "polling": "New logs preserve paused reading; hidden Details polling preserves anchor; Jump to latest resumes tail following.",
+      "pausedBefore": {
+        "id": "107",
+        "offset": -36.8125,
+        "top": 300
+      },
+      "pausedAfter": {
+        "id": "107",
+        "offset": -36.8125,
+        "top": 300
+      },
+      "restored": {
+        "id": "107",
+        "offset": -36.8125,
+        "top": 300
+      },
+      "heads": 5
+    },
+    "Active, terminal and span-scoped empty states are distinct.",
+    "720×480 CSS viewport (200% laptop equivalent) keeps details controls scroll-accessible.",
+    "Fixture-only Retry sends an idempotency key and opens the new run; Cancel shows pending then the terminal action."
+  ],
+  "finalChecks": [
+    {
+      "width": 1440,
+      "theme": "dark",
+      "overflow": false,
+      "screenshots": [
+        "run-detail-final-1440-dark-trace.png",
+        "run-detail-final-1440-dark-details.png"
+      ]
+    },
+    {
+      "width": 1440,
+      "theme": "light",
+      "overflow": false,
+      "screenshots": [
+        "run-detail-final-1440-light-trace.png",
+        "run-detail-final-1440-light-details.png"
+      ]
+    },
+    {
+      "width": 390,
+      "theme": "dark",
+      "overflow": false,
+      "screenshots": [
+        "run-detail-final-390-dark-trace.png",
+        "run-detail-final-390-dark-details.png"
+      ]
+    },
+    {
+      "width": 390,
+      "theme": "light",
+      "overflow": false,
+      "screenshots": [
+        "run-detail-final-390-light-trace.png",
+        "run-detail-final-390-light-details.png"
+      ]
+    },
+    "Running-to-canceled fixture transition produces no React console warnings."
+  ],
+  "contrast": [
+    {
+      "width": 1440,
+      "theme": "dark",
+      "minimum": 6.63,
+      "below": []
+    },
+    {
+      "width": 1440,
+      "theme": "light",
+      "minimum": 5.25,
+      "below": []
+    },
+    {
+      "width": 390,
+      "theme": "dark",
+      "minimum": 6.63,
+      "below": []
+    },
+    {
+      "width": 390,
+      "theme": "light",
+      "minimum": 5.25,
+      "below": []
+    }
+  ],
+  "consoleErrors": [],
+  "pageErrors": [],
+  "fixedWarning": "Changed the span bar background shorthand to backgroundColor for running-to-terminal updates.",
+  "passed": true
+}

@@ -1,8 +1,9 @@
 difficulty: hard
+status: completed
 
 # 共享视觉与响应式 Shell
 
-优先级：P1。模型：max。前置依赖：无。一个 worktree、一个最终 commit。
+优先级：P1。前置依赖：无。由当前会话及内置 subagent 直接完成。
 
 ## T1 · 统一视觉基础与页面容器
 
@@ -31,3 +32,5 @@ difficulty: hard
 - **预计修改文件**：以上共享实现及测试；不修改 RunsList、TasksDashboard、Schedules 或 features/run 的业务实现。
 - **验收**：从仓库根运行 `bun run --cwd apps/web typecheck`、`bun run --cwd apps/web lint`、`bun run --cwd apps/web test`、`bun run --cwd apps/web build` 并记录真实结果。新增测试聚焦抽屉焦点/关闭/断点切换和设置反馈，不为颜色/间距写脆弱快照。真实浏览器至少验证共享 shell 的三个主尺寸、双主题、两种密度和无页面水平溢出；必要文字对比度有测量依据。
 - **前置依赖**：本文件 T1、T2、T3。
+
+完成记录：2026-09-05 已实现并通过集成验收。校验结果和浏览器证据见 [计划验收记录](../plan.md#实施验收记录) 与 [截图及报告](../evidence/README.md)。

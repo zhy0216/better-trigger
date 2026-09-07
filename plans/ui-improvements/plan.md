@@ -4,7 +4,7 @@
 
 用户在了解并打开项目自带 Dashboard 后，调用 `$auto-dev UI 改进`，随后补充“UI 改进下”。本轮是现有前端的视觉与交互打磨：让运行信息更容易扫描、排查步骤更顺畅，并使窄屏也能完成核心操作。保留 Better Trigger 当前深色默认、紫色强调、亮色主题和开发者工具定位。已询问可选侧重点；截至写入没有进一步偏好，采用综合打磨的默认方案，不以此阻塞执行。
 
-按 auto-dev 流程，本阶段只提交本目录内的计划和任务队列，随后通过 Herdr 在新 session 启动实现，不在规划 session 修改业务代码。协调器使用 OpenCode auto + `bailian-token-plan/qwen3.8-flash`；任务 difficulty 按执行技能映射：easy/medium → flash，hard → max。其他既有计划中针对其他任务的模型要求不复制到本计划。
+执行方式更新：用户在计划提交后明确要求“直接用你自己的 subagent，简单点”。因此由当前会话和内置 subagent 直接实现、审查与验证；不再使用 Herdr/OpenCode，也不为任务创建 worktree 或自动提交业务改动。沿用任务范围和文件归属，子 agent 使用当前会话默认模型。原表中的 difficulty 保留为复杂度参考，flash/max 分配不再适用。共享组件保持既有调用接口及 token，页面任务可按明确文件边界同步推进，最后集中集成验收。
 
 ## 目标与范围
 
@@ -91,16 +91,16 @@ bun run --cwd apps/web build
 
 ## 拆解与文件边界
 
-一个 todo 对应一个独立 worktree、一个最终 commit。优先级均为 P1（核心可用性），最终验收为 P2；难度按状态/焦点/滚动回归的实际复杂度判断。
+按用户更新的执行要求，当前会话负责共享组件和集成，内置 subagent 按页面文件边界并行实现。优先级均为 P1（核心可用性），最终验收为 P2；难度按状态/焦点/滚动回归的实际复杂度判断。
 
-| 顺序 | 文件 | 难度 / 模型 | 依赖 | 主要拥有文件 |
+| 顺序 | 文件 | 难度 | 依赖 | 主要拥有文件 |
 | --- | --- | --- | --- | --- |
-| 01 | `01-responsive-shell.md` | hard / max | 无 | App、Shell、Layout、TweaksPanel、navigation、全局主题与共用 primitives；相关 shell/主题测试 |
-| 02 | `02-runs-list.md` | medium / flash | 01 | RunsList、独立 runs-list.css、runsList 测试 |
-| 03 | `03-tasks-dashboard.md` | medium / flash | 01 | TasksDashboard、独立 tasks-dashboard.css、tasksDashboard 测试 |
-| 04 | `04-schedules.md` | medium / flash | 01 | Schedules、独立 schedules.css、schedules 测试 |
-| 05 | `05-run-details.md` | hard / max | 01 | features/run、独立 run-view.css、runView/logStream/runActions 相关测试 |
-| 06 | `06-integration-preview.md` | medium / flash | 02、03、04、05 | 集成回归、必要修复、web README、本计划验收记录 |
+| 01 | `01-responsive-shell.md` | hard | 无 | App、Shell、Layout、TweaksPanel、navigation、全局主题与共用 primitives；相关 shell/主题测试 |
+| 02 | `02-runs-list.md` | medium | 01 | RunsList、独立 runs-list.css、runsList 测试 |
+| 03 | `03-tasks-dashboard.md` | medium | 01 | TasksDashboard、独立 tasks-dashboard.css、tasksDashboard 测试 |
+| 04 | `04-schedules.md` | medium | 01 | Schedules、独立 schedules.css、schedules 测试 |
+| 05 | `05-run-details.md` | hard | 01 | features/run、独立 run-view.css、runView/logStream/runActions 相关测试 |
+| 06 | `06-integration-preview.md` | medium | 02、03、04、05 | 集成回归、必要修复、web README、本计划验收记录 |
 
 执行波次：`01 → [02 ∥ 03 ∥ 04 ∥ 05] → 06`。02–05 不修改 App/全局 CSS/共享组件/API hooks；发现确需共享变更时报告协调器并串行安排，不能互相踩文件。06 的浏览器验证只写必要的行为回归测试，不为可逆的颜色/间距变更添加脆弱快照或实现镜像测试。
 
@@ -141,4 +141,13 @@ bun run test
 
 ## 实施验收记录
 
-待执行端完成后填写真实校验结果、截图位置、已知限制和本地预览地址；此处不预填成功。
+2026-09-05：六个 todo 均已完成。当前会话完成共享布局、移动导航、主题与设置面板，三个内置 subagent 分别完成 Runs、Tasks/Schedules、Run 详情；随后集中审查并用当前源码进行浏览器验收。
+
+- **实现结果**：响应式导航和页面布局；同主题 Display settings；清楚可读的辅助文字与状态色；Runs 已加载数量、清除筛选和不同空态；Tasks 自适应指标/卡片；Schedules 明确暂停和处理中状态；Run 的 Trace/Details 切换、日志跟随/暂停/跳到最新、历史日志阅读锚点、错误优先和复制反馈。
+- **数据呈现修正**：没有运行样本的任务显示 `— / No runs`，不再作为 0% 拉低平均值。平均成功率仍为有运行样本任务的简单平均，并在界面说明；任务总量标为 Registered tasks。API 与 adapter 保持原协议。
+- **整仓检查**：`bun run build`、`bun run typecheck`、`bun run lint`、`bun run test` 均退出 0。总计 1494 个测试通过、100 个跳过；跳过项是数据库或其他条件性套件，本轮测试未配置 DATABASE_URL。前端 21 个测试文件、180 个测试全部通过；未变更包的部分结果由 Turbo 缓存复用。
+- **浏览器检查**：Chrome 验证 375/390/768/1440px、深色/亮色、comfortable/compact；720×480 CSS 视口验证 1440×960 下 200% 缩放的布局等效边界，未自动操作浏览器原生缩放。主页面无水平溢出；移动导航焦点循环、Escape/恢复焦点、长内容、筛选/清除、分页错误/重试、暂停轮询、开关 pending/失败回滚、复制失败、日志阅读位置均已核验。正常页面无 console/page error；受控 HTTP 500/503 fixture 的预期资源错误单独记录。
+- **文字对比度抽测**：Runs 深色最低 6.55:1、亮色最低 5.23:1；搜索占位文字为 7.63:1 / 6.07:1；Tasks/Schedules 最低 5.63:1；Run 详情深色最低 6.63:1、亮色最低 5.25:1。这是实际渲染颜色的抽测结果，不代表对所有自定义配色组合的完整无障碍认证。
+- **证据**：[截图及报告](evidence/README.md)。Runs/Run 详情使用浏览器拦截的受控 fixture，Tasks/Schedules 主截图连接独立预览数据库；fixture 未加入产品数据路径，模拟写请求未发送到真实服务。
+- **本地预览**：[http://127.0.0.1:5173](http://127.0.0.1:5173)，Vite 从当前工作区源码提供 UI，连接 `http://127.0.0.1:4848`。后端 `/api/v1/health` 返回成功，使用现有本地 PostgreSQL 上新建的独立数据库 `better_trigger_ui_preview_20260905_ea8673be` 和 examples/basic 示例任务；保留预览进程。未写用户业务数据库，未清理容器或卷。
+- **交付状态**：原计划提交为 `9c6b3d3`，本轮业务实现保留为工作区改动。未新增运行时依赖，未远程部署或推送。

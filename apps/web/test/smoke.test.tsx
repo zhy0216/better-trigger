@@ -161,7 +161,7 @@ describe('dashboard smoke — the states that used to need a live daemon', () =>
     );
     render(<RunsList env="prod" onOpenRun={() => {}} />);
 
-    await waitFor(() => expect(screen.getByText('No runs match these filters.')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('No runs yet.')).toBeTruthy());
   });
 
   it('4. long logs: Load older logs walks the logsNextCursor chain, deduped, until exhausted', async () => {

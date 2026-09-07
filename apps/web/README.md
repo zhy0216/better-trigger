@@ -15,6 +15,16 @@ bun run lint       # eslint — the shared repo baseline over JS and .ts/.tsx
                    # react-hooks / react-refresh rules this app adds
 ```
 
+To preview changes from the repository root against a local daemon:
+
+```bash
+VITE_BT_API_URL=http://127.0.0.1:4848 bun run --cwd apps/web dev --host 127.0.0.1
+```
+
+Open the Vite URL printed in the terminal (normally `http://127.0.0.1:5173`).
+This serves the current source; an already-running Docker image needs to be
+rebuilt before it includes frontend changes.
+
 ## API key mode
 
 When the daemon has `BETTER_TRIGGER_API_KEY` set, the dashboard asks for the
@@ -54,12 +64,14 @@ src/
 │   ├── hooks.ts         # polling hooks + connection aggregation
 │   └── mergeRuns.ts     # keyset page merge (PF3)
 ├── hooks/
-│   └── useTweaks.ts     # tweak state (host-protocol persistence removed)
+│   ├── useMediaQuery.ts # responsive navigation breakpoint
+│   └── useTweaks.ts     # session-only display preferences
 ├── components/
 │   ├── primitives.tsx   # Icon, Button, Badge, StatusBadge, Input, Sparkline…
 │   ├── Layout.tsx       # Page, Card, Metric, SectionHead
 │   ├── Shell.tsx        # Logo, Sidebar, TopBar, EnvSwitcher
-│   └── TweaksPanel.tsx  # floating tweak panel + form controls
+│   ├── Modal.tsx        # native dialog, keyboard containment, focus restore
+│   └── TweaksPanel.tsx  # themed display settings + form controls
 ├── features/
 │   └── run/RunView.tsx  # the hero: live waterfall trace + logs + inspector
 ├── screens/
@@ -80,7 +92,10 @@ src/
 Styling is driven by **CSS custom properties** (see `styles/tokens.css` and
 `styles/theme.css`), switched by `data-theme` / `data-density` on `<html>` and
 an `--accent` override set from `App.tsx`. Components mostly read those variables
-directly via inline styles.
+directly. Shared layout lives in `theme.css`; screen-specific responsive styles
+are imported by each screen. Use `--accent-text` and the semantic `*-text`
+tokens for text, reserving primary colors for decoration. Status metadata
+keeps the marker color separate from its readable label color.
 
 Tailwind 4 is wired through the `@tailwindcss/postcss` plugin and keeps the
 legacy token map in `tailwind.config.ts` (loaded from `styles/index.css`), so
@@ -89,9 +104,21 @@ new UI can use `bg-surface`, `text-fg-muted`, `border-line`, `font-mono`,
 `main.tsx` puts the tokens/theme **after** Tailwind's preflight so the design
 system wins on shared element rules.
 
-## The Tweaks panel
+## Responsive navigation and display settings
 
-`TweaksPanel` is a floating control panel (theme / accent / density / trace
+Below 768px, navigation opens in a modal drawer. Escape, the backdrop, or a
+navigation choice closes it and returns focus to the opener. Display settings
+uses the same dialog behavior, follows the selected theme, and fits the viewport.
+Settings are kept in memory and reset on refresh. Keyboard focus is visible,
+and animations respect reduced-motion preferences.
+
+Runs, tasks, and schedules reflow at their available content width. Run details
+uses Trace & logs / Span details tabs in narrow containers while retaining the
+selected span and its data. The log toolbar shows Following or Paused; Jump to
+latest resumes following, and loading older logs preserves the reading position.
+Payload, output, and errors can be expanded and copied with explicit feedback.
+
+`TweaksPanel` implements the display settings panel (theme / accent / density / trace
 style) with a full set of form controls (`TweakSlider`, `TweakToggle`,
 `TweakRadio`, `TweakSelect`, `TweakNumber`, `TweakColor`, `TweakButton`).
 
@@ -109,7 +136,7 @@ and the panel receives `open` / `onOpenChange`.
 ```ts
 // App.tsx — state lives here, Shell exposes the built-in toggle
 const [tweaksOpen, setTweaksOpen] = React.useState(false);
-<TweaksPanel open={tweaksOpen} onOpenChange={setTweaksOpen}>…</TweaksPanel>
+<TweaksPanel title="Display settings" open={tweaksOpen} onOpenChange={setTweaksOpen}>…</TweaksPanel>
 ```
 
 ## Notes from the conversion

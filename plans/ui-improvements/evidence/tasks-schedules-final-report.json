@@ -1,0 +1,2185 @@
+{
+  "screenshots": [
+    "/tmp/better-trigger-browser.P2DEpN/tasks-final-390-dark-comfortable.png",
+    "/tmp/better-trigger-browser.P2DEpN/tasks-final-390-light-compact.png",
+    "/tmp/better-trigger-browser.P2DEpN/tasks-final-1440-dark-comfortable.png",
+    "/tmp/better-trigger-browser.P2DEpN/tasks-final-1440-light-compact.png",
+    "/tmp/better-trigger-browser.P2DEpN/schedules-final-390-dark-comfortable.png",
+    "/tmp/better-trigger-browser.P2DEpN/schedules-final-390-light-compact.png",
+    "/tmp/better-trigger-browser.P2DEpN/schedules-final-1440-dark-comfortable.png",
+    "/tmp/better-trigger-browser.P2DEpN/schedules-final-1440-light-compact.png"
+  ],
+  "contrast": [
+    {
+      "route": "tasks",
+      "width": 390,
+      "theme": "dark",
+      "density": "comfortable",
+      "checks": 124,
+      "minimum": 9.12,
+      "failures": [],
+      "samples": [
+        {
+          "text": "Overview",
+          "class": "bt-tasks-eyebrow",
+          "color": "color(srgb 0.687255 0.687255 1)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 9.12,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Your tasks, throughput, and worker health in one place.",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Last 24 hours",
+          "class": "bt-tasks-period",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Runs · last 24h",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "186",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Across registered tasks",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Avg success rate",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "16.7%",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(80, 223, 161)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.52,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Average across tasks",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Active tasks",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "12",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "2 scheduled",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Workers online",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "1",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(80, 223, 161)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.52,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Currently connected",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Open a task card to browse runs",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "always-aborts",
+          "class": "mono",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "24h runs",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "0",
+          "class": "tnum",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Success rate",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        }
+      ]
+    },
+    {
+      "route": "tasks",
+      "width": 390,
+      "theme": "light",
+      "density": "compact",
+      "checks": 124,
+      "minimum": 5.7,
+      "failures": [],
+      "samples": [
+        {
+          "text": "Overview",
+          "class": "bt-tasks-eyebrow",
+          "color": "color(srgb 0.276078 0.267255 0.615294)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 7.55,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Your tasks, throughput, and worker health in one place.",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Last 24 hours",
+          "class": "bt-tasks-period",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Runs · last 24h",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "186",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Across registered tasks",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Avg success rate",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "16.7%",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(6, 112, 68)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 6.16,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Average across tasks",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Active tasks",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "12",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "2 scheduled",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Workers online",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "1",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(6, 112, 68)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 6.16,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Currently connected",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Open a task card to browse runs",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "always-aborts",
+          "class": "mono",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "24h runs",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "0",
+          "class": "tnum",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Success rate",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        }
+      ]
+    },
+    {
+      "route": "tasks",
+      "width": 1440,
+      "theme": "dark",
+      "density": "comfortable",
+      "checks": 124,
+      "minimum": 9.12,
+      "failures": [],
+      "samples": [
+        {
+          "text": "Overview",
+          "class": "bt-tasks-eyebrow",
+          "color": "color(srgb 0.687255 0.687255 1)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 9.12,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Your tasks, throughput, and worker health in one place.",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Last 24 hours",
+          "class": "bt-tasks-period",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Runs · last 24h",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "186",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(229, 231, 236)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 13.02,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Across registered tasks",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Avg success rate",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "16.7%",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(80, 223, 161)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.52,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Average across tasks",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Active tasks",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "12",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(229, 231, 236)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 13.02,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "2 scheduled",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Workers online",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "1",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(80, 223, 161)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.52,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Currently connected",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Open a task card to browse runs",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "always-aborts",
+          "class": "mono",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "24h runs",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "0",
+          "class": "tnum",
+          "color": "rgb(229, 231, 236)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 13.02,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Success rate",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        }
+      ]
+    },
+    {
+      "route": "tasks",
+      "width": 1440,
+      "theme": "light",
+      "density": "compact",
+      "checks": 124,
+      "minimum": 5.7,
+      "failures": [],
+      "samples": [
+        {
+          "text": "Overview",
+          "class": "bt-tasks-eyebrow",
+          "color": "color(srgb 0.276078 0.267255 0.615294)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 7.55,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Your tasks, throughput, and worker health in one place.",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Last 24 hours",
+          "class": "bt-tasks-period",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Runs · last 24h",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "186",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Across registered tasks",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Avg success rate",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "16.7%",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(6, 112, 68)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 6.16,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Average across tasks",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Active tasks",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "12",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "2 scheduled",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Workers online",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "1",
+          "class": "bt-tasks-stat-value tnum",
+          "color": "rgb(6, 112, 68)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 6.16,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Currently connected",
+          "class": "bt-tasks-stat-note",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Open a task card to browse runs",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "always-aborts",
+          "class": "mono",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "24h runs",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "0",
+          "class": "tnum",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "minimum": 3,
+          "pass": true
+        },
+        {
+          "text": "Success rate",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        }
+      ]
+    },
+    {
+      "route": "schedules",
+      "width": 390,
+      "theme": "dark",
+      "density": "comfortable",
+      "checks": 21,
+      "minimum": 7.85,
+      "failures": [],
+      "samples": [
+        {
+          "text": "2 schedules",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "2 active",
+          "class": "bt-schedules-summary-active",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "0 paused",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "every-2s",
+          "class": "mono",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "*/2 * * * * *",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "*/2 * * * * *",
+          "class": "mono",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            20,
+            24,
+            32
+          ],
+          "ratio": 15.89,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "UTC",
+          "class": "bt-schedules-timezone",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Next run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "in <1m",
+          "class": "mono tnum",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Last run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "ok",
+          "class": "",
+          "color": "rgb(80, 223, 161)",
+          "background": [
+            28,
+            51,
+            53
+          ],
+          "ratio": 7.85,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Active",
+          "class": "bt-schedules-state bt-schedules-state-active",
+          "color": "rgb(80, 223, 161)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.52,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "every-minute",
+          "class": "mono",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "* * * * *",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "* * * * *",
+          "class": "mono",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            20,
+            24,
+            32
+          ],
+          "ratio": 15.89,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "UTC",
+          "class": "bt-schedules-timezone",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Next run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "in <1m",
+          "class": "mono tnum",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Last run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "ok",
+          "class": "",
+          "color": "rgb(80, 223, 161)",
+          "background": [
+            28,
+            51,
+            53
+          ],
+          "ratio": 7.85,
+          "minimum": 4.5,
+          "pass": true
+        }
+      ]
+    },
+    {
+      "route": "schedules",
+      "width": 390,
+      "theme": "light",
+      "density": "compact",
+      "checks": 21,
+      "minimum": 5.63,
+      "failures": [],
+      "samples": [
+        {
+          "text": "2 schedules",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "2 active",
+          "class": "bt-schedules-summary-active",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "0 paused",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "every-2s",
+          "class": "mono",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "*/2 * * * * *",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "*/2 * * * * *",
+          "class": "mono",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            246,
+            246,
+            246
+          ],
+          "ratio": 15.08,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "UTC",
+          "class": "bt-schedules-timezone",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Next run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "in <1m",
+          "class": "mono tnum",
+          "color": "rgb(62, 64, 69)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 10.37,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Last run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "ok",
+          "class": "",
+          "color": "rgb(6, 112, 68)",
+          "background": [
+            230,
+            249,
+            241
+          ],
+          "ratio": 5.63,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Active",
+          "class": "bt-schedules-state bt-schedules-state-active",
+          "color": "rgb(6, 112, 68)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 6.16,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "every-minute",
+          "class": "mono",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "* * * * *",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "* * * * *",
+          "class": "mono",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            246,
+            246,
+            246
+          ],
+          "ratio": 15.08,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "UTC",
+          "class": "bt-schedules-timezone",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Next run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "in <1m",
+          "class": "mono tnum",
+          "color": "rgb(62, 64, 69)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 10.37,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Last run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "ok",
+          "class": "",
+          "color": "rgb(6, 112, 68)",
+          "background": [
+            230,
+            249,
+            241
+          ],
+          "ratio": 5.63,
+          "minimum": 4.5,
+          "pass": true
+        }
+      ]
+    },
+    {
+      "route": "schedules",
+      "width": 1440,
+      "theme": "dark",
+      "density": "comfortable",
+      "checks": 21,
+      "minimum": 7.85,
+      "failures": [],
+      "samples": [
+        {
+          "text": "2 schedules",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "2 active",
+          "class": "bt-schedules-summary-active",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "0 paused",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            17,
+            20,
+            27
+          ],
+          "ratio": 10.62,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "every-2s",
+          "class": "mono",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "*/2 * * * * *",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "*/2 * * * * *",
+          "class": "mono",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            20,
+            24,
+            32
+          ],
+          "ratio": 15.89,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "UTC",
+          "class": "bt-schedules-timezone",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Next run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "in <1m",
+          "class": "mono tnum",
+          "color": "rgb(191, 193, 198)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 8.95,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Last run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "ok",
+          "class": "",
+          "color": "rgb(80, 223, 161)",
+          "background": [
+            28,
+            51,
+            53
+          ],
+          "ratio": 7.85,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Active",
+          "class": "bt-schedules-state bt-schedules-state-active",
+          "color": "rgb(80, 223, 161)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.52,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "every-minute",
+          "class": "mono",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 14.39,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "* * * * *",
+          "class": "",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "* * * * *",
+          "class": "mono",
+          "color": "rgb(240, 242, 247)",
+          "background": [
+            20,
+            24,
+            32
+          ],
+          "ratio": 15.89,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "UTC",
+          "class": "bt-schedules-timezone",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Next run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "in <1m",
+          "class": "mono tnum",
+          "color": "rgb(191, 193, 198)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 8.95,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Last run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(189, 197, 212)",
+          "background": [
+            28,
+            33,
+            44
+          ],
+          "ratio": 9.28,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "ok",
+          "class": "",
+          "color": "rgb(80, 223, 161)",
+          "background": [
+            28,
+            51,
+            53
+          ],
+          "ratio": 7.85,
+          "minimum": 4.5,
+          "pass": true
+        }
+      ]
+    },
+    {
+      "route": "schedules",
+      "width": 1440,
+      "theme": "light",
+      "density": "compact",
+      "checks": 21,
+      "minimum": 5.63,
+      "failures": [],
+      "samples": [
+        {
+          "text": "2 schedules",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "2 active",
+          "class": "bt-schedules-summary-active",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "0 paused",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            245,
+            246,
+            250
+          ],
+          "ratio": 6.66,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "every-2s",
+          "class": "mono",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "*/2 * * * * *",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "*/2 * * * * *",
+          "class": "mono",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            246,
+            246,
+            246
+          ],
+          "ratio": 15.08,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "UTC",
+          "class": "bt-schedules-timezone",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Next run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "in <1m",
+          "class": "mono tnum",
+          "color": "rgb(46, 48, 53)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 13.2,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Last run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "ok",
+          "class": "",
+          "color": "rgb(6, 112, 68)",
+          "background": [
+            230,
+            249,
+            241
+          ],
+          "ratio": 5.63,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Active",
+          "class": "bt-schedules-state bt-schedules-state-active",
+          "color": "rgb(6, 112, 68)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 6.16,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "every-minute",
+          "class": "mono",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 16.3,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "* * * * *",
+          "class": "",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "* * * * *",
+          "class": "mono",
+          "color": "rgb(30, 32, 37)",
+          "background": [
+            246,
+            246,
+            246
+          ],
+          "ratio": 15.08,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "UTC",
+          "class": "bt-schedules-timezone",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Next run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "in <1m",
+          "class": "mono tnum",
+          "color": "rgb(46, 48, 53)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 13.2,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "Last run",
+          "class": "bt-schedules-field-label",
+          "color": "rgb(78, 88, 104)",
+          "background": [
+            255,
+            255,
+            255
+          ],
+          "ratio": 7.19,
+          "minimum": 4.5,
+          "pass": true
+        },
+        {
+          "text": "ok",
+          "class": "",
+          "color": "rgb(6, 112, 68)",
+          "background": [
+            230,
+            249,
+            241
+          ],
+          "ratio": 5.63,
+          "minimum": 4.5,
+          "pass": true
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "liveWrites": [],
+  "result": "PASS"
+}

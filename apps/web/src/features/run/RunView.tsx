@@ -14,6 +14,7 @@ import { createRetryIntentKey } from './retryIntentKey';
 import { rulerTicks } from './ruler';
 import { isAtBottom } from './scroll';
 import type { Span, Trace, LogLine, VizStyle } from '../../types';
+import './run-view.css';
 
 const KIND_ICON: Record<string, string> = { task: 'bolt', http: 'globe', query: 'db', fn: 'fn' };
 const KIND_LABEL: Record<string, string> = { task: 'subtask', http: 'http', query: 'query', fn: 'fn' };
@@ -26,10 +27,10 @@ function fmtMs(ms: number): string {
 // ---- the trace header ----
 function RunHeader({ trace, runStatus, env, onRetried }: { trace: Trace; runStatus: string; env: string; onRetried?: (newRunId: string) => void }) {
   const Meta = ({ icon, label, value, mono }: { icon: string; label: string; value: React.ReactNode; mono?: boolean }) => (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+    <div className="run-meta" style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
       <Icon name={icon} size={14} style={{ color: 'var(--fg-subtle)' }} />
       <span style={{ fontSize: 12, color: 'var(--fg-subtle)' }}>{label}</span>
-      <span className={mono ? 'mono' : ''} style={{ fontSize: 12.5, color: 'var(--fg)', fontWeight: 500, whiteSpace: 'nowrap' }}>{value}</span>
+      <span className={mono ? 'mono' : ''} style={{ fontSize: 12.5, color: 'var(--fg)', fontWeight: 500, overflowWrap: 'anywhere' }}>{value}</span>
     </div>
   );
   // UI status vocabulary: waiting maps to 'frozen', so cancel covers the
@@ -79,11 +80,11 @@ function RunHeader({ trace, runStatus, env, onRetried }: { trace: Trace; runStat
     }
   };
   return (
-    <div style={{ padding: '16px 20px 0', borderBottom: '1px solid var(--border)', background: 'var(--panel-bg)' }}>
+    <div className="run-header">
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <StatusBadge status={runStatus} />
-        <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600, letterSpacing: '-0.01em' }}>{trace.task}</h3>
-        <span className="mono" style={{ fontSize: 12, color: 'var(--fg-subtle)', padding: '2px 8px', borderRadius: 6, background: 'var(--fill)' }}>{trace.runId}</span>
+        <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600, letterSpacing: '-0.01em', overflowWrap: 'anywhere', minWidth: 0 }}>{trace.task}</h3>
+        <span className="mono run-id">{trace.runId}</span>
         <div style={{ flex: 1 }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           {canRetry && (
@@ -124,7 +125,7 @@ function RunHeader({ trace, runStatus, env, onRetried }: { trace: Trace; runStat
 }
 
 // ---- time ruler ----
-function Ruler({ totalMs, labelW }: { totalMs: number; labelW: number }) {
+function Ruler({ totalMs, labelW }: { totalMs: number; labelW: string }) {
   const ticks = rulerTicks(totalMs);
   return (
     <div style={{
@@ -151,7 +152,7 @@ function Ruler({ totalMs, labelW }: { totalMs: number; labelW: number }) {
 
 // ---- a single span row ----
 function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle }: {
-  s: Span; t: number; totalMs: number; labelW: number; selected: boolean; onSelect: (id: string) => void; vizStyle: VizStyle;
+  s: Span; t: number; totalMs: number; labelW: string; selected: boolean; onSelect: (id: string) => void; vizStyle: VizStyle;
 }) {
   const state = s.status;
   const m = STATUS_META[state];
@@ -162,7 +163,7 @@ function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle }: {
   const stripe = `repeating-linear-gradient(45deg, ${m.color}, ${m.color} 7px, color-mix(in srgb, ${m.color} 72%, transparent) 7px, color-mix(in srgb, ${m.color} 72%, transparent) 14px)`;
 
   return (
-    <div onClick={() => onSelect(s.id)}
+    <div className="run-span-row" onClick={() => onSelect(s.id)}
       role="button" tabIndex={0} aria-pressed={selected}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -181,7 +182,7 @@ function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle }: {
       <div style={{ width: labelW, flexShrink: 0, paddingLeft: 14 + s.level * 18, paddingRight: 8, display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
         {s.level > 0 && <span style={{ position: 'absolute', left: 14 + (s.level - 1) * 18 + 3, top: 0, bottom: 0, width: 1, background: 'var(--divider)' }} />}
         <Icon name={KIND_ICON[s.kind] || 'dot'} size={13} style={{ color: s.kind === 'task' ? 'var(--accent)' : 'var(--fg-subtle)' }} />
-        <span style={{
+        <span title={s.label} style={{
           fontSize: 12.5, fontWeight: s.kind === 'task' ? 600 : 500, color: 'var(--fg)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
           fontFamily: s.kind === 'http' || s.kind === 'query' ? 'var(--font-mono)' : 'var(--font-sans)',
         }}>{s.label}</span>
@@ -201,21 +202,15 @@ function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle }: {
             position: 'absolute', left: left + '%', width: width + '%', top: '50%', transform: 'translateY(-50%)',
             height: 'min(15px, calc(var(--span-h) - 8px))',
             minWidth: 3, borderRadius: 4, overflow: 'hidden',
-            background: running ? 'transparent' : m.color,
+            backgroundColor: running ? 'transparent' : m.color,
             backgroundImage: running ? stripe : 'none', backgroundSize: '19.8px 100%',
             animation: running ? 'bt-stripe 0.7s linear infinite' : 'none',
             boxShadow: selected ? '0 0 0 1.5px var(--accent)' : 'none', display: 'flex', alignItems: 'center',
-          }}>
-            {!running && (
-              <span className="mono tnum" style={{
-                fontSize: 10, color: '#fff', marginLeft: 6, fontWeight: 600, opacity: width > 7 ? 0.95 : 0,
-                textShadow: '0 1px 1px rgba(0,0,0,0.25)',
-              }}>{fmtMs(s.dur)}</span>
-            )}
-          </div>
+          }} />
         )}
-        {/* duration label outside short bars */}
-        {vizStyle !== 'tree' && !running && width <= 7 && (
+        {/* Keep duration text on the surface, where its contrast is independent
+            of the span's status color. */}
+        {vizStyle !== 'tree' && !running && (
           <span className="mono tnum" style={{
             position: 'absolute', left: `calc(${left}% + ${width}%)`, top: '50%', transform: 'translateY(-50%)',
             marginLeft: 6, fontSize: 10, color: 'var(--fg-subtle)', whiteSpace: 'nowrap',
@@ -227,94 +222,103 @@ function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle }: {
 }
 
 // ---- inspector for selected span ----
-function Inspector({ span, t, trace, wake }: { span: Span | undefined; t: number; trace: Trace; wake?: WakeInfo }) {
-  if (!span) return null;
-  const state = span.status;
-  const Row = ({ k, v, mono }: { k: string; v: React.ReactNode; mono?: boolean }) => (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--divider)' }}>
-      <span style={{ fontSize: 12, color: 'var(--fg-subtle)', whiteSpace: 'nowrap' }}>{k}</span>
-      <span className={mono ? 'mono' : ''} style={{ fontSize: 12.5, color: 'var(--fg)', fontWeight: 500, textAlign: 'right', whiteSpace: 'nowrap' }}>{v}</span>
-    </div>
+function CopyButton({ value, label }: { value: string; label: string }) {
+  const [status, setStatus] = React.useState<'idle' | 'copying' | 'copied' | 'failed'>('idle');
+  const request = React.useRef(0);
+  React.useEffect(() => {
+    request.current += 1;
+    setStatus('idle');
+    return () => { request.current += 1; };
+  }, [value]);
+  const copy = async () => {
+    const currentRequest = ++request.current;
+    setStatus('copying');
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(value);
+      if (request.current === currentRequest) setStatus('copied');
+    } catch {
+      if (request.current === currentRequest) setStatus('failed');
+    }
+  };
+  return (
+    <span className="run-copy-control">
+      <button type="button" className="run-small-button" aria-label={`Copy ${label}`}
+        disabled={status === 'copying'} onClick={() => void copy()}>
+        {status === 'copying' ? 'Copying…' : 'Copy'}
+      </button>
+      <span className={status === 'failed' ? 'run-copy-error' : 'run-copy-feedback'} role="status">
+        {status === 'copied' ? 'Copied' : status === 'failed' ? 'Copy failed' : ''}
+      </span>
+    </span>
   );
+}
+
+function ContentSection({ label, value, error = false }: { label: string; value: string; error?: boolean }) {
+  return (
+    <section className={`run-content-section${error ? ' run-content-error' : ''}`} aria-label={label}>
+      <div className="run-section-heading">
+        <h4>{label}</h4>
+        <CopyButton value={value} label={label} />
+      </div>
+      {error && <p className="run-error-summary">{value.split('\n')[0]}</p>}
+      <details open={!error && value.length < 400}>
+        <summary>{error ? 'Error details' : `${label} contents`}</summary>
+        <pre className="mono">{value}</pre>
+      </details>
+    </section>
+  );
+}
+
+function Inspector({ span, t, trace, wake }: { span: Span | undefined; t: number; trace: Trace; wake?: WakeInfo }) {
+  if (!span) return <div className="run-inspector-empty">No span details available yet.</div>;
+  const state = span.status;
   const payload = span.level === 0 ? trace.payload : null;
   return (
-    <div style={{ width: 320, flexShrink: 0, borderLeft: '1px solid var(--border)', background: 'var(--panel-bg)', overflowY: 'auto' }}>
-      <div style={{ padding: '16px 16px 14px', borderBottom: '1px solid var(--divider)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+    <div className="run-inspector-content">
+      <div className="run-inspector-heading">
+        <div className="run-inspector-badges">
           <Icon name={KIND_ICON[span.kind] || 'dot'} size={15} style={{ color: span.kind === 'task' ? 'var(--accent)' : 'var(--fg-muted)' }} />
           <Badge tone={span.kind === 'task' ? 'blue' : 'gray'}>{KIND_LABEL[span.kind]}</Badge>
-          <div style={{ flex: 1 }} />
           <StatusBadge status={state} size="sm" />
         </div>
-        <div className="mono" style={{ fontSize: 14, fontWeight: 600, color: 'var(--fg)', wordBreak: 'break-word' }}>{span.label}</div>
+        <h3 className="mono">{span.label}</h3>
       </div>
-      <div style={{ padding: '10px 16px 14px' }}>
-        <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--fg-faint)', marginBottom: 4 }}>Timing</div>
-        <Row k="started at" v={fmtMs(span.start)} mono />
-        <Row k="duration" v={state === 'running' ? fmtMs(Math.max(t - span.start, 0)) + ' …' : fmtMs(span.dur)} mono />
-        {span.attempt && <Row k="attempt" v={span.attempt} mono />}
-      </div>
-      {payload && (
-        <div style={{ padding: '0 16px 16px' }}>
-          <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--fg-faint)', marginBottom: 6 }}>Payload</div>
-          <pre className="mono" style={{
-            margin: 0, fontSize: 11.5, lineHeight: 1.6, background: 'var(--code-bg)', border: '1px solid var(--divider)',
-            borderRadius: 8, padding: 12, overflowX: 'auto', color: 'var(--fg-muted)',
-          }}>{JSON.stringify(payload, null, 2)}</pre>
-        </div>
-      )}
+      <section className="run-content-section" aria-label="Timing">
+        <h4>Timing</h4>
+        <dl className="run-timing">
+          <div><dt>Started at</dt><dd className="mono">{fmtMs(span.start)}</dd></div>
+          <div><dt>Duration</dt><dd className="mono">{state === 'running' ? fmtMs(Math.max(t - span.start, 0)) + ' …' : fmtMs(span.dur)}</dd></div>
+          {span.attempt && <div><dt>Attempt</dt><dd className="mono">{span.attempt}</dd></div>}
+        </dl>
+      </section>
+      {span.error && <ContentSection label="Error" error value={span.error.message + (span.error.stack ? '\n\n' + span.error.stack : '')} />}
       {span.level === 0 && wake && wake.waits.length > 0 && (
-        <div style={{ padding: '0 16px 16px' }}>
-          <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--fg-faint)', marginBottom: 6 }}>Waiting on</div>
-          <div style={{
-            background: 'color-mix(in srgb, var(--st-frozen) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--st-frozen) 22%, transparent)',
-            borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8,
-          }}>
+        <section className="run-content-section" aria-label="Waiting on">
+          <h4>Waiting on</h4>
+          <div className="run-waits">
             {wake.waits.map((w, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                <Icon name={w.childRunId ? 'bolt' : 'clock'} size={13} style={{ color: 'var(--st-frozen)', flexShrink: 0 }} />
-                <span style={{ fontSize: 12, color: 'var(--fg-muted)', flexShrink: 0 }}>
-                  {w.childRunId ? 'child run' : w.kind === 'until' ? 'resume at' : 'resume in'}
-                </span>
-                <span className="mono" style={{ fontSize: 12, color: 'var(--fg)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {w.childRunId
-                    ? w.childRunId
-                    : w.resumeAt
-                      ? relativeFuture(w.resumeAt)
-                      : 'pending'}
-                </span>
+              <div key={i} className="run-wait">
+                <div className="run-wait-label">
+                  <Icon name={w.childRunId ? 'bolt' : 'clock'} size={13} />
+                  <span>{w.childRunId ? 'Child run' : w.kind === 'until' ? 'Resume at' : 'Resume in'}</span>
+                </div>
+                <span className="mono run-wait-value">{w.childRunId ?? (w.resumeAt ? relativeFuture(w.resumeAt) : 'pending')}</span>
+                {w.childRunId && <CopyButton value={w.childRunId} label="child run ID" />}
               </div>
             ))}
           </div>
-        </div>
+        </section>
       )}
-      {span.error && (
-        <div style={{ padding: '0 16px 16px' }}>
-          <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--fg-faint)', marginBottom: 6 }}>Error</div>
-          <pre className="mono" style={{
-            margin: 0, fontSize: 11.5, lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-            background: 'color-mix(in srgb, var(--red-primary) 7%, transparent)',
-            border: '1px solid color-mix(in srgb, var(--red-primary) 25%, transparent)',
-            borderRadius: 8, padding: 12, overflowX: 'auto', color: 'var(--red-text)',
-          }}>{span.error.message + (span.error.stack ? '\n\n' + span.error.stack : '')}</pre>
-        </div>
-      )}
-      {span.output != null && (
-        <div style={{ padding: '0 16px 16px' }}>
-          <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--fg-faint)', marginBottom: 6 }}>Output</div>
-          <pre className="mono" style={{
-            margin: 0, fontSize: 11.5, lineHeight: 1.6, background: 'var(--code-bg)', border: '1px solid var(--divider)',
-            borderRadius: 8, padding: 12, overflowX: 'auto', color: 'var(--fg-muted)',
-          }}>{JSON.stringify(span.output, null, 2)}</pre>
-        </div>
-      )}
+      {payload != null && <ContentSection label="Payload" value={JSON.stringify(payload, null, 2)} />}
+      {span.output != null && <ContentSection label="Output" value={JSON.stringify(span.output, null, 2)} />}
     </div>
   );
 }
 
 // ---- streaming log ----
 const LOG_TONE: Record<string, string> = {
-  info: 'var(--fg-muted)', debug: 'var(--fg-subtle)', query: 'var(--accent)', http: 'var(--st-frozen)', warn: 'var(--orange-primary)', error: 'var(--red-primary)',
+  info: 'var(--fg-muted)', debug: 'var(--fg-subtle)', query: 'var(--accent-text)', http: 'var(--st-frozen-text)', warn: 'var(--orange-text)', error: 'var(--red-text)',
 };
 
 interface LogEntry { id: number; spanId: string; lvl: string; msg: string; ms: number; label: string }
@@ -336,62 +340,130 @@ export function LogStream({ trace, logs, t, selectedId, scoped, setScoped, onLoa
     });
     return out.sort((a, b) => a.ms - b.ms);
   }, [trace, logs]);
-  const visible = lines.filter((l) => l.ms <= t && (!scoped || !selectedId || l.spanId === selectedId));
+  const visible = React.useMemo(
+    () => lines.filter((l) => l.ms <= t && (!scoped || !selectedId || l.spanId === selectedId)),
+    [lines, t, scoped, selectedId],
+  );
   const ref = React.useRef<HTMLDivElement | null>(null);
-  // C3 (p1-17): auto-following must be conditional. `stickToBottom` tracks
-  // whether the reader is at the bottom (a scroll event updates it; appending
-  // lines does not). Only then does the length-change effect pull them to the
-  // new bottom — a user who scrolled up keeps their position through the 2s
-  // poll instead of being yanked back every refresh. Starts pinned so a fresh
-  // view follows its run's log tail.
   const stickToBottom = React.useRef(true);
+  const scope = scoped ? `span:${selectedId}` : 'all';
+  const [following, setFollowing] = React.useState(true);
+  const previous = React.useRef<{
+    firstId: number | undefined; height: number; top: number; scope: string;
+    anchor: { id: string; offset: number } | null;
+  } | null>(null);
+  const wasHidden = React.useRef(false);
+  const rememberPosition = () => {
+    const el = ref.current;
+    if (el) previous.current = {
+      firstId: visible[0]?.id, height: el.scrollHeight, top: el.scrollTop, scope, anchor: logAnchor(el),
+    };
+  };
   const onScroll = () => {
     const el = ref.current;
-    if (el) stickToBottom.current = isAtBottom(el.scrollTop, el.clientHeight, el.scrollHeight);
+    if (!el) return;
+    const tracePanel = el.closest('.run-trace-panel');
+    if (tracePanel && getComputedStyle(tracePanel).display === 'none') return;
+    stickToBottom.current = isAtBottom(el.scrollTop, el.clientHeight, el.scrollHeight);
+    setFollowing(stickToBottom.current);
+    rememberPosition();
   };
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
+    // Every newly selected stream starts at its own tail, including a return
+    // to a scope the reader paused earlier.
+    stickToBottom.current = true;
+    setFollowing(true);
+  }, [scope]);
+  React.useLayoutEffect(() => {
     const el = ref.current;
-    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [visible.length]);
+    if (!el) return;
+    const tracePanel = el.closest('.run-trace-panel');
+    if (tracePanel && getComputedStyle(tracePanel).display === 'none') {
+      // A poll may arrive while the compact UI shows Details. Preserve the
+      // last visible geometry until Trace is displayed again.
+      wasHidden.current = true;
+      return;
+    }
+    const before = previous.current;
+    const prepended = before && before.firstId !== visible[0]?.id && visible.some((l) => l.id === before.firstId);
+    if (stickToBottom.current) {
+      el.scrollTop = el.scrollHeight;
+    } else if ((prepended || wasHidden.current) && before) {
+      const row = before.anchor && el.querySelector<HTMLElement>(`[data-log-id="${before.anchor.id}"]`);
+      if (row && before.anchor) {
+        el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - before.anchor.offset;
+      } else {
+        el.scrollTop = before.top + (prepended ? el.scrollHeight - before.height : 0);
+      }
+    }
+    wasHidden.current = false;
+    previous.current = { firstId: visible[0]?.id, height: el.scrollHeight, top: el.scrollTop, scope, anchor: logAnchor(el) };
+  });
+  const jumpToLatest = () => {
+    stickToBottom.current = true;
+    setFollowing(true);
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+    rememberPosition();
+  };
+  const loadOlder = () => {
+    // Paging is an explicit request to read history, even when clicked at the
+    // tail. Capture an existing row before the response inserts older ones.
+    rememberPosition();
+    stickToBottom.current = false;
+    setFollowing(false);
+    void onLoadOlderLogs();
+  };
+  const selectedLabel = trace.spans.find((span) => span.id === selectedId)?.label;
+  const isActive = ['queued', 'running', 'frozen'].includes(trace.spans[0]?.status ?? '');
+  const emptyMessage = scoped && selectedId
+    ? 'No logs for this span.'
+    : isActive ? 'Waiting for logs…' : 'No logs were recorded for this run.';
   return (
-    <div style={{ height: 184, flexShrink: 0, borderTop: '1px solid var(--border)', background: 'var(--panel-bg)', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ height: 34, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10, padding: '0 14px', borderBottom: '1px solid var(--divider)' }}>
-        <Icon name="terminal" size={14} style={{ color: 'var(--fg-subtle)' }} />
-        <span style={{ fontSize: 12.5, fontWeight: 600 }}>Logs</span>
-        <span style={{ fontSize: 11, color: 'var(--fg-subtle)' }} className="tnum">{visible.length} lines</span>
-        <div style={{ flex: 1 }} />
-        {hasOlderLogs && (
-          <button onClick={() => void onLoadOlderLogs()} disabled={loadingOlderLogs}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--border)',
-              background: 'var(--surface)', color: 'var(--fg-muted)', cursor: 'pointer',
-            }}>
-            <Icon name="chevronUp" size={12} /> {loadingOlderLogs ? 'Loading…' : 'Load older logs'}
+    <section className="run-log-stream" aria-label="Run logs">
+      <div className="run-log-toolbar">
+        <div className="run-log-title">
+          <Icon name="terminal" size={14} />
+          <h4>Logs</h4>
+          <span className="tnum">{visible.length} lines</span>
+          <span className={`run-follow-status${following ? ' is-following' : ''}`} role="status">{following ? 'Following' : 'Paused'}</span>
+        </div>
+        <div className="run-log-actions">
+          {!following && <button type="button" className="run-small-button" onClick={jumpToLatest}>Jump to latest</button>}
+          {hasOlderLogs && (
+            <button type="button" className="run-small-button" onClick={loadOlder} disabled={loadingOlderLogs}>
+              <Icon name="chevronUp" size={12} /> {loadingOlderLogs ? 'Loading…' : 'Load older logs'}
+            </button>
+          )}
+          <button type="button" className="run-small-button run-scope-button" onClick={() => setScoped((v) => !v)}
+            aria-pressed={scoped} title={scoped ? `Logs for ${selectedLabel ?? 'selected span'}` : 'Show only the selected span'}>
+            <Icon name="filter" size={12} /> <span>{scoped ? `Span: ${selectedLabel ?? 'selected span'}` : 'All spans'}</span>
           </button>
-        )}
-        {loadOlderLogsError && (
-          <span role="alert" style={{ fontSize: 11, color: 'var(--red-text)' }}>Load failed — retry</span>
-        )}
-        <button onClick={() => setScoped((v) => !v)}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--border)',
-            background: scoped ? 'var(--accent-fill)' : 'transparent', color: scoped ? 'var(--accent)' : 'var(--fg-muted)', cursor: 'pointer',
-          }}>
-          <Icon name="filter" size={12} /> {scoped ? 'Scoped to span' : 'All spans'}
-        </button>
+        </div>
+        {loadOlderLogsError && <div className="run-log-load-error" role="alert">Could not load older logs. Use “Load older logs” to retry.</div>}
       </div>
-      <div ref={ref} onScroll={onScroll} style={{ flex: 1, overflowY: 'auto', padding: '8px 14px', fontFamily: 'var(--font-mono)', fontSize: 11.5, lineHeight: 1.85 }}>
-        {visible.length === 0 && <div style={{ color: 'var(--fg-faint)', fontFamily: 'var(--font-sans)' }}>Waiting for logs…</div>}
+      <div ref={ref} onScroll={onScroll} className="run-log-scroller" role="region" aria-label="Log entries" tabIndex={0}>
+        {visible.length === 0 && <div className="run-log-empty">{emptyMessage}</div>}
         {visible.map((l) => (
-          <div key={l.id} style={{ display: 'flex', gap: 10 }}>
-            <span className="tnum" style={{ color: 'var(--fg-faint)', flexShrink: 0, width: 52, textAlign: 'right' }}>{fmtMs(l.ms)}</span>
-            <span style={{ color: LOG_TONE[l.lvl], textTransform: 'uppercase', fontSize: 10, fontWeight: 600, flexShrink: 0, width: 42, paddingTop: 1 }}>{l.lvl}</span>
-            <span style={{ color: 'var(--fg)', flex: 1 }}>{l.msg}</span>
+          <div key={l.id} className="run-log-line" data-log-id={l.id}>
+            <span className="run-log-time tnum">{fmtMs(l.ms)}</span>
+            <span className="run-log-level" style={{ color: LOG_TONE[l.lvl] }}>{l.lvl}</span>
+            <span className="run-log-message">{l.msg}</span>
           </div>
         ))}
       </div>
-    </div>
+    </section>
   );
+}
+
+function logAnchor(el: HTMLElement): { id: string; offset: number } | null {
+  const viewport = el.getBoundingClientRect();
+  for (const row of el.querySelectorAll<HTMLElement>('[data-log-id]')) {
+    const bounds = row.getBoundingClientRect();
+    if (bounds.bottom > viewport.top && bounds.top < viewport.bottom) {
+      return { id: row.dataset.logId!, offset: bounds.top - viewport.top };
+    }
+  }
+  return null;
 }
 
 // ---- full run view ----
@@ -423,7 +495,7 @@ export function RunView({ vizStyle = 'waterfall', runId = null, env = 'prod', on
   }
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+    <div className="run-view">
       {onBack && (
         <div style={{ padding: '10px 20px 0', background: 'var(--panel-bg)' }}>
           <button onClick={onBack} style={{
@@ -448,7 +520,16 @@ function RunDetail({ detail, vizStyle, env, onLoadOlderLogs, loadingOlderLogs, h
   const logs: Record<string, LogLine[]> = detail.spanLogs;
   const [selectedId, setSelectedId] = React.useState(trace.spans[0]?.id ?? '');
   const [scoped, setScoped] = React.useState(false);
-  const labelW = vizStyle === 'tree' ? 320 : 300;
+  const [panel, setPanel] = React.useState<'trace' | 'details'>('trace');
+  const panelId = React.useId();
+  const labelW = 'var(--run-label-width)';
+  const activateTab = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 'trace' : event.key === 'End' ? 'details' : panel === 'trace' ? 'details' : 'trace';
+    setPanel(next);
+    document.getElementById(`${panelId}-${next}-tab`)?.focus();
+  };
 
   // the whole timeline is revealed at once; status comes from the server.
   const t = trace.totalMs;
@@ -458,21 +539,36 @@ function RunDetail({ detail, vizStyle, env, onLoadOlderLogs, loadingOlderLogs, h
   return (
     <>
       <RunHeader trace={trace} runStatus={detail.status} env={env} onRetried={onRetried} />
-      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, position: 'relative', background: 'var(--surface)' }}>
-          <div style={{ flex: 1, overflowY: 'auto', position: 'relative' }}>
-            <Ruler totalMs={trace.totalMs} labelW={labelW} />
-            <div style={{ position: 'relative', padding: '6px 0 16px' }}>
-              {trace.spans.map((s) => (
-                <SpanRow key={s.id} s={s} t={t} totalMs={trace.totalMs} labelW={labelW}
-                  selected={selected?.id === s.id} onSelect={setSelectedId} vizStyle={vizStyle} />
-              ))}
+      <div className="run-panel-tabs" role="tablist" aria-label="Run panels">
+        {(['trace', 'details'] as const).map((name) => (
+          <button key={name} id={`${panelId}-${name}-tab`} type="button" role="tab"
+            aria-selected={panel === name} aria-controls={`${panelId}-${name}`}
+            tabIndex={panel === name ? 0 : -1} onClick={() => setPanel(name)} onKeyDown={activateTab}>
+            <Icon name={name === 'trace' ? 'activity' : 'layers'} size={14} />
+            {name === 'trace' ? 'Trace & logs' : 'Span details'}
+          </button>
+        ))}
+      </div>
+      <div className="run-workspace" data-panel={panel} data-viz={vizStyle}>
+        <section id={`${panelId}-trace`} className="run-trace-panel" role="tabpanel" aria-labelledby={`${panelId}-trace-tab`}>
+          <div className="run-trace-heading"><h4>Execution trace</h4><span className="tnum">{trace.spans.length} spans</span></div>
+          <div className="run-timeline-scroller" tabIndex={0} aria-label="Span timeline">
+            <div className="run-timeline">
+              <Ruler totalMs={trace.totalMs} labelW={labelW} />
+              <div style={{ position: 'relative', padding: '6px 0 16px' }}>
+                {trace.spans.map((s) => (
+                  <SpanRow key={s.id} s={s} t={t} totalMs={trace.totalMs} labelW={labelW}
+                    selected={selected?.id === s.id} onSelect={setSelectedId} vizStyle={vizStyle} />
+                ))}
+              </div>
             </div>
           </div>
           <LogStream trace={trace} logs={logs} t={t} selectedId={selected?.id ?? ''} scoped={scoped} setScoped={setScoped}
             onLoadOlderLogs={onLoadOlderLogs} loadingOlderLogs={loadingOlderLogs} hasOlderLogs={hasOlderLogs} loadOlderLogsError={loadOlderLogsError} />
-        </div>
-        <Inspector span={selected} t={t} trace={trace} wake={wake} />
+        </section>
+        <section id={`${panelId}-details`} className="run-inspector" role="tabpanel" aria-labelledby={`${panelId}-details-tab`} tabIndex={0}>
+          <Inspector key={selected?.id} span={selected} t={t} trace={trace} wake={wake} />
+        </section>
       </div>
     </>
   );
