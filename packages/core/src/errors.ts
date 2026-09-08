@@ -123,8 +123,18 @@ export function isControlFlowSignal(
  * branch below produces a string message; nothing here throws.
  */
 export function serializeError(err: unknown): SerializedError {
-  if (err instanceof Error) {
-    return { message: err.message, name: err.name, stack: err.stack };
+  try {
+    if (err instanceof Error) {
+      // Each field is independent: one throwing getter must not discard the
+      // other readable diagnostics. Values can violate Error's TS types too.
+      return {
+        message: readErrorString(err, 'message') ?? 'unreadable error message',
+        name: readErrorString(err, 'name'),
+        stack: readErrorString(err, 'stack'),
+      };
+    }
+  } catch {
+    // Even instanceof can throw for a revoked proxy / getPrototypeOf trap.
   }
   if (typeof err === 'string') {
     return { message: err };
@@ -133,14 +143,33 @@ export function serializeError(err: unknown): SerializedError {
   try {
     json = JSON.stringify(err);
   } catch {
-    // A BigInt or a circular structure: JSON.stringify cannot represent them.
+    // BigInt, cycles and user-defined getters / toJSON can all throw.
     json = undefined;
   }
   if (json === undefined) {
     // Either stringify threw above, or it legitimately returned undefined — a
     // top-level undefined/function/symbol, which has no JSON spelling. String()
     // (not a template interpolation) is used because `${symbol}` itself throws.
-    return { message: `non-serializable thrown value: ${String(err)}` };
+    // It also needs its own guard: null-prototype objects and hostile
+    // toString / Symbol.toPrimitive hooks may have no string representation.
+    return { message: `non-serializable thrown value: ${tryString(err) ?? '[unprintable value]'}` };
   }
   return { message: json };
+}
+
+function tryString(value: unknown): string | undefined {
+  try {
+    return String(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function readErrorString(err: Error, key: 'message' | 'name' | 'stack'): string | undefined {
+  try {
+    const value: unknown = err[key];
+    return value === undefined ? undefined : tryString(value);
+  } catch {
+    return undefined;
+  }
 }

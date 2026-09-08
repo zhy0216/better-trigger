@@ -11,13 +11,13 @@
    value JSON cannot represent, 'payload_too_large' for one that exceeds
    `maxBytes`).
 
-   Canonical form, matching the replay-fingerprint serializer
-   (packages/kernel/src/fingerprint.ts, C1): object keys are sorted
+   Canonical form for storage and replay fingerprints: object keys are sorted
    recursively, so two values that differ only in key order serialize
    byte-identically and a jsonb round trip (Postgres reorders keys) changes
    nothing. The algorithm lives here, standalone — core must never depend on
    the kernel.
    ============================================================================= */
+import { serializeError } from './errors';
 import type { KernelErrorCode } from './kernel-errors';
 
 export interface SerializeOk {
@@ -44,48 +44,36 @@ export interface SerializeFailure {
 
 export type SerializeResult = SerializeOk | SerializeFailure;
 
-interface JsonObject {
-  toJSON?: () => unknown;
+/**
+ * Shared canonical JSON bytes for storage and replay. Native JSON.stringify
+ * first resolves getters, toJSON(key), boxed primitives, Dates and omissions
+ * in native traversal order. Sorting only the resulting JSON tree avoids
+ * invoking user hooks twice or recursively re-entering a self-returning hook.
+ *
+ * Like JSON.stringify, returns undefined for a root with no JSON spelling and
+ * throws for BigInt, cycles or throwing hooks. Use safeSerializeJson at an
+ * error boundary. Ordinary JSON keeps its existing bytes: array order stays
+ * intact, integer-index keys precede other keys in numeric order, and other
+ * object keys are sorted by UTF-16 code units. No input objects are mutated.
+ */
+export function canonicalStringify(value: unknown): string | undefined {
+  const json = JSON.stringify(value);
+  if (json === undefined) return undefined;
+  return JSON.stringify(canonicalizePlain(JSON.parse(json)));
 }
 
-/** Recursive canonicalization: keys sorted, toJSON honored (once per value),
- *  circular values rejected. Matches JSON.stringify's value semantics —
- *  undefined/function members are dropped in objects and become null in
- *  arrays; Date-like values go through toJSON first. */
-function canonicalize(value: unknown, seen: WeakSet<object>): unknown {
+/** Only receives a parsed JSON tree: no hooks, boxed values or cycles remain. */
+function canonicalizePlain(value: unknown): unknown {
   if (value === null || typeof value !== 'object') return value;
-  if (typeof (value as JsonObject).toJSON === 'function') {
-    // toJSON is consulted exactly once, like JSON.stringify: its return value
-    // is serialized as a plain value, never re-checked for toJSON — otherwise
-    // { toJSON() { return this } } recurses forever (JSON.stringify yields
-    // '{"a":1}' for that shape).
-    return canonicalizePlain((value as JsonObject).toJSON?.(), seen);
-  }
-  return canonicalizePlain(value, seen);
-}
-
-function canonicalizePlain(value: unknown, seen: WeakSet<object>): unknown {
-  if (value === null || typeof value !== 'object') return value;
-  if (seen.has(value)) {
-    throw new TypeError('cannot serialize a circular structure');
-  }
-  seen.add(value);
-  let out: unknown;
   if (Array.isArray(value)) {
-    out = value.map((v) =>
-      v === undefined || typeof v === 'function' ? null : canonicalize(v, seen),
-    );
-  } else {
-    const record: Record<string, unknown> = {};
-    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      const v = (value as Record<string, unknown>)[key];
-      if (v === undefined || typeof v === 'function') continue;
-      record[key] = canonicalize(v, seen);
-    }
-    out = record;
+    return value.map(canonicalizePlain);
   }
-  seen.delete(value);
-  return out;
+  // A null prototype makes __proto__ an ordinary own data key, never a setter.
+  const record: Record<string, unknown> = Object.create(null);
+  for (const key of Object.keys(value).sort()) {
+    record[key] = canonicalizePlain((value as Record<string, unknown>)[key]);
+  }
+  return record;
 }
 
 /** UTF-8 byte length. TextEncoder rather than Buffer: core is on the SDK's
@@ -126,7 +114,7 @@ export function safeSerializeJson(
 ): SerializeResult {
   let json: string;
   try {
-    const out = JSON.stringify(canonicalize(value, new WeakSet<object>()));
+    const out = canonicalStringify(value);
     if (out === undefined) {
       // JSON.stringify returns undefined for a top-level undefined/function/
       // symbol — a value that has no JSON spelling at all.
@@ -138,10 +126,10 @@ export function safeSerializeJson(
     }
     json = out;
   } catch (err) {
-    // TypeError from the canonicalizer (circular structure) or from
-    // JSON.stringify (BigInt, an exotic object). A stable error record, never
-    // a raw throw — callers turn it into the KernelError the host maps to 4xx.
-    const reason = err instanceof Error ? err.message : String(err);
+    // JSON.stringify rejects cycles / BigInt, and user hooks may throw any
+    // value. Return a stable record; callers turn it into the KernelError
+    // the host maps to 4xx. Diagnosing that thrown value must also be safe.
+    const reason = serializeError(err).message;
     return fail(
       field,
       'serialization_error',
