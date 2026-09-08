@@ -20,7 +20,7 @@ default_agent: codex
 | [04-namespace-pair-isolation.md](done/04-namespace-pair-isolation.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | cron 与指标按真实 namespace pair 隔离（F7–F8） | 已完成，已 rebase main 并通过复核，待协调器集成 |
 | [05-probe-deadline-lifecycle.md](05-probe-deadline-lifecycle.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | deadline 后连接和查询的清理（F9–F10） | 待执行 |
 | [06-worker-numeric-limits.md](06-worker-numeric-limits.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | runtime timer 和 pool 参数的底层范围（F11–F12） | 待执行 |
-| [07-dashboard-query-lifecycle.md](07-dashboard-query-lifecycle.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | 分页、凭据切换和终态读取竞态（F13–F15） | 待执行 |
+| [07-dashboard-query-lifecycle.md](done/07-dashboard-query-lifecycle.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | 分页、凭据切换和终态读取竞态（F13–F15） | 已完成：T1–T3，已 rebase main；局部 103 / 根 PG 1,776 tests 通过，保留首次 waiters 失败及复核记录 |
 | [08-run-detail-async-controls.md](08-run-detail-async-controls.md) | P1 | medium | codex / 继承 | gpt-6-astra / xhigh | 运行操作的迟到 UI 副作用与复制反馈回归（F16–F17） | 待执行 |
 | [09-docs-workflow-concurrency.md](done/09-docs-workflow-concurrency.md) | P2 | easy | codex / 继承 | gpt-6-astra / high | 隔离 docs PR 与 main 发布的并发组（F18） | 已完成：PR 按编号取消旧构建，发布串行且权限限于 deploy；本地 docs 与根 gate（PG 1,594 tests）通过 |
 

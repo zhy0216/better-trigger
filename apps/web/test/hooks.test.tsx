@@ -13,7 +13,7 @@
    ============================================================================= */
 import { act, cleanup, render, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { setApiKey } from '../src/api/client';
+import { api, setApiKey } from '../src/api/client';
 import { getConnection, resetConnection, useRun, useRuns, useSchedules, useTasks } from '../src/api/hooks';
 import type { RunDetailResponse, RunLog, RunsResponse, RunSummary, ServerRunStatus } from '../src/api/client';
 
@@ -58,6 +58,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
 });
 
@@ -576,6 +577,95 @@ describe('useRun logs pagination (loadOlderLogs)', () => {
 });
 
 describe('useRun stops polling on a terminal run (C1)', () => {
+  it.each(['completed', 'failed', 'canceled'] as const)('ignores a retired %s response while a new run is pending', async (status) => {
+    let resolveOld!: (value: RunDetailResponse) => void;
+    let resolveNew!: (value: RunDetailResponse) => void;
+    const old = new Promise<RunDetailResponse>((resolve) => { resolveOld = resolve; });
+    const fresh = new Promise<RunDetailResponse>((resolve) => { resolveNew = resolve; });
+    const request = vi.spyOn(api, 'run').mockReturnValueOnce(old).mockReturnValue(fresh);
+    const { result, rerender } = renderHook(({ runId }) => useRun(runId), { initialProps: { runId: 'old' } });
+    rerender({ runId: 'new' });
+    expect(request.mock.calls[0][3]?.aborted).toBe(true);
+    const freshSignal = request.mock.calls[1][3]!;
+
+    // Settle exactly the retired fetcher, without a timer or a compliant
+    // transport. Previously its setTerminal aborted the fresh pending request.
+    await act(async () => { resolveOld(detail([1], null, status)); });
+    expect(freshSignal.aborted).toBe(false);
+    expect(result.current).toMatchObject({ data: null, loading: true, error: null });
+    const body = detail([201], 201, 'running');
+    body.run.id = 'new';
+    await act(async () => { resolveNew(body); });
+    expect(result.current.data?.trace.runId).toBe('new');
+    expect(result.current).toMatchObject({ loading: false, error: null });
+    expect(result.current.data?.status).toBe('running');
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['completed', 'failed', 'canceled'] as const)('holds the complete accepted %s detail and refreshes it on key/env/run changes', async (status) => {
+    const body = detail([201], 201, status);
+    body.run.payload = { input: 'kept' };
+    body.run.output = { output: 'kept' };
+    body.steps = [{
+      seq: 0, kind: 'step', label: 'kept step', status: 'completed', output: { step: 'kept' },
+      error: null, attempt: 1, startedAt: body.run.startedAt, finishedAt: body.run.finishedAt,
+    }];
+    const request = vi.spyOn(api, 'run').mockResolvedValue(body);
+    const { result, rerender } = renderHook(({ runId, env }) => useRun(runId, env), {
+      initialProps: { runId: 'r1', env: 'prod' },
+    });
+    await flush();
+    expect(result.current.loading).toBe(false);
+    expect(result.current.data?.trace).toMatchObject({
+      payload: { input: 'kept' },
+      spans: [{ output: { output: 'kept' } }, { label: 'kept step', output: { step: 'kept' } }],
+    });
+    expect(result.current.data?.spanLogs.s0?.[0][1]).toBe('line 201');
+    const held = result.current.data;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result.current.data).toBe(held);
+
+    act(() => { setApiKey('new-key'); });
+    expect(result.current.data).toBeNull();
+    await flush();
+    expect(request).toHaveBeenCalledTimes(2);
+    rerender({ runId: 'r1', env: 'staging' });
+    expect(result.current.data).toBeNull();
+    await flush();
+    expect(request).toHaveBeenCalledTimes(3);
+    rerender({ runId: 'r2', env: 'staging' });
+    expect(result.current.data).toBeNull();
+    await flush();
+    expect(request).toHaveBeenCalledTimes(4);
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('rejects terminal results from the first StrictMode effect after its cleanup', async () => {
+    let resolveRetired!: (value: RunDetailResponse) => void;
+    let resolveCurrent!: (value: RunDetailResponse) => void;
+    const request = vi.spyOn(api, 'run')
+      .mockReturnValueOnce(new Promise((resolve) => { resolveRetired = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveCurrent = resolve; }));
+    const { result, unmount } = renderHook(() => useRun('r1'), {
+      reactStrictMode: true,
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[0][3]?.aborted).toBe(true);
+    await act(async () => { resolveRetired(detail([1], null)); });
+    expect(request.mock.calls[1][3]?.aborted).toBe(false);
+    expect(result.current).toMatchObject({ data: null, loading: true });
+    await act(async () => { resolveCurrent(detail([201], null)); });
+    expect(result.current.data?.spanLogs.s0?.[0][1]).toBe('line 201');
+    expect(result.current.loading).toBe(false);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('pauses once terminal, keeps the frame, and re-arms on a new runId', async () => {
     let status: ServerRunStatus = 'running';
     fetchMock.mockImplementation(() =>

@@ -140,6 +140,56 @@ function useApiKeyVersion(): number {
   return React.useSyncExternalStore(subscribeApiKey, getApiKeyVersion, getApiKeyVersion);
 }
 
+interface QueryGeneration {
+  key: string;
+  apiKeyVersion: number;
+  owner: React.RefObject<QueryGeneration | null>;
+  controllers: Set<AbortController>;
+}
+
+/** One identity for the head and every page. Object identity also retires
+ *  requests across A → B → A. Pausing does not create a new generation. */
+function useQueryGeneration(key: string): QueryGeneration {
+  const apiKeyVersion = useApiKeyVersion();
+  const owner = React.useRef<QueryGeneration | null>(null);
+  const generation = React.useMemo<QueryGeneration>(() => ({
+    key, apiKeyVersion, owner, controllers: new Set(),
+  }), [key, apiKeyVersion]);
+
+  React.useLayoutEffect(() => {
+    owner.current = generation;
+    return () => {
+      owner.current = null;
+      for (const controller of generation.controllers) controller.abort();
+      generation.controllers.clear();
+    };
+  }, [generation]);
+  return generation;
+}
+
+function isCurrent(generation: QueryGeneration): boolean {
+  // The external store may have changed before React commits its next render.
+  return generation.owner.current === generation && generation.apiKeyVersion === getApiKeyVersion();
+}
+
+/** Drop all state during the identity-changing render, before descendants
+ *  can display it. Queued updates still belong to their original generation. */
+function useQueryState<T>(
+  generation: QueryGeneration,
+  initial: T,
+): [T, React.Dispatch<React.SetStateAction<T>>] {
+  const [snapshot, setSnapshot] = React.useState({ generation, value: initial });
+  const value = snapshot.generation === generation ? snapshot.value : initial;
+  if (snapshot.generation !== generation) setSnapshot({ generation, value });
+  const setValue = React.useCallback((next: React.SetStateAction<T>) => {
+    setSnapshot((prev) => prev.generation === generation ? {
+      generation,
+      value: typeof next === 'function' ? (next as (value: T) => T)(prev.value) : next,
+    } : prev);
+  }, [generation]);
+  return [value, setValue];
+}
+
 /** Subscribe to the aggregate connection state (drives the TopBar dot). */
 export function useConnection(): Connection {
   const [, force] = React.useReducer((n: number) => n + 1, 0);
@@ -154,7 +204,7 @@ export function useConnection(): Connection {
 
 /* ---- generic polling driver ---------------------------------------------- */
 interface PollResult<T> {
-  /** null until the first successful fetch; last good frame afterwards. */
+  /** null until this identity's first successful fetch; last good frame afterwards. */
   data: T | null;
   /** true until the first response (success or failure) arrives. */
   loading: boolean;
@@ -163,42 +213,32 @@ interface PollResult<T> {
 
 /**
  * Poll `fetcher` every 2s. Failures set `error` but never stop the loop —
- * the next successful poll clears the error. `queryKey` is a stable string
- * identity for the current query (built by the caller from its own primitive
- * inputs); a change re-arms the effect and drops the held frame. `fetcher`
- * receives an AbortSignal so in-flight requests are canceled on unmount /
+ * the next successful poll clears the error. A new `generation` re-arms the
+ * effect and drops the held frame. `fetcher` receives an AbortSignal so
+ * in-flight requests are canceled on unmount /
  * key change. The fetcher is read through a ref, so it may close over the
  * latest render without being an effect dependency.
  */
 function usePoll<T>(
-  queryKey: string,
+  generation: QueryGeneration,
   fetcher: (signal: AbortSignal) => Promise<T>,
   enabled: boolean = true,
+  stopWhen?: (data: T) => boolean,
 ): PollResult<T> {
-  const [data, setData] = React.useState<T | null>(null);
-  const [loading, setLoading] = React.useState(true);
-  const [error, setError] = React.useState<string | null>(null);
-  const apiKeyVersion = useApiKeyVersion();
+  const [state, setState] = useQueryState<PollResult<T>>(generation, {
+    data: null, loading: true, error: null,
+  });
   const fetcherRef = React.useRef(fetcher);
-  fetcherRef.current = fetcher;
-
-  // queryKey change (other run / other filters) → the held frame is for the
-  // wrong query; drop it during render so stale data never flashes (React's
-  // derive-state-from-props pattern). `enabled` toggles deliberately excluded:
-  // pausing must hold the current frame.
-  const lastKey = React.useRef(queryKey);
-  if (lastKey.current !== queryKey) {
-    lastKey.current = queryKey;
-    setData(null);
-    setLoading(true);
-    setError(null);
-  }
+  React.useLayoutEffect(() => { fetcherRef.current = fetcher; });
+  // Only accepted current data can pause the poll; a retired fetcher has no
+  // terminal side effect. Identity changes already returned an empty frame.
+  const polling = enabled && !(state.data !== null && stopWhen?.(state.data));
 
   React.useEffect(() => {
     // Paused: hold whatever data we have, issue no request, run no timer.
     // enabled false→true re-arms this effect, which doubles as the immediate
     // refresh on resume.
-    if (!enabled) return;
+    if (!polling) return;
     const id = registerConnection();
     let mounted = true;
     let controller: AbortController | null = null;
@@ -207,35 +247,41 @@ function usePoll<T>(
     // poll: the self-rescheduling setTimeout chain never overlaps by design, but
     // visibilitychange fires run() directly from an event handler.
     let inFlight = false;
+    let terminal = false;
 
     // Self-rescheduling setTimeout: the next poll only starts once this one
     // settles, so a slow response is never interrupted and never overlaps.
     const run = async () => {
-      if (inFlight) return;
+      if (inFlight || terminal || !isCurrent(generation)) return;
       inFlight = true;
-      controller = new AbortController();
+      const request = new AbortController();
+      controller = request;
+      generation.controllers.add(request);
+      const stale = () => !mounted || !isCurrent(generation) || request.signal.aborted;
       try {
-        const out = await fetcherRef.current(controller.signal);
-        if (!mounted) return;
-        setData(out);
-        setError(null);
-        setLoading(false);
+        const out = await fetcherRef.current(request.signal);
+        if (stale()) return;
+        terminal = stopWhen?.(out) ?? false;
+        setState({ data: out, error: null, loading: false });
         reportOutcome(id, 'ok');
       } catch (e) {
-        if (!mounted) return;
-        // Only the effect cleanup aborts (unmount / key change / enabled
-        // flip); when that fires mid-flight `mounted` is already false, so a
-        // silent return here is safe — the mounted guard swallowed it.
+        if (stale()) return;
+        // Lifecycle cancellation was already discarded by the guard. Keep
+        // transport AbortErrors silent; client timeouts are ordinary Errors.
         if (e instanceof Error && e.name === 'AbortError') return;
-        setError(e instanceof Error ? e.message || 'request failed' : 'request failed');
-        setLoading(false);
+        setState((prev) => ({
+          ...prev,
+          error: e instanceof Error ? e.message || 'request failed' : 'request failed',
+          loading: false,
+        }));
         reportOutcome(id, classifyConnectionError(e) === 'unauthorized' ? 'unauthorized' : 'error');
       } finally {
         inFlight = false;
+        generation.controllers.delete(request);
         // Pause while the tab is hidden: only a visible page schedules the next
         // tick, so background tabs stop polling. Returning to visibility fires
         // onVisibility() to refresh immediately.
-        if (mounted && !document.hidden) timer = setTimeout(run, POLL_MS);
+        if (!stale() && !terminal && !document.hidden) timer = setTimeout(run, POLL_MS);
       }
     };
 
@@ -251,20 +297,22 @@ function usePoll<T>(
     return () => {
       mounted = false;
       controller?.abort();
+      if (controller) generation.controllers.delete(controller);
       clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisibility);
       unregisterConnection(id);
     };
-  }, [queryKey, enabled, apiKeyVersion]);
+  }, [generation, polling, setState, stopWhen]);
 
-  return { data, loading, error };
+  return state;
 }
 
 /* ---- public hooks -------------------------------------------------------- */
 
 export function useTasks(env: string = 'prod'): PollResult<Task[]> {
+  const generation = useQueryGeneration(pollKey('tasks', env));
   return usePoll<Task[]>(
-    pollKey('tasks', env),
+    generation,
     async (signal) => adaptTasks((await api.tasks(env, signal)).tasks),
   );
 }
@@ -297,12 +345,10 @@ export function useRuns(
   const status = filters.status;
   const taskId = filters.taskId;
   const pageLimit = filters.limit ?? 50;
-  // Stable identity for the whole runs query — used both by the poll and by
-  // the tail-invalidation effect so they can never drift apart.
-  const queryKey = pollKey('runs', env, status, taskId, pageLimit);
+  const generation = useQueryGeneration(pollKey('runs', env, status, taskId, pageLimit));
 
   const base = usePoll<{ runs: Run[]; nextCursor: string | null }>(
-    queryKey,
+    generation,
     async (signal) => {
       const res = await api.runs({ env, status, taskId, limit: pageLimit }, signal);
       return { runs: adaptRuns(res.runs), nextCursor: res.nextCursor };
@@ -310,22 +356,21 @@ export function useRuns(
     enabled,
   );
 
-  const [tail, setTail] = React.useState<Run[]>([]);
   // Continuation cursor for the tail pages, INDEPENDENT of the polled head:
   //   undefined  paging not started — the first loadMore uses the head's cursor
   //   null       started and exhausted — no more pages
   //   string     the last loaded page's cursor
   // The head poll must never touch it (see the loadMore comment below).
-  const [tailCursor, setTailCursor] = React.useState<string | null | undefined>(undefined);
-  const [loadingMore, setLoadingMore] = React.useState(false);
-  const [loadMoreError, setLoadMoreError] = React.useState<string | null>(null);
-  // C1 (p1-17): generation counter for the query identity. The reset effect
-  // below bumps it whenever env/filters change; a loadMore in flight when that
-  // happens snapshots the old generation and DISCARDS its response on arrival,
-  // so a slow page of the previous query can never append old-env rows to the
-  // new list. A counter (not the key string) also catches prod→staging→prod
-  // round trips, where the key matches again but the tail was reset.
-  const pageGen = React.useRef(0);
+  const [{ tail, tailCursor, loadingMore, loadMoreError }, setPage] = useQueryState<{
+    tail: Run[];
+    tailCursor: string | null | undefined;
+    loadingMore: boolean;
+    loadMoreError: string | null;
+  }>(generation, { tail: [], tailCursor: undefined, loadingMore: false, loadMoreError: null });
+  // A controller owns the synchronous lock as well as cancellation. React
+  // state alone cannot exclude a second call in the same tick. An aborted
+  // previous generation never blocks a new request, even if it won't settle.
+  const pageRequest = React.useRef<AbortController | null>(null);
 
   // The polled head's own keyset. It only answers "are there more runs at
   // all" BEFORE paging has started — once the user has loaded an older page,
@@ -336,47 +381,38 @@ export function useRuns(
   // slide off the head into the gap are only reachable by refreshing filters.
   const headHasMore = (base.data?.nextCursor ?? null) !== null;
 
-  // A filter/env change invalidates appended pages — they were loaded for the
-  // previous query. Bumping pageGen also retires any page still in flight
-  // (see the C1 guard inside loadMore).
-  React.useEffect(() => {
-    pageGen.current += 1;
-    setTail([]);
-    setTailCursor(undefined);
-    setLoadingMore(false);
-    setLoadMoreError(null);
-  }, [queryKey]);
-
   const loadMore = React.useCallback(async (): Promise<boolean> => {
-    if (loadingMore || !enabled) return false;
+    if (!enabled || !isCurrent(generation) || (pageRequest.current && !pageRequest.current.signal.aborted)) return false;
     if (tailCursor === null) return false; // already loaded everything
     const cursor = tailCursor ?? base.data?.nextCursor ?? null;
     if (cursor === null) return false; // the head page itself was the last page
-    const gen = pageGen.current;
-    const stale = () => pageGen.current !== gen;
-    setLoadingMore(true);
-    setLoadMoreError(null);
+    const controller = new AbortController();
+    pageRequest.current = controller;
+    generation.controllers.add(controller);
+    const stale = () => !isCurrent(generation) || controller.signal.aborted || pageRequest.current !== controller;
+    setPage((prev) => ({ ...prev, loadingMore: true, loadMoreError: null }));
     try {
-      const res = await api.runs({ env, status, taskId, limit: pageLimit, cursor });
-      // The query changed while this page was in flight — the reset effect
-      // already dropped the tail; committing now would splice the OLD query's
-      // rows into the new list.
+      const res = await api.runs({ env, status, taskId, limit: pageLimit, cursor }, controller.signal);
       if (stale()) return false;
-      setTail((prev) => appendTailPage(prev, adaptRuns(res.runs)));
       // Only the user's own paging advances the tail cursor.
-      setTailCursor(res.nextCursor);
+      setPage((prev) => ({
+        ...prev, tail: appendTailPage(prev.tail, adaptRuns(res.runs)), tailCursor: res.nextCursor,
+      }));
       return res.nextCursor !== null;
     } catch (e) {
       if (stale()) return false;
-      setLoadMoreError(e instanceof Error ? e.message || 'request failed' : 'request failed');
+      setPage((prev) => ({
+        ...prev, loadMoreError: e instanceof Error ? e.message || 'request failed' : 'request failed',
+      }));
       return false;
     } finally {
-      // A stale request must not clear the NEW query's spinner either: the
-      // reset effect already set loadingMore false, and a fresh loadMore for
-      // the new key may be in flight right now.
-      if (!stale()) setLoadingMore(false);
+      generation.controllers.delete(controller);
+      if (pageRequest.current === controller) {
+        if (!stale()) setPage((prev) => ({ ...prev, loadingMore: false }));
+        pageRequest.current = null;
+      }
     }
-  }, [loadingMore, enabled, tailCursor, base.data?.nextCursor, env, status, taskId, pageLimit]);
+  }, [generation, setPage, enabled, tailCursor, base.data?.nextCursor, env, status, taskId, pageLimit]);
 
   const head = base.data?.runs ?? [];
   const data = base.data === null ? null : mergeRunPages(head, tail);
@@ -406,6 +442,9 @@ export interface RunDetailResult extends PollResult<AdaptedRunDetail> {
   loadOlderLogsError: string | null;
 }
 
+const isTerminalRun = ({ run }: RunDetailResponse): boolean =>
+  run.status === 'completed' || run.status === 'failed' || run.status === 'canceled';
+
 /**
  * PF3 logs paging: the detail endpoint serves the newest 200 log lines with a
  * `logsNextCursor` when older ones exist; this hook walks that chain. The
@@ -414,82 +453,65 @@ export interface RunDetailResult extends PollResult<AdaptedRunDetail> {
  * — a head that slides forward between polls must not duplicate a line.
  */
 export function useRun(runId: string | null, env: string = 'prod'): RunDetailResult {
-  // C1: a terminal run never mutates in place — a retry mints a NEW id. Flip
-  // this once the detail reports completed/failed/canceled and pause the poll
-  // (the held terminal frame stays on screen). A runId/env change re-arms it:
-  // the next run may still be in flight and must resume polling.
-  const [terminal, setTerminal] = React.useState(false);
+  const generation = useQueryGeneration(pollKey('run', runId, env));
 
   const base = usePoll<RunDetailResponse>(
-    pollKey('run', runId, env),
-    async (signal) => {
-      const res = await api.run(runId!, env, undefined, signal);
-      if (res.run.status === 'completed' || res.run.status === 'failed' || res.run.status === 'canceled') {
-        setTerminal(true);
-      }
-      return res;
-    },
-    runId !== null && !terminal,
+    generation,
+    (signal) => api.run(runId!, env, undefined, signal),
+    runId !== null,
+    isTerminalRun,
   );
 
-  const [olderLogs, setOlderLogs] = React.useState<RunLog[]>([]);
   // Continuation cursor for the older pages, INDEPENDENT of the polled head:
   //   undefined  paging not started — the first load uses the head's cursor
   //   null       started and exhausted — no older page
   //   number     the last loaded page's cursor
-  const [olderCursor, setOlderCursor] = React.useState<number | null | undefined>(undefined);
-  const [loadingOlderLogs, setLoadingOlderLogs] = React.useState(false);
-  const [loadOlderLogsError, setLoadOlderLogsError] = React.useState<string | null>(null);
-  // C1 (p1-17): same generation guard as useRuns.loadMore — an older-log page
-  // that outlives its run/env identity is discarded instead of splicing the
-  // OLD run's lines into the new run's stream.
-  const pageGen = React.useRef(0);
-
-  // A runId/env change invalidates loaded pages (RunDetail is keyed by runId,
-  // so this is belt-and-braces for the same effect). Bumping pageGen also
-  // retires any page still in flight (see loadOlderLogs below).
-  React.useEffect(() => {
-    pageGen.current += 1;
-    setOlderLogs([]);
-    setOlderCursor(undefined);
-    setLoadingOlderLogs(false);
-    setLoadOlderLogsError(null);
-    setTerminal(false);
-  }, [runId, env]);
+  const [{ olderLogs, olderCursor, loadingOlderLogs, loadOlderLogsError }, setPage] = useQueryState<{
+    olderLogs: RunLog[];
+    olderCursor: number | null | undefined;
+    loadingOlderLogs: boolean;
+    loadOlderLogsError: string | null;
+  }>(generation, { olderLogs: [], olderCursor: undefined, loadingOlderLogs: false, loadOlderLogsError: null });
+  const pageRequest = React.useRef<AbortController | null>(null);
 
   const loadOlderLogs = React.useCallback(async (): Promise<boolean> => {
-    if (runId == null || loadingOlderLogs) return false;
+    if (runId == null || !isCurrent(generation) || (pageRequest.current && !pageRequest.current.signal.aborted)) return false;
     if (olderCursor === null) return false; // already loaded everything
     const cursor = olderCursor ?? base.data?.logsNextCursor ?? null;
     if (cursor === null) return false; // the head page itself has no older logs
-    const gen = pageGen.current;
-    const stale = () => pageGen.current !== gen;
-    setLoadingOlderLogs(true);
-    setLoadOlderLogsError(null);
+    const controller = new AbortController();
+    pageRequest.current = controller;
+    generation.controllers.add(controller);
+    const stale = () => !isCurrent(generation) || controller.signal.aborted || pageRequest.current !== controller;
+    setPage((prev) => ({ ...prev, loadingOlderLogs: true, loadOlderLogsError: null }));
     try {
-      const res = await api.run(runId, env, { logsBefore: cursor });
-      // The run/env changed while this page was in flight — the reset effect
-      // already dropped the loaded pages; committing now would splice the OLD
-      // run's lines into the new run's stream.
+      const res = await api.run(runId, env, { logsBefore: cursor }, controller.signal);
       if (stale()) return false;
       // Append the older page; the head may have slid forward between polls,
       // so rows the newer pages already carry are dropped (dedupe by log id).
-      setOlderLogs((prev) => {
-        const seen = new Set(prev.map((l) => l.id));
-        return [...prev, ...res.logs.filter((l) => !seen.has(l.id))];
+      setPage((prev) => {
+        const seen = new Set(prev.olderLogs.map((l) => l.id));
+        return {
+          ...prev,
+          olderLogs: [...prev.olderLogs, ...res.logs.filter((l) => !seen.has(l.id))],
+          olderCursor: res.logsNextCursor,
+        };
       });
-      setOlderCursor(res.logsNextCursor);
       return res.logsNextCursor !== null;
     } catch (e) {
       if (stale()) return false;
-      setLoadOlderLogsError(e instanceof Error ? e.message || 'request failed' : 'request failed');
+      setPage((prev) => ({
+        ...prev, loadOlderLogsError: e instanceof Error ? e.message || 'request failed' : 'request failed',
+      }));
       return false;
     } finally {
-      // A stale request must not clear the NEW run's spinner either (the
-      // reset effect already set it false; a fresh load may be in flight).
-      if (!stale()) setLoadingOlderLogs(false);
+      generation.controllers.delete(controller);
+      if (pageRequest.current === controller) {
+        if (!stale()) setPage((prev) => ({ ...prev, loadingOlderLogs: false }));
+        pageRequest.current = null;
+      }
     }
-  }, [runId, env, loadingOlderLogs, olderCursor, base.data?.logsNextCursor]);
+  }, [generation, setPage, runId, env, olderCursor, base.data?.logsNextCursor]);
 
   const data = React.useMemo<AdaptedRunDetail | null>(() => {
     if (base.data === null) return null;
@@ -513,15 +535,17 @@ export function useRun(runId: string | null, env: string = 'prod'): RunDetailRes
 }
 
 export function useSchedules(env: string = 'prod'): PollResult<Schedule[]> {
+  const generation = useQueryGeneration(pollKey('schedules', env));
   return usePoll<Schedule[]>(
-    pollKey('schedules', env),
+    generation,
     async (signal) => adaptSchedules((await api.schedules(env, signal)).schedules),
   );
 }
 
 export function useWorkers(env: string = 'prod'): PollResult<WorkerSummary[]> {
+  const generation = useQueryGeneration(pollKey('workers', env));
   return usePoll<WorkerSummary[]>(
-    pollKey('workers', env),
+    generation,
     async (signal) => (await api.workers(env, signal)).workers,
   );
 }
