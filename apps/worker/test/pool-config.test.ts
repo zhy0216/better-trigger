@@ -21,6 +21,38 @@ import { derivePoolConfig } from '../src/pool-config';
 const NO_ENV = {} as Record<string, string | undefined>;
 
 describe('derivePoolConfig', () => {
+  it.each([
+    'BETTER_TRIGGER_POOL_MAX',
+    'BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS',
+    'BETTER_TRIGGER_POOL_STATEMENT_TIMEOUT_MS',
+  ])('%s refuses malformed, non-finite and unsafe env values', (name) => {
+    for (const raw of ['', ' ', '-1', '1.5', 'NaN', 'Infinity', '9007199254740992', null, true, 1, []]) {
+      expect(() => derivePoolConfig(5, { [name]: raw } as Record<string, string>), String(raw))
+        .toThrow(name);
+    }
+  });
+
+  it.each(['BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS', 'BETTER_TRIGGER_POOL_STATEMENT_TIMEOUT_MS'])(
+    '%s accepts 0 and the signed 32-bit ceiling, refuses ceiling + 1', (name) => {
+      expect(() => derivePoolConfig(5, { [name]: '0' })).not.toThrow();
+      expect(() => derivePoolConfig(5, { [name]: '2147483647' })).not.toThrow();
+      expect(() => derivePoolConfig(5, { [name]: '2147483648' })).toThrow(name);
+    },
+  );
+
+  it('validates direct concurrency and the headroom sum without an arbitrary pool max cap', () => {
+    for (const concurrency of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '5', null, true]) {
+      for (const env of [{}, { BETTER_TRIGGER_POOL_MAX: '3' }]) {
+        expect(() => derivePoolConfig(concurrency as number, env)).toThrow('concurrency');
+      }
+    }
+    expect(() => derivePoolConfig(Number.MAX_SAFE_INTEGER - 7, {})).toThrow(/concurrency/);
+    expect(derivePoolConfig(Number.MAX_SAFE_INTEGER - 8, {}).max).toBe(Number.MAX_SAFE_INTEGER);
+    expect(derivePoolConfig(5, { BETTER_TRIGGER_POOL_MAX: String(Number.MAX_SAFE_INTEGER) }).max)
+      .toBe(Number.MAX_SAFE_INTEGER);
+    expect(derivePoolConfig(Number.MAX_SAFE_INTEGER, { BETTER_TRIGGER_POOL_MAX: '1' }).max).toBe(1);
+  });
+
   it('defaults to concurrency + 8 headroom, 10s connect timeout, 30s statement timeout', () => {
     expect(derivePoolConfig(5, NO_ENV)).toEqual({
       max: 13,

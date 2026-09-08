@@ -23,6 +23,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ENV_KNOBS } from '../src/env-registry';
+import { derivePoolConfig } from '../src/pool-config';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SOURCE_DIRS = [
@@ -61,6 +62,18 @@ for (const re of READS) {
 const registryNames = new Set(ENV_KNOBS.map((k) => k.name));
 
 describe('env-registry vs source reads', () => {
+  it('documents the pool boundaries and defaults enforced by the env parser', () => {
+    const max = ENV_KNOBS.find((knob) => knob.name === 'BETTER_TRIGGER_POOL_MAX')!;
+    expect(max.help).toContain('1–9007199254740991');
+    for (const name of ['BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS', 'BETTER_TRIGGER_POOL_STATEMENT_TIMEOUT_MS']) {
+      const knob = ENV_KNOBS.find((entry) => entry.name === name)!;
+      expect(knob.help).toContain('0–2147483647');
+      expect(knob.help).toContain('0 =');
+      expect(derivePoolConfig(5, { [name]: knob.default })).toEqual(derivePoolConfig(5, {}));
+      expect(() => derivePoolConfig(5, { [name]: '2147483648' })).toThrow(name);
+    }
+  });
+
   it('registers every BETTER_TRIGGER_* knob the worker and kernel read (no drift)', () => {
     const unregistered = [...readNames]
       .filter((name) => !registryNames.has(name))

@@ -32,14 +32,16 @@ export interface PoolLogger {
  *     itself cancels a lock-waiting or hung query and returns the connection
  *     to the pool instead of letting it block a loop indefinitely.
  *
- * Any key left undefined is not passed to pg, so its default stands.
+ * Any key left undefined is not passed to pg, so its default stands. Numeric
+ * options must be safe integers; invalid types/ranges throw TypeError/RangeError
+ * before a Pool is allocated. There is no additional business cap on max.
  */
 export interface PoolOptions {
-  /** Max clients (default: pg's 10). */
+  /** Positive safe integer max clients (default: pg's 10). */
   max?: number;
-  /** Connection checkout timeout in ms (default: 0 = wait forever, pg's default). */
+  /** Integer ms in 0..2147483647 (default: 0 = wait forever, pg's default). */
   connectionTimeoutMillis?: number;
-  /** Server-side statement timeout in ms, sent as `statement_timeout` in the
+  /** Integer ms in 0..2147483647, sent as `statement_timeout` in the
    *  startup packet (default: unset/off). */
   statementTimeoutMs?: number;
   /** Called for every pool-level 'error' event. Note this fires only for
@@ -50,11 +52,26 @@ export interface PoolOptions {
   onError?: (err: Error) => void;
 }
 
+function validatePoolNumber(name: string, value: number | undefined, min: number, max: number): void {
+  if (value === undefined) return;
+  if (typeof value !== 'number') throw new TypeError(`${name} must be a number`);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new RangeError(`${name} must be a safe integer between ${min} and ${max}`);
+  }
+}
+
 export function createPool(
   connectionString: string = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
   logger: PoolLogger = console,
   opts: PoolOptions = {},
 ): pg.Pool {
+  // pg accepts configuration lazily and may coerce it (max: 0 becomes 10).
+  // Fail before allocating the pool, including for direct embedded poolOptions.
+  validatePoolNumber('max', opts.max, 1, Number.MAX_SAFE_INTEGER);
+  // A connection deadline is a JS timer; statement_timeout is PostgreSQL's
+  // signed 32-bit integer GUC in milliseconds. Both retain 0 = disabled.
+  validatePoolNumber('connectionTimeoutMillis', opts.connectionTimeoutMillis, 0, 2_147_483_647);
+  validatePoolNumber('statementTimeoutMs', opts.statementTimeoutMs, 0, 2_147_483_647);
   const poolOptions: pg.PoolConfig = { connectionString };
   if (opts.max !== undefined) poolOptions.max = opts.max;
   if (opts.connectionTimeoutMillis !== undefined) {
@@ -80,30 +97,28 @@ export function createPool(
 /* ---------------------------------------------------------------------------
    Probe pool (PF4, todos/02-performance.md) — a small dedicated pool for the
    /health?deep=1 and /metrics probes, so a hung or repeatedly-failing probe
-   can never hold a business-pool connection. All three settings below are
-   what make "the probe times out" different from "the probe leaks a
-   connection":
+   uses separate connections from the business pool:
 
-     - max 2: a HEALTHCHECK and a Prometheus scrape can run at once, and that
-       is the whole probe concurrency budget — probe connections are capped
-       forever, whatever the business pool does.
+     - max 2: a HEALTHCHECK and a Prometheus scrape can each borrow a client.
      - statement_timeout 1000: node-postgres sends this as
-       `-c statement_timeout=1000` in the connection startup packet, so
-       PostgreSQL *itself* cancels a probe query after 1s and the connection
-       returns to the pool. The routes' 2s Promise.race deadline is then only
-       the HTTP answer, never the resource safety net — and it stays ahead of
-       it, so the query fails (and frees its connection) before the response
-       does.
-     - connectionTimeoutMillis 1000: a black-holed network would otherwise
-       leave the connect attempt in OS-land for minutes; at 1s the probe
-       answers "query failed" instead.
+       `-c statement_timeout=1000` in the connection startup packet. This
+       bounds SQL on a responsive server; it does not guarantee that the
+       client observes cancellation before the routes' 2s HTTP deadline.
+     - connectionTimeoutMillis 1000: bounds connection establishment and
+       waiting for a checkout to 1s.
+
+   Health and metrics each own one underlying checkout/query flight. At the
+   HTTP deadline, the route destroys an in-flight query's client with
+   release(true); a late checkout is returned without issuing a query. New
+   requests share the failed result until the underlying promise settles.
+   HTTP timeout and client destruction do not prove SQL cancellation: server
+   work may continue during a network fault or with statement_timeout=0.
    --------------------------------------------------------------------------- */
 
 /** Probe concurrency ceiling: one HEALTHCHECK + one scrape, hard cap. */
 const PROBE_POOL_MAX = 2;
 
-/** Server-side query deadline on the probe pool, ms (must stay below the
- *  routes' 2s HTTP deadline). */
+/** Server-side statement timeout, ms; independent of HTTP/client cleanup. */
 const PROBE_STATEMENT_TIMEOUT_MS = 1000;
 
 /** Connection-establishment deadline on the probe pool, ms. */

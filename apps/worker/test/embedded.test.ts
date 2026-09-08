@@ -141,6 +141,91 @@ afterEach(async () => {
 });
 
 describe('createEmbeddedRuntime', () => {
+  it('rejects malformed process timers before pool allocation, migration or registration', async () => {
+    const interval = vi.spyOn(globalThis, 'setInterval');
+    const timeout = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      const invalid = [0, -1, 1.5, NaN, Infinity, 2_147_483_648, Number.MAX_SAFE_INTEGER + 1, '1000', null];
+      for (const name of ['timerIntervalMs', 'cronIntervalMs', 'reaperIntervalMs', 'gcIntervalMs', 'strandedIntervalMs']) {
+        for (const value of invalid) {
+          await expect(createEmbeddedRuntime({
+            tasks: [sendEmail], orchestrator: { [name]: value }, notifications: false,
+          })).rejects.toThrow(name);
+        }
+      }
+      for (const leaseMs of [NaN, Infinity, 6_442_450_944, Number.MAX_SAFE_INTEGER + 1, '60000', null]) {
+        await expect(createEmbeddedRuntime({
+          tasks: [sendEmail], leaseMs: leaseMs as number, notifications: false,
+        })).rejects.toThrow('leaseMs');
+      }
+      for (const timeoutMs of invalid) {
+        await expect(createEmbeddedRuntime({
+          tasks: [sendEmail], timeoutMs: timeoutMs as number, notifications: false,
+        })).rejects.toThrow('timeoutMs');
+      }
+      expect(mocked.createPool).not.toHaveBeenCalled();
+      expect(mocked.migrate).not.toHaveBeenCalled();
+      expect(mocked.createKernel).not.toHaveBeenCalled();
+      expect(kernel.registerWorker).not.toHaveBeenCalled();
+      expect(interval).not.toHaveBeenCalled();
+      expect(timeout).not.toHaveBeenCalled();
+      expect(getDefaultInstance()).toBeNull();
+      expect(getResultResolver()).toBeNull();
+    } finally {
+      interval.mockRestore();
+      timeout.mockRestore();
+    }
+    // Rejected startup must leave the single-runtime slot available.
+    runtime = await createEmbeddedRuntime({ tasks: [sendEmail], pool, migrate: false, notifications: false });
+  });
+
+  it('direct poolOptions pass through the real pool validation before any migration or loop', async () => {
+    const actualDb = await vi.importActual<typeof import('@better-trigger/db')>('@better-trigger/db');
+    mocked.createPool.mockImplementation(actualDb.createPool);
+    for (const name of ['max', 'connectionTimeoutMillis', 'statementTimeoutMs']) {
+      const invalid = [-1, 1.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1, '10', null, true];
+      invalid.push(name === 'max' ? 0 : 2_147_483_648);
+      for (const value of invalid) {
+        await expect(createEmbeddedRuntime({
+          tasks: [sendEmail], notifications: false, poolOptions: { [name]: value },
+        })).rejects.toThrow(name);
+      }
+    }
+    expect(mocked.migrate).not.toHaveBeenCalled();
+    expect(mocked.createKernel).not.toHaveBeenCalled();
+    expect(kernel.registerWorker).not.toHaveBeenCalled();
+    expect(getResultResolver()).toBeNull();
+    mocked.createPool.mockReset().mockReturnValue(pool);
+    runtime = await createEmbeddedRuntime({ tasks: [sendEmail], notifications: false });
+  });
+
+  it.each([[1500, 500], [6_442_450_943, 2_147_483_647]])(
+    'accepts lease %i with the exact heartbeat %i', async (leaseMs, heartbeatMs) => {
+      vi.useFakeTimers();
+      const timer = vi.spyOn(globalThis, 'setTimeout');
+      try {
+        runtime = await createEmbeddedRuntime({
+          tasks: [sendEmail], pool, notifications: false, migrate: false,
+          concurrency: 1, leaseMs, timeoutMs: 2_147_483_647,
+          orchestrator: { timerIntervalMs: 1, cronIntervalMs: 2_147_483_647 },
+        });
+        expect(timer.mock.calls[0]?.[1]).toBe(heartbeatMs);
+        expect(kernel.claimRuns).toHaveBeenCalledWith(expect.objectContaining({ leaseMs }));
+        expect(kernel.startOrchestrator).toHaveBeenCalledWith(expect.objectContaining({
+          timerIntervalMs: 1, cronIntervalMs: 2_147_483_647,
+        }));
+      } finally {
+        const stopped = runtime?.stop();
+        await vi.advanceTimersByTimeAsync(2500);
+        await stopped;
+        runtime = null;
+        vi.clearAllTimers();
+        timer.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('triggers and waits through the normal client without opening a server', async () => {
     runtime = await createEmbeddedRuntime({
       databaseUrl: 'postgres://embedded.test/db',

@@ -172,6 +172,24 @@ across modules are an error unless they are literally the same handle.
 -h, --help               Show this help
 ```
 
+All five `--*-interval-ms` flags require integers in **1..2147483647 ms**.
+The same bounds apply to direct `startOrchestrator` options, runtime/embedded
+orchestrator options and the shared waiter registry's `pollMs`; supplied
+intervals are checked even when their loop is disabled. Loop switches keep
+their existing meaning: GC is off until retention is set, and the stranded
+scan is off until enabled. A zero interval does not disable a loop.
+
+`--lease-ms` and runtime/embedded `leaseMs` accept integer **1500..6442450943 ms**
+(default 60000). The upper bound follows the actual heartbeat timer,
+`max(500, floor(leaseMs / 3))`, and also fits PostgreSQL interval/timestamp
+storage and JavaScript dates. It permits leases longer than one timer's
+24.8-day range. Retention windows such as `365d` and durable waits keep their
+own duration semantics. Embedded `timeoutMs` is a per-request process timer
+and requires integer **1..2147483647 ms** (default 30000).
+
+Invalid timers fail before worker registration or background loops; embedded
+startup checks them before creating a pool or running migrations.
+
 ## Environment variables
 
 > The single source of truth for the `BETTER_TRIGGER_*` knobs below is
@@ -599,6 +617,16 @@ The pool's deadlines have defaults too:
   cancels a query that runs longer (a queue-row lock, a slow scan) and returns
   the connection to the pool. `0` disables it.
 
+Both timeout knobs require integers in **0..2147483647 ms**, matching the
+connection timer and PostgreSQL's `statement_timeout` range. `BETTER_TRIGGER_POOL_MAX`
+requires a positive safe integer (**1..9007199254740991**); it has no additional
+business ceiling and does not allocate all connections up front. The derived
+`concurrency + 8` must also be a safe integer. Empty, malformed, fractional,
+negative, infinite and unsafe values fail at startup with the parameter name.
+The same validation applies to direct `createPool` options and embedded
+`poolOptions` before pool allocation: non-number options throw `TypeError`,
+invalid numeric ranges throw `RangeError`. Undefined options keep pg defaults.
+
 A pool that is too small for the concurrency + loops it serves shows up as
 `better_trigger_pool_checkout_timeouts_total` climbing: each checkout that
 timed out is one moment the pool was saturated. A rising rate there means raise
@@ -659,14 +687,20 @@ waiter registry, where it is clamped to 50–5000ms.
 Point a **readiness** probe at `?deep=1`, never a **liveness** one. The deep
 probe runs on its own **probe pool** (PF4): a small dedicated pool
 (`max: 2`) created by `createHealthPool()`, separate from the business pool.
-Its connections carry `statement_timeout=1000` (and a 1s connect timeout), so
-PostgreSQL itself cancels a probe query after 1s and the connection returns to
-the pool — a hung or repeatedly-failing probe can never hold a business
-connection, and the 2s deadline is only the HTTP answer. Concurrent probes and
-scrapes are **single-flight** (one in-flight probe per route; everyone else
-shares its outcome), so a probe storm cannot pile up queued queries on the
-probe pool either. `pool` in the response is still the **business** pool's
-counters — that is the pool whose saturation a readiness check should see.
+Its connections have a 1s connection timeout and `statement_timeout=1000`.
+The server timeout bounds SQL on a responsive PostgreSQL server; the routes
+also enforce a separate 2s HTTP deadline and explicitly own client cleanup.
+
+Health and metrics each hold one underlying checkout/query operation
+(**single-flight** per route). At the HTTP deadline, a pending query's client
+is destroyed with `release(true)`; a checkout that arrives after the deadline
+is returned without issuing a query. New requests share the failed result
+until that route's underlying promise settles, preventing repeated deadlines
+from queuing more work. An HTTP timeout or client destruction does **not**
+prove that server-side SQL was cancelled: it may still run during a network
+fault or when `statement_timeout=0`. `pool` in the response is still the
+**business** pool's counters — that is the pool whose saturation a readiness
+check should see.
 Embedded callers that assemble `createApp({ kernel, pool })` without a
 `probePool` get the probe on the business pool instead — fine for a healthy
 database, but a hung one can then hold business connections through the
@@ -725,12 +759,16 @@ their errors have been swallowing them all afternoon. Everything is prefixed
 | `waiter_timeouts_total` | counter | `result()` waiters that hit their deadline (latest non-terminal status) |
 | `claim_wakes_total` | counter | Times a work notification woke the idle claim loops |
 
-Two gauges come from one SQL round trip (2s deadline), run on the same
-dedicated probe pool as the health probe — a failing or hung scrape borrows a
-probe connection at most, never a business one, `statement_timeout` cancels
-the query server-side, and concurrent scrapes share a single in-flight probe
-(single-flight); everything else is a live in-process counter, so a scrape
-stays cheap. The endpoint answers `200` even with the database down —
+Two gauges come from one SQL round trip with a 2s HTTP deadline, run on the
+same dedicated probe pool as the health probe (`max: 2`, 1s connection and
+server statement timeouts). Metrics owns one checkout/query operation,
+independent of health's operation, and follows the cleanup rules above:
+late checkouts return without a query, pending queries use `release(true)`,
+and new scrapes share the failure until the underlying promise settles.
+The HTTP deadline and client destruction do not establish that SQL stopped
+on the server. Everything else is a live in-process counter, so each scrape
+still reports current process counters. The endpoint answers `200` even with
+the database down —
 a successful scrape reporting `db_up 0` says more than a failed scrape, and
 the counters are what say how long it has been wrong.
 

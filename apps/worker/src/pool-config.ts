@@ -28,16 +28,18 @@ export const DEFAULT_POOL_CONNECT_TIMEOUT_MS = 10_000;
 export const DEFAULT_POOL_STATEMENT_TIMEOUT_MS = 30_000;
 
 /**
- * A non-negative-integer env knob with a fallback. Used for the pool timeouts:
+ * A non-negative-integer env knob with a fallback. Both timeouts top out at
+ * 2147483647ms: the JS connection timer and PostgreSQL's integer GUC range.
+ * Used for the pool timeouts:
  * 0 is valid there (connectionTimeoutMillis 0 = wait forever, statementTimeoutMs
  * 0 = off). A typo still fails at startup, since a silent fallback would change
  * the pool's timeout behaviour unnoticed.
  */
 function parseEnvMs(name: string, raw: string | undefined, fallback: number): number {
   if (raw === undefined) return fallback;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < 0) {
-    throw new Error(`${name} must be a non-negative integer, got "${raw}"`);
+  const n = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n < 0 || n > 2_147_483_647) {
+    throw new RangeError(`${name} must be a non-negative integer between 0 and 2147483647 milliseconds`);
   }
   return n;
 }
@@ -50,9 +52,9 @@ function parseEnvMs(name: string, raw: string | undefined, fallback: number): nu
  */
 function parsePoolMax(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n <= 0) {
-    throw new Error(`BETTER_TRIGGER_POOL_MAX must be a positive integer, got "${raw}"`);
+  const n = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n <= 0) {
+    throw new RangeError('BETTER_TRIGGER_POOL_MAX must be a positive integer within the safe integer range');
   }
   return n;
 }
@@ -75,8 +77,15 @@ export function derivePoolConfig(
   concurrency: number,
   env: Record<string, string | undefined>,
 ): { max: number; connectionTimeoutMillis: number; statementTimeoutMs: number } {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+    throw new RangeError('concurrency must be a positive integer within the safe integer range');
+  }
+  const max = parsePoolMax(env.BETTER_TRIGGER_POOL_MAX) ?? concurrency + ORCHESTRATOR_HEADROOM;
+  if (!Number.isSafeInteger(max)) {
+    throw new RangeError('concurrency + pool headroom must be within the safe integer range');
+  }
   return {
-    max: parsePoolMax(env.BETTER_TRIGGER_POOL_MAX) ?? concurrency + ORCHESTRATOR_HEADROOM,
+    max,
     connectionTimeoutMillis: parseEnvMs(
       'BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS',
       env.BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS,

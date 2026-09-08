@@ -99,6 +99,35 @@ function registry(pollMs = 20): { reg: WaiterRegistry; runs: Map<string, FakeRun
 
 const NS = DEFAULT_NAMESPACE;
 
+describe('shared waiter poll timer bounds', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('rejects invalid pollMs before creating any timer or querying', () => {
+    const interval = vi.spyOn(globalThis, 'setInterval');
+    const f = fakePool();
+    for (const pollMs of [0, -1, 1.5, NaN, Infinity, 2_147_483_648, Number.MAX_SAFE_INTEGER + 1, '1000', null]) {
+      expect(() => createWaiterRegistry({
+        pool: f.pool, counters: createNotifyCounters(), pollMs: pollMs as number,
+      })).toThrow('pollMs');
+      expect(interval).not.toHaveBeenCalled();
+      expect(f.selects()).toBe(0);
+    }
+  });
+
+  it.each([1, 2_147_483_647])('passes the valid pollMs %i unchanged and stops it', (pollMs) => {
+    const interval = vi.spyOn(globalThis, 'setInterval');
+    const { reg } = registry(pollMs);
+    expect(interval).toHaveBeenCalledWith(expect.any(Function), pollMs);
+    reg.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe('waiter registry', () => {
   it('resolves immediately when the run is already terminal', async () => {
     const { reg, runs } = registry();

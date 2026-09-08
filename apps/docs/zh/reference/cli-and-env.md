@@ -26,6 +26,18 @@ daemon 二进制是 `better-trigger-worker`。每个 flag 都有对应的环境�
 -h, --help               显示帮助
 ```
 
+五个 `--*-interval-ms` flag 都要求 **1..2147483647 ms 的整数**。
+直接 orchestrator 参数和共享 waiter 的 `pollMs` 使用同一范围；即使循环关闭，
+显式传入的 interval 也会校验。布尔循环开关、未设置 retention 时关闭 GC、
+未启用 pinning 时关闭 stranded scan 的语义保留；interval 为 0 不表示关闭循环。
+
+`--lease-ms` 和 runtime/embedded 的 `leaseMs` 接受 **1500..6442450943 ms 的整数**，
+默认 60000。心跳间隔为 `max(500, floor(leaseMs / 3))`，因此 lease 可超过单次
+timer 约 24.8 天的范围，同时满足派生心跳 timer 和日期/数据库存储边界。
+`365d` 等 retention 窗口及 durable wait 保留自身时长语义。
+embedded 的 `timeoutMs` 要求 **1..2147483647 ms 的整数**，默认 30000。
+无效 timer 在注册 worker、启动循环前失败；embedded 在创建 pool、迁移前失败。
+
 ## 环境变量
 
 | 变量 | 默认 | 用途 |
@@ -65,3 +77,10 @@ daemon 二进制是 `better-trigger-worker`。每个 flag 都有对应的环境�
 | `BETTER_TRIGGER_VERSION` | _(构建身份)_ | 注册时上报的代码版本（覆盖所有 per-task 版本） |
 
 将 RPS 限流旋钮设为 `0` 只关闭对应维度的桶；将 `BETTER_TRIGGER_RATE_LIMIT_BURST` 设为 `0` 会禁用整个限流器（不创建也不消费任何桶）。缺失、为负或无法解析的值回落到默认值，而不会把上限关掉。
+
+pool 的 connect/statement timeout 环境变量要求 **0..2147483647 ms 的整数**，
+`0` 仍表示无限等待/关闭。`BETTER_TRIGGER_POOL_MAX` 要求正安全整数
+（**1..9007199254740991**），不附加业务上限；派生的 `concurrency + 8` 也必须是安全整数。
+空值、无法解析的值、分数、负数、Infinity 和非安全整数会在启动时失败，错误明确命名参数。
+直接 `createPool` 参数和 embedded 的 `poolOptions` 在分配 pool 前同样校验：
+非 number 抛 `TypeError`，非法数值范围抛 `RangeError`；undefined 保留 pg 默认值。

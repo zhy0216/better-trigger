@@ -38,10 +38,10 @@ import {
   type WaitResult,
 } from '@better-trigger/core';
 import type { NotifyCounters } from './observability';
+import { MAX_TIMER_MS, requireTimerMs } from './numeric-config';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_MS = 1_000;
-const MAX_TIMER_MS = 2_147_483_647;
 const TERMINAL: ReadonlySet<RunStatus> = new Set(['completed', 'failed', 'canceled']);
 
 /** Monotonically increasing waiter id (p1-14): lets the registry name a
@@ -132,7 +132,7 @@ export function createWaiterRegistry(deps: {
   pollMs?: number;
 }): WaiterRegistry {
   const { pool, counters } = deps;
-  const pollMs = deps.pollMs ?? DEFAULT_POLL_MS;
+  const pollMs = requireTimerMs('pollMs', deps.pollMs === undefined ? DEFAULT_POLL_MS : deps.pollMs);
   const pending = new Map<string, Set<PendingWaiter>>();
   // Includes registrations whose first read is still in flight. They are
   // cancellable, but cannot join a sweep or time out with an unknown status.

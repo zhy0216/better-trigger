@@ -46,7 +46,7 @@ import {
   type RunResultResolver,
 } from 'better-trigger/internal';
 import { createApp } from './app';
-import { MIN_LEASE_MS } from './cli';
+import { requireLeaseMsValue, requireTimerMs, validateOrchestratorTimers } from './numeric-config';
 import { markInternalRequest } from './internal-request';
 import {
   createNotifyCounters,
@@ -100,7 +100,7 @@ export interface EmbeddedRuntimeOptions {
   concurrency?: number;
   /** Friendly name recorded in the workers table. */
   name?: string;
-  /** Lease duration per claim. Default 60s. */
+  /** Integer lease ms in 1500..6442450943 (heartbeat = floor(leaseMs / 3)). Default 60s. */
   leaseMs?: number;
   /** Claim only runs stamped with this process's task versions. */
   pinCodeVersion?: boolean;
@@ -122,7 +122,7 @@ export interface EmbeddedRuntimeOptions {
   /** Bearer key sent through the in-process HTTP client, when auth env vars
    * configure the shared Hono middleware. Defaults like betterTrigger(). */
   apiKey?: string;
-  /** Per-request client timeout. Default 30s. */
+  /** Per-request client timeout, integer ms in 1..2147483647. Default 30s. */
   timeoutMs?: number;
   /** Make runtime.client the TaskHandle process default. Default true. */
   setDefault?: boolean;
@@ -211,22 +211,12 @@ export async function createEmbeddedRuntime(
   const tasks = normalizeTasks(options.tasks);
   const namespaces = normalizeNamespaces(options.namespaces);
   const concurrency = options.concurrency ?? 5;
-  if (!Number.isInteger(concurrency) || concurrency <= 0) {
+  if (!Number.isSafeInteger(concurrency) || concurrency <= 0) {
     throw new Error(`createEmbeddedRuntime concurrency must be a positive integer, got ${concurrency}`);
   }
-  // Same floor the CLI enforces on --lease-ms (p1-16): below 3 × the 500ms
-  // heartbeat floor the lease of every claimed run expires before its first
-  // renewal, so the reaper recovers live runs until their recovery budget is
-  // spent and they fail WorkerLostError.
-  if (
-    options.leaseMs !== undefined &&
-    (!Number.isInteger(options.leaseMs) || options.leaseMs < MIN_LEASE_MS)
-  ) {
-    throw new Error(
-      `createEmbeddedRuntime leaseMs must be an integer of at least ${MIN_LEASE_MS}, got ${options.leaseMs} ` +
-        `(the heartbeat renews at most every 500ms; a shorter lease expires before its first renewal)`,
-    );
-  }
+  if (options.leaseMs !== undefined) requireLeaseMsValue('createEmbeddedRuntime leaseMs', options.leaseMs);
+  validateOrchestratorTimers(options.orchestrator);
+  if (options.timeoutMs !== undefined) requireTimerMs('createEmbeddedRuntime timeoutMs', options.timeoutMs);
   if (options.pool && options.poolOptions) {
     throw new Error('createEmbeddedRuntime poolOptions cannot be used with an injected pool');
   }

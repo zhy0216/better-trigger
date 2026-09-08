@@ -30,6 +30,20 @@ source.
 -h, --help               Show this help
 ```
 
+All five `--*-interval-ms` flags require integers in **1..2147483647 ms**.
+Direct orchestrator options and the shared waiter `pollMs` use the same bounds,
+including supplied intervals for disabled loops. The existing boolean loop
+switches, GC off without retention and stranded scan off without pinning are
+unchanged; a zero interval does not disable a loop.
+
+`--lease-ms` and runtime/embedded `leaseMs` accept **1500..6442450943 ms**
+(integer, default 60000). The heartbeat is `max(500, floor(leaseMs / 3))`, so
+the lease can exceed a single timer's 24.8-day range while fitting both its
+heartbeat timer and date/database storage. Retention windows such as `365d`
+and durable waits retain their own duration semantics. Embedded `timeoutMs`
+requires integer **1..2147483647 ms** (default 30000). Invalid timers fail
+before registration/loops, and before embedded pool creation/migrations.
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -72,3 +86,12 @@ Set an RPS rate-limit knob to `0` to disable just that bucket; set
 `BETTER_TRIGGER_RATE_LIMIT_BURST` to `0` to disable the whole limiter (no
 bucket is created or consumed). An absent, negative or unparseable value falls
 back to the default rather than switching a cap off.
+
+Pool connect/statement timeout env values require integers in **0..2147483647 ms**;
+`0` keeps wait-forever/off semantics. `BETTER_TRIGGER_POOL_MAX` requires a
+positive safe integer (**1..9007199254740991**), with no extra business cap;
+the derived `concurrency + 8` must also be safe. Empty, malformed, fractional,
+negative, infinite or unsafe values fail with the parameter name. Direct
+`createPool` options and embedded `poolOptions` are checked before allocation:
+non-number values throw `TypeError`, invalid numeric ranges throw `RangeError`.
+Undefined options retain pg defaults.

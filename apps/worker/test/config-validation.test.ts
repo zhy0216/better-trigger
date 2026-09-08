@@ -34,6 +34,40 @@ import { createEmbeddedRuntime } from '../src/embedded';
 
 const ENTRY = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
+const TIMER_FLAGS = [
+  '--timer-interval-ms', '--cron-interval-ms', '--reaper-interval-ms',
+  '--gc-interval-ms', '--stranded-interval-ms',
+] as const;
+
+describe('process timer bounds', () => {
+  it.each(TIMER_FLAGS)('%s rejects invalid delays and accepts both boundaries', (flag) => {
+    for (const value of ['0', '-1', '1.5', 'NaN', 'Infinity', '2147483648', '9007199254740992']) {
+      expect(() => parseArgs([`${flag}=${value}`]), `${flag}=${value}`).toThrow(flag);
+    }
+    for (const value of ['1', '2147483647']) {
+      expect(() => parseArgs([flag, value])).not.toThrow();
+    }
+  });
+
+  it('bounds the derived heartbeat without imposing the single-timer cap on a lease', () => {
+    for (const leaseMs of [1500, 60_000, 2_147_483_648, 6_442_450_943]) {
+      expect(parseArgs(['--lease-ms', String(leaseMs)]).leaseMs).toBe(leaseMs);
+    }
+    for (const value of ['6442450944', 'NaN', 'Infinity', '9007199254740992']) {
+      expect(() => parseArgs(['--lease-ms', value])).toThrow('--lease-ms');
+    }
+    expect(parseArgs(['--retention', '365d']).retentionMs).toBe(365 * 86_400_000);
+    expect(parsePruneArgs(['--older-than', '365d']).olderThanMs).toBe(365 * 86_400_000);
+  });
+
+  it.each(TIMER_FLAGS)('the real CLI rejects %s overflow during startup parsing', async (flag) => {
+    const run = await cli([flag, '2147483648']);
+    expect(run.code).toBe(1);
+    expect(`${run.stderr}${run.stdout}`).toContain(`${flag} must be at most 2147483647`);
+    expect(`${run.stderr}${run.stdout}`).not.toMatch(/ECONNREFUSED|TimeoutOverflowWarning/);
+  });
+});
+
 interface Run {
   code: number | null;
   stdout: string;

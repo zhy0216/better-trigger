@@ -16,6 +16,9 @@ import {
 import { MIN_RETENTION_MS } from '@better-trigger/kernel';
 import { parseOriginList } from './middleware';
 import { ENV_CATEGORY_TITLES, ENV_KNOBS } from './env-registry';
+import { MAX_LEASE_MS, MAX_TIMER_MS, MIN_LEASE_MS, requireLeaseMsValue } from './numeric-config';
+
+export { MIN_LEASE_MS } from './numeric-config';
 
 export const USAGE = `better-trigger-worker — durable task daemon
 
@@ -41,8 +44,8 @@ Options:
   --concurrency <n>        Concurrent execution slots   (env BETTER_TRIGGER_CONCURRENCY, default 5)
   --name <s>               Worker name shown in the dashboard
   --lease-ms <n>           Claim lease duration         (default 60000,
-                           minimum 1500 — a shorter lease expires before the
-                           first heartbeat renewal)
+                           range 1500–${MAX_LEASE_MS}ms; the heartbeat interval
+                           must fit a single process timer)
   --timer-interval-ms <n>  Wait-due scan interval       (default 1000)
   --cron-interval-ms <n>   Cron scan interval           (default 1000)
   --reaper-interval-ms <n> Expired-lease reap interval  (default 10000)
@@ -81,6 +84,9 @@ Options:
                            better_trigger_stranded_runs; it is switched on with
                            this flag.
   -h, --help               Show this help
+
+Timer intervals must be integers from 1 to ${MAX_TIMER_MS}ms. This limit
+applies to process timers, not durable waits or retention windows.
 
 ${renderEnvBlock()}
 `;
@@ -236,7 +242,7 @@ export function envFlag(raw: string | undefined): boolean {
  */
 export function requireInt(flag: string, raw: string, max?: number): number {
   const n = Number(raw);
-  if (!Number.isInteger(n) || n <= 0) {
+  if (!Number.isSafeInteger(n) || n <= 0) {
     throw new Error(`${flag} must be a positive integer, got "${raw}"`);
   }
   if (max !== undefined && n > max) {
@@ -254,16 +260,6 @@ export const MAX_PORT = 65_535;
  *  runtime.ts would die with a RangeError well after registration. */
 export const MAX_CONCURRENCY = 1_000;
 
-/**
- * Floor for --lease-ms / the embedded leaseMs option. The heartbeat renews
- * leases every `max(500, floor(leaseMs / 3))` ms (runtime.ts), so below 3 ×
- * the 500ms heartbeat floor a claim's lease expires BEFORE its first renewal:
- * the reaper reclaims a live run on every sweep, each reclaim consumes one of
- * the run's recovery budget, and the run ends WorkerLostError while its
- * worker was alive the whole time.
- */
-export const MIN_LEASE_MS = 1_500;
-
 export function requireLeaseMs(flag: string, raw: string): number {
   const n = requireInt(flag, raw);
   if (n < MIN_LEASE_MS) {
@@ -272,7 +268,7 @@ export function requireLeaseMs(flag: string, raw: string): number {
         `500ms, so a shorter lease expires before its first renewal and a live run gets reaped`,
     );
   }
-  return n;
+  return requireLeaseMsValue(flag, n);
 }
 
 /**
@@ -293,7 +289,7 @@ export function parsePositiveIntEnv(
 ): number {
   if (raw === undefined) return fallback;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n <= 0) {
+  if (!Number.isSafeInteger(n) || n <= 0) {
     throw new Error(`${name} must be a positive integer, got "${raw}"`);
   }
   if (max !== undefined && n > max) {
@@ -522,22 +518,22 @@ export function parseArgs(argv: string[]): Options {
         opts.leaseMs = requireLeaseMs(flag, value());
         break;
       case '--timer-interval-ms':
-        opts.timerIntervalMs = requireInt(flag, value());
+        opts.timerIntervalMs = requireInt(flag, value(), MAX_TIMER_MS);
         break;
       case '--cron-interval-ms':
-        opts.cronIntervalMs = requireInt(flag, value());
+        opts.cronIntervalMs = requireInt(flag, value(), MAX_TIMER_MS);
         break;
       case '--reaper-interval-ms':
-        opts.reaperIntervalMs = requireInt(flag, value());
+        opts.reaperIntervalMs = requireInt(flag, value(), MAX_TIMER_MS);
         break;
       case '--retention':
         opts.retentionMs = requireDuration(flag, value());
         break;
       case '--gc-interval-ms':
-        opts.gcIntervalMs = requireInt(flag, value());
+        opts.gcIntervalMs = requireInt(flag, value(), MAX_TIMER_MS);
         break;
       case '--stranded-interval-ms':
-        opts.strandedIntervalMs = requireInt(flag, value());
+        opts.strandedIntervalMs = requireInt(flag, value(), MAX_TIMER_MS);
         break;
       case '--database-url': {
         const databaseUrl = value();

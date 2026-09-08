@@ -9,11 +9,94 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import pg from 'pg';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createHealthPool, createPool } from '../src/pool';
+
+const poolConstruction = vi.hoisted(() => vi.fn());
+vi.mock('pg', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('pg')>();
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      Pool: class extends actual.default.Pool {
+        constructor(options?: pg.PoolConfig) {
+          poolConstruction(options);
+          super(options);
+        }
+      },
+    },
+  };
+});
 
 const execFileAsync = promisify(execFile);
 const UNREACHABLE = 'postgres://better_trigger@127.0.0.1:1/none';
+
+describe('createPool numeric option boundaries', () => {
+  it.each(['max', 'connectionTimeoutMillis', 'statementTimeoutMs'] as const)(
+    '%s refuses wrong types and invalid numbers before allocating a Pool', (name) => {
+      poolConstruction.mockClear();
+      for (const value of ['1', null, true, [], {}, 1n]) {
+        expect(() => createPool(UNREACHABLE, console, { [name]: value })).toThrow(TypeError);
+        expect(() => createPool(UNREACHABLE, console, { [name]: value })).toThrow(name);
+        expect(poolConstruction).not.toHaveBeenCalled();
+      }
+      for (const value of [-1, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+        expect(() => createPool(UNREACHABLE, console, { [name]: value })).toThrow(RangeError);
+        expect(() => createPool(UNREACHABLE, console, { [name]: value })).toThrow(name);
+        expect(poolConstruction).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each(['connectionTimeoutMillis', 'statementTimeoutMs'] as const)(
+    '%s preserves zero and both positive boundaries, rejecting overflow', async (name) => {
+      poolConstruction.mockClear();
+      expect(() => createPool(UNREACHABLE, console, { [name]: 2_147_483_648 })).toThrow(name);
+      expect(poolConstruction).not.toHaveBeenCalled();
+      for (const value of [0, 1, 2_147_483_647]) {
+        const pool = createPool(UNREACHABLE, console, { [name]: value });
+        try {
+          expect(pool.options[name === 'statementTimeoutMs' ? 'statement_timeout' : name]).toBe(value);
+        } finally {
+          await pool.end();
+        }
+      }
+    },
+  );
+
+  it('requires a positive max without inventing a business ceiling', async () => {
+    poolConstruction.mockClear();
+    expect(() => createPool(UNREACHABLE, console, { max: 0 })).toThrow('max');
+    expect(poolConstruction).not.toHaveBeenCalled();
+    for (const max of [1, 2_147_483_648, Number.MAX_SAFE_INTEGER]) {
+      const pool = createPool(UNREACHABLE, console, { max });
+      expect(pool.options.max).toBe(max);
+      expect(pool.totalCount).toBe(0); // max is lazy capacity, not preallocation.
+      await pool.end();
+    }
+  });
+});
+
+describe.skipIf(!process.env.DATABASE_URL)('createPool options accepted by PostgreSQL', () => {
+  it.each([
+    { max: 1, connectionTimeoutMillis: 0, statementTimeoutMs: 0 },
+    { max: Number.MAX_SAFE_INTEGER, connectionTimeoutMillis: 2_147_483_647, statementTimeoutMs: 2_147_483_647 },
+    { max: 13, connectionTimeoutMillis: 10_000, statementTimeoutMs: 30_000 },
+  ])('connects and applies $statementTimeoutMs ms at startup', async (opts) => {
+    const pool = createPool(process.env.DATABASE_URL!, console, opts);
+    try {
+      const { rows } = await pool.query(
+        "SELECT setting, min_val, max_val, unit FROM pg_settings WHERE name = 'statement_timeout'",
+      );
+      expect(rows).toEqual([{
+        setting: String(opts.statementTimeoutMs), min_val: '0', max_val: '2147483647', unit: 'ms',
+      }]);
+    } finally {
+      await pool.end();
+    }
+  });
+});
 
 describe('createPool — idle client errors', () => {
   it('is a fatal throw without the listener (the trap being guarded)', async () => {

@@ -24,7 +24,7 @@ import {
   type ResolvedTaskDefinition,
 } from 'better-trigger/internal';
 import { Executor } from './executor';
-import { MIN_LEASE_MS } from './cli';
+import { MIN_HEARTBEAT_MS, requireLeaseMsValue, validateOrchestratorTimers } from './numeric-config';
 import { sleepWithWake, type WakeSignal } from './notify';
 import {
   createThrottledLogger,
@@ -46,7 +46,7 @@ export interface StartOptions {
   concurrency?: number;
   /** Friendly worker name recorded on registration. */
   name?: string;
-  /** Lease duration granted per claim (renewed by heartbeat). Default 60s. */
+  /** Integer lease ms in 1500..6442450943 (heartbeat = floor(leaseMs / 3)). Default 60s. */
   leaseMs?: number;
   /**
    * Claim only runs stamped with the code version this process serves for that
@@ -124,7 +124,6 @@ export interface WorkerDeps {
 }
 
 const DEFAULT_LEASE_MS = 60_000;
-const MIN_HEARTBEAT_MS = 500;
 const IDLE_POLL_BASE_MS = 300;
 const IDLE_POLL_MAX_MS = 2_000;
 const SHUTDOWN_DRAIN_MS = 30_000;
@@ -138,7 +137,10 @@ export async function startWorkerRuntime(
 ): Promise<WorkerHandle> {
   const { kernel } = deps;
   const concurrency = options.concurrency ?? 5;
-  const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
+  const leaseMs = requireLeaseMsValue(
+    'startWorkerRuntime leaseMs',
+    options.leaseMs === undefined ? DEFAULT_LEASE_MS : options.leaseMs,
+  );
 
   // The library entry point gets the same guards the CLI (--lease-ms) and the
   // embedded host apply, so a caller wiring startWorkerRuntime() up by hand
@@ -148,18 +150,10 @@ export async function startWorkerRuntime(
   // concurrency yields zero claim loops; empty tasks or namespaces produce an
   // infinitely-throttled claim-error loop. Checked before any side effect, so a
   // rejected call never registers a worker or starts an orchestrator.
-  if (!Number.isInteger(concurrency) || concurrency <= 0) {
+  if (!Number.isSafeInteger(concurrency) || concurrency <= 0) {
     throw new Error(`startWorkerRuntime concurrency must be a positive integer, got ${concurrency}`);
   }
-  if (
-    options.leaseMs !== undefined &&
-    (!Number.isInteger(options.leaseMs) || options.leaseMs < MIN_LEASE_MS)
-  ) {
-    throw new Error(
-      `startWorkerRuntime leaseMs must be an integer of at least ${MIN_LEASE_MS}, got ${options.leaseMs} ` +
-        `(the heartbeat renews at most every ${MIN_HEARTBEAT_MS}ms; a shorter lease expires before its first renewal)`,
-    );
-  }
+  validateOrchestratorTimers(deps.orchestrator);
   if (!Array.isArray(options.tasks) || options.tasks.length === 0) {
     throw new Error('startWorkerRuntime requires a non-empty tasks array');
   }

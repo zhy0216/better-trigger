@@ -164,6 +164,7 @@ async function servedTaskIds(
   return new Set(res.rows.map((r) => r.task_id));
 }
 
+/** Supplied intervals must be integer ms in 1..2147483647, even for disabled loops. */
 export interface OrchestratorOptions {
   /** Wait-due scan interval (default 1s). */
   timerIntervalMs?: number;
@@ -772,6 +773,17 @@ export function startOrchestrator(
   opts: OrchestratorOptions = {},
   waitGraph?: WaitGraphCounters,
 ): OrchestratorHandle {
+  // Validate every supplied interval before starting ANY loop. Checking inside
+  // loop() would leak earlier timers if a later interval were invalid. A zero
+  // delay never disabled a loop; the boolean switches below own that contract.
+  for (const name of [
+    'timerIntervalMs', 'cronIntervalMs', 'reaperIntervalMs', 'gcIntervalMs', 'strandedIntervalMs',
+  ] as const) {
+    const value = opts[name];
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647)) {
+      throw new RangeError(`${name} must be a positive integer between 1 and 2147483647 milliseconds`);
+    }
+  }
   const timerIntervalMs = opts.timerIntervalMs ?? 1_000;
   const cronIntervalMs = opts.cronIntervalMs ?? 1_000;
   const reaperIntervalMs = opts.reaperIntervalMs ?? 10_000;

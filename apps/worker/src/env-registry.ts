@@ -206,19 +206,19 @@ export const ENV_KNOBS: EnvKnob[] = [
     name: 'BETTER_TRIGGER_POOL_MAX',
     category: 'tuning',
     default: 'derived (concurrency + 8)',
-    help: 'Override for the business-pool connection max, otherwise derived as --concurrency + 8 headroom for the orchestrator loops, heartbeat, waiter sweep and HTTP slack.',
+    help: 'Positive safe integer (1–9007199254740991) overriding the business-pool connection max; otherwise --concurrency + 8 headroom for loops, heartbeat, waiter sweep and HTTP slack.',
   },
   {
     name: 'BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS',
     category: 'tuning',
     default: '10000',
-    help: 'Pool checkout / connect timeout in ms; a saturated pool answers a checkout with an error after this instead of queueing forever. 0 = wait forever (pg\'s default).',
+    help: 'Pool checkout / connect timeout in ms, integer 0–2147483647; a saturated pool rejects a checkout after this. 0 = wait forever (pg\'s default).',
   },
   {
     name: 'BETTER_TRIGGER_POOL_STATEMENT_TIMEOUT_MS',
     category: 'tuning',
     default: '30000',
-    help: 'Server-side statement timeout in ms, sent as statement_timeout in the connection startup packet so PostgreSQL itself cancels a query that runs longer. 0 = off.',
+    help: 'Server-side statement timeout in ms, integer 0–2147483647, sent as statement_timeout at connection startup so PostgreSQL cancels longer queries. 0 = off.',
   },
   {
     name: 'BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION',
