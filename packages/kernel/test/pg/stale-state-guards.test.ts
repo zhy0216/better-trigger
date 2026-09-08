@@ -143,6 +143,16 @@ async function pendingWaitCount(pool: Pool, id: string): Promise<number> {
   return res.rows[0]!.n;
 }
 
+/** Make a suspended timer due only after the race's setup has finished. */
+async function makeTimerDue(pool: Pool, runId: string): Promise<void> {
+  const res = await pool.query(
+    `UPDATE waits SET resume_at = now() - interval '1 second'
+      WHERE run_id = $1 AND kind = 'duration' AND status = 'pending'`,
+    [runId],
+  );
+  expect(res.rowCount).toBe(1);
+}
+
 async function stepCount(pool: Pool, id: string): Promise<number> {
   const res = await pool.query<{ n: number }>(
     `SELECT count(*)::int AS n FROM run_steps WHERE run_id = $1`,
@@ -399,10 +409,12 @@ describePg('stale-state transition guards (p2-39)', () => {
         expect(claim.id).toBe(runId);
         const res = await kernel.suspendRun({
           runId, namespace: NS, seq: 0, kind: 'duration',
-          resumeAt: new Date(Date.now() + 40).toISOString(),
+          // Keep the timer pending through slow DB calls; advance it below.
+          resumeAt: new Date(Date.now() + 3_600_000).toISOString(),
           fingerprint: 'fp-healthy', workerId, fencingToken: claim.fencingToken,
         });
         expect(res.resumed).toBe(false);
+        await makeTimerDue(pool, runId);
 
         // The run comes back 'queued' with its wait completed and a step row.
         const deadline = Date.now() + 5_000;
@@ -583,7 +595,9 @@ describePg('stale-state transition guards (p2-39)', () => {
           const aToken = aClaim.fencingToken;
           const aResume = await kernel.suspendRun({
             runId: aId, namespace: NS, seq: 0, kind: 'duration',
-            resumeAt: new Date(Date.now() + 30).toISOString(),
+            // A short deadline can expire inside suspendRun on a busy runner,
+            // taking the immediate-resume path instead of racing the scanner.
+            resumeAt: new Date(Date.now() + 3_600_000).toISOString(),
             fingerprint: 'fp-int', workerId, fencingToken: aToken,
           });
           expect(aResume.resumed).toBe(false);
@@ -596,6 +610,8 @@ describePg('stale-state transition guards (p2-39)', () => {
           });
           expect(bClaim.id).toBe(bId);
           const bToken = bClaim.fencingToken;
+
+          await makeTimerDue(pool, aId);
 
           // Fire the round's ops together: a terminal op on A or B, and time
           // for the scanner + reaper to do their worst.
@@ -618,9 +634,8 @@ describePg('stale-state transition guards (p2-39)', () => {
           await Promise.allSettled(races);
 
           // Drain A. 'queued' = the scanner won → reclaim (token must have
-          // advanced — exactly one more claim) and complete. 'running' = the
-          // suspend saw an already-past resumeAt (resumed:true) and kept the
-          // claim. Anything else must be 'canceled' — and a canceled run must
+          // advanced — exactly one more claim) and complete. Anything else
+          // must be 'canceled' — and a canceled run must
           // show NO queue row and the SAME fencing token cancel saw (a terminal
           // run's token never advances again). 'waiting' is the scanner
           // mid-resume — poll it out (bounded) instead of asserting on a state
@@ -634,10 +649,6 @@ describePg('stale-state transition guards (p2-39)', () => {
             expect(a2.fencingToken).toBeGreaterThan(aToken);
             await kernel.completeRun({
               runId: aId, output: {}, workerId, fencingToken: a2.fencingToken, namespace: NS,
-            });
-          } else if (aStatus === 'running') {
-            await kernel.completeRun({
-              runId: aId, output: {}, workerId, fencingToken: aToken, namespace: NS,
             });
           } else {
             expect(aStatus).toBe('canceled');
