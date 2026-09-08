@@ -138,7 +138,7 @@ matters.
 ### Dashboard
 
 The daemon serves the built dashboard itself: `docker compose up` and open
-<http://127.0.0.1:4848> — same origin as the API, no second port, no CORS. A
+<http://127.0.0.1:4848> — same origin as the API, on one port. A
 deep link (e.g. a `/runs/...` URL you bookmarked) refreshes to the dashboard
 instead of a 404, and hashed assets are served `immutable` so a daemon restart
 always hands out the new bundle.
@@ -150,9 +150,12 @@ it at the daemon:
 cd apps/web && VITE_BT_API_URL=http://localhost:4848 bun run dev   # :5173
 ```
 
-(Without `VITE_BT_API_URL` the dev server targets `http://localhost:4848`
-anyway; a production build — what the daemon serves — talks to the origin it
-was loaded from, so it works from any host:port.)
+Without `VITE_BT_API_URL` the dev server targets `http://localhost:4848`.
+A production build talks to the origin it was loaded from. Remote HTTPS
+dashboards are allowed when their origin matches the request URL the worker
+receives. If a TLS proxy rewrites that URL to an internal HTTP address,
+configure the public origin with `--cors-origin` or
+`BETTER_TRIGGER_CORS_ORIGIN` (see [CORS](./apps/worker/README.md#cors)).
 
 If the daemon uses `BETTER_TRIGGER_API_KEY`, the dashboard prompts for a key
 after a `401` and keeps a manually entered token only in page memory. Refreshing
@@ -208,8 +211,15 @@ without spending a retry attempt.
 "local" has to mean local. Set `BETTER_TRIGGER_API_KEY` and the API requires
 `Authorization: Bearer <key>`; the SDK takes the same value. A non-loopback
 `--host` **without** a key refuses to start unless `--allow-unauthenticated`
-says the exposure is deliberate. Browser origins are loopback-only by default;
-add others with `--cors-origin`.
+says the exposure is deliberate. Browser origins may match the worker's
+request URL (including remote HTTPS) or use HTTP/HTTPS loopback origins;
+`--cors-origin` / `BETTER_TRIGGER_CORS_ORIGIN` adds explicit origins.
+
+CORS controls whether a browser can read a response. A separate origin check
+rejects disallowed origins on unsafe API methods with `403 origin_not_allowed`
+before any side effect, including bodyless cancel/retry POSTs and form requests.
+SDK, curl and embedded callers that send no `Origin` remain supported;
+authentication and rate limits still apply.
 
 For deployments that are explicitly on the network, the daemon also ships the
 security edge that makes that survivable (see the

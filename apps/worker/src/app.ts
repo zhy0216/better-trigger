@@ -12,7 +12,7 @@ import type { Namespace } from '@better-trigger/core';
 import { KernelError, type Kernel, type KernelErrorCode } from '@better-trigger/kernel';
 import type { ApiErrorBody } from './types';
 import { auditMiddleware } from './audit';
-import { authMiddleware, corsMiddleware, type AppVariables } from './middleware';
+import { authMiddleware, corsMiddleware, originMiddleware, type AppVariables } from './middleware';
 import { rateLimitMiddleware } from './rate-limit';
 import { dashboardStatic } from './static';
 import { triggerRoutes } from './routes/trigger';
@@ -104,14 +104,15 @@ export function createApp(deps: AppDeps): Hono<{ Variables: AppVariables }> {
 
   app.use('*', corsMiddleware);
   // O6 order matters: audit is OUTERMOST so it sees every outcome — auth's
-  // 401, the rate limiter's 429, the body limit's 413, a route's throw
+  // 401, the origin gate's 403, the rate limiter's 429, the body limit's 413, a route's throw
   // (Hono turns it into the onError response before the chain unwinds) and
   // the successful responses — and records them all with one requestId. The
-  // rate limiter sits AFTER auth so only authenticated callers draw from the
-  // run-creating budget, and BEFORE the body limit so a throttled request is
-  // answered without ever buffering its body.
+  // origin gate sits AFTER auth and BEFORE rate limiting/body reads: rejected
+  // browser origins cannot spend the run-creating budget. Permitted requests
+  // still pass the rate limiter before anything buffers their bodies.
   app.use('/api/v1/*', auditMiddleware());
   app.use('/api/v1/*', authMiddleware());
+  app.use('/api/v1/*', originMiddleware);
   app.use('/api/v1/*', rateLimitMiddleware());
 
   // Refuse an oversized body before anything buffers it: `c.req.json()` would

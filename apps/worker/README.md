@@ -118,9 +118,13 @@ even when the dashboard comes from cache. At runtime:
 - `/api/v1/*` and any other `/api*` path are untouched: API routes answer as
   before, unknown ones keep the JSON 404.
 
-Because the dashboard is same-origin, production needs one port and no CORS
-configuration, and the built client talks to the origin it was loaded from —
-no `VITE_BT_API_URL` needed. A build without the dashboard (`dist/public`
+The built client talks to the origin it was loaded from, so same-origin hosting
+needs no `VITE_BT_API_URL`. The worker accepts remote HTTPS dashboards when
+their origin matches the request URL it receives. If a TLS proxy rewrites that
+URL to an internal HTTP address, configure the public origin with
+`--cors-origin` or `BETTER_TRIGGER_CORS_ORIGIN` (see [CORS](#cors)).
+
+A build without the dashboard (`dist/public`
 missing, e.g. a source checkout that has not run the web build) behaves
 exactly as before: non-API paths answer the JSON 404. For dashboard
 development, run Vite standalone (see `apps/web/README.md`).
@@ -443,16 +447,28 @@ code rule.
 
 ### CORS
 
-Binding loopback keeps the network out, but not the browser: a page the user
-visits can still send a cross-origin request to `http://localhost:4848`, and
-with `Access-Control-Allow-Origin: *` on an unauthenticated API that page could
-trigger tasks and read run payloads. So only the dashboard's own origins are
-allowed by default — **http/https on `localhost` / `127.0.0.0/8` / `[::1]`, any
-port** (the vite dev port is not fixed). Anything else gets no
-`Access-Control-Allow-Origin` header and the browser drops the response.
+The default browser origin policy allows **the origin of the request URL the
+worker receives**, including remote HTTPS dashboards, plus **HTTP/HTTPS on
+`localhost` / `127.0.0.0/8` / `[::1]`, any port** (the Vite dev port is not
+fixed). Origins are compared after parsing scheme, host and port, so
+`http://localhost.evil.com` is not `localhost`, and a different scheme or port
+is a different origin.
+
+CORS response headers control whether a browser can read the response. A
+separate server check rejects disallowed `Origin` values on every unsafe API
+method (all methods except GET, HEAD and OPTIONS) with
+`403 { error: { code: 'origin_not_allowed', message: 'request origin is not allowed' } }`
+**before any kernel or database side effect**. This includes bodyless
+`POST /runs/:id/cancel` and `POST /runs/:id/retry`, form requests, and JSON
+requests; the check does not depend on Content-Type. Auth runs first, so a
+missing or invalid required key still returns 401. Origin rejections are
+audited and consume no run-operation rate-limit tokens; allowed requests
+continue through the existing rate and body limits. Disallowed origins also
+receive no `Access-Control-Allow-Origin` header.
 
 `--cors-origin` adds origins explicitly; it is repeatable and accepts
-comma-separated values, and `*` opts back into allowing everything:
+comma-separated values. `BETTER_TRIGGER_CORS_ORIGIN` accepts the same list.
+`*` explicitly allows any nonempty origin, including the opaque `null` origin:
 
 ```bash
 better-trigger-worker --cors-origin https://ops.example.com
@@ -460,22 +476,24 @@ better-trigger-worker --cors-origin https://a.example.com,https://b.example.com
 BETTER_TRIGGER_CORS_ORIGIN=https://ops.example.com better-trigger-worker
 ```
 
-Origins are compared after parsing (scheme + host + port), so
-`http://localhost.evil.com` is not `localhost`. Non-browser callers — the SDK,
-`curl` — send no `Origin` and are unaffected: CORS only decides what a browser
-hands back to a page, never whether the daemon serves the request.
+For a TLS proxy, same-origin in the browser may differ from the URL received
+by the worker: `https://ops.example.com` can become
+`http://worker.internal:4848` upstream. In that case, explicitly allow the
+**public origin**, using `--cors-origin https://ops.example.com` or
+`BETTER_TRIGGER_CORS_ORIGIN=https://ops.example.com`. The worker does not infer
+origin permission from `Forwarded`, `X-Forwarded-*` or `Sec-Fetch-Site` headers.
 
-That last clause is why the allowlist is only half of it. A cross-origin POST is
-a **simple request** — one the browser sends with no preflight at all — as long
-as its `Content-Type` is `text/plain`, `application/x-www-form-urlencoded` or
-`multipart/form-data`. Such a request reaches the route and runs the task; the
-browser only hides the response. So every route that reads a body requires
-`Content-Type: application/json` (parameters such as `; charset=utf-8` are
-fine) and answers `400 bad_request` otherwise: asking for that media type is
-what forces a preflight, and the preflight is where the allowlist refuses.
-Body-less POSTs (`/runs/:id/cancel`, `/runs/:id/retry`) announce nothing and are
-untouched. The SDK and the dashboard already send `application/json`; `curl`
-needs it spelled out, since `-d` defaults to form encoding:
+Callers without an `Origin` header — the SDK, `curl`, and embedded dispatches —
+remain supported and need not add one. An empty or `null` Origin is distinct
+from an absent header and is rejected by default. Origin permission does not
+replace authentication or rate limiting.
+
+Routes that read a body still require `Content-Type: application/json`
+(parameters such as `; charset=utf-8` are fine) and answer `400 bad_request`
+otherwise, even for an allowed origin or a caller without Origin. Bodyless
+cancel/retry need no Content-Type. The SDK and dashboard already send JSON
+with the required media type; `curl -d` defaults to form encoding, so specify
+the header when sending JSON:
 
 ```bash
 curl -X POST http://localhost:4848/api/v1/trigger \

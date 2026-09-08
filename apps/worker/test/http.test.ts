@@ -144,6 +144,80 @@ describe('body parsing', () => {
   });
 });
 
+describe('origin checks across the HTTP boundary', () => {
+  it.each([
+    ['POST', '/trigger', '{"taskId":"origin_test","payload":{}}'],
+    ['POST', '/batch-trigger', '{"items":[{"taskId":"origin_test","payload":{}}]}'],
+    ['PATCH', '/schedules/sch_origin_test', '{"enabled":true}'],
+  ])('guards %s %s before kernel/SQL work', async (method, path, body) => {
+    for (const origin of ['https://untrusted.example', 'null']) {
+      for (const type of [
+        undefined, 'application/json', 'text/plain',
+        'application/x-www-form-urlencoded', 'multipart/form-data; boundary=x',
+      ]) {
+        const { app, calls } = makeApp();
+        const res = await app.request(`https://dashboard.example/api/v1${path}`, {
+          method,
+          headers: { Origin: origin, ...(type === undefined ? {} : { 'Content-Type': type }) },
+          body: new TextEncoder().encode(body),
+        });
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ error: { code: 'origin_not_allowed' } });
+        expect(calls.trigger).toHaveLength(0);
+        expect(calls.batchTrigger).toHaveLength(0);
+        expect(calls.query).toHaveLength(0);
+      }
+    }
+    const { app, calls } = makeApp();
+    const res = await app.request(`https://dashboard.example/api/v1${path}`, {
+      method, headers: { Origin: 'https://dashboard.example', 'Content-Type': 'application/json' }, body,
+    });
+    expect(res.status).toBe(200);
+    const writes = calls.trigger.length + calls.batchTrigger.length +
+      calls.query.filter(({ sql }) => /UPDATE schedules/.test(sql)).length;
+    expect(writes).toBe(1);
+  });
+
+  it.each(['PUT', 'DELETE', 'PATCH'])('checks %s even on an unknown API route', async (method) => {
+    const { app, calls } = makeApp();
+    const res = await app.request('/api/v1/origin_probe', {
+      method, headers: { Origin: 'https://untrusted.example' },
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: { code: 'origin_not_allowed' } });
+    expect(calls.query).toHaveLength(0);
+  });
+
+  it.each(['GET', 'HEAD', 'OPTIONS'])('preserves %s health/preflight requests with auth enabled', async (method) => {
+    process.env.BETTER_TRIGGER_API_KEY = 'synthetic-health-key';
+    const { app, calls } = makeApp();
+    const res = await app.request(
+      method === 'OPTIONS' ? '/api/v1/runs/run_origin_test/cancel' : '/api/v1/health',
+      { method, headers: { Origin: 'https://untrusted.example' } },
+    );
+    expect(res.status).toBe(method === 'OPTIONS' ? 204 : 200);
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBeNull();
+    expect(calls.query).toHaveLength(0);
+  });
+
+  it.each([
+    ['text/plain', '{"taskId":"origin_test"}', 'Content-Type must be application/json'],
+    ['application/x-www-form-urlencoded', 'taskId=origin_test', 'Content-Type must be application/json'],
+    ['multipart/form-data; boundary=x', '{}', 'Content-Type must be application/json'],
+    ['application/json', '{"taskId":', 'request body must be valid JSON'],
+    ['application/json', 'null', 'request body must be a JSON object'],
+  ])('still validates an allowed browser body: %s / %s', async (type, body, message) => {
+    const { app, calls } = makeApp();
+    const res = await app.request('https://dashboard.example/api/v1/trigger', {
+      method: 'POST', headers: { Origin: 'https://dashboard.example', 'Content-Type': type }, body,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: { code: 'bad_request', message } });
+    expect(calls.trigger).toHaveLength(0);
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('PATCH /schedules/:id body fields', () => {
   it('rejects a body without a boolean `enabled`, before any query', async () => {
     // `{}` used to pass undefined → NULL into a NOT NULL column → 500.

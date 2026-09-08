@@ -1,20 +1,17 @@
 /* =============================================================================
    @better-trigger/worker — middleware.
    Bearer auth (skipped when BETTER_TRIGGER_API_KEY is unset; /health always
-   open; the key is compared in constant time) + a loopback-only CORS
-   allowlist.
+   open; the key is compared in constant time) + browser origin checks.
 
-   The API is unauthenticated by default, so the browser is an entry path of its
-   own: with `origin: '*'` any page the user visits could POST /api/v1/trigger
-   at http://localhost:4848 and read back run payloads. Only the dashboard's own
-   origins are allowed by default — http/https on localhost / 127.0.0.0/8 /
-   [::1], any port (the dev vite port is not fixed) — and anything else is
-   answered without the Access-Control-Allow-Origin header, which is what makes
-   the browser drop the response. `--cors-origin` (env
-   BETTER_TRIGGER_CORS_ORIGIN) opens that up explicitly.
+   CORS headers govern whether a browser can read the response, not whether
+   the server executes the request. originMiddleware independently rejects
+   disallowed origins on unsafe methods, including bodyless cancel/retry and
+   simple form POSTs. Both checks allow the request's own origin, loopback
+   (http/https on localhost / 127.0.0.0/8 / [::1], any port), and explicit
+   --cors-origin / BETTER_TRIGGER_CORS_ORIGIN entries ('*' opts into any origin).
 
-   Non-browser callers (the SDK, curl) send no Origin and are untouched: CORS
-   only ever decides what a *browser* hands back to a page.
+   Non-browser callers (the SDK, curl, embedded dispatches) need no Origin.
+   Origin permission never replaces bearer auth or the run rate limit.
    ============================================================================= */
 import { Buffer } from 'node:buffer';
 import { createHash, timingSafeEqual } from 'node:crypto';
@@ -100,24 +97,56 @@ function extraOrigins(): string[] {
   return fromEnv.length > 0 ? [...configuredOrigins, ...fromEnv] : configuredOrigins;
 }
 
-/** The origin allowed back to the caller, or null to send no CORS header. */
-export function allowedOrigin(origin: string): string | null {
+/**
+ * Shared CORS/execution policy. Same-origin remote HTTPS dashboards are valid
+ * even when their host is not loopback. Compare with the actual request URL;
+ * never infer trust from Forwarded / X-Forwarded-* or Sec-Fetch-Site headers.
+ * If a TLS proxy rewrites the public URL to an internal HTTP origin, explicitly
+ * allow its public origin with --cors-origin / BETTER_TRIGGER_CORS_ORIGIN.
+ */
+export function allowedOrigin(origin: string, requestUrl?: string): string | null {
   if (!origin) return null; // Same-origin GETs and non-browser clients.
   const extra = extraOrigins();
   if (extra.includes('*')) return origin;
   if (isLoopbackOrigin(origin)) return origin;
   const normalized = normalizeOrigin(origin);
-  return normalized !== null && extra.includes(normalized) ? origin : null;
+  return normalized !== null && (
+    (requestUrl !== undefined && normalized === normalizeOrigin(requestUrl)) ||
+    extra.includes(normalized)
+  ) ? origin : null;
 }
 
 export const corsMiddleware: MiddlewareHandler = cors({
-  origin: (origin) => allowedOrigin(origin),
+  origin: (origin, c) => allowedOrigin(origin, c.req.url),
   allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   // Idempotency-Key is read by POST /runs/:id/retry and is not on the CORS
   // safelist, so a browser caller with --cors-origin would fail the preflight
   // without it here.
   allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
 });
+
+/**
+ * Check every unsafe method regardless of Content-Type or body presence.
+ * Hono CSRF is form-media-type gated; our JSON and bodyless routes share one
+ * policy, and callers without Origin must remain usable. Only an absent
+ * header is exempt: an empty, opaque ("null"), or invalid origin is rejected
+ * unless explicitly permitted by the policy above.
+ * Mounted after audit/auth and before rate limiting/body reads, so refusals
+ * are audited and spend neither run-operation tokens nor kernel work.
+ */
+export const originMiddleware: MiddlewareHandler = async (c, next) => {
+  if (c.req.method === 'GET' || c.req.method === 'HEAD' || c.req.method === 'OPTIONS') {
+    return next();
+  }
+  const origin = c.req.header('Origin');
+  if (origin !== undefined && allowedOrigin(origin, c.req.url) === null) {
+    return c.json(
+      { error: { code: 'origin_not_allowed', message: 'request origin is not allowed' } },
+      403,
+    );
+  }
+  return next();
+};
 
 /**
  * Constant-time token compare. `===` stops at the first differing byte, so the

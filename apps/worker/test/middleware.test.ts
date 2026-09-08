@@ -11,11 +11,9 @@
    and `http://localhost@evil.com` both contain "localhost" and neither is one —
    which is why the check parses the origin instead of matching a pattern.
 
-   The allowlist alone only covers half of it: a cross-origin POST whose
-   Content-Type is text/plain is a *simple request* and never gets preflighted,
-   so it reaches the route and runs the task no matter what the allowlist says
-   — the browser only withholds the response. Hence the media-type block below,
-   which is the part that actually stops the trigger.
+   CORS headers only govern response access. The unsafe-method origin gate
+   must refuse disallowed requests before any kernel call, including bodyless
+   cancel/retry and simple form requests that never get preflighted.
 
    Driven through createApp with stub deps: no Postgres involved. The last block
    spawns the real CLI (still no Postgres — it never gets past --no-migrate) to
@@ -27,9 +25,10 @@ import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import type { Pool } from 'pg';
 import type { Kernel } from '@better-trigger/kernel';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
 import { allowedOrigin, parseOriginList, setCorsOrigins } from '../src/middleware';
+import type { AuditEntry } from '../src/audit';
 
 const makeApp = () => {
   const kernel = {
@@ -64,6 +63,7 @@ const LOOPBACK = [
   'http://localhost:5173', // vite dev
   'http://localhost:4848', // the daemon serving the dashboard itself
   'http://127.0.0.1:4848',
+  'http://127.7.8.9:5173',
   'http://[::1]:4848',
   'https://localhost:8443',
   'http://localhost', // default port
@@ -79,10 +79,16 @@ const HOSTILE = [
   'null', // file:// and sandboxed iframes
 ];
 
-beforeEach(() => setCorsOrigins([]));
+beforeEach(() => {
+  setCorsOrigins([]);
+  vi.stubEnv('BETTER_TRIGGER_API_KEY', undefined);
+  vi.stubEnv('BETTER_TRIGGER_API_KEYS', undefined);
+  vi.stubEnv('BETTER_TRIGGER_CORS_ORIGIN', undefined);
+});
 afterEach(() => {
   setCorsOrigins([]);
-  delete process.env.BETTER_TRIGGER_CORS_ORIGIN;
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 describe('CORS allowlist', () => {
@@ -190,7 +196,9 @@ describe('CORS allowlist', () => {
 
 /** Same stubs, but recording: "did the task run" is the assertion that counts. */
 const makeRecordingApp = () => {
-  const calls: { trigger: unknown[]; cancel: string[] } = { trigger: [], cancel: [] };
+  const calls: { trigger: unknown[]; cancel: string[]; retry: string[] } = {
+    trigger: [], cancel: [], retry: [],
+  };
   const kernel = {
     trigger: async (input: unknown) => {
       calls.trigger.push(input);
@@ -198,6 +206,10 @@ const makeRecordingApp = () => {
     },
     cancelRun: async (id: string) => {
       calls.cancel.push(id);
+    },
+    retryRun: async (id: string) => {
+      calls.retry.push(id);
+      return { runId: 'run_origin_retry' };
     },
   } as unknown as Kernel;
   const pool = { query: async () => ({ rows: [] }) } as unknown as Pool;
@@ -220,7 +232,7 @@ const simplePost = (contentType?: string) => {
 };
 
 describe('cross-origin simple requests', () => {
-  it('refuses a body that is not announced as JSON — and runs nothing', async () => {
+  it('refuses disallowed origins on simple requests before body validation', async () => {
     // The three Content-Types a form/fetch can set without a preflight, plus
     // the header omitted entirely.
     for (const type of [
@@ -231,9 +243,9 @@ describe('cross-origin simple requests', () => {
     ]) {
       const { app, calls } = makeRecordingApp();
       const res = await app.fetch(simplePost(type));
-      expect(res.status, String(type)).toBe(400);
+      expect(res.status, String(type)).toBe(403);
       expect(await res.json()).toEqual({
-        error: { code: 'bad_request', message: 'Content-Type must be application/json' },
+        error: { code: 'origin_not_allowed', message: 'request origin is not allowed' },
       });
       // The one that matters: the response being unreadable is not enough, the
       // task must not have been triggered in the first place.
@@ -257,13 +269,146 @@ describe('cross-origin simple requests', () => {
     }
   });
 
-  it('leaves body-less POSTs alone — they have no Content-Type to check', async () => {
+  it('leaves body-less POSTs without Origin available to SDK/curl callers', async () => {
     const { app, calls } = makeRecordingApp();
     const res = await app.fetch(
       new Request('http://localhost:4848/api/v1/runs/run_1/cancel', { method: 'POST' }),
     );
     expect(res.status).toBe(200);
     expect(calls.cancel).toEqual(['run_1']);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+
+const CONTROL_PATH = '/api/v1/runs/run_origin_test';
+const PUBLIC_ORIGIN = 'https://dashboard.example';
+const UNTRUSTED_ORIGIN = 'https://untrusted.example';
+const ORIGIN_ERROR = {
+  error: { code: 'origin_not_allowed', message: 'request origin is not allowed' },
+};
+
+describe.each(['cancel', 'retry'] as const)('%s browser origin boundary', (action) => {
+  it.each([UNTRUSTED_ORIGIN, ...HOSTILE, '', 'not-an-origin'])(
+    'rejects a bodyless POST from %j without invoking the kernel',
+    async (origin) => {
+      const { app, calls } = makeRecordingApp();
+      const res = await app.request(`http://localhost:4848${CONTROL_PATH}/${action}`, {
+        method: 'POST', headers: { Origin: origin },
+      });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual(ORIGIN_ERROR);
+      expect(res.headers.get('Access-Control-Allow-Origin')).toBeNull();
+      expect(calls.cancel).toHaveLength(0);
+      expect(calls.retry).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    'text/plain;charset=UTF-8',
+    'application/x-www-form-urlencoded',
+    'multipart/form-data; boundary=x',
+    'application/json',
+    'application/octet-stream',
+  ])('rejects a disallowed origin regardless of Content-Type %s', async (type) => {
+    const { app, calls } = makeRecordingApp();
+    const res = await app.request(`${CONTROL_PATH}/${action}`, {
+      method: 'POST', headers: { Origin: UNTRUSTED_ORIGIN, 'Content-Type': type }, body: '{}',
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual(ORIGIN_ERROR);
+    expect(calls[action]).toHaveLength(0);
+  });
+
+  it.each([undefined, ...LOOPBACK])('executes exactly once for origin %s', async (origin) => {
+    const { app, calls } = makeRecordingApp();
+    const res = await app.request(`${CONTROL_PATH}/${action}`, {
+      method: 'POST', headers: origin === undefined ? {} : { Origin: origin },
+    });
+    expect(res.status).toBe(200);
+    expect(calls[action]).toEqual(['run_origin_test']);
+  });
+
+  it('allows a remote HTTPS dashboard on the same origin, including its port', async () => {
+    const origin = `${PUBLIC_ORIGIN}:8443`;
+    const { app, calls } = makeRecordingApp();
+    const res = await app.request(`${origin}${CONTROL_PATH}/${action}`, {
+      method: 'POST', headers: { Origin: origin },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe(origin);
+    expect(calls[action]).toEqual(['run_origin_test']);
+  });
+
+  it.each(['http://dashboard.example', `${PUBLIC_ORIGIN}:8443`, 'https://dashboard.example.evil.com'])(
+    'rejects a near miss of the request origin: %s',
+    async (origin) => {
+      const { app, calls } = makeRecordingApp();
+      const res = await app.request(`${PUBLIC_ORIGIN}${CONTROL_PATH}/${action}`, {
+        method: 'POST', headers: { Origin: origin },
+      });
+      expect(res.status).toBe(403);
+      expect(calls[action]).toHaveLength(0);
+    },
+  );
+
+  it.each(['flag', 'env'])('allows a TLS proxy public origin through explicit %s configuration', async (source) => {
+    if (source === 'flag') setCorsOrigins([PUBLIC_ORIGIN]);
+    else vi.stubEnv('BETTER_TRIGGER_CORS_ORIGIN', PUBLIC_ORIGIN);
+    const { app, calls } = makeRecordingApp();
+    const res = await app.request(`http://worker.internal:4848${CONTROL_PATH}/${action}`, {
+      method: 'POST', headers: { Origin: PUBLIC_ORIGIN },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe(PUBLIC_ORIGIN);
+    expect(calls[action]).toEqual(['run_origin_test']);
+  });
+
+  it.each([UNTRUSTED_ORIGIN, 'null'])('preserves the explicit wildcard opt-in for %s', async (origin) => {
+    setCorsOrigins(['*']);
+    const { app, calls } = makeRecordingApp();
+    const res = await app.request(`${CONTROL_PATH}/${action}`, {
+      method: 'POST', headers: { Origin: origin },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe(origin);
+    expect(calls[action]).toEqual(['run_origin_test']);
+  });
+
+  it('does not treat forwarded headers or fetch metadata as permission', async () => {
+    const { app, calls } = makeRecordingApp();
+    const res = await app.request(`http://worker.internal:4848${CONTROL_PATH}/${action}`, {
+      method: 'POST',
+      headers: {
+        Origin: UNTRUSTED_ORIGIN,
+        Forwarded: 'host=untrusted.example;proto=https',
+        'X-Forwarded-Host': 'untrusted.example',
+        'X-Forwarded-Proto': 'https',
+        'Sec-Fetch-Site': 'same-origin',
+      },
+    });
+    expect(res.status).toBe(403);
+    expect(calls[action]).toHaveLength(0);
+  });
+
+  it('audits the rejection and leaves the request body unread', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { app, calls } = makeRecordingApp();
+    const request = new Request(`http://localhost${CONTROL_PATH}/${action}`, {
+      method: 'POST', headers: { Origin: UNTRUSTED_ORIGIN }, body: 'synthetic private body',
+    });
+    const res = await app.fetch(request);
+    expect(res.status).toBe(403);
+    expect(request.bodyUsed).toBe(false);
+    expect(calls[action]).toHaveLength(0);
+    expect(log).toHaveBeenCalledTimes(1);
+    const entry = JSON.parse(String(log.mock.calls[0][0]).slice('[audit] '.length)) as AuditEntry;
+    expect(entry).toMatchObject({
+      method: 'POST', path: `${CONTROL_PATH}/${action}`, endpoint: action,
+      status: 403, result: 'rejected', reason: 'origin_not_allowed',
+      requestId: res.headers.get('x-request-id'), taskIds: null, runIds: null,
+    });
+    expect(String(log.mock.calls[0][0])).not.toContain('synthetic private body');
   });
 });
 

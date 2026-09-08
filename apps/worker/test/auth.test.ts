@@ -36,6 +36,8 @@ vi.mock('node:crypto', async (importActual) => {
 });
 
 import { createApp } from '../src/app';
+import { keyFingerprint, setCorsOrigins } from '../src/middleware';
+import type { AuditEntry } from '../src/audit';
 
 const KEY = 'sk-local-abcdefghijklmnop';
 
@@ -176,5 +178,87 @@ describe('constant-time compare', () => {
     const res = await makeApp().fetch(trigger(`Bearer ${KEY}xx`));
     expect(res.status).toBe(401);
     expect(timingSafeEqualSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe.each(['cancel', 'retry'] as const)('%s origin/auth/rate-limit ordering', (action) => {
+  beforeEach(() => {
+    setCorsOrigins([]);
+    vi.stubEnv('BETTER_TRIGGER_API_KEYS', undefined);
+    vi.stubEnv('BETTER_TRIGGER_CORS_ORIGIN', undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  const recordingApp = () => {
+    const operation = vi.fn(async () => ({ runId: 'run_origin_retry' }));
+    const kernel = { cancelRun: operation, retryRun: operation } as unknown as Kernel;
+    const pool = { query: vi.fn() } as unknown as Pool;
+    return { app: createApp({ kernel, pool }), operation };
+  };
+  const request = (origin?: string, authorization?: string) => new Request(
+    `https://dashboard.example/api/v1/runs/run_origin_auth/${action}`,
+    {
+      method: 'POST',
+      headers: {
+        ...(origin === undefined ? {} : { Origin: origin }),
+        ...(authorization === undefined ? {} : { Authorization: authorization }),
+      },
+    },
+  );
+
+  it('authenticates first and audits a valid key rejected by the origin gate', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { app, operation } = recordingApp();
+    for (const origin of ['https://dashboard.example', 'https://untrusted.example', undefined]) {
+      for (const authorization of [undefined, 'Bearer wrong-key']) {
+        const res = await app.fetch(request(origin, authorization));
+        expect(res.status).toBe(401);
+        expect(await res.json()).toMatchObject({ error: { code: 'unauthorized' } });
+      }
+    }
+    const denied = await app.fetch(request('https://untrusted.example', `Bearer ${KEY}`));
+    expect(denied.status).toBe(403);
+    expect(operation).not.toHaveBeenCalled();
+    const line = String(log.mock.calls.at(-1)![0]);
+    const entry = JSON.parse(line.slice('[audit] '.length)) as AuditEntry;
+    expect(entry).toMatchObject({
+      key: keyFingerprint(KEY), status: 403, result: 'rejected', reason: 'origin_not_allowed',
+      requestId: denied.headers.get('x-request-id'),
+    });
+    expect(line).not.toContain(KEY);
+    const accepted = await app.fetch(request('https://dashboard.example', `Bearer ${KEY}`));
+    expect(accepted.status).toBe(200);
+    expect(operation).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { keyed: true, rps: '1', globalRps: '0' },
+    { keyed: true, rps: '0', globalRps: '1' },
+    { keyed: false, rps: '1', globalRps: '0' },
+    { keyed: false, rps: '0', globalRps: '1' },
+  ])('preserves the run budget and enforces its limit: %j', async ({ keyed, rps, globalRps }) => {
+    // Freeze only the bucket clock: async response/audit streams still use
+    // real timers, and a slow CI host cannot refill the one-token budget.
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    vi.stubEnv('BETTER_TRIGGER_RATE_LIMIT_RPS', rps);
+    vi.stubEnv('BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS', globalRps);
+    vi.stubEnv('BETTER_TRIGGER_RATE_LIMIT_BURST', '1');
+    if (!keyed) delete process.env.BETTER_TRIGGER_API_KEY;
+    const authorization = keyed ? `Bearer ${KEY}` : undefined;
+    const { app, operation } = recordingApp();
+    for (const origin of ['https://untrusted.example', 'null']) {
+      expect((await app.fetch(request(origin, authorization))).status).toBe(403);
+    }
+    expect(operation).not.toHaveBeenCalled();
+    expect((await app.fetch(request('https://dashboard.example', authorization))).status).toBe(200);
+    expect(operation).toHaveBeenCalledTimes(1);
+    // Omitting Origin is compatible with SDK/curl; it does not bypass limits.
+    const limited = await app.fetch(request(undefined, authorization));
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toMatchObject({ error: { code: 'rate_limited' } });
+    expect(operation).toHaveBeenCalledTimes(1);
   });
 });
