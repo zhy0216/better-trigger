@@ -1,6 +1,6 @@
 # 执行队列 · repo-improvements-2026-09-07
 
-方案：[../plan.md](../plan.md)。18 项发现合为 9 个任务；R1–R7 roadmap 不入队。初始状态：全部待执行。
+方案：[../plan.md](../plan.md)。18 项发现合为 9 个任务；R1–R7 roadmap 不入队。初始状态：全部待执行。执行结果：9/9 已合入 main、归档并清理；逐项提交和最终验收见 plan 末尾“执行结果”。
 
 ## 执行偏好
 
@@ -14,15 +14,15 @@ default_agent: codex
 
 | 文件 | 优先级 | 难度 | agent / 来源 | 模型 / Codex 推理强度 | 一句话说明 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| [01-browser-control-origins.md](done/01-browser-control-origins.md) | P1 | medium | codex / 继承 | gpt-6-astra / xhigh | 无 body 控制请求的浏览器来源检查（F1） | 已完成（已 rebase main 并通过验收、文档已同步，待协调器集成） |
-| [02-core-json-error-boundaries.md](done/02-core-json-error-boundaries.md) | P1 | medium | codex / 继承 | gpt-6-astra / xhigh | JSON 值保真及不再抛错的诊断边界（F2–F4） | 已完成，待协调器集成 |
-| [03-replay-canonicalization.md](done/03-replay-canonicalization.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | 消除指纹递归和输入碰撞（F5–F6） | 已完成：T1/T2，已 rebase main 并复核；13 组旧指纹 golden、11 项新 PG 回归及根 PG 1,883 tests 通过，首次失败与兼容限制保留，待协调器集成 |
-| [04-namespace-pair-isolation.md](done/04-namespace-pair-isolation.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | cron 与指标按真实 namespace pair 隔离（F7–F8） | 已完成，已 rebase main 并通过复核，待协调器集成 |
-| [05-probe-deadline-lifecycle.md](done/05-probe-deadline-lifecycle.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | deadline 后连接和查询的清理（F9–F10） | 已完成：T1–T2，已 rebase main 并复核；局部 92 / 故障 PG 6 / health-pool 4 / 根 PG 1,841 tests 通过，首次失败及 SQL 取消边界保留，待协调器集成 |
-| [06-worker-numeric-limits.md](done/06-worker-numeric-limits.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | runtime timer 和 pool 参数的底层范围（F11–F12） | 已完成：T1–T2，已 rebase main 并复核；worker 259 / DB pool 21 / kernel 135 / 根 PG 1,936 tests 及 check:exports 通过，首次失败与探针说明交接保留；待协调器集成 |
-| [07-dashboard-query-lifecycle.md](done/07-dashboard-query-lifecycle.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | 分页、凭据切换和终态读取竞态（F13–F15） | 已完成：T1–T3，已 rebase main；局部 103 / 根 PG 1,776 tests 通过，保留首次 waiters 失败及复核记录 |
-| [08-run-detail-async-controls.md](done/08-run-detail-async-controls.md) | P1 | medium | codex / 继承 | gpt-6-astra / xhigh | 运行操作的迟到 UI 副作用与复制反馈回归（F16–F17） | 已完成：已 rebase main 并复核，局部 95 / 根 PG 1,818 tests 通过；复制 effect 竞态已受控复现并修复，保留历史首次失败归因边界；待协调器集成 |
-| [09-docs-workflow-concurrency.md](done/09-docs-workflow-concurrency.md) | P2 | easy | codex / 继承 | gpt-6-astra / high | 隔离 docs PR 与 main 发布的并发组（F18） | 已完成：PR 按编号取消旧构建，发布串行且权限限于 deploy；本地 docs 与根 gate（PG 1,594 tests）通过 |
+| [01-browser-control-origins.md](done/01-browser-control-origins.md) | P1 | medium | codex / 继承 | gpt-6-astra / xhigh | 无 body 控制请求的浏览器来源检查（F1） | 已合入、复核并清理（`95110a8`） |
+| [02-core-json-error-boundaries.md](done/02-core-json-error-boundaries.md) | P1 | medium | codex / 继承 | gpt-6-astra / xhigh | JSON 值保真及不再抛错的诊断边界（F2–F4） | 已合入、复核并清理（`ada4613`） |
+| [03-replay-canonicalization.md](done/03-replay-canonicalization.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | 消除指纹递归和输入碰撞（F5–F6） | 已合入、复核并清理（`b740fdc`） |
+| [04-namespace-pair-isolation.md](done/04-namespace-pair-isolation.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | cron 与指标按真实 namespace pair 隔离（F7–F8） | 已合入、复核并清理（`af56074`） |
+| [05-probe-deadline-lifecycle.md](done/05-probe-deadline-lifecycle.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | deadline 后连接和查询的清理（F9–F10） | 已合入、复核并清理（`c709d14`） |
+| [06-worker-numeric-limits.md](done/06-worker-numeric-limits.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | runtime timer 和 pool 参数的底层范围（F11–F12） | 已合入、复核并清理（`2849d6d`） |
+| [07-dashboard-query-lifecycle.md](done/07-dashboard-query-lifecycle.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | 分页、凭据切换和终态读取竞态（F13–F15） | 已合入、复核并清理（`93976c6`） |
+| [08-run-detail-async-controls.md](done/08-run-detail-async-controls.md) | P1 | medium | codex / 继承 | gpt-6-astra / xhigh | 运行操作的迟到 UI 副作用与复制反馈回归（F16–F17） | 已合入、复核并清理（`27249c7`） |
+| [09-docs-workflow-concurrency.md](done/09-docs-workflow-concurrency.md) | P2 | easy | codex / 继承 | gpt-6-astra / high | 隔离 docs PR 与 main 发布的并发组（F18） | 已合入、复核并清理（`b7265e3`） |
 
 ## 文件
 

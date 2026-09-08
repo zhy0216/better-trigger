@@ -140,3 +140,45 @@ git diff --check
 - 来源校验设计参考 [Hono CSRF](https://hono.dev/docs/middleware/builtin/csrf)：需要检查不安全方法，不能只省略 CORS 响应头；采用中间件前核对无 body 请求是否在其实际覆盖范围。
 - JSON 值语义参考 [JSON.stringify](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify)；连接归还/销毁参考 [node-postgres Pool](https://node-postgres.com/apis/pool)；计时器边界参考 [Node timers](https://nodejs.org/api/timers.html) 和 [PostgreSQL 16 client defaults](https://www.postgresql.org/docs/16/runtime-config-client.html)。
 - workflow 并发语义参考 [GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)，实际修改以本仓库触发器与权限为准。
+
+## 执行结果 · 2026-09-08
+
+本轮 9/9 个 todo 已在独立 Herdr worktree 中完成、复核、串行 rebase 并快进合入 `main`，任务代码最终提交为 `2849d6d6c7d7e86cdae202b50dd31a8451aff2f8`。原计划与首次失败证据全文保留；下表列出每个最终任务 commit 和协调器在 rebase 后亲自执行的仓库 gate。全部 todo 原文及逐项验收已归档到 `todos/done/`。
+
+所有任务逐个解析 `agent: inherit`，实际继承 `default_agent: codex`。模型均为 `gpt-6-astra`；easy/high、medium/xhigh、hard/max。每次 Herdr 启动显式使用 `--dangerously-bypass-approvals-and-sandbox`，没有重启、换模型或降档。
+
+| todo / 归档 | 合入 commit | 实际 agent / 模型 | 推理强度 | 协调器 gate：PG 根 files / tests |
+| --- | --- | --- | --- | --- |
+| [01-browser-control-origins.md](todos/done/01-browser-control-origins.md) | `95110a82e1e7aaa0a560470184b55c9503ebba69` | codex / gpt-6-astra | xhigh | 156 / 1,724，全部通过 |
+| [02-core-json-error-boundaries.md](todos/done/02-core-json-error-boundaries.md) | `ada4613083f12a90af15130ea78e4b0337f864a3` | codex / gpt-6-astra | xhigh | 156 / 1,634，全部通过 |
+| [03-replay-canonicalization.md](todos/done/03-replay-canonicalization.md) | `b740fdc2ae14a233c89ec6228074880d5c7b03d6` | codex / gpt-6-astra | max | 158 / 1,883，全部通过 |
+| [04-namespace-pair-isolation.md](todos/done/04-namespace-pair-isolation.md) | `af56074636c2de8e22d650d8fc0922ee9b1a6c7c` | codex / gpt-6-astra | max | 156 / 1,731，全部通过 |
+| [05-probe-deadline-lifecycle.md](todos/done/05-probe-deadline-lifecycle.md) | `c709d148cdb5855153aa878b298b5e887e4f70dc` | codex / gpt-6-astra | max | 157 / 1,841，全部通过 |
+| [06-worker-numeric-limits.md](todos/done/06-worker-numeric-limits.md) | `2849d6d6c7d7e86cdae202b50dd31a8451aff2f8` | codex / gpt-6-astra | max | 158 / 1,936，全部通过 |
+| [07-dashboard-query-lifecycle.md](todos/done/07-dashboard-query-lifecycle.md) | `93976c68f929be687ebcc6a2a65a15785649c15e` | codex / gpt-6-astra | max | 157 / 1,776，全部通过 |
+| [08-run-detail-async-controls.md](todos/done/08-run-detail-async-controls.md) | `27249c76d6d929d38709a0c791e2fa4aa4d49ea2` | codex / gpt-6-astra | xhigh | 157 / 1,818，全部通过 |
+| [09-docs-workflow-concurrency.md](todos/done/09-docs-workflow-concurrency.md) | `b7265e3acf244cb52dd430a6b5ccceb9b632af79` | codex / gpt-6-astra | high | 156 / 1,594，全部通过 |
+
+实际集成顺序：09 → 02 → 01 → 04 → 07 → 08 → 05 → 03 → 06；各依赖均先完成复核并合入，README 相邻行冲突由原任务 agent 解决。
+
+每个任务的协调器 gate 均包含 `bun run lint`、`bun run typecheck`、`bun run build`、`bun run test -- --force`、`git diff --check`，独立缓存目录、强制执行，使用本轮自建 PostgreSQL 16 cluster，无 PG skip。日志和每条命令退出状态见 `/tmp/bt-finish-20260907/NN-integration/`；任务 agent 的原始失败、修复与自验日志索引保留在各归档。
+
+### 最终整合验收
+
+协调器在全部任务合入后的 main `2849d6d6c7d7e86cdae202b50dd31a8451aff2f8` 上再次运行完整 gate：**158 files / 1,936 tests 全通过，无测试 skip、无缓存恢复**。同时重新运行 **19/19 acceptance harnesses**、全部 `check:audit` / `check:deps` / `check:drift` / `check:exports` / `check:pkg-meta`、audit self-test 和 docs Mermaid 检查，全部通过。命令、退出码及完整输出在 `/tmp/bt-finish-20260907/final-integration/`。这些是本轮最终实测结果，不是复用历史 1,594 tests / 19 harnesses 基线。
+
+03 的旧指纹 13/13 golden 另由协调器核对保存源码与旧 Git 版本完全一致；局部 core 115、kernel 指纹/serialization 57、executor 30 通过。03 的 11 项真实 PG 回放回归及 replay-drift/e2e、04 namespace PG 回归、05 六个 PG 故障/恢复场景和 health-pool、06 pool/lease 真实 PG 上下界均有任务归档证据；最终根 tests/acceptance 重新覆盖仓库内的相应回归与既有 harness，临时故障脚本的执行记录见 05 归档。07 局部 103、08 局部 95、05 局部 92、06 worker 局部 160 也由协调器独立通过。
+
+### 保留的首次失败与限制
+
+- 原计划首次复制反馈断言 `expected '' to be 'Copied'` 及随后 1,594 tests 复核通过全部保留。08 确定性复现并修复了 DOM 提交后、被动 value effect 前开始复制的竞态，原测试和新增回归通过；**历史首次失败的确切调度/根因仍未证实**，没有以增加 timeout、删除断言或后续通过覆盖首次证据。
+- 07 首次根 tests 的 waiter 断言 `expected 3 to be 2` 及之后的局部、PG 根复核记录全部保留。受控 25ms 间隔揭示了 20ms sweep/5ms 等待的计时假设；06 只补数值范围，原断言未改。本轮通过不表示这项既有调度敏感性已消除。
+- 05 初次真实 PG 验证对旧 backend 迅速消失的假设失败，原脚本和日志保留。客户端 `release(true)`、pool 恢复与服务端 SQL 停止是不同证据；网络故障或关闭 statement_timeout 时 SQL 仍可能执行。06 在其文件所有权内同步了 worker README 与 pool 注释。
+- 03 的普通 fingerprint v1 保持兼容；过去丢字段或误表示的特殊输入可能被识别为漂移，旧 ledger 不重写，已丢失字段无法恢复。具有副作用的 toJSON 不承诺跨不同序列化上下文稳定。02 采用 JSON parse 中间树，未做性能基准或承诺 raw JSON 数字字面量保真。
+- 保留既有 TypeScript 7 experimental API 构建警告，未升级工具链。09 的 GitHub Actions 行为依据配置与官方并发规则复核，未声称在远端实际触发过 Actions。
+
+### 归档、范围与清理
+
+无 blocked 或未完成的队列项。R1–R7 roadmap 按计划延后，原因保留在原 roadmap 表，未扩展到 SDK 等待契约、新重试意图交互、连续分页、规模性能改造、模块拆分、依赖升级或新产品能力。
+
+9 个本轮 Herdr agent 均正常退出，对应 workspace、worktree 和任务分支均已删除；没有保留待清理任务资源。所有本轮独占临时 PostgreSQL cluster 已停止并清理，原始验证日志继续保留；没有使用 Docker 或用户数据库。原 checkout 保持 main，任务集成后 `git status --short` 为空；本节及 README 状态以单独的收尾文档 commit 提交，提交后再次确认干净。未 push、创建 PR 或部署。
