@@ -6,11 +6,14 @@
    pattern (role=button + tabIndex + Enter/Space) and announce their selected
    state via aria-pressed.
    ============================================================================= */
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import React from 'react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunView } from '../src/features/run/RunView';
 import { setApiKey } from '../src/api/client';
 import { resetConnection } from '../src/api/hooks';
+import * as hooks from '../src/api/hooks';
+import { adaptRunDetail } from '../src/api/adapter';
 import type { RunDetailResponse } from '../src/api/client';
 
 const NOW = Date.parse('2026-08-11T12:00:00Z');
@@ -47,8 +50,16 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
+
+function deferredCopy() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
 
 describe('SpanRow keyboard access (T4)', () => {
   it('renders rows as focusable buttons that select the span on Enter/Space', async () => {
@@ -143,5 +154,94 @@ describe('Inspector content and copy feedback', () => {
     resolveCopy();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Copy Output' }).textContent).toBe('Copy'));
     expect(screen.queryByText('Copied')).toBeNull();
+  });
+
+  it('preserves a copy started after DOM commit but before passive effects', async () => {
+    const pending = deferredCopy();
+    const writeText = vi.fn(() => pending.promise);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    // Supply an accepted detail synchronously so a parent layout effect can
+    // activate its committed button before CopyButton's passive value effect.
+    // This controls the ordering; it does not assume how the historical PG
+    // root-test failure was scheduled.
+    vi.spyOn(hooks, 'useRun').mockReturnValue({
+      data: adaptRunDetail(failedDetail), loading: false, error: null,
+      loadOlderLogs: async () => false, loadingOlderLogs: false, hasOlderLogs: false, loadOlderLogsError: null,
+    });
+    function CopyOnCommit() {
+      React.useLayoutEffect(() => {
+        screen.getByRole('button', { name: 'Copy Payload' }).click();
+      }, []);
+      return <RunView runId="r1" />;
+    }
+    render(<CopyOnCommit />);
+    const payloadSection = screen.getByRole('region', { name: 'Payload' });
+    expect(payloadSection.querySelector('details')!.open).toBe(false);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(JSON.stringify(payload, null, 2));
+    await act(async () => { pending.resolve(); });
+    expect(within(payloadSection).getByRole('status').textContent).toBe('Copied');
+    expect(payloadSection.isConnected).toBe(true);
+  });
+
+  for (const target of ['span', 'run'] as const) {
+    for (const outcome of ['success', 'failure'] as const) {
+      it(`ignores old copy ${outcome} after switching ${target} while the new copy is pending`, async () => {
+        const old = deferredCopy();
+        const current = deferredCopy();
+        const writeText = vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+        vi.stubGlobal('navigator', { clipboard: { writeText } });
+        fetchMock.mockImplementation((input: RequestInfo | URL) => {
+          const id = new URL(String(input)).pathname.split('/').pop()!;
+          return Promise.resolve(new Response(JSON.stringify({ ...failedDetail, run: { ...failedDetail.run, id } })));
+        });
+        const view = render(<RunView runId="r1" />);
+        fireEvent.click(await screen.findByRole('button', { name: 'Copy Output' }));
+        const oldSection = screen.getByRole('region', { name: 'Output' });
+        if (target === 'span') fireEvent.click(screen.getByRole('button', { name: /child-op/ }));
+        else view.rerender(<RunView runId="r2" />);
+        fireEvent.click(await screen.findByRole('button', { name: 'Copy Output' }));
+        expect(oldSection.isConnected).toBe(false);
+        const currentSection = screen.getByRole('region', { name: 'Output' });
+        await act(async () => {
+          if (outcome === 'success') old.resolve();
+          else old.reject(new Error('old permission denial'));
+        });
+        const button = within(currentSection).getByRole('button', { name: 'Copy Output' }) as HTMLButtonElement;
+        expect(button.disabled).toBe(true);
+        expect(button.textContent).toBe('Copying…');
+        expect(within(currentSection).getByRole('status').textContent).toBe('');
+        await act(async () => { current.resolve(); });
+        expect(within(currentSection).getByRole('status').textContent).toBe('Copied');
+        expect(writeText).toHaveBeenLastCalledWith(JSON.stringify(target === 'span' ? { child: 'result' } : { processed: false }, null, 2));
+      });
+    }
+  }
+
+  it('retains the copy through same-value frames and invalidates it when the value changes', async () => {
+    const old = deferredCopy();
+    const current = deferredCopy();
+    const writeText = vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const frame = (response: RunDetailResponse) => ({
+      data: adaptRunDetail(response), loading: false, error: null,
+      loadOlderLogs: async () => false, loadingOlderLogs: false, hasOlderLogs: false, loadOlderLogsError: null,
+    });
+    const query = vi.spyOn(hooks, 'useRun').mockReturnValue(frame(failedDetail));
+    const view = render(<RunView runId="r1" />);
+    const section = screen.getByRole('region', { name: 'Output' });
+    fireEvent.click(within(section).getByRole('button', { name: 'Copy Output' }));
+    query.mockReturnValue(frame(failedDetail));
+    view.rerender(<RunView runId="r1" />);
+    expect(screen.getByRole('region', { name: 'Output' })).toBe(section);
+    expect((within(section).getByRole('button', { name: 'Copy Output' }) as HTMLButtonElement).disabled).toBe(true);
+    query.mockReturnValue(frame({ ...failedDetail, run: { ...failedDetail.run, output: { processed: true } } }));
+    view.rerender(<RunView runId="r1" />);
+    fireEvent.click(within(section).getByRole('button', { name: 'Copy Output' }));
+    await act(async () => { old.reject(new Error('old denial')); });
+    expect(within(section).getByRole('status').textContent).toBe('');
+    expect((within(section).getByRole('button', { name: 'Copy Output' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { current.resolve(); });
+    expect(within(section).getByRole('status').textContent).toBe('Copied');
+    expect(writeText).toHaveBeenLastCalledWith(JSON.stringify({ processed: true }, null, 2));
   });
 });

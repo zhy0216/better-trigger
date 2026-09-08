@@ -8,12 +8,15 @@
    call and an inline error on failure (the optimistic overlay rolls back and
    the useRun poll drives the real status).
    ============================================================================= */
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunView } from '../src/features/run/RunView';
 import { createRetryIntentKey } from '../src/features/run/retryIntentKey';
-import { setApiKey } from '../src/api/client';
+import { ApiError, setApiKey } from '../src/api/client';
+import * as client from '../src/api/client';
 import { resetConnection, getConnection } from '../src/api/hooks';
+import * as hooks from '../src/api/hooks';
+import { adaptRunDetail } from '../src/api/adapter';
 import type { RunDetailResponse, ServerRunStatus } from '../src/api/client';
 
 // Base timestamps relative to the REAL clock: a running run has no finishedAt,
@@ -68,7 +71,171 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+describe('RunHeader action ownership', () => {
+  for (const kind of ['retry', 'cancel'] as const) {
+    const status = kind === 'retry' ? 'failed' : 'running';
+    const label = kind === 'retry' ? 'Retry' : 'Cancel';
+    const pendingLabel = kind === 'retry' ? 'Retrying…' : 'Canceling…';
+
+    it(`${kind} dispatches only once for two entries in the same tick`, async () => {
+      const response = deferred<Response>();
+      fetchMock.mockImplementation((input: RequestInfo | URL) => String(input).includes(`/${kind}?`)
+        ? response.promise : Promise.resolve(json(detail('r1', status), 200)));
+      render(<RunView runId="r1" />, { reactStrictMode: true });
+      const button = await screen.findByRole('button', { name: label });
+      act(() => {
+        fireEvent.click(button);
+        fireEvent.click(button);
+      });
+      expect(fetchMock.mock.calls.filter(([input]) => String(input).includes(`/${kind}?`))).toHaveLength(1);
+      await act(async () => { response.resolve(json({ runId: 'retried', ok: true }, 200)); });
+    });
+
+    for (const change of ['run', 'env', 'key', 'revoke', 'leave', 'unmount'] as const) {
+      for (const outcome of ['success', '401'] as const) {
+        it(`${kind} retires on ${change} and ignores a late ${outcome}`, async () => {
+          const response = deferred<Response>();
+          let signal: AbortSignal | undefined;
+          fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+            const url = new URL(String(input));
+            if (url.pathname.endsWith(`/${kind}`)) {
+              signal = init?.signal ?? undefined;
+              // Deliberately ignore abort: a delivered response can still race cleanup.
+              return response.promise;
+            }
+            return Promise.resolve(json(detail(url.pathname.split('/').pop()!, status), 200));
+          });
+          setApiKey('synthetic-old-key');
+          const onRetried = vi.fn();
+          const view = render(<RunView runId="r1" onRetried={onRetried} />);
+          fireEvent.click(await screen.findByRole('button', { name: label }));
+          expect(signal?.aborted).toBe(false);
+          if (change === 'unmount') view.unmount();
+          else if (change === 'key' || change === 'revoke') {
+            act(() => { setApiKey(change === 'key' ? 'synthetic-new-key' : null); });
+          } else {
+            view.rerender(<RunView runId={change === 'leave' ? null : change === 'run' ? 'r2' : 'r1'}
+              env={change === 'env' ? 'staging' : 'prod'} onRetried={onRetried} />);
+          }
+          expect(signal?.aborted).toBe(true);
+          if (change !== 'unmount' && change !== 'leave') await screen.findByRole('button', { name: label });
+          resetConnection();
+          await act(async () => {
+            response.resolve(outcome === 'success' ? json({ runId: 'late-run', ok: true }, 200)
+              : json({ error: { message: 'old credential rejected' } }, 401));
+          });
+          expect(onRetried).not.toHaveBeenCalled();
+          expect(getConnection()).not.toBe('unauthorized');
+          expect(screen.queryByRole('alert')).toBeNull();
+          expect(screen.queryByText('Canceled')).toBeNull();
+        });
+      }
+    }
+
+    for (const identity of ['run', 'env', 'key'] as const) {
+      it(`${kind} keeps the new pending operation when an old request settles after ${identity} A → B → A`, async () => {
+        // Keep the header mounted to test its own lifecycle, independently of
+        // useRun's identity-changing loading frame (which normally unmounts it).
+        const frame = {
+          data: adaptRunDetail(detail('r1', status)), loading: false, error: null,
+          loadOlderLogs: async () => false, loadingOlderLogs: false, hasOlderLogs: false, loadOlderLogsError: null,
+        };
+        const query = vi.spyOn(hooks, 'useRun').mockReturnValue(frame);
+        const old = deferred<Response>();
+        const current = deferred<Response>();
+        fetchMock.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+        const onRetried = vi.fn();
+        const view = render(<RunView runId="r1" onRetried={onRetried} />);
+        fireEvent.click(screen.getByRole('button', { name: label }));
+        const oldInit = fetchMock.mock.calls[0][1] as RequestInit;
+        if (identity === 'key') {
+          act(() => { setApiKey('synthetic-key-b'); });
+          act(() => { setApiKey(null); });
+        } else if (identity === 'run') {
+          // Change the trace identity in place to exercise RunHeader directly;
+          // the outer RunDetail key otherwise adds another unmount boundary.
+          query.mockReturnValue({ ...frame, data: adaptRunDetail(detail('r2', status)) });
+          view.rerender(<RunView runId="r1" onRetried={onRetried} />);
+          query.mockReturnValue(frame);
+          view.rerender(<RunView runId="r1" onRetried={onRetried} />);
+        } else {
+          view.rerender(<RunView runId="r1" env="staging" onRetried={onRetried} />);
+          view.rerender(<RunView runId="r1" env="prod" onRetried={onRetried} />);
+        }
+        expect(oldInit.signal?.aborted).toBe(true);
+        fireEvent.click(screen.getByRole('button', { name: label }));
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        const currentInit = fetchMock.mock.calls[1][1] as RequestInit;
+        if (kind === 'retry') expect(currentInit.headers).not.toEqual(oldInit.headers);
+        await act(async () => { old.resolve(json({ error: { message: 'retired failure' } }, 401)); });
+        const button = screen.getByRole('button', { name: pendingLabel }) as HTMLButtonElement;
+        expect(button.disabled).toBe(true);
+        expect(currentInit.signal?.aborted).toBe(false);
+        expect(screen.queryByRole('alert')).toBeNull();
+        expect(getConnection()).not.toBe('unauthorized');
+        fireEvent.click(button);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        await act(async () => { current.resolve(json({ runId: 'current-retry', ok: true }, 200)); });
+        expect((screen.getByRole('button', { name: label }) as HTMLButtonElement).disabled).toBe(false);
+        if (kind === 'retry') expect(onRetried).toHaveBeenCalledExactlyOnceWith('current-retry');
+        // A completed cancel request still waits for the poll's real status.
+        else expect(screen.queryByText('Canceled')).toBeNull();
+      });
+    }
+
+    it(`${kind} cancels transport silently when leaving and fetch honors abort`, async () => {
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        if (!String(input).includes(`/${kind}?`)) return Promise.resolve(json(detail('r1', status), 200));
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('Transport stopped', 'AbortError')), { once: true });
+        });
+      });
+      const view = render(<RunView runId="r1" />);
+      fireEvent.click(await screen.findByRole('button', { name: label }));
+      await act(async () => { view.rerender(<RunView runId={null} />); });
+      expect(screen.getByText('No run selected')).toBeTruthy();
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.queryByText('Canceled')).toBeNull();
+    });
+  }
+
+  for (const outcome of ['success', '401'] as const) {
+    it(`checks the credential version before React commits the changed key on ${outcome}`, async () => {
+      // Delay subscription delivery to control the interval between changing
+      // the external credential and React committing the replacement view.
+      const notifications = new Set<() => void>();
+      const subscribe = client.subscribeApiKey;
+      vi.spyOn(client, 'subscribeApiKey').mockImplementation(listener => subscribe(() => { notifications.add(listener); }));
+      const response = deferred<{ runId: string }>();
+      const retry = vi.spyOn(hooks.api, 'retryRun').mockReturnValue(response.promise);
+      fetchMock.mockImplementation(() => Promise.resolve(json(detail('r1', 'failed'), 200)));
+      const onRetried = vi.fn();
+      render(<RunView runId="r1" onRetried={onRetried} />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+      const signal = retry.mock.calls[0][3]!;
+      await act(async () => {
+        setApiKey('synthetic-replacement');
+        if (outcome === 'success') response.resolve({ runId: 'old-key-retry' });
+        else response.reject(new ApiError(401, 'old key rejected'));
+        await response.promise.catch(() => {});
+        expect(signal.aborted).toBe(false);
+        expect(onRetried).not.toHaveBeenCalled();
+        expect(getConnection()).not.toBe('unauthorized');
+      });
+      act(() => { notifications.forEach(listener => listener()); });
+    });
+  }
 });
 
 describe('RunHeader retry', () => {

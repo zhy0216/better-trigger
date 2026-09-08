@@ -5,16 +5,17 @@
    second half of a double-click (or any re-send racing the pending disabled
    state) has to carry the SAME key so the server's run_retry_operations
    replay path answers with the one run this intent already created instead of
-   minting one run per delivery. This holder is what RunHeader keeps for its
-   mounted lifetime: current() mints lazily on first use and returns the same
+   minting one run per delivery. RunHeader owns one holder per dispatched
+   operation: current() mints lazily on first use and returns the same
    key until clear() ends the intent (called from the request's finally —
    settle, success or failure, response arrived or not). The next current()
    is then a new intent with a fresh key.
 
    It is a synchronous closure, not useState: a second click can arrive in the
    same tick as the first, before any re-render could commit state, so the
-   reuse decision must be readable without a render cycle. Each mounted
-   RunHeader owns one holder — two dashboard tabs/replicas deliberately hold
+   reuse decision must be readable without a render cycle. RunHeader's
+   synchronous request lock excludes duplicate entries; a retired operation
+   only clears its own holder. Two dashboard tabs/replicas deliberately hold
    independent keys; cross-client dedup needs server-side coordination and is
    outside this protocol (docs/backend-contract.md §3.7).
    ============================================================================= */

@@ -8,7 +8,7 @@ import { Icon, Badge, Button, StatusBadge, StatusDot } from '../../components/pr
 import { STATUS_META } from '../../components/status-meta';
 import { ErrorState, LoadingState } from '../../components/Layout';
 import { useRun, api, recordConnectionError } from '../../api/hooks';
-import { ApiError } from '../../api/client';
+import { ApiError, getApiKeyVersion, subscribeApiKey } from '../../api/client';
 import { relativeFuture, type AdaptedRunDetail } from '../../api/adapter';
 import { createRetryIntentKey } from './retryIntentKey';
 import { rulerTicks } from './ruler';
@@ -37,46 +37,63 @@ function RunHeader({ trace, runStatus, env, onRetried }: { trace: Trace; runStat
   // server's queued/running/waiting; retry covers the terminal dead ends.
   const canRetry = runStatus === 'failed' || runStatus === 'canceled';
   const canCancel = runStatus === 'queued' || runStatus === 'running' || runStatus === 'frozen';
-  // Disabled/"pending" overlay for the gap between click and the next polled
-  // frame; on failure it rolls back (buttons re-enable) and surfaces the error.
-  const [pending, setPending] = React.useState<'retry' | 'cancel' | null>(null);
-  const [actionError, setActionError] = React.useState<string | null>(null);
-  // p2-38 repair: one Idempotency-Key per retry INTENT, not per click event.
-  // current() mints on the first click of an intent and returns the SAME key
-  // for every re-send of that intent (the second click of a double-click
-  // racing the pending disabled state, a re-send while the request is still
-  // in flight), so the server's replay path hands back the one run this
-  // intent already created. clear() in the request's finally ends the intent
-  // on settle (success OR failure, whether or not a response made it back) —
-  // the NEXT click is a new intent with a fresh key. Two dashboard tabs each
-  // hold their own holder by design: cross-client dedup needs server-side
-  // coordination and is outside this protocol (docs/backend-contract.md §3.7).
-  const retryIntentKey = React.useMemo(() => createRetryIntentKey(), []);
+  const apiKeyVersion = React.useSyncExternalStore(subscribeApiKey, getApiKeyVersion, getApiKeyVersion);
+  const generation = React.useMemo(() => ({ runId: trace.runId, env, apiKeyVersion }), [trace.runId, env, apiKeyVersion]);
+  const owner = React.useRef<typeof generation | null>(null);
+  // This ref owns both the transport and the synchronous single-flight lock.
+  const request = React.useRef<AbortController | null>(null);
+  const [state, setState] = React.useState<{
+    generation: typeof generation; pending: 'retry' | 'cancel' | null; error: string | null;
+  }>({ generation, pending: null, error: null });
+  if (state.generation !== generation) setState({ generation, pending: null, error: null });
+  const pending = state.generation === generation ? state.pending : null;
+  const actionError = state.generation === generation ? state.error : null;
+  React.useLayoutEffect(() => {
+    owner.current = generation;
+    return () => {
+      owner.current = null;
+      const retired = request.current;
+      request.current = null;
+      // Stops waiting for the response; it cannot undo a server-side action.
+      retired?.abort();
+    };
+  }, [generation]);
+  const isCurrent = () => owner.current === generation && apiKeyVersion === getApiKeyVersion();
   const runAction = async (kind: 'retry' | 'cancel') => {
-    setActionError(null);
-    setPending(kind);
+    if (!isCurrent() || request.current || (kind === 'retry' ? !canRetry : !canCancel)) return;
+    const controller = new AbortController();
+    request.current = controller;
+    const stale = () => !isCurrent() || request.current !== controller || controller.signal.aborted;
+    // One holder per dispatched intent. Settle still ends it on success OR
+    // failure, even without a response. A retired finally only clears its own
+    // holder; it cannot end a new identity's intent (contract §3.7).
+    const retryIntentKey = createRetryIntentKey();
+    setState((prev) => prev.generation === generation ? { generation, pending: kind, error: null } : prev);
     try {
       if (kind === 'retry') {
         // retryRun mints a NEW run (id changes) — navigate to it, or the
         // poll would keep watching the old failed run forever and repeat
         // clicks would silently spawn N runs.
         const operationKey = retryIntentKey.current();
-        const { runId: newRunId } = await api.retryRun(trace.runId, env, { operationKey });
-        onRetried?.(newRunId);
+        const { runId: newRunId } = await api.retryRun(trace.runId, env, { operationKey }, controller.signal);
+        if (!stale()) onRetried?.(newRunId);
       } else {
         // Cancel keeps the same run: the 2s useRun poll picks up 'canceled'.
-        await api.cancelRun(trace.runId, env);
+        await api.cancelRun(trace.runId, env, controller.signal);
       }
     } catch (e) {
-      setActionError(e instanceof Error ? e.message : 'request failed');
+      if (stale()) return;
+      setState((prev) => prev.generation === generation
+        ? { ...prev, error: e instanceof Error ? e.message : 'request failed' } : prev);
       // C3: only a 401 means the credential is bad; a 404/409/network failure is
       // a transient run-state or transport problem and must not flip the whole
       // dashboard to "offline". Feed just the auth rejection into the shared
       // connection registry so the key prompt takes over.
       if (e instanceof ApiError && e.status === 401) recordConnectionError(e);
     } finally {
-      setPending(null);
       if (kind === 'retry') retryIntentKey.clear();
+      if (!stale()) setState((prev) => prev.generation === generation ? { ...prev, pending: null } : prev);
+      if (request.current === controller) request.current = null;
     }
   };
   return (
@@ -225,7 +242,10 @@ function SpanRow({ s, t, totalMs, labelW, selected, onSelect, vizStyle }: {
 function CopyButton({ value, label }: { value: string; label: string }) {
   const [status, setStatus] = React.useState<'idle' | 'copying' | 'copied' | 'failed'>('idle');
   const request = React.useRef(0);
-  React.useEffect(() => {
+  // Initialize/retire ownership during commit, before this button can be
+  // activated. A passive effect can run after the click and invalidate a
+  // legitimate pending copy even though its value never changed.
+  React.useLayoutEffect(() => {
     request.current += 1;
     setStatus('idle');
     return () => { request.current += 1; };
