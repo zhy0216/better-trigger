@@ -22,7 +22,7 @@ default_agent: codex
 | [06-worker-numeric-limits.md](06-worker-numeric-limits.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | runtime timer 和 pool 参数的底层范围（F11–F12） | 待执行 |
 | [07-dashboard-query-lifecycle.md](07-dashboard-query-lifecycle.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | 分页、凭据切换和终态读取竞态（F13–F15） | 待执行 |
 | [08-run-detail-async-controls.md](08-run-detail-async-controls.md) | P1 | medium | codex / 继承 | gpt-6-astra / xhigh | 运行操作的迟到 UI 副作用与复制反馈回归（F16–F17） | 待执行 |
-| [09-docs-workflow-concurrency.md](09-docs-workflow-concurrency.md) | P2 | easy | codex / 继承 | gpt-6-astra / high | 隔离 docs PR 与 main 发布的并发组（F18） | 待执行 |
+| [09-docs-workflow-concurrency.md](done/09-docs-workflow-concurrency.md) | P2 | easy | codex / 继承 | gpt-6-astra / high | 隔离 docs PR 与 main 发布的并发组（F18） | 已完成：PR 按编号取消旧构建，发布串行且权限限于 deploy；本地 docs 与根 gate（PG 1,594 tests）通过 |
 
 ## 文件
 
