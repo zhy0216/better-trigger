@@ -828,7 +828,7 @@ export function startOrchestrator(
   // condition persists by nature (an unregistered task stays unregistered
   // across many fires), so a line per skipped fire would be noise while a
   // line only on the way in would leave "did it come back?" unanswered.
-  let lastUnservedCronSignature = '';
+  let lastUnservedCronSignature = '[]';
   const logWaitGraphViolations = (noWaitRuns: number, stuckWaits: number): void => {
     const signature = `${noWaitRuns}/${stuckWaits}`;
     if (signature === lastWaitGraphSignature) return;
@@ -960,7 +960,8 @@ export function startOrchestrator(
       const skippedUnserved: ScheduleRow[] = [];
       const dueNs = new Map<string, ScheduleRow[]>();
       for (const s of due.rows) {
-        const key = `${s.project_id}/${s.env}`;
+        // Both parts may contain '/', so identity must encode the pair.
+        const key = JSON.stringify([s.project_id, s.env]);
         const group = dueNs.get(key);
         if (group) group.push(s);
         else dueNs.set(key, [s]);
@@ -1080,21 +1081,28 @@ export function startOrchestrator(
             `fix the pattern (dashboard PATCH or re-registration) to resume it`,
         );
       }
-      const unservedSignature = [...new Set(
-        skippedUnserved.map((s) => `${s.project_id}/${s.env}/${s.task_id}`),
-      )]
-        .sort()
-        .join(', ');
+      // Keep identity separate from the readable slash-delimited log text:
+      // two namespace/task tuples can render identically but change service
+      // independently. Encode the sorted set too, so separators inside a
+      // component cannot hide a transition between different task sets.
+      const unservedTasks = new Map(
+        skippedUnserved.map((s) => [
+          JSON.stringify([s.project_id, s.env, s.task_id]),
+          `${s.project_id}/${s.env}/${s.task_id}`,
+        ]),
+      );
+      const unservedSignature = JSON.stringify([...unservedTasks.keys()].sort());
       if (unservedSignature !== lastUnservedCronSignature) {
         lastUnservedCronSignature = unservedSignature;
-        if (unservedSignature === '') {
+        if (unservedTasks.size === 0) {
           logger.warn(
             `[orchestrator:cron] no cron schedule is unserved anymore — fires resumed`,
           );
         } else {
+          const detail = [...unservedTasks.values()].sort().join(', ');
           logger.warn(
             `[orchestrator:cron] skipped due cron fire(s) for task(s) no online ` +
-              `worker serves: ${unservedSignature} — no runs were created for them. ` +
+              `worker serves: ${detail} — no runs were created for them. ` +
               `Start a worker whose manifest declares the task, or delete its ` +
               `schedule; the scan keeps skipping it while nothing serves it.`,
           );

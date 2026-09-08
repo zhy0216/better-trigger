@@ -17,7 +17,7 @@ default_agent: codex
 | [01-browser-control-origins.md](done/01-browser-control-origins.md) | P1 | medium | codex / 继承 | gpt-6-astra / xhigh | 无 body 控制请求的浏览器来源检查（F1） | 已完成（已 rebase main 并通过验收、文档已同步，待协调器集成） |
 | [02-core-json-error-boundaries.md](done/02-core-json-error-boundaries.md) | P1 | medium | codex / 继承 | gpt-6-astra / xhigh | JSON 值保真及不再抛错的诊断边界（F2–F4） | 已完成，待协调器集成 |
 | [03-replay-canonicalization.md](03-replay-canonicalization.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | 消除指纹递归和输入碰撞（F5–F6） | 待执行 |
-| [04-namespace-pair-isolation.md](04-namespace-pair-isolation.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | cron 与指标按真实 namespace pair 隔离（F7–F8） | 待执行 |
+| [04-namespace-pair-isolation.md](done/04-namespace-pair-isolation.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | cron 与指标按真实 namespace pair 隔离（F7–F8） | 已完成，已 rebase main 并通过复核，待协调器集成 |
 | [05-probe-deadline-lifecycle.md](05-probe-deadline-lifecycle.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | deadline 后连接和查询的清理（F9–F10） | 待执行 |
 | [06-worker-numeric-limits.md](06-worker-numeric-limits.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | runtime timer 和 pool 参数的底层范围（F11–F12） | 待执行 |
 | [07-dashboard-query-lifecycle.md](07-dashboard-query-lifecycle.md) | P1 | hard | codex / 继承 | gpt-6-astra / max | 分页、凭据切换和终态读取竞态（F13–F15） | 待执行 |

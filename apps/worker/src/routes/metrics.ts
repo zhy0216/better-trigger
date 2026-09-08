@@ -227,9 +227,10 @@ async function queryGauges(
   // A configured namespace with an empty queue gets no row — emit zeros for it
   // rather than a missing series (a vanished series breaks rate() and reads as
   // an outage of the metric, exactly like the counters below).
+  // Encode the pair: '/' is legal inside either namespace part.
   const byNs = new Map(
     namespaces.map((ns) => [
-      `${ns.projectId}/${ns.env}`,
+      JSON.stringify([ns.projectId, ns.env]),
       {
         projectId: ns.projectId,
         env: ns.env,
@@ -243,7 +244,7 @@ async function queryGauges(
   // count() comes back as bigint, i.e. a string over the wire.
   const n = (v: string | undefined): number => Number(v ?? 0);
   for (const row of res.rows) {
-    const slot = byNs.get(`${row.project_id}/${row.env}`);
+    const slot = byNs.get(JSON.stringify([row.project_id, row.env]));
     if (!slot) continue;
     slot.queueAvailable = n(row.available);
     slot.queueScheduled = n(row.scheduled);

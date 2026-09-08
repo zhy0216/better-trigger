@@ -31,12 +31,12 @@ async function countScheduleRuns(pool: Pool): Promise<number> {
   return res.rows[0]!.count;
 }
 
-async function registerCronWorker(kernel: Kernel): Promise<string> {
+async function registerCronWorker(kernel: Kernel, namespace = NS): Promise<string> {
   const { workerId } = await kernel.registerWorker({
     codeVersion: 'v1',
     runtime: 'test',
     concurrency: 1,
-    namespaces: [NS],
+    namespaces: [namespace],
     tasks: [{ id: CRON_TASK, codeVersion: 'v1', cron: { pattern: CRON_PATTERN } }],
   });
   return workerId;
@@ -148,4 +148,125 @@ describePg('cron skip of unserved schedules (p2-18 C1)', () => {
       }
     });
   });
+});
+
+describePg('cron namespace pairs containing slashes', () => {
+  const A = { projectId: 'a/b', env: 'c' };
+  const B = { projectId: 'a', env: 'b/c' };
+
+  it.each([false, true])(
+    'isolates fires, skips and worker recovery (reverse namespaces: %s)',
+    async (reverse) => {
+      await withPg('cron_namespace_pair', async ({ kernel, pool }) => {
+        const namespaces = reverse ? [B, A] : [A, B];
+        await registerCronWorker(kernel, A);
+        const workerB = await registerCronWorker(kernel, B);
+        await pool.query(`UPDATE workers SET status = 'offline' WHERE id = $1`, [workerB]);
+
+        const snapshot = async () => {
+          const result = await pool.query<{
+            project_id: string;
+            env: string;
+            last_run_at: Date | null;
+            last_run_id: string | null;
+            advanced: boolean;
+            runs: number;
+            queued: number;
+          }>(
+            `SELECT s.project_id, s.env, s.last_run_at, s.last_run_id,
+                    s.next_run_at > now() AS advanced,
+                    (SELECT count(*)::int FROM runs r
+                      WHERE r.task_id = s.task_id AND r.trigger_type = 'schedule'
+                        AND r.project_id = s.project_id AND r.env = s.env) AS runs,
+                    (SELECT count(*)::int FROM queue q
+                      WHERE q.project_id = s.project_id AND q.env = s.env) AS queued
+               FROM schedules s WHERE s.task_id = $1`,
+            [CRON_TASK],
+          );
+          return result.rows;
+        };
+        const expectCounts = async (counts: number[]) => {
+          const rows = await snapshot();
+          expect(rows).toHaveLength(2);
+          return [A, B].map((ns, i) => {
+            const row = rows.find((r) => r.project_id === ns.projectId && r.env === ns.env)!;
+            expect(row).toMatchObject({ advanced: true, runs: counts[i], queued: counts[i] });
+            if (counts[i] === 0) {
+              expect(row.last_run_id).toBeNull();
+              expect(row.last_run_at).toBeNull();
+            } else {
+              expect(row.last_run_id).toBeTruthy();
+              expect(row.last_run_at).toBeInstanceOf(Date);
+            }
+            return row;
+          });
+        };
+
+        const handle = kernel.startOrchestrator({
+          cron: true,
+          waits: false,
+          reaper: false,
+          workerOffline: false,
+          cronIntervalMs: 50,
+          namespaces,
+        });
+        const waitForIdleTick = async () => {
+          const previous = handle.counters.loopLastSuccess.cron;
+          await expect.poll(() => handle.counters.loopLastSuccess.cron, { timeout: 5_000 })
+            .toBeGreaterThan(previous);
+          expect(handle.counters.loopErrors.cron).toBe(0);
+        };
+        const fireDue = async () => {
+          await forceDue(pool);
+          // Check against the DB clock and wait for both write-backs to
+          // COMMIT, including the skipped row that never creates a run.
+          await expect.poll(async () => (await snapshot()).every((r) => r.advanced), { timeout: 5_000 })
+            .toBe(true);
+          await waitForIdleTick();
+        };
+        try {
+          // Registered schedules are in the future and both queues are empty.
+          await waitForIdleTick();
+          await expectCounts([0, 0]);
+          expect(handle.counters.cronSkippedUnserved).toBe(0);
+
+          // Only A is online: B must consume its fire without creating a run.
+          await fireDue();
+          const first = await expectCounts([1, 0]);
+          expect(handle.counters.cronSkippedUnserved).toBe(1);
+
+          // Switch service to B without changing either task id. A's prior
+          // last_run_* must survive its skipped fire unchanged.
+          await pool.query(
+            `UPDATE workers
+                SET status = CASE WHEN id = $1 THEN 'online' ELSE 'offline' END,
+                    last_heartbeat_at = now()`,
+            [workerB],
+          );
+          await fireDue();
+          const switched = await expectCounts([1, 1]);
+          expect(switched[0]!.last_run_id).toBe(first[0]!.last_run_id);
+          expect(switched[0]!.last_run_at).toEqual(first[0]!.last_run_at);
+          expect(handle.counters.cronSkippedUnserved).toBe(2);
+
+          // A returns: both pairs can fire independently on the next due scan.
+          await pool.query(`UPDATE workers SET status = 'online', last_heartbeat_at = now()`);
+          await fireDue();
+          const recovered = await expectCounts([2, 2]);
+          for (let i = 0; i < recovered.length; i++) {
+            expect(recovered[i]!.last_run_id).not.toBe(switched[i]!.last_run_id);
+          }
+          expect(handle.counters.cronSkippedUnserved).toBe(2);
+
+          // Another empty due scan neither duplicates runs nor consumes fires.
+          await waitForIdleTick();
+          expect(await expectCounts([2, 2])).toEqual(recovered);
+          expect(handle.counters.cronSkippedUnserved).toBe(2);
+          expect(handle.counters.cronPoisoned).toBe(0);
+        } finally {
+          handle.stop();
+        }
+      });
+    },
+  );
 });

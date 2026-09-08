@@ -17,7 +17,8 @@
    behaviour on a real database is test/pg/cron-unserved.test.ts.
    ============================================================================= */
 import type { Pool } from 'pg';
-import { describe, expect, it } from 'vitest';
+import type { Namespace } from '@better-trigger/core';
+import { describe, expect, it, vi } from 'vitest';
 import { startOrchestrator } from '../src/orchestrator';
 
 interface Stmt {
@@ -199,4 +200,113 @@ describe('scanCron — unserved schedule skip (p2-18 C1)', () => {
     expect(lines.some((l) => l.includes('skipped due cron fire'))).toBe(false);
     expect(handle.counters.loopErrors.cron).toBe(0);
   }, 10_000);
+});
+
+describe('scanCron — namespace pairs containing slashes', () => {
+  const A = { projectId: 'a/b', env: 'c' };
+  const B = { projectId: 'a', env: 'b/c' };
+  const dbNow = new Date('2026-09-08T12:00:00.000Z');
+  const schedules = [A, B].map((ns, i) => ({
+    id: `sch_pair_${i}`,
+    project_id: ns.projectId,
+    env: ns.env,
+    task_id: 'same-task',
+    cron_pattern: '0 0 1 1 *',
+    cron_tz: 'UTC',
+    db_now: dbNow,
+  }));
+
+  it.each([false, true])(
+    'queries each exact pair and tracks worker transitions (reverse namespaces: %s)',
+    async (reverse) => {
+      const namespaces = reverse ? [B, A] : [A, B];
+      let due: typeof schedules = [];
+      let served: Namespace[] = [A];
+      const stmts: Stmt[] = [];
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          stmts.push({ sql, params });
+          if (/FROM schedules\s+WHERE enabled/.test(sql)) {
+            return { rows: due.filter((s) => s.project_id === params[0] && s.env === params[1]) };
+          }
+          if (/unnest\(\$2::text\[\]\) AS task_id/.test(sql)) {
+            const [ns] = JSON.parse(params[0] as string) as Namespace[];
+            const online = served.some((s) => s.projectId === ns!.projectId && s.env === ns!.env);
+            return { rows: online ? [{ task_id: 'same-task' }] : [] };
+          }
+          if (/INSERT INTO runs/.test(sql)) return { rows: [{ id: 'run_pair' }], rowCount: 1 };
+          if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: dbNow }], rowCount: 1 };
+          return { rows: [], rowCount: 0 };
+        },
+        release: () => {},
+      };
+      const pool = { connect: async () => client } as unknown as Pool;
+      const { logger, lines } = recordingLogger();
+      vi.useFakeTimers();
+      const handle = startOrchestrator(pool, logger, { ...CRON_ONLY, namespaces });
+      const tick = async () => {
+        const before = stmts.length;
+        await vi.advanceTimersByTimeAsync(CRON_ONLY.cronIntervalMs);
+        expect(handle.counters.loopErrors.cron).toBe(0);
+        const batch = stmts.slice(before);
+        expect(batch.at(-1)?.sql).toBe('COMMIT');
+        return batch;
+      };
+      try {
+        // An empty due scan queries both pairs and creates no work or warning.
+        const empty = await tick();
+        expect(empty.filter((s) => /FROM schedules/.test(s.sql)).map((s) => s.params))
+          .toEqual(namespaces.map((ns) => [ns.projectId, ns.env]));
+        expect(empty.some((s) => /unnest|INSERT INTO runs|pg_notify/.test(s.sql))).toBe(false);
+        expect(lines).toEqual([]);
+
+        due = schedules;
+        const first = await tick();
+        const checks = first.filter((s) => /unnest/.test(s.sql));
+        expect(checks.map((s) => JSON.parse(s.params[0] as string))).toEqual(namespaces.map((ns) => [ns]));
+        for (const check of checks) {
+          expect(check.params[1]).toEqual(['same-task']);
+          expectAligned(check.sql, check.params);
+        }
+        expect(first.filter((s) => /INSERT INTO runs/.test(s.sql))).toHaveLength(1);
+        const skip = first.find((s) => /UPDATE schedules/.test(s.sql) && !/last_run_at/.test(s.sql))!;
+        expect(skip.params).toEqual(['sch_pair_1', new Date('2027-01-01T00:00:00.000Z'), B.projectId, B.env]);
+        const fire = first.find((s) => /UPDATE schedules/.test(s.sql) && /last_run_at/.test(s.sql))!;
+        expect(fire.params.slice(-2)).toEqual([A.projectId, A.env]);
+        expect(first.filter((s) => /pg_notify/.test(s.sql)).map((s) => JSON.parse(s.params[1] as string)))
+          .toEqual([{ type: 'work', ...A }]);
+        expect(handle.counters.cronSkippedUnserved).toBe(1);
+
+        // Same unserved set on the next due fire: one transition warning.
+        await tick();
+        expect(lines.filter((l) => l.includes('skipped due cron fire'))).toHaveLength(1);
+
+        // The unserved task moves from B to A. Its slash-rendered text is
+        // identical, but its identity changed and must produce a new warning.
+        served = [B];
+        const switched = await tick();
+        expect(switched.filter((s) => /pg_notify/.test(s.sql)).map((s) => JSON.parse(s.params[1] as string)))
+          .toEqual([{ type: 'work', ...B }]);
+        expect(lines.filter((l) => l.includes('skipped due cron fire'))).toHaveLength(2);
+        expect(handle.counters.cronSkippedUnserved).toBe(3);
+
+        served = [A, B];
+        const recovered = await tick();
+        expect(recovered.filter((s) => /INSERT INTO runs/.test(s.sql))).toHaveLength(2);
+        expect(recovered.filter((s) => /pg_notify/.test(s.sql)).map((s) => JSON.parse(s.params[1] as string)))
+          .toEqual(namespaces.map((ns) => ({ type: 'work', ...ns })));
+        expect(handle.counters.cronSkippedUnserved).toBe(3);
+        expect(lines.filter((l) => l.includes('fires resumed'))).toHaveLength(1);
+
+        due = [];
+        const idle = await tick();
+        expect(idle.some((s) => /unnest|INSERT INTO runs|pg_notify/.test(s.sql))).toBe(false);
+        expect(handle.counters.cronSkippedUnserved).toBe(3);
+        expect(lines).toHaveLength(3);
+      } finally {
+        handle.stop();
+        vi.useRealTimers();
+      }
+    },
+  );
 });

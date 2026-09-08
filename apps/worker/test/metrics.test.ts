@@ -13,6 +13,7 @@
    with stub deps — no Postgres involved.
    ============================================================================= */
 import type { Pool } from 'pg';
+import { assertNamespace } from '@better-trigger/core';
 import type { Kernel, OrchestratorCounters } from '@better-trigger/kernel';
 import { createOrchestratorCounters } from '@better-trigger/kernel';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -20,6 +21,7 @@ import { createApp } from '../src/app';
 import { renderMetrics, type MetricFamily } from '../src/routes/metrics';
 import { createWorkerCounters, type WorkerCounters } from '../src/observability';
 import { BUILD_SHA, BUILD_VERSION } from '../src/generated/build-info';
+import { namespaceFromOptions } from '../src/namespace';
 
 /* ------------------------------------------------------- the parser under use */
 
@@ -385,6 +387,62 @@ describe('database gauges', () => {
     // The one predicate that keeps the runs count on runs_status_concurrency_idx.
     expect(sql).toMatch(/FROM runs\s+WHERE status = 'running'/);
   });
+
+  const slashNamespaces = [
+    { projectId: 'a/b', env: 'c' },
+    { projectId: 'a', env: 'b/c' },
+  ];
+  const slashRows = [
+    { project_id: 'a/b', env: 'c', available: '3', scheduled: '2', claimed: '1', running: '1' },
+    { project_id: 'a', env: 'b/c', available: '7', scheduled: '6', claimed: '5', running: '5' },
+  ];
+
+  it('continues accepting slashes in either namespace part at the host and core boundaries', () => {
+    for (const ns of slashNamespaces) {
+      expect(() => assertNamespace(ns)).not.toThrow();
+      expect(namespaceFromOptions(ns)).toEqual(ns);
+    }
+  });
+
+  it.each([false, true])(
+    'keeps slash pairs separate across scrapes, result order and empty queues (reverse namespaces: %s)',
+    async (reverse) => {
+      const namespaces = reverse ? [...slashNamespaces].reverse() : slashNamespaces;
+      let rows = slashRows;
+      const query = vi.fn(async (..._args: unknown[]) => ({ rows }));
+      const app = makeApp({ namespaces, query });
+      const cases = [
+        { rows: slashRows, counts: [[3, 2, 1, 1], [7, 6, 5, 5]] },
+        { rows: [...slashRows].reverse(), counts: [[3, 2, 1, 1], [7, 6, 5, 5]] },
+        { rows: [slashRows[0]!], counts: [[3, 2, 1, 1], [0, 0, 0, 0]] },
+        { rows: [slashRows[1]!], counts: [[0, 0, 0, 0], [7, 6, 5, 5]] },
+        { rows: [], counts: [[0, 0, 0, 0], [0, 0, 0, 0]] },
+        { rows: slashRows, counts: [[3, 2, 1, 1], [7, 6, 5, 5]] },
+      ];
+      for (const scenario of cases) {
+        rows = scenario.rows;
+        const res = await app.fetch(get());
+        expect(res.status).toBe(200);
+        const families = parseExposition(await res.text());
+        expect(sampleValue(families, 'better_trigger_db_up')).toBe(1);
+        expect(families.get('better_trigger_queue_depth')!.samples).toHaveLength(6);
+        expect(families.get('better_trigger_inflight_runs')!.samples).toHaveLength(2);
+        for (const [i, ns] of slashNamespaces.entries()) {
+          const labels = { project_id: ns.projectId, env: ns.env };
+          const counts = scenario.counts[i]!;
+          for (const [j, state] of ['available', 'scheduled', 'claimed'].entries()) {
+            expect(sampleValue(families, 'better_trigger_queue_depth', { ...labels, state }))
+              .toBe(counts[j]);
+          }
+          expect(sampleValue(families, 'better_trigger_inflight_runs', labels)).toBe(counts[3]);
+        }
+      }
+      expect(query).toHaveBeenCalledTimes(cases.length);
+      for (const [, params] of query.mock.calls) {
+        expect(params).toEqual(namespaces.flatMap((ns) => [ns.projectId, ns.env]));
+      }
+    },
+  );
 
   it('drops the DB gauges and flips db_up when the query fails', async () => {
     const { res, families } = await scrape({
