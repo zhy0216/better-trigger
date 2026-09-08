@@ -7,8 +7,8 @@
    and a raw TypeError from inside user code gets classified as a retryable
    failure, burning attempts on a value that can never be recorded. The
    fingerprint method converts that into an AbortError instead (deterministic,
-   non-retryable), and a BigInt child payload that reaches the kernel is
-   converted the same way via the kernel's serialization_error. Exercised
+   non-retryable), including BigInt and unreadable hook failures. Kernel
+   serialization_error refusals are converted the same way. Exercised
    against recording fake kernels; no Postgres.
    ============================================================================= */
 import type { ClaimedRun, LogEntry, RetryPolicy } from '@better-trigger/core';
@@ -110,14 +110,21 @@ describe('executor serialization (C3)', () => {
     expect(calls.reportStep).toEqual([]); // never reached a kernel write
   });
 
-  it('a BigInt child payload rejected by the kernel fails as AbortError (non-retryable)', async () => {
+  it('a BigInt child payload fails as AbortError before the kernel is touched', async () => {
+    const { kernel, calls } = fakeKernel();
+    const ex = new Executor(kernel, plainTask, claimed(), 'w1', null);
+    await expect(ex.triggerAndWait('child', { n: 1n }, 'wait-child')).rejects.toBeInstanceOf(AbortError);
+    expect(calls.waitForChildRun).toEqual([]);
+  });
+
+  it('a kernel serialization refusal still fails as AbortError (non-retryable)', async () => {
     const calls = { waitForChildRun: [] as unknown[] };
     const kernel = {
       waitForChildRun: async (input: unknown) => {
         calls.waitForChildRun.push(input);
         throw new KernelError(
           'serialization_error',
-          'payload is not JSON-serializable: Do not know how to serialize a BigInt',
+          'payload is not JSON-serializable',
         );
       },
       reportStep: async () => {},
@@ -125,10 +132,85 @@ describe('executor serialization (C3)', () => {
     } as unknown as Kernel;
     const ex = new Executor(kernel, plainTask, claimed(), 'w1', null);
 
-    await expect(ex.triggerAndWait('child', { n: 1n }, 'wait-child')).rejects.toBeInstanceOf(
+    await expect(ex.triggerAndWait('child', { n: 1 }, 'wait-child')).rejects.toBeInstanceOf(
       AbortError,
     );
-    expect(calls.waitForChildRun).toHaveLength(1); // BigInt fingerprints fine; the kernel refused it
+    expect(calls.waitForChildRun).toHaveLength(1);
+  });
+
+  it.each(['triggerAndWait', 'batchTrigger'] as const)('%s with self-returning toJSON finishes the execution pass', async (primitive) => {
+    const { kernel, calls } = fakeKernel();
+    const keys: string[] = [];
+    const payload = {
+      a: 1,
+      toJSON(key: string) {
+        keys.push(key);
+        if (keys.length > 1) throw new Error('toJSON re-entered');
+        return this;
+      },
+    };
+    const task: ExecutorTask = {
+      id: 'demo',
+      run: async (_payload, ctx) => primitive === 'triggerAndWait'
+        ? ctx.triggerAndWait('child', payload)
+        : ex.durableBatchTrigger([{ taskId: 'child', payload }], 'fan-out'),
+    };
+    const ex = new Executor(kernel, task, claimed(), 'w1', null);
+    expect(await ex.execute()).toEqual(primitive === 'triggerAndWait'
+      ? { type: 'suspended' }
+      : { type: 'completed', output: ['child_1'] });
+    expect(keys).toEqual(['payload']);
+    expect(calls.failRun).toEqual([]);
+    expect(primitive === 'triggerAndWait' ? calls.waitForChildRun : calls.batchTriggerChild).toHaveLength(1);
+  });
+
+  it.each(['triggerAndWait', 'batchTrigger'] as const)('%s reports invalid inputs once without retrying or writing a child', async (primitive) => {
+    const unreadable = Object.assign(Object.create(null), { n: 1n });
+    const badMessage = new Error('original');
+    Object.defineProperty(badMessage, 'message', { get() { throw unreadable; } });
+    const values = [
+      { n: 1n },
+      { toJSON() { throw unreadable; } },
+      { get toJSON() { throw badMessage; } },
+    ];
+    for (const payload of values) {
+      const { kernel, calls } = fakeKernel();
+      const task: ExecutorTask = {
+        id: 'demo',
+        retry: { maxAttempts: 3 },
+        run: async (_payload, ctx) => primitive === 'triggerAndWait'
+          ? ctx.triggerAndWait('child', payload)
+          : ex.durableBatchTrigger([{ taskId: 'child', payload }], 'fan-out'),
+      };
+      const ex = new Executor(kernel, task, claimed(), 'w1', null);
+      expect(await ex.execute()).toEqual({ type: 'failed' });
+      expect(calls.failRun).toHaveLength(1);
+      expect(calls.failRun[0]).toMatchObject({
+        abort: true, retry: undefined,
+        error: { name: 'AbortError', message: expect.stringContaining('not JSON-serializable') },
+      });
+      expect(calls.waitForChildRun).toEqual([]);
+      expect(calls.batchTriggerChild).toEqual([]);
+      expect(calls.reportStep).toEqual([]);
+      expect(calls.completeRun).toEqual([]);
+    }
+  });
+
+  it('keeps a normal hook diagnostic and a normal task failure retry policy', async () => {
+    const { kernel, calls } = fakeKernel();
+    const ex = new Executor(kernel, plainTask, claimed(), 'w1', null);
+    await expect(ex.triggerAndWait('child', { toJSON() { throw new TypeError('hook unavailable'); } }, 'wait-child'))
+      .rejects.toThrow('hook unavailable');
+    const task: ExecutorTask = {
+      id: 'demo', retry: { maxAttempts: 3 },
+      run: async () => { throw new TypeError('service unavailable'); },
+    };
+    expect(await new Executor(kernel, task, claimed(), 'w1', null).execute()).toEqual({ type: 'failed' });
+    expect(calls.failRun).toHaveLength(1);
+    expect(calls.failRun[0]).toMatchObject({
+      abort: false, retry: task.retry,
+      error: { name: 'TypeError', message: 'service unavailable' },
+    });
   });
 
   it('an unregistered child task id fails the parent as AbortError (non-retryable)', async () => {

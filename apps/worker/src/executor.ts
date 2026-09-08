@@ -610,11 +610,11 @@ export class Executor implements RunExecutor {
         codeVersion: this.run.codeVersion,
       });
     } catch (err) {
-      // A circular persistable input (a child payload, step options): the
-      // fingerprint cannot be computed, and neither could the kernel persist
+      // Invalid persistable inputs (BigInt, circular payloads/step options):
+      // the fingerprint cannot be computed, and neither could the kernel persist
       // the value — a deterministic problem, so fail the run non-retryably
       // instead of burning attempts (same semantics as serialization_error).
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = serializeError(err).message;
       throw new AbortError(
         `this call's persistable inputs are not JSON-serializable (${reason}) — ` +
           `the value can never be recorded, so run ${this.run.id} fails ` +
