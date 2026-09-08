@@ -12,6 +12,7 @@
    family at a time, quoted-and-escaped label values). Driven through createApp
    with stub deps — no Postgres involved.
    ============================================================================= */
+import { EventEmitter } from 'node:events';
 import type { Pool } from 'pg';
 import { assertNamespace } from '@better-trigger/core';
 import type { Kernel, OrchestratorCounters } from '@better-trigger/kernel';
@@ -145,8 +146,10 @@ interface Fixture {
 }
 
 function makeApp(fx: Fixture = {}) {
+  const query = fx.query ?? (async () => ({ rows: [GAUGE_ROW] }));
   const pool = {
-    query: fx.query ?? (async () => ({ rows: [GAUGE_ROW] })),
+    query,
+    connect: async () => Object.assign(new EventEmitter(), { query, release: vi.fn() }),
   } as unknown as Pool;
   return createApp({
     kernel,
@@ -166,7 +169,10 @@ function makeProbeApp(businessQuery: () => Promise<unknown>, probeQuery: () => P
   return createApp({
     kernel,
     pool: { query: businessQuery } as unknown as Pool,
-    probePool: { query: probeQuery } as unknown as Pool,
+    probePool: {
+      query: probeQuery,
+      connect: async () => Object.assign(new EventEmitter(), { query: probeQuery, release: vi.fn() }),
+    } as unknown as Pool,
     metrics: { worker: null, orchestrator: null },
   });
 }
@@ -487,13 +493,6 @@ describe('database gauges', () => {
     }
   });
 
-  // There is deliberately no test for "the hung query rejects after the
-  // deadline takes the daemon down". That cannot happen and so cannot regress:
-  // `Promise.race` subscribes to *every* input, so the loser's late rejection
-  // is already observed by the race itself — it never reaches
-  // process.on('unhandledRejection'), whatever gaugesOrNull does with the
-  // winner. The property worth pinning — a hung query degrades the scrape
-  // instead of hanging it — is covered above.
 });
 
 describe('database gauges — dedicated probe pool (PF4)', () => {
@@ -580,14 +579,15 @@ describe('database gauges — dedicated probe pool (PF4)', () => {
   it('100 hung scrapes still answer at the deadline and never touch the business pool', async () => {
     // The never-returning-probe half of the acceptance: a query that never
     // settles (a paused container, a black-holed network) must not accumulate
-    // pending work that blocks the business pool. Each scrape answers with
-    // db_up 0 at the 2s deadline, and the business pool sees nothing.
+    // pending work that blocks the business pool. After the first deadline,
+    // later scrapes share db_up 0 while that operation is still pending.
     vi.useFakeTimers();
     try {
       const businessQuery = vi.fn(async () => {
         throw new Error('business query should not run');
       });
-      const app = makeProbeApp(businessQuery, () => new Promise(() => {}));
+      const probeQuery = vi.fn(() => new Promise(() => {}));
+      const app = makeProbeApp(businessQuery, probeQuery);
 
       for (let i = 0; i < 100; i++) {
         const pending = app.fetch(get());
@@ -597,9 +597,76 @@ describe('database gauges — dedicated probe pool (PF4)', () => {
         const families = parseExposition(await res.text());
         expect(sampleValue(families, 'better_trigger_db_up')).toBe(0);
       }
-      // Every scrape disarmed its own deadline timer — no timer pile-up.
+      // The shared flight disarmed its deadline — no timer or query pile-up.
       expect(vi.getTimerCount()).toBe(0);
+      expect(probeQuery).toHaveBeenCalledTimes(1);
       expect(businessQuery).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds mixed health/scrape batches to two owned operations across deadlines and recovery', async () => {
+    vi.useFakeTimers();
+    try {
+      const business = { connect: vi.fn(), query: vi.fn() };
+      const settle: Array<(rows: { rows: typeof GAUGE_ROW[] }) => void> = [];
+      let recovering = false;
+      const makeClient = () => Object.assign(new EventEmitter(), {
+        query: vi.fn((..._args: unknown[]) => recovering
+          ? Promise.resolve({ rows: [GAUGE_ROW] })
+          : new Promise<{ rows: typeof GAUGE_ROW[] }>((resolve) => { settle.push(resolve); })),
+        release: vi.fn(),
+      });
+      const clients: Array<ReturnType<typeof makeClient>> = [];
+      const connect = vi.fn(async () => {
+        const c = makeClient();
+        clients.push(c);
+        return c;
+      });
+      const app = createApp({
+        kernel,
+        pool: business as unknown as Pool,
+        probePool: { connect } as unknown as Pool,
+      });
+      const batch = () => Array.from({ length: 12 }, async () => ({
+        health: await app.fetch(get('/api/v1/health?deep=1')),
+        metrics: await app.fetch(get()),
+      }));
+      for (let i = 0; i < 3; i++) {
+        // Start both routes together; neither should borrow the other's query.
+        const health = app.fetch(get('/api/v1/health?deep=1'));
+        const metrics = app.fetch(get());
+        const requests = batch();
+        await vi.advanceTimersByTimeAsync(2000);
+        expect((await health).status).toBe(503);
+        expect(sampleValue(parseExposition(await (await metrics).text()), 'better_trigger_db_up')).toBe(0);
+        for (const pair of await Promise.all(requests)) {
+          expect(pair.health.status).toBe(503);
+          expect(pair.metrics.status).toBe(200);
+          expect(sampleValue(parseExposition(await pair.metrics.text()), 'better_trigger_db_up')).toBe(0);
+        }
+        expect(connect).toHaveBeenCalledTimes(2);
+        for (const c of clients) {
+          expect(c.query).toHaveBeenCalledTimes(1);
+          expect(c.release.mock.calls).toEqual([[true]]);
+          expect(c.release.mock.contexts).toEqual([c]);
+        }
+      }
+      expect(clients.map((c) => String(c.query.mock.calls[0]![0])).filter((sql) => sql === 'SELECT 1')).toHaveLength(1);
+      expect(clients.map((c) => String(c.query.mock.calls[0]![0])).filter((sql) => sql.includes('FROM queue'))).toHaveLength(1);
+      recovering = true;
+      settle.forEach((resolve) => resolve({ rows: [GAUGE_ROW] }));
+      await vi.advanceTimersByTimeAsync(0);
+      const health = await app.fetch(get('/api/v1/health?deep=1'));
+      const metrics = await app.fetch(get());
+      expect(health.status).toBe(200);
+      expect(sampleValue(parseExposition(await metrics.text()), 'better_trigger_db_up')).toBe(1);
+      expect(connect).toHaveBeenCalledTimes(4);
+      expect(clients.map((c) => c.release.mock.calls)).toEqual([[[true]], [[true]], [[]], [[]]]);
+      expect(business.connect).not.toHaveBeenCalled();
+      expect(business.query).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
@@ -710,7 +777,12 @@ describe('in-process counters', () => {
 
   it('still answers when the app was assembled without a metrics source', async () => {
     // The embedded case: createApp({ kernel, pool }) with no third field.
-    const pool = { query: async () => ({ rows: [GAUGE_ROW] }) } as unknown as Pool;
+    const pool = {
+      connect: async () => Object.assign(new EventEmitter(), {
+        query: async () => ({ rows: [GAUGE_ROW] }),
+        release: vi.fn(),
+      }),
+    } as unknown as Pool;
     const res = await createApp({ kernel, pool }).fetch(get());
     const families = parseExposition(await res.text());
     expect(

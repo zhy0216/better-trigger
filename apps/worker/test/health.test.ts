@@ -11,7 +11,8 @@
    opens to unauthenticated callers, so the 503 must stay a 503 there too.
    Driven through createApp with stub deps: no Postgres involved.
    ============================================================================= */
-import type { Pool } from 'pg';
+import { EventEmitter } from 'node:events';
+import type { Pool, PoolClient } from 'pg';
 import type { Kernel } from '@better-trigger/kernel';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
@@ -21,6 +22,13 @@ import { createApp } from '../src/app';
 import { BUILD_SHA, BUILD_VERSION } from '../src/generated/build-info';
 
 const kernel = {} as unknown as Kernel;
+type Releases = Parameters<PoolClient['release']>[];
+
+const stubClient = (query: () => Promise<unknown>, releases?: Releases) =>
+  Object.assign(new EventEmitter(), {
+    query,
+    release: (...args: Parameters<PoolClient['release']>) => releases?.push(args),
+  });
 
 /**
  * An app whose pool answers `query` with `impl`, and carries pg's counters.
@@ -32,10 +40,10 @@ const kernel = {} as unknown as Kernel;
 const makeApp = (
   impl: () => Promise<unknown>,
   counts?: Partial<Record<string, number>>,
-  releases?: boolean[],
+  releases?: Releases,
 ) => {
   const pool = {
-    connect: async () => ({ query: impl, release: () => releases?.push(true) }),
+    connect: async () => stubClient(impl, releases),
     totalCount: 3,
     idleCount: 2,
     waitingCount: 0,
@@ -65,13 +73,13 @@ const makeProbeApp = (
   businessQuery: () => Promise<unknown>,
   probeClientQuery: () => Promise<unknown>,
   counts?: Partial<Record<string, number>>,
-  probeReleases?: boolean[],
+  probeReleases?: Releases,
 ) =>
   createApp({
     kernel,
     pool: { query: businessQuery, totalCount: 3, idleCount: 2, waitingCount: 0, ...counts } as unknown as Pool,
     probePool: {
-      connect: async () => ({ query: probeClientQuery, release: () => probeReleases?.push(true) }),
+      connect: async () => stubClient(probeClientQuery, probeReleases),
     } as unknown as Pool,
   });
 
@@ -182,14 +190,6 @@ describe('deep /health?deep=1 (readiness)', () => {
     }
   });
 
-  // There is deliberately no test for "the hung query rejects after the
-  // deadline takes the daemon down". That cannot happen and so cannot regress:
-  // `Promise.race` subscribes to *every* input, so the loser's late rejection
-  // is already observed by the race itself — it never reaches
-  // process.on('unhandledRejection'), whatever probeDb does with the winner.
-  // A test asserting that handler stays silent is green against any
-  // implementation, i.e. it is not a test.
-
   it('disarms the deadline once the query answers', async () => {
     // The deadline is a live setTimeout, and a pending timer holds the event
     // loop open: forget the clearTimeout and every cheap probe pins the process
@@ -227,7 +227,7 @@ describe('deep /health?deep=1 — dedicated probe pool (PF4)', () => {
       throw new Error('business query should not run');
     });
     const probeQuery = vi.fn(async () => ({ rows: [{ '?column?': 1 }] }));
-    const releases: boolean[] = [];
+    const releases: Releases = [];
     const app = makeProbeApp(businessQuery, probeQuery, undefined, releases);
 
     const res = await app.fetch(get('/api/v1/health?deep=1'));
@@ -240,23 +240,23 @@ describe('deep /health?deep=1 — dedicated probe pool (PF4)', () => {
     expect(probeQuery).toHaveBeenCalledWith('SELECT 1');
     expect(businessQuery).not.toHaveBeenCalled();
     // The checked-out client came back to the probe pool.
-    expect(releases).toEqual([true]);
+    expect(releases).toEqual([[]]);
   });
 
   it('answers 503 at the deadline when the probe hangs, leaving the business pool untouched', async () => {
     // 验收: a probe that never returns must (a) answer the HTTP request within
     // the deadline and (b) never hold a business connection. The real
-    // cancellation of the hung query is the probe pool's statement_timeout —
+    // server-side cancellation is the probe pool's statement_timeout —
     // covered at the pool level (packages/db pool.test.ts) and against a real
     // Postgres (examples/basic scripts/health-pool.ts) — so this pins the
-    // route side: the deadline fires, the checked-out client is released, and
+    // route side: the deadline fires, the checked-out client is destroyed, and
     // the business pool saw nothing.
     vi.useFakeTimers();
     try {
       const businessQuery = vi.fn(async () => {
         throw new Error('business query should not run');
       });
-      const releases: boolean[] = [];
+      const releases: Releases = [];
       const app = makeProbeApp(businessQuery, () => new Promise(() => {}), undefined, releases);
       const pending = app.fetch(get('/api/v1/health?deep=1'));
       await vi.advanceTimersByTimeAsync(2000);
@@ -267,11 +267,9 @@ describe('deep /health?deep=1 — dedicated probe pool (PF4)', () => {
         ok: false,
         db: { ok: false, error: 'timeout' },
       });
-      // The hung query outlived the deadline, yet the connection came back:
-      // the probe's finally released the checked-out client exactly once (pg
-      // discards a client released with an in-flight query, so the probe pool
-      // keeps its full capacity for the next probe).
-      expect(releases).toEqual([true]);
+      // HTTP expiry does not establish SQL cancellation. Explicitly destroy
+      // this client so its pending query cannot be reused by a new checkout.
+      expect(releases).toEqual([[true]]);
       expect(businessQuery).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
@@ -279,13 +277,13 @@ describe('deep /health?deep=1 — dedicated probe pool (PF4)', () => {
   });
 
   it('returns the checked-out client exactly once on success', async () => {
-    const releases: boolean[] = [];
+    const releases: Releases = [];
     const app = makeProbeApp(async () => ({ rows: [] }), async () => ({ rows: [{ '?column?': 1 }] }), undefined, releases);
     const res = await app.fetch(get('/api/v1/health?deep=1'));
     expect(res.status).toBe(200);
-    // The query settled before the deadline, so the continuation released —
-    // and the deadline's finally did not double-release.
-    expect(releases).toEqual([true]);
+    // The query settled before the deadline, so the client was returned and
+    // the disarmed deadline cannot release it again.
+    expect(releases).toEqual([[]]);
   });
 
   it('concurrent deep probes share ONE probe query (single-flight)', async () => {
@@ -299,7 +297,7 @@ describe('deep /health?deep=1 — dedicated probe pool (PF4)', () => {
           resolveGate = () => resolve({ rows: [{ '?column?': 1 }] });
         }),
     );
-    const connects = vi.fn(async () => ({ query: probeQuery, release: () => {} }));
+    const connects = vi.fn(async () => stubClient(probeQuery));
     const app = createApp({
       kernel,
       pool: { query: async () => ({ rows: [] }), totalCount: 3, idleCount: 2, waitingCount: 0 } as unknown as Pool,
@@ -325,6 +323,238 @@ describe('deep /health?deep=1 — dedicated probe pool (PF4)', () => {
     }
     expect(connects).toHaveBeenCalledTimes(1);
     expect(probeQuery).toHaveBeenCalledTimes(1);
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+// Exercise both routes through the same ownership matrix. HTTP completion and
+// checkout/query completion are independently controlled; timers never stand
+// in for an assertion that the database operation actually settled.
+describe.each(['health', 'metrics'] as const)('%s probe resource lifecycle', (route) => {
+  const path = route === 'health' ? '/api/v1/health?deep=1' : '/api/v1/metrics';
+  const rows = { rows: [] };
+  const failure = new Error('private database failure');
+  const counters = { poolCheckoutTimeouts: 7 };
+  const unhandled = vi.fn<(reason: unknown) => void>();
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    unhandled.mockClear();
+    process.on('unhandledRejection', unhandled);
+  });
+  afterEach(async () => {
+    try {
+      // Give a late rejection an event-loop turn to reach process listeners.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      process.removeListener('unhandledRejection', unhandled);
+      vi.useRealTimers();
+    }
+  });
+
+  const client = () => Object.assign(new EventEmitter(), {
+    query: vi.fn<() => Promise<unknown>>().mockResolvedValue(rows),
+    release: vi.fn<PoolClient['release']>(),
+  });
+
+  function fixture(connect: () => Promise<unknown>) {
+    const business = { connect: vi.fn(), query: vi.fn(), totalCount: 3, idleCount: 2, waitingCount: 0 };
+    const poolQuery = vi.fn(() => { throw new Error('probe must own its checkout'); });
+    const app = createApp({
+      kernel,
+      pool: business as unknown as Pool,
+      probePool: { connect, query: poolQuery } as unknown as Pool,
+      metrics: { pool: counters },
+    });
+    return {
+      request: () => app.fetch(get(path)),
+      batch: () => Array.from({ length: 12 }, () => app.fetch(get(path))),
+      assertIsolation: () => {
+        expect(business.connect).not.toHaveBeenCalled();
+        expect(business.query).not.toHaveBeenCalled();
+        expect(poolQuery).not.toHaveBeenCalled();
+      },
+    };
+  }
+
+  async function answer(pending: Response | Promise<Response>, error?: 'timeout' | 'query_failed') {
+    const res = await pending;
+    expect(res.status).toBe(route === 'metrics' || !error ? 200 : 503);
+    if (route === 'health') {
+      expect(await res.json()).toMatchObject({
+        ok: !error,
+        db: error ? { ok: false, error } : { ok: true },
+        pool: { total: 3, idle: 2, waiting: 0 },
+      });
+    } else {
+      const text = await res.text();
+      expect(text).toContain(`better_trigger_db_up ${error ? 0 : 1}\n`);
+      expect(text).toContain('better_trigger_pool_checkout_timeouts_total 7\n');
+      expect(text).not.toContain(failure.message);
+      if (error) expect(text).not.toContain('# TYPE better_trigger_queue_depth');
+    }
+  }
+
+  it('returns only its acquired client once when checkout and query beat the deadline', async () => {
+    const checkout = deferred<ReturnType<typeof client>>();
+    const query = deferred<unknown>();
+    const c = client();
+    c.query.mockReturnValueOnce(query.promise);
+    const connect = vi.fn(() => checkout.promise);
+    const fx = fixture(connect);
+    const requests = fx.batch();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(c.query).not.toHaveBeenCalled();
+    checkout.resolve(c);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(c.query).toHaveBeenCalledTimes(1);
+    expect(c.release).not.toHaveBeenCalled();
+    query.resolve(rows);
+    await Promise.all(requests.map((p) => answer(p)));
+    expect(c.release.mock.calls).toEqual([[]]);
+    expect(c.release.mock.contexts).toEqual([c]);
+    expect(c.listenerCount('error')).toBe(0);
+    fx.assertIsolation();
+  });
+
+  it.each(['throw', 'reject'] as const)('handles an early checkout %s without a client to release', async (kind) => {
+    const connect = vi.fn(() => {
+      if (kind === 'throw') throw failure;
+      return Promise.reject(failure);
+    });
+    const fx = fixture(connect);
+    await Promise.all(fx.batch().map((p) => answer(p, 'query_failed')));
+    expect(connect).toHaveBeenCalledTimes(1);
+    fx.assertIsolation();
+  });
+
+  it.each(['throw', 'reject'] as const)('destroys its client once on an early query %s and can recover', async (kind) => {
+    const c = client();
+    c.query.mockImplementationOnce(() => {
+      if (kind === 'throw') throw failure;
+      return Promise.reject(failure);
+    });
+    const next = client();
+    const connect = vi.fn().mockResolvedValueOnce(c).mockResolvedValue(next);
+    const fx = fixture(connect);
+    await answer(fx.request(), 'query_failed');
+    expect(c.release.mock.calls).toEqual([[true]]);
+    expect(c.release.mock.contexts).toEqual([c]);
+    expect(c.listenerCount('error')).toBe(0);
+    await answer(fx.request());
+    expect(next.release.mock.calls).toEqual([[]]);
+    expect(c.release.mock.calls).toEqual([[true]]);
+    fx.assertIsolation();
+  });
+
+  it.each(['resolve', 'reject'] as const)('bounds checkout across multiple HTTP deadlines, then handles late %s', async (kind) => {
+    const checkout = deferred<ReturnType<typeof client>>();
+    const late = client();
+    const next = client();
+    const connect = vi.fn().mockReturnValueOnce(checkout.promise).mockResolvedValue(next);
+    const fx = fixture(connect);
+    for (let batch = 0; batch < 4; batch++) {
+      const requests = fx.batch();
+      await vi.advanceTimersByTimeAsync(2000);
+      await Promise.all(requests.map((p) => answer(p, 'timeout')));
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(late.query).not.toHaveBeenCalled();
+      expect(late.release).not.toHaveBeenCalled();
+    }
+    if (kind === 'resolve') checkout.resolve(late);
+    else checkout.reject(failure);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(late.query).not.toHaveBeenCalled();
+    expect(late.release.mock.calls).toEqual(kind === 'resolve' ? [[]] : []);
+    expect(late.release.mock.contexts).toEqual(kind === 'resolve' ? [late] : []);
+    await answer(fx.request());
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(next.query).toHaveBeenCalledTimes(1);
+    expect(next.release.mock.calls).toEqual([[]]);
+    fx.assertIsolation();
+  });
+
+  it('returns a checkout arriving after expiry without starting its hanging SELECT', async () => {
+    const checkout = deferred<ReturnType<typeof client>>();
+    const late = client();
+    late.query.mockImplementation(() => new Promise(() => {}));
+    const fx = fixture(() => checkout.promise);
+    const pending = fx.request();
+    await vi.advanceTimersByTimeAsync(2000);
+    await answer(pending, 'timeout');
+    checkout.resolve(late);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(late.query).not.toHaveBeenCalled();
+    expect(late.release.mock.calls).toEqual([[]]);
+    expect(late.release.mock.contexts).toEqual([late]);
+    fx.assertIsolation();
+  });
+
+  it.each(['resolve', 'reject'] as const)('destroys an active query once, bounds later batches, and observes late %s', async (kind) => {
+    const query = deferred<unknown>();
+    const late = client();
+    late.query.mockReturnValueOnce(query.promise);
+    const next = client();
+    const nextQuery = deferred<unknown>();
+    next.query.mockReturnValueOnce(nextQuery.promise);
+    const connect = vi.fn().mockResolvedValueOnce(late).mockResolvedValue(next);
+    const fx = fixture(connect);
+    for (let batch = 0; batch < 4; batch++) {
+      const requests = fx.batch();
+      await vi.advanceTimersByTimeAsync(2000);
+      await Promise.all(requests.map((p) => answer(p, 'timeout')));
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(late.query).toHaveBeenCalledTimes(1);
+      expect(late.release.mock.calls).toEqual([[true]]);
+      expect(late.release.mock.contexts).toEqual([late]);
+      expect(late.listenerCount('error')).toBe(0);
+    }
+    if (kind === 'resolve') query.resolve(rows);
+    else query.reject(failure);
+    await vi.advanceTimersByTimeAsync(0);
+    const recovered = fx.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(next.query).toHaveBeenCalledTimes(1);
+    expect(next.release).not.toHaveBeenCalled();
+    expect(late.release.mock.calls).toEqual([[true]]);
+    nextQuery.resolve(rows);
+    await answer(recovered);
+    expect(next.release.mock.calls).toEqual([[]]);
+    expect(next.release.mock.contexts).toEqual([next]);
+    fx.assertIsolation();
+  });
+
+  it('handles a checked-out client error while retaining the flight until the query rejects', async () => {
+    const query = deferred<unknown>();
+    const c = client();
+    c.query.mockReturnValueOnce(query.promise);
+    const connect = vi.fn().mockResolvedValueOnce(c).mockResolvedValue(client());
+    const fx = fixture(connect);
+    const pending = fx.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(c.listenerCount('error')).toBe(1);
+    c.emit('error', failure);
+    await answer(pending, 'query_failed');
+    expect(c.release.mock.calls).toEqual([[true]]);
+    await Promise.all(fx.batch().map((p) => answer(p, 'query_failed')));
+    expect(connect).toHaveBeenCalledTimes(1);
+    query.reject(failure);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(c.release.mock.calls).toEqual([[true]]);
+    expect(c.listenerCount('error')).toBe(0);
+    await answer(fx.request());
+    expect(connect).toHaveBeenCalledTimes(2);
+    fx.assertIsolation();
   });
 });
 

@@ -25,7 +25,8 @@
    with it; setting a key closes this too.
    ============================================================================= */
 import { Hono } from 'hono';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
+import { createDbProbe } from './db-probe';
 import type { Namespace } from '@better-trigger/core';
 import { DEFAULT_NAMESPACE } from '@better-trigger/core';
 import {
@@ -48,12 +49,7 @@ const PREFIX = 'better_trigger_';
 /** Content type of the Prometheus text exposition format (version 0.0.4). */
 const CONTENT_TYPE = 'text/plain; version=0.0.4; charset=utf-8';
 
-/**
- * Deadline for the gauge query's HTTP answer — a hung DB must not hang the
- * scrape. The query itself is cancelled earlier, server-side, by the probe
- * pool's statement_timeout (1s, PF4), so this deadline never outlives a live
- * query: it only bounds queueing behind other probes.
- */
+/** HTTP deadline; createDbProbe separately owns checkout/query cleanup. */
 const QUERY_TIMEOUT_MS = 2000;
 
 /**
@@ -193,7 +189,7 @@ interface DbGauges {
  * status equality the next, so it touches only running rows.
  */
 async function queryGauges(
-  pool: Pool,
+  client: PoolClient,
   namespaces: readonly Namespace[],
 ): Promise<DbGauges[]> {
   // VALUES pairing, like the kernel's claim scan: the namespaces come as
@@ -205,7 +201,7 @@ async function queryGauges(
       return `($${i * 2 + 1}::text, $${i * 2 + 2}::text)`;
     })
     .join(', ');
-  const res = await pool.query<{
+  const res = await client.query<{
     project_id: string;
     env: string;
     available: string;
@@ -254,40 +250,13 @@ async function queryGauges(
   return [...byNs.values()];
 }
 
-/**
- * queryGauges under a deadline, folded to null on any failure. Same shape as
- * the deep health probe's race, and for the same reason: folding both outcomes
- * into a value makes the race's winner *be* the answer instead of one outcome
- * arriving as a throw. This is presentation, not safety — the query itself is
- * cancelled by the probe pool's statement_timeout, so the loser's rejection is
- * PostgreSQL's, and `Promise.race` subscribes to every input, so a late
- * rejection is still an *observed* rejection and never becomes an
- * unhandledRejection.
- */
-async function gaugesOrNull(
-  pool: Pool,
-  namespaces: readonly Namespace[],
-): Promise<DbGauges[] | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), QUERY_TIMEOUT_MS);
-  });
-  try {
-    // Fold a query failure to null (rather than a rejection) so the race's
-    // winner *be* the answer. Same rationale as the deep health probe: the
-    // query itself is cancelled by the probe pool's statement_timeout, so the
-    // loser's rejection is the query's own and is still an observed one.
-    const query = (async () => {
-      try {
-        return await queryGauges(pool, namespaces);
-      } catch {
-        return null;
-      }
-    })();
-    return await Promise.race([query, deadline]);
-  } finally {
-    clearTimeout(timer);
-  }
+/** A route owns one flight, including any work outliving the HTTP deadline. */
+function createGaugesProbe(pool: Pool, namespaces: readonly Namespace[]): () => Promise<DbGauges[] | null> {
+  const probe = createDbProbe(pool, (client) => queryGauges(client, namespaces), QUERY_TIMEOUT_MS);
+  return async () => {
+    const outcome = await probe();
+    return outcome.ok ? outcome.value : null;
+  };
 }
 
 /**
@@ -318,7 +287,7 @@ export async function collectMetrics(
   const poolCheckoutTimeouts = sources.pool?.poolCheckoutTimeouts ?? counters.poolCheckoutTimeouts;
   // `undefined` means "load it" (the pre-PF4 path); `null` is a *failed* load
   // and must not trigger a second query.
-  const g = gauges === undefined ? await gaugesOrNull(pool, namespaces) : gauges;
+  const g = gauges === undefined ? await createGaugesProbe(pool, namespaces)() : gauges;
 
   const families: MetricFamily[] = [
     {
@@ -537,9 +506,9 @@ export async function collectMetrics(
 export function metricsRoutes(deps: {
   pool: Pool;
   /** PF4: dedicated probe pool for the gauge query — a failed or hung scrape
-   *  must never hold a business connection, and the pool's statement_timeout
-   *  cancels the query server-side. Tests and embedded callers may omit it
-   *  and share the business pool. */
+   *  must never hold a business connection. createDbProbe owns cleanup even
+   *  when the server's statement_timeout cannot reach the client. Tests and
+   *  embedded callers may omit it and share the business pool. */
   probePool?: Pool;
   metrics?: MetricsSources;
   /** Namespaces whose queue/in-flight gauges this daemon exports (default
@@ -549,19 +518,7 @@ export function metricsRoutes(deps: {
   const app = new Hono();
   const probePool = deps.probePool ?? deps.pool;
   const namespaces = deps.namespaces ?? [DEFAULT_NAMESPACE];
-  // PF4 single-flight guard: concurrent scrapes share ONE gauge query. Without
-  // it a scrape storm could queue N queries on the probe pool (bounded at
-  // max 2, but still queued and each paying statement_timeout); with it every
-  // concurrent scrape gets the same probe's outcome, so the pool never has
-  // more than one probe query in flight and a scrape storm cannot pile up
-  // pending work on a half-dead database.
-  let inflightGauges: Promise<DbGauges[] | null> | null = null;
-  const loadGauges = (): Promise<DbGauges[] | null> => {
-    inflightGauges ??= gaugesOrNull(probePool, namespaces).finally(() => {
-      inflightGauges = null;
-    });
-    return inflightGauges;
-  };
+  const loadGauges = createGaugesProbe(probePool, namespaces);
 
   app.get('/metrics', async (c) => {
     const gauges = await loadGauges();
