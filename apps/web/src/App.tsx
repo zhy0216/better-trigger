@@ -16,8 +16,6 @@ import { RunView } from './features/run/RunView';
 import { RunsList } from './screens/RunsList';
 import { TasksDashboard } from './screens/TasksDashboard';
 import { Schedules } from './screens/Schedules';
-import { Alerts } from './screens/Alerts';
-import { Deployments } from './screens/Deployments';
 import { Onboarding } from './screens/Onboarding';
 import { resetConnection, useConnection } from './api/hooks';
 import { getApiKeySource, setApiKey } from './api/client';
@@ -32,13 +30,10 @@ const TWEAK_DEFAULTS = {
 
 /* URL routing — the daemon's SPA fallback (apps/worker/src/static.ts) serves
    index.html for deep links, so paths mirror the sidebar + run detail. There is
-   no 'workers' route (worker stats live on the tasks dashboard). Alerts and
-   deployments retain their deep links while their features are coming soon. */
+   no 'workers' route (worker stats live on the tasks dashboard). */
 const STATIC_ROUTES: Array<[string, Route]> = [
   ['/tasks', 'tasks'],
   ['/schedules', 'schedules'],
-  ['/alerts', 'alerts'],
-  ['/deployments', 'deployments'],
   ['/onboarding', 'onboarding'],
 ];
 
@@ -136,7 +131,7 @@ export default function App() {
   const activeNav = route === 'run' ? 'runs' : route;
   const titles: Record<Route, string> = {
     run: 'Run', runs: 'Runs', tasks: 'Tasks', schedules: 'Schedules',
-    alerts: 'Alerts', deployments: 'Deployments', onboarding: 'Get started',
+    onboarding: 'Get started',
   };
 
   let screen: React.ReactNode;
@@ -144,8 +139,6 @@ export default function App() {
   else if (route === 'runs') screen = <RunsList env={env} onOpenRun={(r) => openRun(r.id)} />;
   else if (route === 'tasks') screen = <TasksDashboard setRoute={goTo} env={env} />;
   else if (route === 'schedules') screen = <Schedules env={env} />;
-  else if (route === 'alerts') screen = <Alerts />;
-  else if (route === 'deployments') screen = <Deployments />;
   else if (route === 'onboarding') screen = <Onboarding setRoute={goTo} />;
 
   return (

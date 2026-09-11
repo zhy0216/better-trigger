@@ -8,17 +8,13 @@
    ============================================================================= */
 import React from 'react';
 
-export type SetTweak<T> = (keyOrEdits: keyof T | Partial<T>, val?: unknown) => void;
+export type SetTweak<T> = <K extends keyof T>(key: K, value: T[K]) => void;
 
 export function useTweaks<T extends Record<string, unknown>>(defaults: T): [T, SetTweak<T>] {
   const [values, setValues] = React.useState<T>(defaults);
 
-  // Accepts either setTweak('key', value) or setTweak({ key: value, ... }).
-  const setTweak = React.useCallback<SetTweak<T>>((keyOrEdits, val) => {
-    const edits = (typeof keyOrEdits === 'object' && keyOrEdits !== null
-      ? keyOrEdits
-      : { [keyOrEdits as keyof T]: val }) as Partial<T>;
-    setValues((prev) => ({ ...prev, ...edits }));
+  const setTweak = React.useCallback<SetTweak<T>>((key, value) => {
+    setValues((prev) => ({ ...prev, [key]: value }));
   }, []);
 
   return [values, setTweak];

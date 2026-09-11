@@ -2,7 +2,7 @@
    @better-trigger/example-basic — crash-recovery e2e (lease/fencing/reaper).
 
    Runs on @better-trigger/testing (runScenario provisions + migrates the
-   database, createMarker owns the exactly-once probe, spawnDaemon/killDaemon do
+   database, createMarker owns the exactly-once probe, spawnDaemon/daemon.kill do
    the fault injection) and drives two daemons —
 
      · an API node (no --tasks) that serves HTTP and runs the lease reaper. It
@@ -44,7 +44,6 @@ import { fileURLToPath } from 'node:url';
 import {
   countQueueRows,
   createMarker,
-  killDaemon,
   portFromEnv,
   runScenario,
   sleep,
@@ -113,7 +112,7 @@ async function main(s: Scenario): Promise<void> {
     () => marker.count('step1') >= 1,
   );
   await sleep(1_000); // stay inside the 4s sleep window, past the step commit
-  await killDaemon(proc);
+  await proc.kill();
   s.ok('kill ① — SIGKILL during post-step1 sleep (run running, lease held)');
 
   /* -- executor #2: reclaim after reap, run to 'waiting', kill ② ------------ */
@@ -149,13 +148,13 @@ async function main(s: Scenario): Promise<void> {
     s.ok(`ledger snapshot taken mid-flight (${before.length} committed step row(s))`);
   }
 
-  await killDaemon(proc);
+  await proc.kill();
   s.ok(`kill ② — SIGKILL while run is 'waiting' (worker held no claim)`);
 
   /* -- executor #3: resume the wait, back to 'running', kill ③ -------------- */
   proc = spawnExecutor();
   await waitForStatus(client, handle.id, 'running', { timeoutMs: 60_000 });
-  await killDaemon(proc);
+  await proc.kill();
   s.ok(`kill ③ — SIGKILL during post-resume sleep (run running again)`);
 
   /* -- executor #4: reclaim and finish ------------------------------------- */

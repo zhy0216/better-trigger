@@ -11,7 +11,9 @@
    module's — every one of its exit paths goes through stop().
    ============================================================================= */
 import { createHash } from 'node:crypto';
+import { setTimeout as sleepTimer } from 'node:timers/promises';
 import type { ClaimedRun, Namespace, RetryPolicy } from '@better-trigger/core';
+import { fnSourceHash } from '@better-trigger/kernel';
 import type {
   Kernel,
   OrchestratorCounters,
@@ -553,7 +555,7 @@ function envVersion(): string | undefined {
 /** One task's identity for versioning: id + cron config + run body source. */
 function taskSignature(d: ResolvedTaskDefinition<any, any>): string {
   const cron = d.cron ? `${d.cron.pattern}@${d.cron.timezone ?? ''}` : '';
-  return `${d.id}|${cron}|${fingerprintFn(d.run)}`;
+  return `${d.id}|${cron}|${fnSourceHash(d.run)}`;
 }
 
 /**
@@ -601,21 +603,9 @@ export function resolveTaskVersion(d: ResolvedTaskDefinition<any, any>): string 
   return `v_${hash}`;
 }
 
-/** Short hash of a function's source. Native/bound fns hash their placeholder
- *  source ("[native code]") — stable, just not discriminating. */
-function fingerprintFn(fn: unknown): string {
-  const source = typeof fn === 'function' ? Function.prototype.toString.call(fn) : String(fn);
-  return createHash('sha256').update(source).digest('hex').slice(0, 16);
-}
-
 /** Multiply a delay by [0.8, 1.2) so idle slots do not poll in lockstep. */
 function jittered(ms: number): number {
   return Math.round(ms * (0.8 + Math.random() * 0.4));
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    (t as { unref?: () => void }).unref?.();
-  });
-}
+const sleep = (ms: number): Promise<void> => sleepTimer(ms, undefined, { ref: false });

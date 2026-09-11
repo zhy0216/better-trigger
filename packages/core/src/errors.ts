@@ -15,13 +15,19 @@ export class AbortError extends Error {
   }
 }
 
-export function isAbortError(err: unknown): err is AbortError {
+/** Cross-copy brand check: `instanceof` fails across duplicated SDK copies
+ *  (two node_modules trees, a bundle next to a link), so each error class also
+ *  carries a marker property that survives the boundary. */
+export function hasErrorBrand(err: unknown, flag: string): boolean {
   return (
-    err instanceof AbortError ||
-    (typeof err === 'object' &&
-      err !== null &&
-      (err as Record<string, unknown>).isBetterTriggerAbort === true)
+    typeof err === 'object' &&
+    err !== null &&
+    (err as Record<string, unknown>)[flag] === true
   );
+}
+
+export function isAbortError(err: unknown): err is AbortError {
+  return err instanceof AbortError || hasErrorBrand(err, 'isBetterTriggerAbort');
 }
 
 /**
@@ -46,10 +52,7 @@ export class NonDeterminismError extends Error {
 
 export function isNonDeterminismError(err: unknown): err is NonDeterminismError {
   return (
-    err instanceof NonDeterminismError ||
-    (typeof err === 'object' &&
-      err !== null &&
-      (err as Record<string, unknown>).isBetterTriggerNonDeterminism === true)
+    err instanceof NonDeterminismError || hasErrorBrand(err, 'isBetterTriggerNonDeterminism')
   );
 }
 
@@ -67,12 +70,7 @@ export class SuspendSignal extends Error {
 }
 
 export function isSuspendSignal(err: unknown): err is SuspendSignal {
-  return (
-    err instanceof SuspendSignal ||
-    (typeof err === 'object' &&
-      err !== null &&
-      (err as Record<string, unknown>).isBetterTriggerSuspend === true)
-  );
+  return err instanceof SuspendSignal || hasErrorBrand(err, 'isBetterTriggerSuspend');
 }
 
 /**
@@ -87,11 +85,7 @@ export interface ExecutionEndedSignal extends Error {
 }
 
 export function isExecutionEndedSignal(err: unknown): err is ExecutionEndedSignal {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    (err as Record<string, unknown>).isBetterTriggerExecutionDone === true
-  );
+  return hasErrorBrand(err, 'isBetterTriggerExecutionDone');
 }
 
 /**

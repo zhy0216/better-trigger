@@ -7,6 +7,7 @@
    is the whole seam between "define + trigger tasks" (this package, HTTP only)
    and "execute tasks" (the worker daemon).
    ============================================================================= */
+import { hasErrorBrand } from '@better-trigger/core';
 import type {
   Namespace,
   ReplayMode,
@@ -89,12 +90,7 @@ export class RunAbortedError extends Error {
 
 /** Brand check (survives duplicate copies of this package, like isAbortError). */
 export function isRunAborted(err: unknown): err is RunAbortedError {
-  return (
-    err instanceof RunAbortedError ||
-    (typeof err === 'object' &&
-      err !== null &&
-      (err as Record<string, unknown>).isBetterTriggerRunAborted === true)
-  );
+  return err instanceof RunAbortedError || hasErrorBrand(err, 'isBetterTriggerRunAborted');
 }
 
 /** Wait primitives. */

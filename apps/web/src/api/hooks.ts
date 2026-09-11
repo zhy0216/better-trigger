@@ -14,7 +14,7 @@ import {
   adaptSchedules,
   type AdaptedRunDetail,
 } from './adapter';
-import { appendTailPage, mergeRunPages } from './mergeRuns';
+import { mergeRunPages } from './mergeRuns';
 import type { Task, Run, Schedule } from '../types';
 import type { WorkerSummary } from './client';
 
@@ -396,7 +396,7 @@ export function useRuns(
       if (stale()) return false;
       // Only the user's own paging advances the tail cursor.
       setPage((prev) => ({
-        ...prev, tail: appendTailPage(prev.tail, adaptRuns(res.runs)), tailCursor: res.nextCursor,
+        ...prev, tail: mergeRunPages(prev.tail, adaptRuns(res.runs)), tailCursor: res.nextCursor,
       }));
       return res.nextCursor !== null;
     } catch (e) {

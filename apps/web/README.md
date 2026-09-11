@@ -87,7 +87,7 @@ src/
     └── index.css        # Tailwind 4 entrypoint
 ```
 
-## Design system & Tailwind
+## Design system
 
 Styling is driven by **CSS custom properties** (see `styles/tokens.css` and
 `styles/theme.css`), switched by `data-theme` / `data-density` on `<html>` and
@@ -97,12 +97,9 @@ are imported by each screen. Use `--accent-text` and the semantic `*-text`
 tokens for text, reserving primary colors for decoration. Status metadata
 keeps the marker color separate from its readable label color.
 
-Tailwind 4 is wired through the `@tailwindcss/postcss` plugin and keeps the
-legacy token map in `tailwind.config.ts` (loaded from `styles/index.css`), so
-new UI can use `bg-surface`, `text-fg-muted`, `border-line`, `font-mono`,
-`text-status-running`, etc. CSS load order in
-`main.tsx` puts the tokens/theme **after** Tailwind's preflight so the design
-system wins on shared element rules.
+`tokens.css` also carries the base element reset (the subset of Tailwind's
+preflight the app relied on) and the element typography rules, so there is no
+Tailwind/PostCSS pipeline in the build.
 
 ## Responsive navigation and display settings
 

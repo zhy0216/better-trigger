@@ -43,15 +43,10 @@ interface SafeParseSchema<Output> {
     | { success: false; error: unknown };
 }
 
-interface ParseSchema<Output> {
-  parse: (input: unknown) => Output;
-}
-
 /** Any supported schema shape. */
 export type AnySchema<Output = unknown> =
   | StandardSchemaV1<unknown, Output>
-  | SafeParseSchema<Output>
-  | ParseSchema<Output>;
+  | SafeParseSchema<Output>;
 
 /** Infer the validated output type from a supported schema. */
 export type InferSchema<S> =
@@ -59,9 +54,7 @@ export type InferSchema<S> =
     ? O
     : S extends SafeParseSchema<infer O>
       ? O
-      : S extends ParseSchema<infer O>
-        ? O
-        : never;
+      : never;
 
 function hasStandard(s: unknown): s is StandardSchemaV1 {
   return (
@@ -78,17 +71,10 @@ function hasSafeParse(s: unknown): s is SafeParseSchema<unknown> {
     typeof (s as SafeParseSchema<unknown>).safeParse === 'function'
   );
 }
-function hasParse(s: unknown): s is ParseSchema<unknown> {
-  return (
-    typeof s === 'object' &&
-    s !== null &&
-    typeof (s as ParseSchema<unknown>).parse === 'function'
-  );
-}
 
 /** True when a value looks like one of the supported schema shapes. */
 export function isSchema(s: unknown): s is AnySchema {
-  return hasStandard(s) || hasSafeParse(s) || hasParse(s);
+  return hasStandard(s) || hasSafeParse(s);
 }
 
 function formatIssues(issues: ReadonlyArray<StandardSchemaIssue>): string {
@@ -124,14 +110,6 @@ export async function validateSchema<Output>(
       throw schemaError(extractZodMessage(result.error));
     }
     return result.data as Output;
-  }
-  if (hasParse(schema)) {
-    // zod-style parse throws on failure; let it propagate, retag as schema error.
-    try {
-      return schema.parse(input) as Output;
-    } catch (err) {
-      throw schemaError((err as Error)?.message ?? 'schema validation failed');
-    }
   }
   throw schemaError('unsupported schema shape');
 }

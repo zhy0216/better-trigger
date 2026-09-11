@@ -9,13 +9,10 @@ export interface NavEntry {
   id: Route;
   label: string;
   icon: string;
-  comingSoon?: boolean;
 }
 
 export const NAV: NavEntry[] = [
   { id: 'runs',        label: 'Runs',        icon: 'activity' },
   { id: 'tasks',       label: 'Tasks',       icon: 'task' },
   { id: 'schedules',   label: 'Schedules',   icon: 'clock' },
-  { id: 'alerts',      label: 'Alerts',      icon: 'bell', comingSoon: true },
-  { id: 'deployments', label: 'Deployments', icon: 'rocket', comingSoon: true },
 ];

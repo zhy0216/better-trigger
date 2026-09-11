@@ -12,7 +12,7 @@
         woken (not left 'waiting' forever).
 
    Runs on @better-trigger/testing (runScenario provisions + migrates the
-   database; spawnDaemon/killDaemon inject the fault) with two daemons: an API
+   database; spawnDaemon/daemon.kill inject the fault) with two daemons: an API
    node (no --tasks) that serves the scenario's client and keeps a reaper alive,
    plus executor nodes (--tasks worker-lost-tasks.ts --no-serve) that get
    killed. The executors run with BETTER_TRIGGER_MAX_RECOVERIES=1 so the budget
@@ -48,7 +48,6 @@
    ============================================================================= */
 import { fileURLToPath } from 'node:url';
 import {
-  killDaemon,
   portFromEnv,
   runScenario,
   spawnDaemon,
@@ -124,7 +123,7 @@ async function main(s: Scenario): Promise<void> {
     parentAtKill.status === 'waiting',
     `parent should be 'waiting' at kill time, got '${parentAtKill.status}'`,
   );
-  await killDaemon(proc);
+  await proc.kill();
   s.ok(`SIGKILL #1 while child ${childRunId} is 'running' (parent 'waiting')`);
 
   /* -- the reaper RECOVERS it: recoveries + 1, attempt untouched ------------ */
@@ -172,7 +171,7 @@ async function main(s: Scenario): Promise<void> {
     }
     return false;
   });
-  await killDaemon(proc);
+  await proc.kill();
   s.ok(`SIGKILL #2 while the child is running on its recovered claim`);
 
   /* -- reaper terminal-fails the child, parent wakes + completes ------------ */

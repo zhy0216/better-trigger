@@ -128,16 +128,9 @@ export function createHealthPool(
   connectionString: string = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
   logger: PoolLogger = console,
 ): pg.Pool {
-  const pool = new Pool({
-    connectionString,
+  return createPool(connectionString, logger, {
     max: PROBE_POOL_MAX,
-    statement_timeout: PROBE_STATEMENT_TIMEOUT_MS,
+    statementTimeoutMs: PROBE_STATEMENT_TIMEOUT_MS,
     connectionTimeoutMillis: PROBE_CONNECT_TIMEOUT_MS,
   });
-  // Same idle-client contract as createPool: a probe pool that lost its
-  // database must record it, not crash the daemon.
-  pool.on('error', (err: Error) => {
-    logger.error('[better-trigger] idle client error:', err.message);
-  });
-  return pool;
 }

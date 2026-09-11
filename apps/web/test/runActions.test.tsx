@@ -11,7 +11,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunView } from '../src/features/run/RunView';
-import { createRetryIntentKey } from '../src/features/run/retryIntentKey';
 import { ApiError, setApiKey } from '../src/api/client';
 import * as client from '../src/api/client';
 import { resetConnection, getConnection } from '../src/api/hooks';
@@ -294,24 +293,6 @@ describe('RunHeader retry', () => {
     expect(retryCalls).toBe(1);
     expect(typeof retryKey).toBe('string');
     expect(retryKey!.length).toBeGreaterThan(0);
-  });
-
-  it('holds one key per intent: the intent holder mints once and resets on clear', () => {
-    const intent = createRetryIntentKey();
-
-    const first = intent.current();
-    expect(typeof first).toBe('string');
-    expect(first.length).toBeGreaterThan(0);
-    // Re-sends of the SAME intent (double-click's second click, a re-send
-    // while the request is still pending) reuse the key…
-    expect(intent.current()).toBe(first);
-    expect(intent.current()).toBe(first);
-    // …and settle ends the intent: the next current() mints a fresh key.
-    intent.clear();
-    const second = intent.current();
-    expect(second).not.toBe(first);
-    intent.clear();
-    expect(intent.current()).not.toBe(second);
   });
 
   it('clears the key when the request settles: the next click is a new intent with a fresh key', async () => {

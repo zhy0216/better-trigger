@@ -20,6 +20,7 @@
    without knowing anything about Postgres.
    ============================================================================= */
 import pg from 'pg';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { NotifyCounters } from './observability';
 
 const { Client } = pg;
@@ -72,12 +73,7 @@ export function createWakeSignal(): WakeSignal {
 }
 
 /** Plain unref'd sleep, shared with the rest of the runtime. */
-function plainSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    (t as { unref?: () => void }).unref?.();
-  });
-}
+const plainSleep = (ms: number): Promise<void> => sleep(ms, undefined, { ref: false });
 
 /**
  * `sleep(ms)` that returns early when `wake` fires — the idle claim loop's

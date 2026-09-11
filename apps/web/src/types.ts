@@ -97,8 +97,6 @@ export type Route =
   | 'runs'
   | 'tasks'
   | 'schedules'
-  | 'alerts'
-  | 'deployments'
   | 'onboarding';
 
 export type VizStyle = 'waterfall' | 'tree';

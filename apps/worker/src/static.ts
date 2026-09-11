@@ -146,17 +146,6 @@ function resolveInside(root: string, decodedPath: string): string | null {
   return resolved;
 }
 
-const NOT_FOUND_BODY = JSON.stringify({
-  error: { code: 'not_found', message: 'route not found' },
-});
-
-function notFound(): Response {
-  return new Response(NOT_FOUND_BODY, {
-    status: 404,
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-  });
-}
-
 /**
  * Serve `target` (already lexically inside root) with the right content-type,
  * cache headers and ETag — or null when it is missing, not a file, or a
@@ -270,8 +259,8 @@ export function dashboardStatic(publicDir: string | undefined): MiddlewareHandle
       // A real file reference: serve it, or 404 — never the SPA shell, or a
       // missing /assets/foo.js would answer HTML under a JS content-type.
       const target = resolveInside(root, decoded);
-      if (target === null) return notFound();
-      return (await serveFile(realRoot, target, requestPath, method, ifNoneMatch)) ?? notFound();
+      if (target === null) return next();
+      return (await serveFile(realRoot, target, requestPath, method, ifNoneMatch)) ?? next();
     }
 
     // No extension: serve the request path itself when it is a real file
@@ -282,7 +271,7 @@ export function dashboardStatic(publicDir: string | undefined): MiddlewareHandle
     if (direct !== null) return direct;
     return (
       (await serveFile(realRoot, join(root, 'index.html'), requestPath, method, ifNoneMatch)) ??
-      notFound()
+      next()
     );
   };
 }

@@ -44,12 +44,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_MS = 1_000;
 const TERMINAL: ReadonlySet<RunStatus> = new Set(['completed', 'failed', 'canceled']);
 
-/** Monotonically increasing waiter id (p1-14): lets the registry name a
- *  specific entry, so an abort can target exactly the waiter it was handed. */
-let nextWaiterId = 0;
-
 interface PendingWaiter {
-  id: number;
   runId: string;
   namespace: Namespace;
   resolve: (r: WaitResult) => void;
@@ -273,7 +268,6 @@ export function createWaiterRegistry(deps: {
 
     return new Promise<WaitResult>((resolve, rejectPromise) => {
       const entry: PendingWaiter = {
-        id: nextWaiterId++,
         runId,
         namespace,
         resolve,

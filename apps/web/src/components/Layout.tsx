@@ -1,15 +1,15 @@
 /* =============================================================================
-   Better Trigger — shared layout pieces: Page, Card, Metric, SectionHead,
+   Better Trigger — shared layout pieces: Page, Card, SectionHead,
    LoadingState, ErrorState.
    ============================================================================= */
 import React from 'react';
 import { Icon } from './primitives';
 import { API_BASE_URL } from '../api/client';
 
-export function Page({ children, pad = true, scroll = true }: { children?: React.ReactNode; pad?: boolean; scroll?: boolean }) {
+export function Page({ children }: { children?: React.ReactNode }) {
   return (
-    <div className="bt-page" style={{ overflowY: scroll ? 'auto' : 'hidden' }}>
-      <div className="bt-page-inner" data-padded={pad}>{children}</div>
+    <div className="bt-page" style={{ overflowY: 'auto' }}>
+      <div className="bt-page-inner" data-padded="true">{children}</div>
     </div>
   );
 }
@@ -49,15 +49,6 @@ export function Card({
         transform: h && hover ? 'translateY(-1px)' : 'none', ...style,
       }}>
       {children}
-    </div>
-  );
-}
-
-export function Metric({ label, value, tone }: { label: string; value: React.ReactNode; tone?: string }) {
-  return (
-    <div>
-      <div style={{ fontSize: 10.5, color: 'var(--fg-faint)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 2, whiteSpace: 'nowrap' }}>{label}</div>
-      <div className="mono tnum" style={{ fontSize: 13.5, fontWeight: 600, color: tone || 'var(--fg)', whiteSpace: 'nowrap' }}>{value}</div>
     </div>
   );
 }

@@ -13,7 +13,7 @@
        head's copy and the display order stays head → tail.
    ============================================================================= */
 import { describe, expect, it } from 'vitest';
-import { appendTailPage, mergeRunPages } from '../src/api/mergeRuns';
+import { mergeRunPages } from '../src/api/mergeRuns';
 import type { Run } from '../src/types';
 
 const run = (id: number): Run => ({
@@ -29,12 +29,12 @@ const run = (id: number): Run => ({
   ts: id,
 });
 
-describe('appendTailPage', () => {
+describe('mergeRunPages (tail append)', () => {
   it('appends an older page after the tail, keeping order', () => {
     // head is 5..1; the user loaded page 2 (runs 10..6) then page 3 (15..11).
     const tail = [10, 9, 8, 7, 6].map(run);
     const page = [15, 14, 13, 12, 11].map(run);
-    expect(appendTailPage(tail, page).map((r) => r.id)).toEqual([
+    expect(mergeRunPages(tail, page).map((r) => r.id)).toEqual([
       '10', '9', '8', '7', '6', '15', '14', '13', '12', '11',
     ]);
   });
@@ -42,7 +42,7 @@ describe('appendTailPage', () => {
   it('drops a run that already exists in the tail (keyset moved between polls)', () => {
     const tail = [6, 5].map(run);
     const page = [6, 4].map(run); // run 6 repeated
-    expect(appendTailPage(tail, page).map((r) => r.id)).toEqual(['6', '5', '4']);
+    expect(mergeRunPages(tail, page).map((r) => r.id)).toEqual(['6', '5', '4']);
   });
 });
 

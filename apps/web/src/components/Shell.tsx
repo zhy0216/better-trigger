@@ -38,7 +38,7 @@ export function Sidebar({ route, setRoute, collapsed, mobile = false, open = fal
     const on = route === item.id;
     return (
       <button key={item.id} onClick={() => setRoute(item.id)} type="button"
-        title={compact ? `${item.label}${item.comingSoon ? ' — Coming soon' : ''}` : undefined}
+        title={compact ? item.label : undefined}
         aria-label={item.label}
         aria-current={on ? 'page' : undefined}
         data-active={on}
@@ -46,7 +46,6 @@ export function Sidebar({ route, setRoute, collapsed, mobile = false, open = fal
         >
         <Icon name={item.icon} size={17} strokeWidth={on ? 2.2 : 2} />
         {!compact && <span className="bt-nav-label">{item.label}</span>}
-        {!compact && item.comingSoon && <span className="bt-soon">Soon</span>}
       </button>
     );
   };
@@ -180,5 +179,3 @@ export function TopBar({
     </header>
   );
 }
-
-export type { Route };

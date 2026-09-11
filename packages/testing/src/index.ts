@@ -23,11 +23,9 @@ export {
   type TestDatabase,
 } from './database';
 export {
-  killDaemon,
   spawnDaemon,
   startDaemon,
   waitForHealth,
-  withDaemon,
   type Daemon,
   type DaemonOptions,
 } from './daemon';

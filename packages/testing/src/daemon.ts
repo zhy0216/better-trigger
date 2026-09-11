@@ -163,28 +163,3 @@ export async function startDaemon(opts: DaemonOptions & { port: number }): Promi
   }
   return daemon;
 }
-
-/**
- * Scoped daemon: start it, run `fn`, and always stop it — even when `fn`
- * throws. For scenarios that keep one daemon alive for their whole body
- * (as opposed to swapping executors under an API node).
- */
-export async function withDaemon<T>(
-  opts: DaemonOptions & { port: number },
-  fn: (daemon: Daemon) => Promise<T>,
-): Promise<T> {
-  const daemon = await startDaemon(opts);
-  try {
-    return await fn(daemon);
-  } finally {
-    await daemon.stop();
-  }
-}
-
-/**
- * Kill a daemon (SIGKILL by default) and wait for it to be gone — the
- * fault-injection primitive the crash scenarios are built on.
- */
-export async function killDaemon(daemon: Daemon, signal: NodeJS.Signals = 'SIGKILL'): Promise<void> {
-  await daemon.kill(signal);
-}

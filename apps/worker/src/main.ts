@@ -40,29 +40,6 @@ import { BUILD_SHA, BUILD_VERSION } from './generated/build-info';
 import { daemon, handoff, markFatal, unhandledRejections } from './shutdown';
 import { parseArgs, parsePruneArgs } from './cli';
 
-// C4: the CLI surface (parsers, helpers, help texts) moved to cli.ts, the exit
-// paths to shutdown.ts. Both stay re-exported / imported here so this file
-// keeps its entry-point role and anything importing these symbols from
-// './main' keeps resolving.
-export {
-  USAGE,
-  PRUNE_USAGE,
-  type Options,
-  type PruneOptions,
-  parseArgs,
-  parsePruneArgs,
-  requireInt,
-  requireDuration,
-  parseNamespace,
-  parseNamespaces,
-  parseMaxSteps,
-  parsePositiveIntEnv,
-  boolValue,
-  envFlag,
-  wrapEnvLine,
-  renderEnvBlock,
-} from './cli';
-
 /**
  * Binds only this machine can reach. Everything else puts the API — which is
  * unauthenticated unless BETTER_TRIGGER_API_KEY is set — on the network.

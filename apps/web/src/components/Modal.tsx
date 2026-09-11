@@ -2,18 +2,15 @@ import React from 'react';
 import { createPortal } from 'react-dom';
 
 /** Native dialogs keep focus and pointer interaction inside the active layer. */
-export function Modal({ open, onClose, label, children, className, panelRef, style, id }: {
+export function Modal({ open, onClose, label, children, className, id }: {
   open: boolean;
   onClose: () => void;
   label: string;
   children: React.ReactNode;
   className?: string;
-  panelRef?: React.RefObject<HTMLDialogElement | null>;
-  style?: React.CSSProperties;
   id?: string;
 }) {
-  const ownRef = React.useRef<HTMLDialogElement>(null);
-  const ref = panelRef ?? ownRef;
+  const ref = React.useRef<HTMLDialogElement>(null);
   const backdropDown = React.useRef(false);
 
   React.useEffect(() => {
@@ -40,7 +37,7 @@ export function Modal({ open, onClose, label, children, className, panelRef, sty
     return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
   };
   return createPortal(
-    <dialog ref={ref} id={id} aria-label={label} aria-modal="true" className={className} style={style}
+    <dialog ref={ref} id={id} aria-label={label} aria-modal="true" className={className}
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       onKeyDown={(event) => {
         if (event.key !== 'Tab') return;

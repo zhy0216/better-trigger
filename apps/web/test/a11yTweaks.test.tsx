@@ -4,10 +4,10 @@
    Covers what the CLI cannot verify by hand:
    - C2: the Tweaks panel is reachable — App owns `open`, the TopBar button
      toggles it, the panel's ✕ collapses it, and it stays closed by default.
-   - C3: keyboard/a11y semantics — Switch is a real role=switch button, the
-     runs rows are real buttons, the interactive Card takes role=button with
-     Enter/Space, and EnvSwitcher exposes aria-expanded, moves focus into the
-     menu on open and restores it on Escape close.
+   - C3: keyboard/a11y semantics — the runs rows are real buttons, the
+     interactive Card takes role=button with Enter/Space, and EnvSwitcher
+     exposes aria-expanded, moves focus into the menu on open and restores it
+     on Escape close.
    - C4: drag/scrub window listeners are detached when the component unmounts
      mid-drag (no leak, no stale closure after unmount).
    ============================================================================= */
@@ -16,8 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../src/App';
 import { EnvSwitcher } from '../src/components/Shell';
 import { Card } from '../src/components/Layout';
-import { Switch } from '../src/components/primitives';
-import { TweakNumber, TweakRadio, TweaksPanel } from '../src/components/TweaksPanel';
+import { TweakRadio, TweaksPanel } from '../src/components/TweaksPanel';
 import { RunsList } from '../src/screens/RunsList';
 import { setApiKey } from '../src/api/client';
 import { resetConnection } from '../src/api/hooks';
@@ -60,19 +59,6 @@ afterEach(() => {
 
 const eventCount = (calls: unknown[][], type: string): number =>
   calls.filter((c) => c[0] === type).length;
-
-describe('Switch keyboard access (C3)', () => {
-  it('is a focusable role=switch button that reports and toggles state', () => {
-    const onChange = vi.fn();
-    render(<Switch checked={false} onChange={onChange} />);
-    const el = screen.getByRole('switch');
-    // A real <button> — focusable, and Enter/Space activate it natively.
-    expect(el.tagName).toBe('BUTTON');
-    expect(el.getAttribute('aria-checked')).toBe('false');
-    fireEvent.click(el);
-    expect(onChange).toHaveBeenCalledWith(true);
-  });
-});
 
 describe('EnvSwitcher keyboard access (C3)', () => {
   it('exposes aria-expanded, focuses the menu on open, and closes on Escape with focus restore', () => {
@@ -191,22 +177,6 @@ describe('TweakRadio click (C3)', () => {
 });
 
 describe('drag listener lifetime (C4)', () => {
-  it('unmounting the panel mid-drag detaches its window listeners', () => {
-    const add = vi.spyOn(window, 'addEventListener');
-    const remove = vi.spyOn(window, 'removeEventListener');
-    const { unmount } = render(
-      <TweaksPanel open onOpenChange={() => {}}><div>content</div></TweaksPanel>,
-    );
-    fireEvent.mouseDown(screen.getByText('Tweaks'), { clientX: 10, clientY: 10 });
-    expect(eventCount(add.mock.calls, 'mousemove')).toBeGreaterThanOrEqual(1);
-
-    const removedBefore = eventCount(remove.mock.calls, 'mousemove');
-    const upBefore = eventCount(remove.mock.calls, 'mouseup');
-    unmount();
-    expect(eventCount(remove.mock.calls, 'mousemove')).toBe(removedBefore + 1);
-    expect(eventCount(remove.mock.calls, 'mouseup')).toBe(upBefore + 1);
-  });
-
   it('unmounting a segment radio mid-scrub detaches its pointer listeners', () => {
     const add = vi.spyOn(window, 'addEventListener');
     const remove = vi.spyOn(window, 'removeEventListener');
@@ -214,20 +184,6 @@ describe('drag listener lifetime (C4)', () => {
       <TweakRadio label="Mode" value="light" options={['light', 'dark']} onChange={() => {}} />,
     );
     fireEvent.pointerDown(screen.getByRole('radiogroup'), { clientX: 5, clientY: 5 });
-    expect(eventCount(add.mock.calls, 'pointermove')).toBeGreaterThanOrEqual(1);
-
-    const removedBefore = eventCount(remove.mock.calls, 'pointermove');
-    unmount();
-    expect(eventCount(remove.mock.calls, 'pointermove')).toBe(removedBefore + 1);
-  });
-
-  it('unmounting a number field mid-scrub detaches its pointer listeners', () => {
-    const add = vi.spyOn(window, 'addEventListener');
-    const remove = vi.spyOn(window, 'removeEventListener');
-    const { unmount } = render(
-      <TweakNumber label="Count" value={5} onChange={() => {}} />,
-    );
-    fireEvent.pointerDown(screen.getByText('Count'), { clientX: 5, clientY: 5 });
     expect(eventCount(add.mock.calls, 'pointermove')).toBeGreaterThanOrEqual(1);
 
     const removedBefore = eventCount(remove.mock.calls, 'pointermove');

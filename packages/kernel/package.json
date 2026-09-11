@@ -1,7 +1,7 @@
 {
   "name": "@better-trigger/kernel",
   "version": "0.1.0",
-  "description": "better-trigger kernel — durable execution engine over Postgres (queue, runs, orchestrator). Internal: consumed by apps/worker, never by the SDK.",
+  "description": "better-trigger kernel \u2014 durable execution engine over Postgres (queue, runs, orchestrator). Internal: consumed by apps/worker, never by the SDK.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -18,7 +18,9 @@
       }
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "sideEffects": false,
   "license": "MIT",
   "repository": {
@@ -38,8 +40,10 @@
   },
   "dependencies": {
     "@better-trigger/core": "workspace:*",
-    "croner": "^10.0.1",
-    "pg": "^8.23.0"
+    "croner": "^10.0.1"
+  },
+  "peerDependencies": {
+    "pg": ">=8"
   },
   "devDependencies": {
     "@better-trigger/db": "workspace:*",

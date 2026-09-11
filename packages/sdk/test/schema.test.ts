@@ -1,11 +1,11 @@
 /* =============================================================================
    better-trigger — duck-typed schema validation unit tests.
 
-   schema.ts accepts three shapes with zero validation-library dependencies:
-   Standard Schema (~standard.validate), zod-style safeParse and zod-style
-   parse. These tests pin the duck-typing (isSchema false-negatives), the async
-   Standard Schema path, the `{ key }` path segment formatIssues emits, and the
-   real-ZodError message extraction.
+   schema.ts accepts two shapes with zero validation-library dependencies:
+   Standard Schema (~standard.validate) and zod-style safeParse. These tests
+   pin the duck-typing (isSchema false-negatives), the async Standard Schema
+   path, the `{ key }` path segment formatIssues emits, and the real-ZodError
+   message extraction.
    ============================================================================= */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -21,7 +21,6 @@ describe('isSchema — duck typing', () => {
   it('accepts each supported shape', () => {
     expect(isSchema({ '~standard': { version: 1, vendor: 'x', validate: () => ({ value: 1 }) } })).toBe(true);
     expect(isSchema({ safeParse: () => ({ success: true, data: 1 }) })).toBe(true);
-    expect(isSchema({ parse: () => 1 })).toBe(true);
   });
 
   it('false-negatives: near-misses and junk are NOT schemas', () => {
@@ -109,14 +108,7 @@ describe('validateSchema — real ZodError extraction', () => {
   });
 });
 
-describe('validateSchema — parse / safeParse / unsupported shapes', () => {
-  it('retags a throwing zod-style parse as a SchemaValidationError', async () => {
-    const schema = { parse: () => { throw new Error('bad input'); } };
-    const err = await validateSchema(schema, {}).catch((e: unknown) => e);
-    expect((err as Error).name).toBe('SchemaValidationError');
-    expect((err as Error).message).toContain('bad input');
-  });
-
+describe('validateSchema — safeParse / unsupported shapes', () => {
   it('extracts the message from a safeParse error that is just an Error', async () => {
     const schema = {
       safeParse: () => ({ success: false as const, error: new Error('boom') }),

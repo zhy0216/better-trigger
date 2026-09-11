@@ -158,8 +158,9 @@ export interface TriggerItem {
   options?: TriggerOptions;
 }
 
-/** A run handed to a worker for execution. */
-export interface DequeuedRun {
+/** A claimed run: id/payload/steps come from the claim, fencingToken is the
+ *  claim's write credential, stepsTruncated flags the step-ledger cut (p1-07). */
+export interface ClaimedRun {
   id: string;
   taskId: string;
   payload: unknown;
@@ -171,10 +172,6 @@ export interface DequeuedRun {
   env: string;
   /** Memoized completed/failed steps for replay. */
   steps: StepSnapshot[];
-}
-
-/** A claimed run: the fencing token is the claim's write credential. */
-export interface ClaimedRun extends DequeuedRun {
   fencingToken: number;
   /**
    * True when the claim truncated the run's step ledger at the worker's

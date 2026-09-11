@@ -3,7 +3,6 @@
    schema (single source of truth for the DB shape), generated-migration
    runner, and the pg Pool factory.
    ============================================================================= */
-export * as schema from './schema';
 export * from './schema';
 export {
   createPool,

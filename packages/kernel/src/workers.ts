@@ -7,7 +7,6 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import {
-  assertNamespace,
   KernelError,
   validateRetryPolicy,
   type Namespace,
@@ -16,7 +15,7 @@ import {
 import type { KernelLogger } from './kernel';
 import { scheduleId as genScheduleId, workerId as genWorkerId } from './ids';
 import { nextCronAt } from './orchestrator';
-import { WORKER_OFFLINE_MS } from './queue';
+import { assertNamespaces, WORKER_OFFLINE_MS } from './queue';
 
 export interface RegisterWorkerArgs {
   name?: string;
@@ -50,10 +49,7 @@ export async function registerWorker(
   if (!Array.isArray(args.tasks)) {
     throw new KernelError('bad_request', 'tasks must be an array');
   }
-  if (!Array.isArray(args.namespaces) || args.namespaces.length === 0) {
-    throw new KernelError('bad_request', 'namespaces must be a non-empty array');
-  }
-  for (const ns of args.namespaces) assertNamespace(ns);
+  assertNamespaces(args.namespaces);
   // The workers.concurrency column carries no CHECK, so a garbage value either
   // lands in the row (a negative "capacity" the dashboard renders) or reaches
   // pg as a type violation and surfaces as a bare driver error. It is a slot

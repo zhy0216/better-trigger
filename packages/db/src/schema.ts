@@ -536,20 +536,3 @@ export const workers = pgTable('workers', {
     .where(sql`${t.status} = 'online'`),
 ],
 );
-
-/* ---------------------------------------------------------------------------
- * $inferSelect convenience types — INTERNAL to this package only. They are
- * kept for schema-internal / migration reference; the kernel hand-writes its
- * own row types (RunRow & co) on purpose (raw SQL with precise semantics), so
- * these exports are NOT a public contract and currently have no consumers.
- * Do not import them from other packages. (p1-07, todos/p1-07-schema-drift-guard.md)
- * ------------------------------------------------------------------------- */
-export type DbRun = typeof runs.$inferSelect;
-export type DbRunInsert = typeof runs.$inferInsert;
-export type DbRunStep = typeof runSteps.$inferSelect;
-export type DbRunRetryOperation = typeof runRetryOperations.$inferSelect;
-export type DbQueue = typeof queue.$inferSelect;
-export type DbWait = typeof waits.$inferSelect;
-export type DbSchedule = typeof schedules.$inferSelect;
-export type DbWorker = typeof workers.$inferSelect;
-export type DbTask = typeof tasks.$inferSelect;

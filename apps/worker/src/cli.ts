@@ -15,7 +15,6 @@ import {
 } from '@better-trigger/core';
 import { MIN_RETENTION_MS } from '@better-trigger/kernel';
 import { parseOriginList } from './middleware';
-import { ENV_CATEGORY_TITLES, ENV_KNOBS } from './env-registry';
 import { MAX_LEASE_MS, MAX_TIMER_MS, MIN_LEASE_MS, requireLeaseMsValue } from './numeric-config';
 
 export { MIN_LEASE_MS } from './numeric-config';
@@ -88,61 +87,182 @@ Options:
 Timer intervals must be integers from 1 to ${MAX_TIMER_MS}ms. This limit
 applies to process timers, not durable waits or retention windows.
 
-${renderEnvBlock()}
+Env:
+  DATABASE_URL             postgres://localhost:5432/better_trigger
+  PORT                     HTTP listen port (default 4848)
+
+  Core:
+    BETTER_TRIGGER_API_KEY                      When set, the API requires
+                                               \`Authorization: Bearer <key>\`;
+                                               unset = local mode, no auth. May
+                                               carry a @YYYY-MM-DD expiry suffix
+                                               past which it answers 401
+                                               key_expired. (default: (unset))
+    BETTER_TRIGGER_API_KEYS                     Additional bearer keys,
+                                               comma-separated (each may carry
+                                               the same @YYYY-MM-DD expiry
+                                               suffix). Any configured key
+                                               authenticates — the rotation
+                                               mechanism. (default: (unset))
+    BETTER_TRIGGER_CONCURRENCY                  Concurrent execution slots.
+                                               (default: 5)
+    BETTER_TRIGGER_PIN_CODE_VERSION             1/true = same as
+                                               --pin-code-version: claim only
+                                               runs stamped with the code
+                                               version this process serves for
+                                               that task. (default: (unset))
+    BETTER_TRIGGER_VERSION                      Code version reported on
+                                               registration, overriding the
+                                               default build identity
+                                               (0.1.0+<git sha>) — name deploys
+                                               as your pipeline does. (default:
+                                               build identity)
+
+  Network posture:
+    BETTER_TRIGGER_HOST                         Bind address (same as --host).
+                                               Loopback only by default; use
+                                               0.0.0.0 to accept connections
+                                               from the network. (default:
+                                               127.0.0.1)
+    BETTER_TRIGGER_ALLOW_UNAUTHENTICATED        1/true = same as
+                                               --allow-unauthenticated: permit a
+                                               non-loopback --host without an
+                                               API key. (default: (unset))
+    BETTER_TRIGGER_CORS_ORIGIN                  Extra browser origins allowed to
+                                               call the API, comma-separated
+                                               (same as --cors-origin).
+                                               localhost/127.0.0.1/[::1] are
+                                               always allowed; \`*\` allows any
+                                               origin. (default: (unset))
+    BETTER_TRIGGER_NAMESPACES                   Namespaces this worker serves,
+                                               comma-separated <projectId>/<env>
+                                               pairs (same as --namespace).
+                                               (default: default/prod)
+
+  Limits:
+    BETTER_TRIGGER_BODY_LIMIT                   Max request body in bytes; over
+                                               it the API answers 413
+                                               payload_too_large. (default:
+                                               1048576 (1 MiB))
+    BETTER_TRIGGER_MAX_BATCH                    Max items in one batchTrigger;
+                                               over it 400 bad_request — split
+                                               the fan-out into batches.
+                                               (default: 500)
+    BETTER_TRIGGER_MAX_BATCH_PAYLOAD_BYTES      Max TOTAL serialized payload
+                                               across one batchTrigger; over it
+                                               400 bad_request — split the
+                                               fan-out. (default: 1048576 (1
+                                               MiB))
+    BETTER_TRIGGER_MAX_PAYLOAD_BYTES            Max serialized payload per run;
+                                               over it 413 payload_too_large —
+                                               keep large objects elsewhere and
+                                               pass a reference. (default:
+                                               262144 (256 KiB))
+    BETTER_TRIGGER_MAX_STEPS                    Cap on a run's replayed step
+                                               ledger; a run past it fails with
+                                               a non-retryable AbortError —
+                                               split it with continueAsNew. 0 =
+                                               unlimited. (default: 10000)
+    BETTER_TRIGGER_MAX_RECOVERIES               Reaper recovery budget stamped
+                                               on new runs; a run recovered more
+                                               than this is failed rather than
+                                               requeued. 0 = never recover a
+                                               lost run. (default: 10)
+    BETTER_TRIGGER_STEP_OUTPUT_MAX_BYTES        Max serialized output/error per
+                                               step row; over it the step
+                                               records failed with a
+                                               SerializationError diagnostic and
+                                               the run fails. (default: 262144
+                                               (256 KiB))
+    BETTER_TRIGGER_RUN_OUTPUT_MAX_BYTES         Max serialized run output; over
+                                               it the run fails 413
+                                               payload_too_large. (default:
+                                               262144 (256 KiB))
+    BETTER_TRIGGER_ERROR_MAX_BYTES              Max serialized error record; a
+                                               larger one is stored as a
+                                               SerializationError stub so the
+                                               failure still lands. (default:
+                                               65536 (64 KiB))
+    BETTER_TRIGGER_LOG_DATA_MAX_BYTES           Max serialized \`data\` on one log
+                                               line; an over-limit line keeps
+                                               its message and stores { omitted:
+                                               true, reason } in data. (default:
+                                               16384 (16 KiB))
+    BETTER_TRIGGER_LOG_MESSAGE_MAX_BYTES        Max serialized message on one
+                                               log line; a longer one is stored
+                                               as a SerializationError stub.
+                                               (default: 65536 (64 KiB))
+    BETTER_TRIGGER_LOG_BATCH_MAX_BYTES          Max serialized payload of one
+                                               log INSERT; a flush over it is
+                                               split into more statements.
+                                               (default: 262144 (256 KiB))
+
+  Rate limiting:
+    BETTER_TRIGGER_RATE_LIMIT_RPS               Per-key per-endpoint
+                                               token-bucket rate on trigger /
+                                               batch-trigger / retry / cancel
+                                               (tokens/s). 0 disables the
+                                               per-key bucket. (default: 50)
+    BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS        Per-endpoint token-bucket rate
+                                               over all keys (tokens/s). 0
+                                               disables the global bucket.
+                                               In-memory per process — an exact
+                                               fleet-wide cap belongs at the
+                                               reverse proxy. (default: 200)
+    BETTER_TRIGGER_RATE_LIMIT_READ_RPS          Per-key token-bucket rate across
+                                               the read surface (/api/v1 reads:
+                                               record, result, /runs, /tasks,
+                                               /schedules, /workers, /metrics).
+                                               0 disables the per-key read
+                                               bucket. (default: 200)
+    BETTER_TRIGGER_RATE_LIMIT_READ_GLOBAL_RPS   Token-bucket rate over all keys
+                                               across the whole read surface
+                                               (tokens/s). 0 disables the global
+                                               read bucket. In-memory per
+                                               process, like the write buckets.
+                                               (default: 1000)
+    BETTER_TRIGGER_RATE_LIMIT_BURST             Token-bucket burst capacity (max
+                                               burst) for both write and read
+                                               buckets. 0 disables the whole
+                                               rate limiter (no buckets are
+                                               created or consumed); negative or
+                                               unparseable values fall back to
+                                               the default. (default: larger
+                                               write rate above)
+
+  Tuning:
+    BETTER_TRIGGER_POOL_MAX                     Positive safe integer
+                                               (1–9007199254740991) overriding
+                                               the business-pool connection max;
+                                               otherwise --concurrency + 8
+                                               headroom for loops, heartbeat,
+                                               waiter sweep and HTTP slack.
+                                               (default: derived (concurrency +
+                                               8))
+    BETTER_TRIGGER_POOL_CONNECT_TIMEOUT_MS      Pool checkout / connect timeout
+                                               in ms, integer 0–2147483647; a
+                                               saturated pool rejects a checkout
+                                               after this. 0 = wait forever
+                                               (pg's default). (default: 10000)
+    BETTER_TRIGGER_POOL_STATEMENT_TIMEOUT_MS    Server-side statement timeout in
+                                               ms, integer 0–2147483647, sent as
+                                               statement_timeout at connection
+                                               startup so PostgreSQL cancels
+                                               longer queries. 0 = off.
+                                               (default: 30000)
+    BETTER_TRIGGER_FATAL_UNHANDLED_REJECTION    Default off: a stray
+                                               unhandledRejection is logged and
+                                               counted on
+                                               better_trigger_unhandled_rejections_total
+                                               while the daemon keeps serving.
+                                               Set to 1 to make it fatal (exit
+                                               1) like an uncaughtException.
+                                               (default: (unset))
+    BETTER_TRIGGER_STATS_TTL_MS                 Cache TTL for /tasks stats, per
+                                               namespace; 0 disables the cache.
+                                               (default: 10000)
+
 `;
-
-/** Wrap a `name  help...` line so a terminal keeps the description aligned:
- *  the first line starts at `prefix`, continuation lines re-indent to the same
- *  column. Break at word boundaries, never mid-word. */
-export function wrapEnvLine(prefix: string, text: string): string[] {
-  const width = 80;
-  const indent = prefix.length;
-  const words = text.split(/\s+/);
-  const lines: string[] = [];
-  let line = prefix;
-  for (const word of words) {
-    if (line === prefix) {
-      line = `${prefix} ${word}`;
-    } else if (line.length + 1 + word.length <= width) {
-      line += ` ${word}`;
-    } else {
-      lines.push(line);
-      line = `${' '.repeat(indent)}${word}`;
-    }
-  }
-  lines.push(line);
-  return lines;
-}
-
-/**
- * The `Env:` block of --help, rendered from ENV_KNOBS (env-registry.ts) — the
- * single source of truth for every `BETTER_TRIGGER_*` knob the worker and the
- * kernel read. Grouped by category, so --help cannot silently drift from the
- * registry; test/env-registry.test.ts guards the registry against the source.
- * DATABASE_URL / PORT stay hand-written here (they are not BETTER_TRIGGER_*).
- */
-export function renderEnvBlock(): string {
-  const nameWidth = Math.max(...ENV_KNOBS.map((k) => k.name.length)) + 2;
-  const body: string[] = [];
-  let current: string | undefined;
-  for (const knob of ENV_KNOBS) {
-    if (knob.category !== current) {
-      current = knob.category;
-      body.push('');
-      body.push(`  ${ENV_CATEGORY_TITLES[current] ?? current}:`);
-    }
-    const prefix = `    ${knob.name.padEnd(nameWidth)}`;
-    const text = `${knob.help} (default: ${knob.default})`;
-    body.push(...wrapEnvLine(prefix, text));
-  }
-  return [
-    'Env:',
-    '  DATABASE_URL             postgres://localhost:5432/better_trigger',
-    '  PORT                     HTTP listen port (default 4848)',
-    ...body,
-    '',
-  ].join('\n');
-}
 
 export const PRUNE_USAGE = `better-trigger-worker prune — delete history past a retention window
 

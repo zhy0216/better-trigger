@@ -10,7 +10,6 @@ import { ErrorState, LoadingState } from '../../components/Layout';
 import { useRun, api, recordConnectionError } from '../../api/hooks';
 import { ApiError, getApiKeyVersion, subscribeApiKey } from '../../api/client';
 import { relativeFuture, type AdaptedRunDetail } from '../../api/adapter';
-import { createRetryIntentKey } from './retryIntentKey';
 import { rulerTicks } from './ruler';
 import { isAtBottom } from './scroll';
 import type { Span, Trace, LogLine, VizStyle } from '../../types';
@@ -64,17 +63,18 @@ function RunHeader({ trace, runStatus, env, onRetried }: { trace: Trace; runStat
     const controller = new AbortController();
     request.current = controller;
     const stale = () => !isCurrent() || request.current !== controller || controller.signal.aborted;
-    // One holder per dispatched intent. Settle still ends it on success OR
-    // failure, even without a response. A retired finally only clears its own
-    // holder; it cannot end a new identity's intent (contract §3.7).
-    const retryIntentKey = createRetryIntentKey();
     setState((prev) => prev.generation === generation ? { generation, pending: kind, error: null } : prev);
     try {
       if (kind === 'retry') {
         // retryRun mints a NEW run (id changes) — navigate to it, or the
         // poll would keep watching the old failed run forever and repeat
         // clicks would silently spawn N runs.
-        const operationKey = retryIntentKey.current();
+        // One Idempotency-Key per dispatched intent; the synchronous
+        // request lock above excludes a second dispatch for this one.
+        const operationKey =
+          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `retry-${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const { runId: newRunId } = await api.retryRun(trace.runId, env, { operationKey }, controller.signal);
         if (!stale()) onRetried?.(newRunId);
       } else {
@@ -91,7 +91,6 @@ function RunHeader({ trace, runStatus, env, onRetried }: { trace: Trace; runStat
       // connection registry so the key prompt takes over.
       if (e instanceof ApiError && e.status === 401) recordConnectionError(e);
     } finally {
-      if (kind === 'retry') retryIntentKey.clear();
       if (!stale()) setState((prev) => prev.generation === generation ? { ...prev, pending: null } : prev);
       if (request.current === controller) request.current = null;
     }

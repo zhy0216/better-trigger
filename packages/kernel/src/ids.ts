@@ -5,10 +5,8 @@
    ============================================================================= */
 import { randomUUID } from 'node:crypto';
 
-function token(len = 24): string {
-  // Two UUIDs give 64 hex chars; plenty for any truncation length.
-  const hex = (randomUUID() + randomUUID()).replace(/-/g, '');
-  return hex.slice(0, len);
+function token(): string {
+  return randomUUID().replace(/-/g, '').slice(0, 24);
 }
 
 export function runId(): string {
