@@ -68,7 +68,7 @@
     "@better-trigger/kernel": "workspace:*",
     "@hono/node-server": "^2.1.1",
     "better-trigger": "workspace:*",
-    "hono": "^4.13.3",
+    "hono": "^4.13.5",
     "pg": "^8.23.0"
   },
   "devDependencies": {

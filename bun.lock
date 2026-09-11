@@ -68,7 +68,7 @@
         "@better-trigger/kernel": "workspace:*",
         "@hono/node-server": "^2.1.1",
         "better-trigger": "workspace:*",
-        "hono": "^4.13.3",
+        "hono": "^4.13.5",
         "pg": "^8.23.0",
       },
       "devDependencies": {
@@ -1088,7 +1088,7 @@
 
     "highlight.js": ["highlight.js@10.7.3", "https://registry.npmmirror.com/highlight.js/-/highlight.js-10.7.3.tgz", {}, "sha512-tzcUFauisWKNHaRkN4Wjl/ZA07gENAjFl3J/c480dprkGTg5EQstgaNFqBfUqCq54kZRIEcreTsAgF/m2quD7A=="],
 
-    "hono": ["hono@4.13.3", "https://registry.npmmirror.com/hono/-/hono-4.13.3.tgz", {}, "sha512-r8AO2mYHoLxSHkgafNeC/BXyb2vWRxD3jem4Ts+ptav8oTG5FIRifAjuJEmZI4bSvvc2ns0GxmIYiZnHqN3mMw=="],
+    "hono": ["hono@4.13.7", "https://registry.npmmirror.com/hono/-/hono-4.13.7.tgz", {}, "sha512-c8/gF9ac8Y78/agExVocyLevgR+JlpNB444Py0FSX8pJoPdYUfUzRcXtYEYGwt6l19qIlVZPN5Mfsw9jFShmQQ=="],
 
     "hookable": ["hookable@6.1.1", "https://registry.npmmirror.com/hookable/-/hookable-6.1.1.tgz", {}, "sha512-U9LYDy1CwhMCnprUfeAZWZGByVbhd54hwepegYTK7Pi5NvqEj63ifz5z+xukznehT7i6NIZRu89Ay1AZmRsLEQ=="],
 
