@@ -42,7 +42,7 @@ try {
     private: true,
     type: 'module',
     dependencies: { '@better-trigger/source': source },
-    devDependencies: { '@types/bun': '^1.4.0', typescript: '^7.0.2' },
+    devDependencies: { '@types/bun': '1.4.0', typescript: '^7.0.2' },
   }, null, 2));
   run('bun', ['install', '--ignore-scripts'], consumer, { ...process.env, GIT_CONFIG_GLOBAL: config });
 
