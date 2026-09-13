@@ -11,7 +11,7 @@ import {
   validateRetryPolicy,
   type Namespace,
   type TaskManifest,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 import type { KernelLogger } from './kernel';
 import { scheduleId as genScheduleId, workerId as genWorkerId } from './ids';
 import { nextCronAt } from './orchestrator';

@@ -10,10 +10,10 @@
 
    Driven against a fake kernel (no Postgres).
    ============================================================================= */
-import type { TaskManifest } from '@better-trigger/core';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import type { Kernel } from '@better-trigger/kernel';
-import { task } from 'better-trigger';
+import type { TaskManifest } from '../../../packages/core/src/index';
+import { DEFAULT_NAMESPACE } from '../../../packages/core/src/index';
+import type { Kernel } from '../../../packages/kernel/src/index';
+import { task } from '../../../packages/sdk/src/index';
 import { describe, expect, it } from 'vitest';
 import { resolveTaskVersion, startWorkerRuntime } from '../src/runtime';
 

@@ -11,7 +11,7 @@ import {
   type RetryPolicy,
   type RetryRunOptions,
   type SerializedError,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 import { notifyTerminal, notifyWork } from './notify';
 import { enqueue, removeFromQueue, TERMINAL_STATUSES } from './queue';
 import { createRunIn } from './runs-create';

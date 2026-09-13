@@ -23,8 +23,8 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { KernelError } from '@better-trigger/core';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
+import { KernelError } from '../../core/src/index';
+import { DEFAULT_NAMESPACE } from '../../core/src/index';
 import { MIN_RETENTION_MS, prune } from '../src/prune';
 
 interface Stmt {

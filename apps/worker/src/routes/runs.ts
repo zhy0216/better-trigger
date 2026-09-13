@@ -6,7 +6,7 @@
    /runs/:id detail view lives in routes/dashboard.ts.
    ============================================================================= */
 import { Hono } from 'hono';
-import { KernelError, type Kernel } from '@better-trigger/kernel';
+import { KernelError, type Kernel } from '../../../../packages/kernel/src/index';
 import type { OkResponse, RetryRunResponse } from '../types';
 import { ResultWaitAbortedError, type WaiterRegistry } from '../waiters';
 import { namespaceFromQuery } from '../namespace';

@@ -12,7 +12,7 @@
    one is the CORS allowlist's other half rather than a validation nicety.
    ============================================================================= */
 import type { Context } from 'hono';
-import { KernelError } from '@better-trigger/kernel';
+import { KernelError } from '../../../packages/kernel/src/index';
 
 /**
  * Refuse a body that is not announced as JSON.

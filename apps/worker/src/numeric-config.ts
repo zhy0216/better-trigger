@@ -1,4 +1,4 @@
-import type { OrchestratorOptions } from '@better-trigger/kernel';
+import type { OrchestratorOptions } from '../../../packages/kernel/src/index';
 
 /** Largest single setTimeout/setInterval delay; larger delays can become 1ms. */
 export const MAX_TIMER_MS = 2_147_483_647;

@@ -18,7 +18,7 @@
    exactly once, in order.
    ============================================================================= */
 import type { Pool } from 'pg';
-import type { Kernel } from '@better-trigger/kernel';
+import type { Kernel } from '../../../packages/kernel/src/index';
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 

@@ -9,11 +9,11 @@
    not the recomputed absolute resumeAt, so a normal suspend→resume→replay
    cycle never drifts. Exercised against a recording fake kernel (no Postgres).
    ============================================================================= */
-import type { ClaimedRun, LogEntry, StepSnapshot } from '@better-trigger/core';
-import { NonDeterminismError } from '@better-trigger/core';
-import type { Kernel } from '@better-trigger/kernel';
-import { fnSourceHash, stepFingerprint } from '@better-trigger/kernel';
-import type { ExecutorTask } from 'better-trigger/internal';
+import type { ClaimedRun, LogEntry, StepSnapshot } from '../../../packages/core/src/index';
+import { NonDeterminismError } from '../../../packages/core/src/index';
+import type { Kernel } from '../../../packages/kernel/src/index';
+import { fnSourceHash, stepFingerprint } from '../../../packages/kernel/src/index';
+import type { ExecutorTask } from '../../../packages/sdk/src/internal';
 import { describe, expect, it } from 'vitest';
 import { Executor } from '../src/executor';
 

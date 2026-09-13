@@ -14,7 +14,7 @@
    request, so each test sets its own BETTER_TRIGGER_RATE_LIMIT_* values.
    ============================================================================= */
 import type { Pool } from 'pg';
-import type { Kernel } from '@better-trigger/kernel';
+import type { Kernel } from '../../../packages/kernel/src/index';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
 import { markInternalRequest } from '../src/internal-request';

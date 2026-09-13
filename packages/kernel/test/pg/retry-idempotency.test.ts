@@ -17,7 +17,7 @@
    exercised by deliberately bypassing the FK via session_replication_role.
    ============================================================================= */
 import { expect, it } from 'vitest';
-import type { Namespace } from '@better-trigger/core';
+import type { Namespace } from '../../../core/src/index';
 import type { Kernel } from '../../src/index';
 import { describePg, withPg } from './helpers';
 

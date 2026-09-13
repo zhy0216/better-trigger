@@ -22,9 +22,9 @@
    query shapes (single-run read, batch ANY read) is enough.
    ============================================================================= */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_NAMESPACE, KernelError, ResultTimeoutError as CoreResultTimeoutError } from '@better-trigger/core';
-import { ResultTimeoutError } from 'better-trigger';
-import type { Kernel } from '@better-trigger/kernel';
+import { DEFAULT_NAMESPACE, KernelError, ResultTimeoutError as CoreResultTimeoutError } from '../../../packages/core/src/index';
+import { ResultTimeoutError } from '../../../packages/sdk/src/index';
+import type { Kernel } from '../../../packages/kernel/src/index';
 import { createApp } from '../src/app';
 import { createNotifyCounters } from '../src/observability';
 import { createWakeSignal, sleepWithWake } from '../src/notify';

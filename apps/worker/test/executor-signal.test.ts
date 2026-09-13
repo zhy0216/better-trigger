@@ -6,10 +6,10 @@
    aborted attempt writes NOTHING — a canceled run's step row would be rejected
    anyway, and a drained one must not burn an attempt on a handover.
    ============================================================================= */
-import type { ClaimedRun, LogEntry, StepSnapshot } from '@better-trigger/core';
-import type { Kernel } from '@better-trigger/kernel';
-import { isRunAborted } from 'better-trigger';
-import type { ExecutorTask } from 'better-trigger/internal';
+import type { ClaimedRun, LogEntry, StepSnapshot } from '../../../packages/core/src/index';
+import type { Kernel } from '../../../packages/kernel/src/index';
+import { isRunAborted } from '../../../packages/sdk/src/index';
+import type { ExecutorTask } from '../../../packages/sdk/src/internal';
 import { describe, expect, it } from 'vitest';
 import { Executor } from '../src/executor';
 

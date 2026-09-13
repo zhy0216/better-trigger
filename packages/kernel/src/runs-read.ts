@@ -20,7 +20,7 @@ import {
   type WaitKind,
   type WaitRecord,
   type WaitResult,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 import { TERMINAL_STATUSES } from './queue';
 import { withTx } from './runs-internal';
 

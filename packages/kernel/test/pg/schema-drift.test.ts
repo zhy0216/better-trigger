@@ -33,7 +33,7 @@ import {
   tasks,
   waits,
   workers,
-} from '@better-trigger/db';
+} from '../../../db/src/index';
 import { describePg, withPg } from './helpers';
 import { RETRY_OPERATION_UNIQUE_CONSTRAINT } from '../../src/runs';
 

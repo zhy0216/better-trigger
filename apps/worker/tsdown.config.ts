@@ -1,4 +1,5 @@
 import { defineConfig } from 'tsdown';
+import { sourcePackageExternals } from '../../scripts/source-package-externals.mjs';
 
 const buildVersion = process.env.BT_WORKER_BUILD_VERSION;
 const buildSha = process.env.BT_WORKER_BUILD_SHA;
@@ -10,9 +11,11 @@ if (!buildVersion) {
 }
 
 export default defineConfig({
+  plugins: [sourcePackageExternals()],
   entry: ['src/index.ts', 'src/embedded.ts', 'src/main.ts'],
   format: ['esm', 'cjs'],
-  dts: true,
+  // Keep cross-package source declarations inside the compiler's temp output.
+  dts: { tsconfig: '../../tsconfig.build.json' },
   sourcemap: true,
   clean: true,
   fixedExtension: false,

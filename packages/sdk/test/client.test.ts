@@ -8,7 +8,7 @@
    HttpError with the status attached. No daemon, no Postgres — `fetch` is
    injected.
    ============================================================================= */
-import { KernelError, type KernelErrorCode } from '@better-trigger/core';
+import { KernelError, type KernelErrorCode } from '../../core/src/index';
 import { describe, expect, it, vi } from 'vitest';
 import { HttpClient, HttpError } from '../src/client';
 

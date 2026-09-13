@@ -14,7 +14,7 @@ import {
   type ClaimedRun,
   type Namespace,
   type StepSnapshot,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 import type { KernelLogger } from './kernel';
 import { notifyWork } from './notify';
 

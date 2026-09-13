@@ -13,7 +13,7 @@ import {
   type TriggerItem,
   type TriggerOptions,
   type TriggerType,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 import { runId as genRunId } from './ids';
 import { notifyWork } from './notify';
 import { enqueue, enqueueMany } from './queue';

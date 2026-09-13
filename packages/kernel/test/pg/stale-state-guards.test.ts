@@ -31,7 +31,7 @@
    ============================================================================= */
 import { expect, it } from 'vitest';
 import type { Pool } from 'pg';
-import type { Namespace } from '@better-trigger/core';
+import type { Namespace } from '../../../core/src/index';
 import { describePg, withPg } from './helpers';
 import { createKernel, type Kernel, type KernelLogger } from '../../src/index';
 import {

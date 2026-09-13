@@ -22,7 +22,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { expect, it } from 'vitest';
-import type { LogEntry, Namespace } from '@better-trigger/core';
+import type { LogEntry, Namespace } from '../../../core/src/index';
 import { appendLogs } from '../../src/runs';
 import type { KernelLogger } from '../../src/kernel';
 import { describePg, withPg } from './helpers';

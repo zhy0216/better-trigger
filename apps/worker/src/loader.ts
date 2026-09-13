@@ -12,7 +12,7 @@
    ============================================================================= */
 import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { TaskHandle } from 'better-trigger';
+import type { TaskHandle } from '../../../packages/sdk/src/index';
 
 type AnyTask = TaskHandle<any, any>;
 

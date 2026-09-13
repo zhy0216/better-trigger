@@ -22,7 +22,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
-import type { Namespace } from '@better-trigger/core';
+import type { Namespace } from '../../core/src/index';
 import { heartbeat, releaseClaims, scanStrandedRuns, claimRuns } from '../src/queue';
 import { createRunIn } from '../src/runs';
 import { prune } from '../src/prune';

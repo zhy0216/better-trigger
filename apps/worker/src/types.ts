@@ -27,7 +27,7 @@ import type {
   WaitRecord,
   WorkersResponse as WorkersResponseModel,
   WorkerSummary as WorkerSummaryModel,
-} from '@better-trigger/core';
+} from '../../../packages/core/src/index';
 
 /* ---------------------------------------------------------------------------
  * Shared envelope

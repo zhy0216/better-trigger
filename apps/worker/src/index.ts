@@ -24,5 +24,5 @@ export {
   type WorkerCounters,
   type WorkerLogger,
 } from './observability';
-export { createHealthPool, createPool, DEFAULT_DATABASE_URL, migrate } from '@better-trigger/db';
+export { createHealthPool, createPool, DEFAULT_DATABASE_URL, migrate } from '../../../packages/db/src/index';
 export * from './types';

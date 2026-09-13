@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { expect, it, vi } from 'vitest';
-import { DEFAULT_NAMESPACE as NS, ResultTimeoutError } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE as NS, ResultTimeoutError } from '../../../core/src/index';
 import { createKernel } from '../../src';
 import { describePg, withPg } from './helpers';
 

@@ -19,14 +19,14 @@ import type {
   TriggerOptions,
   WaitForResultOptions,
   WaitResult,
-} from '@better-trigger/core';
-import { DEFAULT_NAMESPACE, KernelError, ResultTimeoutError } from '@better-trigger/core';
+} from '../../core/src/index';
+import { DEFAULT_NAMESPACE, KernelError, ResultTimeoutError } from '../../core/src/index';
 import { HttpClient, HttpError, type HttpClientOptions } from './client';
 import { applyConcurrencyKey } from './concurrency';
 import { registry } from './registry';
 import type { BatchItemOptions, BatchNamespaceOptions, TaskHandle } from './task';
 
-export { ResultTimeoutError } from '@better-trigger/core';
+export { ResultTimeoutError } from '../../core/src/index';
 
 /** Returned by trigger / batchTrigger: the run id plus a result() poller. */
 export interface RunHandle<TOutput = unknown> {

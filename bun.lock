@@ -4,6 +4,13 @@
   "workspaces": {
     "": {
       "name": "better-trigger",
+      "dependencies": {
+        "@types/pg": "^8.23.1",
+        "croner": "^10.0.1",
+        "drizzle-orm": "^0.45.2",
+        "hono": "^4.13.5",
+        "pg": "^8.23.0",
+      },
       "devDependencies": {
         "@arethetypeswrong/cli": "^0.18.5",
         "@eslint/js": "^10.0.1",

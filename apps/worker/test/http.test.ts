@@ -12,7 +12,7 @@
    Routes are driven through createApp with stub deps (no Postgres involved).
    ============================================================================= */
 import type { Pool } from 'pg';
-import { createKernel, type Kernel } from '@better-trigger/kernel';
+import { createKernel, type Kernel } from '../../../packages/kernel/src/index';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
 import type { WaiterRegistry } from '../src/waiters';

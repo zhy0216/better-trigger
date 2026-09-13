@@ -14,7 +14,7 @@
    uses). All of them are test-only — they import nothing from src.
    ============================================================================= */
 import type { Pool } from 'pg';
-import type { Namespace } from '@better-trigger/core';
+import type { Namespace } from '../../../core/src/index';
 
 /** Insert a runs row directly (fault injection): any status, no queue row, no
  *  task/worker registration — exactly the desynced shapes the guards must

@@ -11,7 +11,7 @@
      what --pin-code-version matches on): a hash of id + cron + run() body
      source, so an edited body on one task never moves its peers' versions.
    ============================================================================= */
-import type { ResolvedTaskDefinition } from 'better-trigger/internal';
+import type { ResolvedTaskDefinition } from '../../../packages/sdk/src/internal';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resolveCodeVersion, resolveTaskVersion } from '../src/runtime';
 import { BUILD_SHA, BUILD_VERSION } from '../src/generated/build-info';
@@ -94,7 +94,7 @@ describe('resolveTaskVersion', () => {
     const alone = resolveTaskVersion(def('a', bodyA));
     // b changed, was added, was removed — none of it may move a's version.
     expect(resolveTaskVersion(def('a', bodyA))).toBe(alone);
-    const withPeers = [def('a', bodyA), def('b', bodyB)].map(resolveTaskVersion);
+    const withPeers = [def('a', bodyA), def('b', bodyB)].map((definition) => resolveTaskVersion(definition));
     expect(withPeers[0]).toBe(alone);
     expect(withPeers[1]).not.toBe(alone);
   });

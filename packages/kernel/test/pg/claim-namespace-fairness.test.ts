@@ -16,7 +16,7 @@
    Skipped unless DATABASE_URL is set (see helpers.ts).
    ============================================================================= */
 import { expect, it } from 'vitest';
-import type { Namespace } from '@better-trigger/core';
+import type { Namespace } from '../../../core/src/index';
 import { describePg, withPg, type PgContext } from './helpers';
 
 const NS_A: Namespace = { projectId: 'acme', env: 'staging' };

@@ -11,10 +11,10 @@
    serialization_error refusals are converted the same way. Exercised
    against recording fake kernels; no Postgres.
    ============================================================================= */
-import type { ClaimedRun, LogEntry, RetryPolicy } from '@better-trigger/core';
-import { AbortError, isAbortError, KernelError } from '@better-trigger/core';
-import type { Kernel } from '@better-trigger/kernel';
-import type { ExecutorTask } from 'better-trigger/internal';
+import type { ClaimedRun, LogEntry, RetryPolicy } from '../../../packages/core/src/index';
+import { AbortError, isAbortError, KernelError } from '../../../packages/core/src/index';
+import type { Kernel } from '../../../packages/kernel/src/index';
+import type { ExecutorTask } from '../../../packages/sdk/src/internal';
 import { describe, expect, it } from 'vitest';
 import { Executor } from '../src/executor';
 

@@ -28,5 +28,5 @@ export {
   RunNotRunningError,
   StaleLeaseError,
   TaskNotFoundError,
-} from '@better-trigger/core';
-export type { KernelErrorCode } from '@better-trigger/core';
+} from '../../core/src/index';
+export type { KernelErrorCode } from '../../core/src/index';

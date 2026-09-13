@@ -10,7 +10,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { NonDeterminismError, safeSerializeJson, type Namespace } from '@better-trigger/core';
+import { NonDeterminismError, safeSerializeJson, type Namespace } from '../../core/src/index';
 import { canonicalStringify, fnSourceHash, stepFingerprint, type StepFingerprintArgs } from '../src/fingerprint';
 import { reportStep, type ReportStepArgs } from '../src/runs';
 

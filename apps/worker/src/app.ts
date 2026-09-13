@@ -8,11 +8,11 @@ import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { Pool } from 'pg';
-import type { Namespace } from '@better-trigger/core';
-import { KernelError, type Kernel, type KernelErrorCode } from '@better-trigger/kernel';
+import type { Namespace } from '../../../packages/core/src/index';
+import { KernelError, type Kernel, type KernelErrorCode } from '../../../packages/kernel/src/index';
 import type { ApiErrorBody } from './types';
 import { auditMiddleware } from './audit';
-import { authMiddleware, corsMiddleware, originMiddleware, type AppVariables } from './middleware';
+import { authMiddleware, createCorsMiddleware, createOriginMiddleware, type AppVariables } from './middleware';
 import { rateLimitMiddleware } from './rate-limit';
 import { dashboardStatic } from './static';
 import { triggerRoutes } from './routes/trigger';
@@ -22,6 +22,8 @@ import { metricsRoutes, type MetricsSources } from './routes/metrics';
 import { WaiterRegistryStoppedError, type WaiterRegistry } from './waiters';
 
 export interface AppDeps {
+  /** Explicit embedded configuration; the daemon reads process.env by default. */
+  env?: Readonly<Record<string, string | undefined>>;
   /** The kernel backing trigger/cancel/retry (owned by the caller). */
   kernel: Kernel;
   /** The pg Pool for dashboard read queries (owned by the caller). */
@@ -82,16 +84,16 @@ const STATUS_BY_CODE: Partial<Record<KernelErrorCode, 400 | 404 | 409 | 413 | 42
 /** Request body cap in bytes; 1 MiB unless BETTER_TRIGGER_BODY_LIMIT says else. */
 const DEFAULT_BODY_LIMIT_BYTES = 1024 * 1024;
 
-function bodyLimitBytes(): number {
-  const raw = process.env.BETTER_TRIGGER_BODY_LIMIT;
+function bodyLimitBytes(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const raw = env.BETTER_TRIGGER_BODY_LIMIT;
   if (raw === undefined || raw === '') return DEFAULT_BODY_LIMIT_BYTES;
   const n = Number(raw);
   return Number.isSafeInteger(n) && n > 0 ? n : DEFAULT_BODY_LIMIT_BYTES;
 }
 
 /** Read per request, so a test (or a reload) can flip it without re-assembly. */
-function isProduction(): boolean {
-  return process.env.NODE_ENV === 'production';
+function isProduction(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return env.NODE_ENV === 'production';
 }
 
 /** Short correlation id shared by the 500 body and its server log line. */
@@ -102,7 +104,7 @@ function requestId(): string {
 export function createApp(deps: AppDeps): Hono<{ Variables: AppVariables }> {
   const app = new Hono<{ Variables: AppVariables }>();
 
-  app.use('*', corsMiddleware);
+  app.use('*', createCorsMiddleware(deps.env));
   // O6 order matters: audit is OUTERMOST so it sees every outcome — auth's
   // 401, the origin gate's 403, the rate limiter's 429, the body limit's 413, a route's throw
   // (Hono turns it into the onError response before the chain unwinds) and
@@ -111,16 +113,16 @@ export function createApp(deps: AppDeps): Hono<{ Variables: AppVariables }> {
   // browser origins cannot spend the run-creating budget. Permitted requests
   // still pass the rate limiter before anything buffers their bodies.
   app.use('/api/v1/*', auditMiddleware());
-  app.use('/api/v1/*', authMiddleware());
-  app.use('/api/v1/*', originMiddleware);
-  app.use('/api/v1/*', rateLimitMiddleware());
+  app.use('/api/v1/*', authMiddleware(deps.env));
+  app.use('/api/v1/*', createOriginMiddleware(deps.env));
+  app.use('/api/v1/*', rateLimitMiddleware(undefined, deps.env));
 
   // Refuse an oversized body before anything buffers it: `c.req.json()` would
   // otherwise read a 500MB POST straight into the daemon's heap. Content-Length
   // short-circuits; a chunked body is measured as it streams. Answered right
   // here (413 + the normal error envelope) rather than thrown, so it never
   // reaches onError as an HTTPException that would read as a 500.
-  const maxBody = bodyLimitBytes();
+  const maxBody = bodyLimitBytes(deps.env);
   app.use(
     '/api/v1/*',
     bodyLimit({
@@ -186,7 +188,7 @@ export function createApp(deps: AppDeps): Hono<{ Variables: AppVariables }> {
     // so the caller gets a generic message plus a requestId and the real error
     // goes to the log under the same id. (KernelError above is untouched —
     // those messages are ours, written for the caller.)
-    if (isProduction()) {
+    if (isProduction(deps.env)) {
       // Reuse the audit middleware's correlation id when this request had one
       // (every /api/v1 request does), so the 500 body, the audit line and the
       // log line all carry the same id; fall back to a fresh one for errors

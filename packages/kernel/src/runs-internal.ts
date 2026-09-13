@@ -1,5 +1,6 @@
 // Shared internals of the kernel run lifecycle: lock-order docs, config caps,
 // pure helpers and the row-lock helpers every run module builds on.
+import { kernelEnvironment } from './environment';
 /* =============================================================================
    @better-trigger/kernel — kernel run lifecycle.
    Create (idempotent) / steps / suspend / wait-for-child / batch-trigger /
@@ -91,7 +92,7 @@ import {
   type SerializedError,
   type TriggerItem,
   type TriggerOptions,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 
 /** Upper bound for a delay before a run becomes available: 10 years in ms. */
 const MAX_DELAY_MS = 315_576_000_000;
@@ -159,7 +160,7 @@ const DEFAULT_MAX_RECOVERIES = 10;
  * object down here, and parsing an int is nothing next to the INSERT it guards.
  */
 function envLimit(name: string, fallback: number): number {
-  const raw = process.env[name];
+  const raw = kernelEnvironment()[name];
   if (raw === undefined || raw === '') return fallback;
   const n = Number(raw);
   return Number.isSafeInteger(n) && n > 0 ? n : fallback;
@@ -199,7 +200,7 @@ export const logBatchMaxBytes = () =>
  * envLimit treats 0 as garbage and falls back to the default.
  */
 export function maxRecoveries(): number {
-  const raw = process.env.BETTER_TRIGGER_MAX_RECOVERIES;
+  const raw = kernelEnvironment().BETTER_TRIGGER_MAX_RECOVERIES;
   if (raw === undefined || raw === '') return DEFAULT_MAX_RECOVERIES;
   const n = Number(raw);
   return Number.isSafeInteger(n) && n >= 0 ? n : DEFAULT_MAX_RECOVERIES;

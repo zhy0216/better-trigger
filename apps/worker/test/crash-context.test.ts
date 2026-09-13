@@ -14,9 +14,9 @@
 
    Together they fail if the id list degenerates to [] or stops being rendered.
    ============================================================================= */
-import type { ClaimedRun } from '@better-trigger/core';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import { task } from 'better-trigger';
+import type { ClaimedRun } from '../../../packages/core/src/index';
+import { DEFAULT_NAMESPACE } from '../../../packages/core/src/index';
+import { task } from '../../../packages/sdk/src/index';
 import { describe, expect, it } from 'vitest';
 import { formatCrashContext } from '../src/observability';
 import { startWorkerRuntime } from '../src/runtime';

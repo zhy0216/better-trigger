@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "target": "ES2022",
+    "types": ["node"]
+  },
+  "include": [
+    "packages/core/src",
+    "packages/db/src",
+    "packages/kernel/src",
+    "packages/sdk/src",
+    "apps/worker/src"
+  ]
+}

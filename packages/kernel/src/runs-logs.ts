@@ -7,7 +7,7 @@ import {
   type LogEntry,
   type LogLevel,
   type Namespace,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 import type { KernelLogger } from './kernel';
 import {
   logBatchMaxBytes,

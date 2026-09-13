@@ -18,23 +18,22 @@ import {
   DEFAULT_NAMESPACE,
   type Namespace,
   type RetryPolicy,
-} from '@better-trigger/core';
+} from '../../../packages/core/src/index';
 import {
   createPool,
-  DEFAULT_DATABASE_URL,
   migrate as runMigrations,
   type PoolOptions,
-} from '@better-trigger/db';
+} from '../../../packages/db/src/index';
 import {
   createKernel,
   type Kernel,
   type OrchestratorOptions,
-} from '@better-trigger/kernel';
+} from '../../../packages/kernel/src/index';
 import {
   betterTrigger,
   type BetterTrigger,
   type TaskHandle,
-} from 'better-trigger';
+} from '../../../packages/sdk/src/index';
 import {
   executorStorage,
   getDefaultInstance,
@@ -44,7 +43,7 @@ import {
   setExecutorStorage,
   setResultResolver,
   type RunResultResolver,
-} from 'better-trigger/internal';
+} from '../../../packages/sdk/src/internal';
 import { createApp } from './app';
 import { requireLeaseMsValue, requireTimerMs, validateOrchestratorTimers } from './numeric-config';
 import { markInternalRequest } from './internal-request';
@@ -77,6 +76,10 @@ const embeddedSlot = (globalWithSlot[SLOT_KEY] ??= { active: null });
 export interface EmbeddedRuntimeOptions {
   /** Task definitions executed by this process. At least one is required. */
   tasks: readonly TaskHandle<any, any>[];
+
+  /** Optional daemon-style configuration. Defaults to an empty object;
+   * embedded mode never reads the host's process.env implicitly. */
+  env?: Readonly<Record<string, string | undefined>>;
 
   /**
    * PostgreSQL connection string. Used to create the pool when `pool` is not
@@ -224,8 +227,13 @@ export async function createEmbeddedRuntime(
   const slotToken = acquireSlot();
   const logger = options.logger ?? console;
   const ownsPool = options.pool === undefined;
-  const connectionString = options.databaseUrl ??
-    (ownsPool ? process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL : undefined);
+  const env = { ...options.env };
+  if (options.apiKey !== undefined) env.BETTER_TRIGGER_API_KEY = options.apiKey;
+  const connectionString = options.databaseUrl;
+  if (ownsPool && !connectionString) {
+    releaseSlot(slotToken);
+    throw new Error('createEmbeddedRuntime requires databaseUrl or pool');
+  }
   if (options.notifications === true && connectionString === undefined) {
     releaseSlot(slotToken);
     throw new Error(
@@ -291,11 +299,11 @@ export async function createEmbeddedRuntime(
     pool = options.pool ?? createPool(
       connectionString!,
       logger,
-      { ...derivePoolConfig(concurrency, process.env), ...options.poolOptions },
+      { ...derivePoolConfig(concurrency, env), ...options.poolOptions },
     );
     if (options.migrate !== false) await runMigrations(pool);
 
-    const kernel: Kernel = createKernel({ pool, logger });
+    const kernel: Kernel = createKernel({ pool, logger, env });
     const notifyCounters = createNotifyCounters();
     const wake = createWakeSignal();
     waiters = createWaiterRegistry({ pool, counters: notifyCounters });
@@ -374,6 +382,7 @@ export async function createEmbeddedRuntime(
         pinCodeVersion: options.pinCodeVersion,
         maxSteps: options.maxSteps,
         namespaces,
+        env,
       },
     );
 
@@ -387,6 +396,7 @@ export async function createEmbeddedRuntime(
         notify: notifyCounters,
       },
       namespaces,
+      env,
     });
 
     const inProcessFetch: typeof globalThis.fetch = async (input, init) => {
@@ -403,7 +413,7 @@ export async function createEmbeddedRuntime(
     client = betterTrigger({
       url: EMBEDDED_URL,
       fetch: inProcessFetch,
-      apiKey: options.apiKey,
+      apiKey: env.BETTER_TRIGGER_API_KEY ?? '',
       timeoutMs: options.timeoutMs,
     });
     if (options.setDefault === false) {

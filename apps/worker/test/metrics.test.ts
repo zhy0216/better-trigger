@@ -14,9 +14,9 @@
    ============================================================================= */
 import { EventEmitter } from 'node:events';
 import type { Pool } from 'pg';
-import { assertNamespace } from '@better-trigger/core';
-import type { Kernel, OrchestratorCounters } from '@better-trigger/kernel';
-import { createOrchestratorCounters } from '@better-trigger/kernel';
+import { assertNamespace } from '../../../packages/core/src/index';
+import type { Kernel, OrchestratorCounters } from '../../../packages/kernel/src/index';
+import { createOrchestratorCounters } from '../../../packages/kernel/src/index';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
 import { renderMetrics, type MetricFamily } from '../src/routes/metrics';

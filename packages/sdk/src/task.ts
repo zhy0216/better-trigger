@@ -18,8 +18,8 @@ import type {
   TaskManifest,
   TaskRunResult,
   TriggerOptions,
-} from '@better-trigger/core';
-import { KernelError, validateRetryPolicy } from '@better-trigger/core';
+} from '../../core/src/index';
+import { KernelError, validateRetryPolicy } from '../../core/src/index';
 import { applyConcurrencyKey } from './concurrency';
 import {
   currentExecutor,
@@ -339,7 +339,7 @@ function makeHandle<TPayload, TOutput>(
         // The child lives in the parent's namespace — carry it on the handle so
         // result() polls the same scope it was created in. TOutput flows
         // through the typed handle (p2-23).
-        return makeRunHandle<TOutput>(runIds[0], undefined, undefined, executor.namespace);
+        return makeRunHandle<TOutput>(runIds[0]!, undefined, undefined, executor.namespace);
       }
       // The instance can't know TOutput from a raw id — this handle passes its
       // own, so the TaskHandle stays typed end to end.

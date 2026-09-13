@@ -21,7 +21,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_NAMESPACE, KernelError, type RetryPolicy } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError, type RetryPolicy } from '../../core/src/index';
 import { registerWorker } from '../src/workers';
 import { createRunIn, failRun } from '../src/runs';
 import { describePg, withPg } from './pg/helpers';

@@ -12,8 +12,8 @@ import {
   DEFAULT_NAMESPACE,
   parseDuration,
   type Namespace,
-} from '@better-trigger/core';
-import { MIN_RETENTION_MS } from '@better-trigger/kernel';
+} from '../../../packages/core/src/index';
+import { MIN_RETENTION_MS } from '../../../packages/kernel/src/index';
 import { parseOriginList } from './middleware';
 import { MAX_LEASE_MS, MAX_TIMER_MS, MIN_LEASE_MS, requireLeaseMsValue } from './numeric-config';
 

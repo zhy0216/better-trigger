@@ -222,7 +222,7 @@ async function runIdsFromResponse(
 
 function runIdFromPath(path: string): string | null {
   const match = /^\/api\/v1\/runs\/([^/]+)\/(cancel|retry)$/.exec(path);
-  return match !== null ? match[1] : null;
+  return match !== null ? match[1]! : null;
 }
 
 function runIdFromPathList(path: string): string[] | null {
@@ -234,7 +234,7 @@ function runIdFromPathList(path: string): string[] | null {
 function scheduleIdsFromPath(endpoint: RateLimitedEndpoint, path: string): string[] | null {
   if (endpoint !== 'schedule') return null;
   const match = /^\/api\/v1\/schedules\/([^/]+)$/.exec(path);
-  return match !== null ? [match[1]] : null;
+  return match !== null ? [match[1]!] : null;
 }
 
 /** The error code from a rejection envelope, or null if it is not JSON. */

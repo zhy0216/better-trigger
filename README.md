@@ -10,7 +10,7 @@ is the only infrastructure.
   Run it as a daemon or embedded host; N processes against one database
   coordinate via `FOR UPDATE SKIP LOCKED` — no leader election.
 - **Embedded when one process is the product** —
-  `createEmbeddedRuntime({ tasks })` starts those same loops in your app and
+  `createEmbeddedRuntime({ tasks, databaseUrl })` starts those same loops in your app and
   connects the normal SDK client through an in-process fetch adapter: no port,
   no second process, no second execution model.
 - **The SDK is an HTTP client** — `better-trigger` ships `task()` and
@@ -127,6 +127,59 @@ The runtime applies migrations by default, owns its pool when given a
 `databaseUrl`, starts claim/heartbeat/timer/cron/reaper loops, and drains plus
 releases claims on `stop()`. Pass an existing `pool` to share the application's
 pool; injected pools are not closed unless `closePoolOnStop: true` is set.
+
+Pass `databaseUrl` or `pool` explicitly. Embedded mode does not read the host's
+environment implicitly; `env` optionally accepts validated daemon-style
+configuration (for example `{ NODE_ENV: "production" }`). A `namespaces` option
+controls which work the worker serves; triggers still use `default/prod` unless
+their options include the matching `{ projectId, env }` pair.
+
+### Pinned Git source dependency (Bun)
+
+The repository also exposes TypeScript source without a package build or install
+hooks. Pin a full reviewed commit SHA, using the same single Git dependency for
+task definitions and the embedded worker:
+
+```json
+{
+  "dependencies": {
+    "@better-trigger/source": "github:zhy0216/better-trigger#<full-commit-sha>"
+  }
+}
+```
+
+```ts
+import { task } from "@better-trigger/source/sdk";
+import { createEmbeddedRuntime } from "@better-trigger/source/worker/embedded";
+
+const hello = task("hello", async (payload: { name: string }, ctx) =>
+  ctx.step("greet", () => `Hello ${payload.name}`),
+);
+const runtime = await createEmbeddedRuntime({
+  databaseUrl: applicationConfig.databaseUrl,
+  tasks: [hello],
+});
+try {
+  console.log(await (await hello.trigger({ name: "Ada" })).result());
+} finally {
+  await runtime.stop();
+}
+```
+
+Run `bun install --ignore-scripts`; no sibling checkout, workspace link,
+consumer `tsconfig.paths`, or generated `dist` is required. Both entries use
+the same SDK registry. SQL migrations resolve relative to the installed source
+and use `public` tables (`tasks`, `runs`, `queue`, etc.) plus the
+`drizzle.__drizzle_migrations` journal. An application can share its pool when
+those names and the migration journal are unused; this entry does not isolate
+the database schema or expose the worker HTTP app automatically.
+
+`bun run verify:git-install` tests a fresh install of committed HEAD with
+lifecycle scripts disabled and a strict Bun/TypeScript consumer. Pass
+`--github` after pushing to verify GitHub's actual pinned-SHA path. Set
+`BT_GIT_TEST_ADMIN_URL` to a PostgreSQL URL whose role can create databases to
+also test embedded execution; the check creates and drops its own random test
+database and leaves existing application databases untouched.
 
 Embedded mode removes the extra OS process, not the need for an online worker:
 when the application is stopped, durable state remains in Postgres but tasks,

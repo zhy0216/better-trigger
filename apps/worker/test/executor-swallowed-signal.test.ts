@@ -10,9 +10,9 @@
    run's back. Recording fake kernel, no Postgres — same shape as
    executor-signal.test.ts.
    ============================================================================= */
-import { isAbortError, type ClaimedRun, type LogEntry } from '@better-trigger/core';
-import type { Kernel } from '@better-trigger/kernel';
-import type { ExecutorTask } from 'better-trigger/internal';
+import { isAbortError, type ClaimedRun, type LogEntry } from '../../../packages/core/src/index';
+import type { Kernel } from '../../../packages/kernel/src/index';
+import type { ExecutorTask } from '../../../packages/sdk/src/internal';
 import { describe, expect, it } from 'vitest';
 import { Executor } from '../src/executor';
 

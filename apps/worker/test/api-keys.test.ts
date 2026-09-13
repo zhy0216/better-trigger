@@ -11,7 +11,7 @@
    Driven through createApp with stub deps — no Postgres involved.
    ============================================================================= */
 import type { Pool } from 'pg';
-import type { Kernel } from '@better-trigger/kernel';
+import type { Kernel } from '../../../packages/kernel/src/index';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { configuredApiKeys, keyFingerprint, matchApiKey, parseKeyEntry } from '../src/middleware';

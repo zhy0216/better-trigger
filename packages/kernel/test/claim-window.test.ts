@@ -24,7 +24,7 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError } from '../../core/src/index';
 import { claimRuns, claimWindow, MAX_CLAIM_LIMIT } from '../src/queue';
 
 interface Stmt {

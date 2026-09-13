@@ -21,7 +21,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '../../core/src/index';
 import {
   batchTriggerChild,
   cancelRun,

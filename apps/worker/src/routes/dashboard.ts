@@ -5,8 +5,8 @@
    ============================================================================= */
 import { Hono } from 'hono';
 import type { Pool } from 'pg';
-import type { Namespace, RunStatus } from '@better-trigger/core';
-import { getRunDetail, KernelError, nextCronAt } from '@better-trigger/kernel';
+import type { Namespace, RunStatus } from '../../../../packages/core/src/index';
+import { getRunDetail, KernelError, nextCronAt } from '../../../../packages/kernel/src/index';
 import type {
   HealthPoolStats,
   HealthResponse,
@@ -52,8 +52,8 @@ const DEFAULT_STATS_TTL_MS = 10_000;
  * without re-assembly. `0` disables the cache entirely (every request
  * re-queries).
  */
-function statsTtlMs(): number {
-  const raw = process.env.BETTER_TRIGGER_STATS_TTL_MS;
+function statsTtlMs(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const raw = env.BETTER_TRIGGER_STATS_TTL_MS;
   if (raw === undefined || raw === '') return DEFAULT_STATS_TTL_MS;
   const n = Number(raw);
   return Number.isSafeInteger(n) && n >= 0 ? n : DEFAULT_STATS_TTL_MS;
@@ -83,7 +83,7 @@ function poolStats(pool: Pool): HealthPoolStats {
   return { total: n(pool.totalCount), idle: n(pool.idleCount), waiting: n(pool.waitingCount) };
 }
 
-export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
+export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool; env?: Readonly<Record<string, string | undefined>> }): Hono {
   const { pool } = deps;
   // PF4: probes run on the dedicated probe pool (createHealthPool) when the
   // caller wired one — a hung/failing probe then cannot hold a business
@@ -188,7 +188,7 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool }): Hono {
     // list plus the runs aggregations, which grow with history when retention
     // is off (PF1, todos/02-performance.md). A hit issues zero queries.
     const hit = statsCache.get(cacheKey);
-    const ttlMs = statsTtlMs();
+    const ttlMs = statsTtlMs(deps.env);
     if (hit !== undefined && Date.now() - hit.at < ttlMs) {
       return c.json({ tasks: hit.tasks } satisfies TasksResponse);
     }

@@ -8,7 +8,7 @@
    instance and handle paths from drifting. Lives in its own module so neither
    task.ts nor instance.ts has to import the other at runtime just to share it.
    ============================================================================= */
-import type { TriggerOptions } from '@better-trigger/core';
+import type { TriggerOptions } from '../../core/src/index';
 
 /**
  * Return `options` with `concurrencyKey` set to the explicit option when one was

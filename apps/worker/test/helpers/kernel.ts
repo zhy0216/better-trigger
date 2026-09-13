@@ -1,5 +1,5 @@
-import type { Namespace } from '@better-trigger/core';
-import { createOrchestratorCounters, type Kernel } from '@better-trigger/kernel';
+import type { Namespace } from '../../../../packages/core/src/index';
+import { createOrchestratorCounters, type Kernel } from '../../../../packages/kernel/src/index';
 import { expect, vi } from 'vitest';
 import type { WorkerLogger } from '../../src/observability';
 import type { WorkerHandle } from '../../src/runtime';

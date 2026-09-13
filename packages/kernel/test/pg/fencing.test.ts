@@ -19,7 +19,7 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { expect, it } from 'vitest';
-import { RunNotRunningError, StaleLeaseError, type ClaimedRun } from '@better-trigger/core';
+import { RunNotRunningError, StaleLeaseError, type ClaimedRun } from '../../../core/src/index';
 import { describePg, withPg, type PgContext } from './helpers';
 
 const NAMESPACE = { projectId: 'default', env: 'prod' };

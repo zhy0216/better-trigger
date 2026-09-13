@@ -10,7 +10,7 @@
    the window can never silently drift back to all-time again.
    ============================================================================= */
 import type { Pool } from 'pg';
-import type { Namespace } from '@better-trigger/core';
+import type { Namespace } from '../../../packages/core/src/index';
 import { describe, expect, it } from 'vitest';
 import { computeTaskStats } from '../src/stats';
 

@@ -13,7 +13,7 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_NAMESPACE, KernelError, ResultTimeoutError, type WaitForResultOptions } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError, ResultTimeoutError, type WaitForResultOptions } from '../../core/src/index';
 import { waitForResult } from '../src/runs';
 
 /** A pool whose every query proves validation let the call through. */

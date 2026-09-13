@@ -21,7 +21,7 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '../../core/src/index';
 import { scanStrandedRuns } from '../src/queue';
 
 function stubPool(rows: Array<{ task_id: string; code_version: string; n: string }>) {

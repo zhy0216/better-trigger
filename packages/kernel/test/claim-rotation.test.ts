@@ -23,7 +23,7 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
-import type { Namespace } from '@better-trigger/core';
+import type { Namespace } from '../../core/src/index';
 import { claimRuns } from '../src/queue';
 
 const NS_A: Namespace = { projectId: 'acme', env: 'staging' };

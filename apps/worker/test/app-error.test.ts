@@ -10,7 +10,7 @@
    Driven through createApp with stub deps — no Postgres involved.
    ============================================================================= */
 import type { Pool } from 'pg';
-import { KernelError, type Kernel, type KernelErrorCode } from '@better-trigger/kernel';
+import { KernelError, type Kernel, type KernelErrorCode } from '../../../packages/kernel/src/index';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
 

@@ -18,7 +18,7 @@
    KernelError with code 'serialization_error', the same code the daemon would
    answer with if the body had reached it.
    ============================================================================= */
-import { KernelError, safeSerializeJson, type KernelErrorCode } from '@better-trigger/core';
+import { KernelError, safeSerializeJson, type KernelErrorCode } from '../../core/src/index';
 
 /** Failure that is not part of the kernel error family (transport, auth, 5xx). */
 export class HttpError extends Error {

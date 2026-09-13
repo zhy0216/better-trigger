@@ -31,7 +31,7 @@ export {
   isSuspendSignal,
   isControlFlowSignal,
   serializeError,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 
 /* ---- value + type exports ----------------------------------------------- */
 export type {
@@ -84,4 +84,4 @@ export type {
   LogRecord,
   WaitResult,
   WaitForResultOptions,
-} from '@better-trigger/core';
+} from '../../core/src/index';

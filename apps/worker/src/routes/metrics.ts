@@ -27,12 +27,12 @@
 import { Hono } from 'hono';
 import type { Pool, PoolClient } from 'pg';
 import { createDbProbe } from './db-probe';
-import type { Namespace } from '@better-trigger/core';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
+import type { Namespace } from '../../../../packages/core/src/index';
+import { DEFAULT_NAMESPACE } from '../../../../packages/core/src/index';
 import {
   createOrchestratorCounters,
   type OrchestratorCounters,
-} from '@better-trigger/kernel';
+} from '../../../../packages/kernel/src/index';
 import {
   createNotifyCounters,
   createWorkerCounters,

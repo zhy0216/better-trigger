@@ -17,7 +17,7 @@
    ============================================================================= */
 import { expect, it } from 'vitest';
 import type { Kernel } from '../../src';
-import type { ClaimedRun } from '@better-trigger/core';
+import type { ClaimedRun } from '../../../core/src/index';
 import { describePg, withPg } from './helpers';
 
 const NS = { projectId: 'default', env: 'prod' };

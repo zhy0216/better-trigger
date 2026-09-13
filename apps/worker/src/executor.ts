@@ -39,20 +39,20 @@ import {
   type TaskRunResult,
   type TriggerItem,
   type TriggerOptions,
-} from '@better-trigger/core';
-import { fnSourceHash, stepFingerprint, type Kernel } from '@better-trigger/kernel';
+} from '../../../packages/core/src/index';
+import { fnSourceHash, stepFingerprint, type Kernel } from '../../../packages/kernel/src/index';
 import {
   RunAbortedError,
   type RunAbortReason,
   type RunCtx,
   type RunInfo,
   type StepOptions,
-} from 'better-trigger';
+} from '../../../packages/sdk/src/index';
 import {
   executorStorage,
   type ExecutorTask,
   type RunExecutor,
-} from 'better-trigger/internal';
+} from '../../../packages/sdk/src/internal';
 import { errorKey, type ExecutorDiagnostics } from './observability';
 
 /**

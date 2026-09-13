@@ -12,7 +12,7 @@
    [audit] lines can be asserted.
    ============================================================================= */
 import type { Pool } from 'pg';
-import type { Kernel } from '@better-trigger/kernel';
+import type { Kernel } from '../../../packages/kernel/src/index';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
 import type { AuditEntry } from '../src/audit';

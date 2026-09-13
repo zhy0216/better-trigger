@@ -6,7 +6,7 @@
    joined onto tasks in routes/dashboard.ts.
    ============================================================================= */
 import type { Pool } from 'pg';
-import type { Namespace } from '@better-trigger/core';
+import type { Namespace } from '../../../packages/core/src/index';
 
 export interface TaskStats {
   taskId: string;

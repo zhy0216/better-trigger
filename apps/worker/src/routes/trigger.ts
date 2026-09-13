@@ -6,7 +6,7 @@
    See docs/backend-contract.md §4.
    ============================================================================= */
 import { Hono } from 'hono';
-import type { Kernel } from '@better-trigger/kernel';
+import type { Kernel } from '../../../../packages/kernel/src/index';
 import type {
   BatchTriggerRequest,
   BatchTriggerResponse,

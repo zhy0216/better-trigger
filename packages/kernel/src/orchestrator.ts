@@ -58,7 +58,7 @@ import {
   assertNamespace,
   type Namespace,
   type SerializedError,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 import type { KernelLogger, WaitGraphCounters } from './kernel';
 import { prune } from './prune';
 import {

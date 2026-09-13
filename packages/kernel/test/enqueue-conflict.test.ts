@@ -11,7 +11,7 @@
    ============================================================================= */
 import type { PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '../../core/src/index';
 import { enqueue, enqueueMany } from '../src/queue';
 
 const stmt = (preserveSurvivor: boolean): string => {

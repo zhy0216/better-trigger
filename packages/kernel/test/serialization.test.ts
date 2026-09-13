@@ -9,7 +9,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_NAMESPACE, KernelError, type Namespace } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError, type Namespace } from '../../core/src/index';
 import {
   appendLogs,
   batchTriggerChild,

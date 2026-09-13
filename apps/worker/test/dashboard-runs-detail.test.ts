@@ -19,7 +19,7 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
-import type { Kernel } from '@better-trigger/kernel';
+import type { Kernel } from '../../../packages/kernel/src/index';
 import { createApp } from '../src/app';
 
 interface Stmt {

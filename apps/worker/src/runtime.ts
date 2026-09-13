@@ -12,19 +12,19 @@
    ============================================================================= */
 import { createHash } from 'node:crypto';
 import { setTimeout as sleepTimer } from 'node:timers/promises';
-import type { ClaimedRun, Namespace, RetryPolicy } from '@better-trigger/core';
-import { fnSourceHash } from '@better-trigger/kernel';
+import type { ClaimedRun, Namespace, RetryPolicy } from '../../../packages/core/src/index';
+import { fnSourceHash } from '../../../packages/kernel/src/index';
 import type {
   Kernel,
   OrchestratorCounters,
   OrchestratorOptions,
-} from '@better-trigger/kernel';
-import type { TaskHandle } from 'better-trigger';
+} from '../../../packages/kernel/src/index';
+import type { TaskHandle } from '../../../packages/sdk/src/index';
 import {
   toExecutorTask,
   toManifest,
   type ResolvedTaskDefinition,
-} from 'better-trigger/internal';
+} from '../../../packages/sdk/src/internal';
 import { Executor } from './executor';
 import { MIN_HEARTBEAT_MS, requireLeaseMsValue, validateOrchestratorTimers } from './numeric-config';
 import { sleepWithWake, type WakeSignal } from './notify';
@@ -42,6 +42,8 @@ import { BUILD_SHA, BUILD_VERSION } from './generated/build-info';
 
 /** Options accepted by startWorkerRuntime(). */
 export interface StartOptions {
+  /** Explicit configuration for embedded hosts; omitted by the CLI. */
+  env?: Readonly<Record<string, string | undefined>>;
   /** Tasks this worker can execute. */
   tasks: Array<TaskHandle<any, any>>;
   /** Number of concurrent execution slots / claim loops. Default 5. */
@@ -181,12 +183,12 @@ export async function startWorkerRuntime(
   const taskIds = definitions.map((d) => d.id);
   // Parallel to taskIds by construction — claimRuns reads them as (id, version)
   // pairs, so the two arrays are built from one map and never re-derived.
-  const taskVersions = definitions.map(resolveTaskVersion);
+  const taskVersions = definitions.map((definition) => resolveTaskVersion(definition, options.env));
 
   // Worker-level identity (workers.code_version) is the BUILD identity — the
   // same value /health reports; task-level versions (runs.code_version, what
   // pinning matches) stay per-task hashes. Two concepts, two fields (O4).
-  const codeVersion = resolveCodeVersion();
+  const codeVersion = resolveCodeVersion(options.env);
   const manifests = definitions.map((d, i) => ({
     ...toManifest(d),
     codeVersion: taskVersions[i]!,
@@ -548,8 +550,8 @@ export async function startWorkerRuntime(
 /** BETTER_TRIGGER_VERSION, when the deployment sets it. It overrides both
  *  versions below — an explicit git sha / image tag is more trustworthy than
  *  any source hash, and churns only when the deployment says so. */
-function envVersion(): string | undefined {
-  return process.env.BETTER_TRIGGER_VERSION;
+function envVersion(env: Readonly<Record<string, string | undefined>> = process.env): string | undefined {
+  return env.BETTER_TRIGGER_VERSION;
 }
 
 /** One task's identity for versioning: id + cron config + run body source. */
@@ -576,9 +578,9 @@ function taskSignature(d: ResolvedTaskDefinition<any, any>): string {
  * (a git sha, an image tag) overrides both this and every task version at
  * once — the coarse behaviour is what such a deployment is asking for.
  */
-export function resolveCodeVersion(): string {
-  const env = envVersion();
-  if (env) return env;
+export function resolveCodeVersion(environment?: Readonly<Record<string, string | undefined>>): string {
+  const version = envVersion(environment);
+  if (version) return version;
   return BUILD_SHA === undefined ? BUILD_VERSION : `${BUILD_VERSION}+${BUILD_SHA}`;
 }
 
@@ -596,9 +598,9 @@ export function resolveCodeVersion(): string {
  * BETTER_TRIGGER_VERSION still wins: a deployment that names its own version is
  * asking for exactly the coarse behaviour, all tasks moving together.
  */
-export function resolveTaskVersion(d: ResolvedTaskDefinition<any, any>): string {
-  const env = envVersion();
-  if (env) return env;
+export function resolveTaskVersion(d: ResolvedTaskDefinition<any, any>, environment?: Readonly<Record<string, string | undefined>>): string {
+  const version = envVersion(environment);
+  if (version) return version;
   const hash = createHash('sha256').update(taskSignature(d)).digest('hex').slice(0, 12);
   return `v_${hash}`;
 }

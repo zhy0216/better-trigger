@@ -14,10 +14,10 @@
    Driven through the real runtime against a fake kernel whose appendLogs is
    deliberately slow.
    ============================================================================= */
-import type { ClaimedRun } from '@better-trigger/core';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import type { Kernel } from '@better-trigger/kernel';
-import { task } from 'better-trigger';
+import type { ClaimedRun } from '../../../packages/core/src/index';
+import { DEFAULT_NAMESPACE } from '../../../packages/core/src/index';
+import type { Kernel } from '../../../packages/kernel/src/index';
+import { task } from '../../../packages/sdk/src/index';
 import { describe, expect, it } from 'vitest';
 import { startWorkerRuntime } from '../src/runtime';
 

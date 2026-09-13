@@ -17,8 +17,8 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { LogEntry } from '@better-trigger/core';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
+import type { LogEntry } from '../../core/src/index';
+import { DEFAULT_NAMESPACE } from '../../core/src/index';
 import { appendLogs } from '../src/runs';
 import { truncateUtf8 } from '../src/runs-logs';
 import type { KernelLogger } from '../src/kernel';

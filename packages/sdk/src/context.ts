@@ -7,7 +7,7 @@
    is the whole seam between "define + trigger tasks" (this package, HTTP only)
    and "execute tasks" (the worker daemon).
    ============================================================================= */
-import { hasErrorBrand } from '@better-trigger/core';
+import { hasErrorBrand } from '../../core/src/index';
 import type {
   Namespace,
   ReplayMode,
@@ -15,7 +15,7 @@ import type {
   TaskRunResult,
   TriggerItem,
   TriggerOptions,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 import type { AsyncLocalStorage } from 'node:async_hooks';
 import { registry } from './registry';
 

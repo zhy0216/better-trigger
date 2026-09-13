@@ -12,10 +12,10 @@
    case per Executor result type, because the index is what makes the four
    labels distinct.
    ============================================================================= */
-import type { ClaimedRun } from '@better-trigger/core';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import { KernelError } from '@better-trigger/kernel';
-import { task } from 'better-trigger';
+import type { ClaimedRun } from '../../../packages/core/src/index';
+import { DEFAULT_NAMESPACE } from '../../../packages/core/src/index';
+import { KernelError } from '../../../packages/kernel/src/index';
+import { task } from '../../../packages/sdk/src/index';
 import { describe, expect, it } from 'vitest';
 import { startWorkerRuntime } from '../src/runtime';
 import { runtimeTestKernel } from './helpers/kernel';

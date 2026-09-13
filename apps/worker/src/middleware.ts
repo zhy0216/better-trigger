@@ -92,9 +92,10 @@ function isLoopbackOrigin(raw: string): boolean {
  * hands over `--cors-origin` alone, so listing an origin in both places cannot
  * duplicate it.
  */
-function extraOrigins(): string[] {
-  const fromEnv = parseOriginList(process.env.BETTER_TRIGGER_CORS_ORIGIN ?? '');
-  return fromEnv.length > 0 ? [...configuredOrigins, ...fromEnv] : configuredOrigins;
+function extraOrigins(env?: Readonly<Record<string, string | undefined>>): string[] {
+  const fromEnv = parseOriginList((env ?? process.env).BETTER_TRIGGER_CORS_ORIGIN ?? '');
+  const origins = env === undefined ? configuredOrigins : [];
+  return fromEnv.length > 0 ? [...origins, ...fromEnv] : origins;
 }
 
 /**
@@ -104,9 +105,9 @@ function extraOrigins(): string[] {
  * If a TLS proxy rewrites the public URL to an internal HTTP origin, explicitly
  * allow its public origin with --cors-origin / BETTER_TRIGGER_CORS_ORIGIN.
  */
-export function allowedOrigin(origin: string, requestUrl?: string): string | null {
+export function allowedOrigin(origin: string, requestUrl?: string, env?: Readonly<Record<string, string | undefined>>): string | null {
   if (!origin) return null; // Same-origin GETs and non-browser clients.
-  const extra = extraOrigins();
+  const extra = extraOrigins(env);
   if (extra.includes('*')) return origin;
   if (isLoopbackOrigin(origin)) return origin;
   const normalized = normalizeOrigin(origin);
@@ -116,14 +117,18 @@ export function allowedOrigin(origin: string, requestUrl?: string): string | nul
   ) ? origin : null;
 }
 
-export const corsMiddleware: MiddlewareHandler = cors({
-  origin: (origin, c) => allowedOrigin(origin, c.req.url),
+export function createCorsMiddleware(env?: Readonly<Record<string, string | undefined>>): MiddlewareHandler {
+  return cors({
+  origin: (origin, c) => allowedOrigin(origin, c.req.url, env),
   allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   // Idempotency-Key is read by POST /runs/:id/retry and is not on the CORS
   // safelist, so a browser caller with --cors-origin would fail the preflight
   // without it here.
   allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
 });
+}
+
+export const corsMiddleware: MiddlewareHandler = createCorsMiddleware();
 
 /**
  * Check every unsafe method regardless of Content-Type or body presence.
@@ -134,12 +139,13 @@ export const corsMiddleware: MiddlewareHandler = cors({
  * Mounted after audit/auth and before rate limiting/body reads, so refusals
  * are audited and spend neither run-operation tokens nor kernel work.
  */
-export const originMiddleware: MiddlewareHandler = async (c, next) => {
+export function createOriginMiddleware(env?: Readonly<Record<string, string | undefined>>): MiddlewareHandler {
+  return async (c, next) => {
   if (c.req.method === 'GET' || c.req.method === 'HEAD' || c.req.method === 'OPTIONS') {
     return next();
   }
   const origin = c.req.header('Origin');
-  if (origin !== undefined && allowedOrigin(origin, c.req.url) === null) {
+  if (origin !== undefined && allowedOrigin(origin, c.req.url, env) === null) {
     return c.json(
       { error: { code: 'origin_not_allowed', message: 'request origin is not allowed' } },
       403,
@@ -147,6 +153,9 @@ export const originMiddleware: MiddlewareHandler = async (c, next) => {
   }
   return next();
 };
+}
+
+export const originMiddleware: MiddlewareHandler = createOriginMiddleware();
 
 /**
  * Constant-time token compare. `===` stops at the first differing byte, so the
@@ -191,7 +200,7 @@ export function parseKeyEntry(raw: string): ApiKeyEntry {
 /** Every configured key: BETTER_TRIGGER_API_KEY first, then the
  *  comma-separated BETTER_TRIGGER_API_KEYS entries. Read per request, like
  *  the rest of the auth env. */
-export function configuredApiKeys(env = process.env): ApiKeyEntry[] {
+export function configuredApiKeys(env: Readonly<Record<string, string | undefined>> = process.env): ApiKeyEntry[] {
   const out: ApiKeyEntry[] = [];
   const primary = env.BETTER_TRIGGER_API_KEY;
   if (primary !== undefined && primary !== '') out.push(parseKeyEntry(primary));
@@ -243,9 +252,9 @@ export function remoteAddressOf(c: { env: unknown }): string | null {
  * working — while a wrong or missing key keeps the pre-existing
  * `unauthorized` shape verbatim.
  */
-export function authMiddleware(): MiddlewareHandler<{ Variables: AppVariables }> {
+export function authMiddleware(env?: Readonly<Record<string, string | undefined>>): MiddlewareHandler<{ Variables: AppVariables }> {
   return async (c, next) => {
-    const entries = configuredApiKeys();
+    const entries = configuredApiKeys(env);
     if (entries.length === 0) return next();
 
     const path = c.req.path;

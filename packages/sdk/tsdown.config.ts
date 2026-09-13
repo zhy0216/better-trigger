@@ -1,6 +1,8 @@
 import { defineConfig } from 'tsdown';
+import { sourcePackageExternals } from '../../scripts/source-package-externals.mjs';
 
 export default defineConfig({
+  plugins: [sourcePackageExternals()],
   // ./internal is a separate entry (never bundled into ./index) so the worker
   // daemon and the user's task modules share ONE instance of the module — and
   // therefore one AsyncLocalStorage. See src/internal.ts.
@@ -9,7 +11,8 @@ export default defineConfig({
     neverBundle: ['node:async_hooks'],
   },
   format: ['esm', 'cjs'],
-  dts: true,
+  // Keep cross-package source declarations inside the compiler's temp output.
+  dts: { tsconfig: '../../tsconfig.build.json' },
   sourcemap: true,
   clean: true,
   fixedExtension: false,

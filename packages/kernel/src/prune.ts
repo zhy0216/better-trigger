@@ -45,7 +45,7 @@ import type { Pool } from 'pg';
 import {
   KernelError,
   type Namespace,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 import { withTx } from './runs';
 import { assertNamespaces, namespacePredicate, TERMINAL_STATUSES } from './queue';
 

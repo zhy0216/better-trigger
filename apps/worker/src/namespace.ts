@@ -16,9 +16,9 @@
      namespace by default" visibility boundary: without params a request only
      ever sees default/prod.
    ============================================================================= */
-import { assertNamespace, DEFAULT_NAMESPACE, type Namespace } from '@better-trigger/core';
+import { assertNamespace, DEFAULT_NAMESPACE, type Namespace } from '../../../packages/core/src/index';
 import type { Context } from 'hono';
-import type { TriggerOptions } from '@better-trigger/core';
+import type { TriggerOptions } from '../../../packages/core/src/index';
 
 /**
  * Resolve the namespace a trigger request creates its run(s) in. The host

@@ -219,7 +219,9 @@ async function serveFile(
   // /assets/ path is content-hashed and served `immutable`, so clients cache
   // each file in full and never byte-range it — the state machine would serve
   // a request pattern that does not occur for this dashboard.
-  const body = Readable.toWeb(createReadStream(target));
+  // Node and DOM declare separate Web Stream types; the runtime protocol is
+  // shared even when a source consumer loads both type libraries.
+  const body = Readable.toWeb(createReadStream(target)) as ReadableStream;
   return new Response(body, { status: 200, headers });
 }
 

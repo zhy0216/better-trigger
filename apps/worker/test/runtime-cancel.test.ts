@@ -7,10 +7,10 @@
    dashboard click into an aborted signal. Driven against a fake kernel (no
    Postgres) with leaseMs chosen so the heartbeat ticks at its 500ms floor.
    ============================================================================= */
-import type { ClaimedRun } from '@better-trigger/core';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import type { Kernel } from '@better-trigger/kernel';
-import { isRunAborted, task, type RunAbortedError } from 'better-trigger';
+import type { ClaimedRun } from '../../../packages/core/src/index';
+import { DEFAULT_NAMESPACE } from '../../../packages/core/src/index';
+import type { Kernel } from '../../../packages/kernel/src/index';
+import { isRunAborted, task, type RunAbortedError } from '../../../packages/sdk/src/index';
 import { describe, expect, it } from 'vitest';
 import { startWorkerRuntime } from '../src/runtime';
 import { runtimeTestKernel } from './helpers/kernel';

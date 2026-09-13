@@ -70,7 +70,7 @@
    a second independent cap would only add configuration surface.
    ============================================================================= */
 import type { MiddlewareHandler } from 'hono';
-import { KernelError } from '@better-trigger/kernel';
+import { KernelError } from '../../../packages/kernel/src/index';
 import { isInternalRequest } from './internal-request';
 import { remoteAddressOf, type AppVariables } from './middleware';
 
@@ -128,7 +128,7 @@ function envInt(raw: string | undefined, fallback: number): number {
 }
 
 /** Rate-limit config from env; read per request (see the file header). */
-export function rateLimitConfigFromEnv(env = process.env): RateLimitConfig {
+export function rateLimitConfigFromEnv(env: Readonly<Record<string, string | undefined>> = process.env): RateLimitConfig {
   const rps = envInt(env.BETTER_TRIGGER_RATE_LIMIT_RPS, DEFAULT_RPS);
   const globalRps = envInt(env.BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS, DEFAULT_GLOBAL_RPS);
   const readRps = envInt(env.BETTER_TRIGGER_RATE_LIMIT_READ_RPS, DEFAULT_READ_RPS);
@@ -212,7 +212,7 @@ export class TokenBuckets {
  * the common case), then the global one. Anything else (the dashboard, /health,
  * OPTIONS) passes through untouched.
  */
-export function rateLimitMiddleware(now?: () => number): MiddlewareHandler<{ Variables: AppVariables }> {
+export function rateLimitMiddleware(now?: () => number, env?: Readonly<Record<string, string | undefined>>): MiddlewareHandler<{ Variables: AppVariables }> {
   const buckets = new TokenBuckets(now);
   return async (c, next) => {
     // In-process embedded dispatches carry a WeakSet marker (internal-request.ts)
@@ -222,7 +222,7 @@ export function rateLimitMiddleware(now?: () => number): MiddlewareHandler<{ Var
     if (isInternalRequest(c.req.raw)) return next();
     const endpoint = endpointOf(c.req.method, c.req.path);
     if (endpoint === null) return next();
-    const cfg = rateLimitConfigFromEnv();
+    const cfg = rateLimitConfigFromEnv(env);
     // `BURST=0` disables the entire limiter: short-circuit before the bucket
     // identity is even computed, so no per-key or global read/write bucket is
     // created or consumed on this path.

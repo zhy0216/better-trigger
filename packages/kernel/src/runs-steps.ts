@@ -14,7 +14,7 @@ import {
   type StepStatus,
   type TriggerItem,
   type TriggerOptions,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 import { stepFingerprint } from './fingerprint';
 import type { WaitGraphCounters } from './kernel';
 import { notifyWork } from './notify';

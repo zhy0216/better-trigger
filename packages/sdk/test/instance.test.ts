@@ -10,7 +10,7 @@
    immediately. No daemon, no Postgres — `fetch` is injected and the clock is
    faked.
    ============================================================================= */
-import { DEFAULT_NAMESPACE, KernelError, ResultTimeoutError as CoreResultTimeoutError, type Namespace, type WaitResult } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError, ResultTimeoutError as CoreResultTimeoutError, type Namespace, type WaitResult } from '../../core/src/index';
 import { describe, expect, it, vi } from 'vitest';
 import { HttpError } from '../src/client';
 import { betterTrigger, ResultTimeoutError } from '../src/instance';

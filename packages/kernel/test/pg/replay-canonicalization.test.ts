@@ -3,7 +3,7 @@
  * Historical fingerprints below were captured before canonicalization changed;
  * the completed ledger is only compared, never migrated to make replay pass. */
 import { beforeAll, expect, it } from 'vitest';
-import { NonDeterminismError, type ClaimedRun, type RetryPolicy, type TriggerItem } from '@better-trigger/core';
+import { NonDeterminismError, type ClaimedRun, type RetryPolicy, type TriggerItem } from '../../../core/src/index';
 import { stepFingerprint } from '../../src/fingerprint';
 import { describePg, withPg, type PgContext } from './helpers';
 

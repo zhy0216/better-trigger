@@ -6,7 +6,7 @@
    stores) and the executor task (what runs). Everything here is pure — no
    executor in the AsyncLocalStorage, so trigger paths are not exercised.
    ============================================================================= */
-import { KernelError, type RetryPolicy, type TaskRunResult, type TriggerItem, type TriggerOptions, type WaitResult } from '@better-trigger/core';
+import { KernelError, type RetryPolicy, type TaskRunResult, type TriggerItem, type TriggerOptions, type WaitResult } from '../../core/src/index';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { executorStorage, type DurableTriggerOptions, type RunExecutor } from '../src/context';
 import { applyConcurrencyKey } from '../src/concurrency';

@@ -14,9 +14,9 @@
 
    Driven against a fake kernel (no Postgres).
    ============================================================================= */
-import type { Namespace } from '@better-trigger/core';
-import type { Kernel } from '@better-trigger/kernel';
-import { task } from 'better-trigger';
+import type { Namespace } from '../../../packages/core/src/index';
+import type { Kernel } from '../../../packages/kernel/src/index';
+import { task } from '../../../packages/sdk/src/index';
 import { describe, expect, it } from 'vitest';
 import { startWorkerRuntime } from '../src/runtime';
 

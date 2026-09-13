@@ -43,7 +43,7 @@
    (scanCron, reap, releaseClaims) as well as withTx.
    ============================================================================= */
 import type { PoolClient } from 'pg';
-import type { Namespace } from '@better-trigger/core';
+import type { Namespace } from '../../core/src/index';
 
 /** The single channel every daemon LISTENs on (PF2 §channel). */
 export const NOTIFY_CHANNEL = 'bt';

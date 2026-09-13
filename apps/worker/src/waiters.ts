@@ -36,7 +36,7 @@ import {
   type SerializedError,
   type WaitForResultOptions,
   type WaitResult,
-} from '@better-trigger/core';
+} from '../../../packages/core/src/index';
 import type { NotifyCounters } from './observability';
 import { MAX_TIMER_MS, requireTimerMs } from './numeric-config';
 

@@ -26,7 +26,7 @@
    ============================================================================= */
 import type { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_NAMESPACE, type Namespace, type TaskManifest } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, type Namespace, type TaskManifest } from '../../core/src/index';
 import type { KernelLogger } from '../src/kernel';
 import { startOrchestrator } from '../src/orchestrator';
 import { registerWorker } from '../src/workers';

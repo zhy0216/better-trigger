@@ -35,7 +35,8 @@ export function parseDuration(input: string | number): number {
   let matches = 0;
   const seen = new Set<string>();
   for (const m of str.matchAll(re)) {
-    const unit = m[2];
+    // Both capture groups are required by the regexp.
+    const unit = m[2]!;
     // "1m1m" was silently accepted as 120000 — a typo (or a pasted compound)
     // that doubles a unit reads as a very different wait. Reject it, naming
     // the duplicate.
@@ -43,7 +44,7 @@ export function parseDuration(input: string | number): number {
       throw new Error(`invalid duration: "${input}" — repeated unit "${unit}"`);
     }
     seen.add(unit);
-    total += parseFloat(m[1]) * UNIT_MS[unit];
+    total += parseFloat(m[1]!) * UNIT_MS[unit]!;
     matches += 1;
   }
   const leftover = str.replace(re, '').replace(/\s+/g, '');

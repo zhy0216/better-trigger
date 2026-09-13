@@ -7,15 +7,15 @@
    adapter, TaskHandle defaults work, and shutdown restores process globals.
    ============================================================================= */
 import type { Pool } from 'pg';
-import type { Kernel } from '@better-trigger/kernel';
-import { createOrchestratorCounters } from '@better-trigger/kernel';
-import { task, type BetterTrigger } from 'better-trigger';
+import type { Kernel } from '../../../packages/kernel/src/index';
+import { createOrchestratorCounters } from '../../../packages/kernel/src/index';
+import { task, type BetterTrigger } from '../../../packages/sdk/src/index';
 import {
   getDefaultInstance,
   getResultResolver,
   setDefaultInstance,
   setResultResolver,
-} from 'better-trigger/internal';
+} from '../../../packages/sdk/src/internal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocked = vi.hoisted(() => ({
@@ -24,8 +24,8 @@ const mocked = vi.hoisted(() => ({
   createKernel: vi.fn(),
 }));
 
-vi.mock('@better-trigger/db', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@better-trigger/db')>();
+vi.mock('../../../packages/db/src/index', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../packages/db/src/index')>();
   return {
     ...actual,
     createPool: (...args: unknown[]) => mocked.createPool(...args),
@@ -33,8 +33,8 @@ vi.mock('@better-trigger/db', async (importOriginal) => {
   };
 });
 
-vi.mock('@better-trigger/kernel', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@better-trigger/kernel')>();
+vi.mock('../../../packages/kernel/src/index', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../packages/kernel/src/index')>();
   return {
     ...actual,
     createKernel: (...args: unknown[]) => mocked.createKernel(...args),
@@ -141,6 +141,30 @@ afterEach(async () => {
 });
 
 describe('createEmbeddedRuntime', () => {
+  it('uses explicit options without inheriting the host database, pool, auth or version env', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgres://unexpected.test/wrong');
+    vi.stubEnv('BETTER_TRIGGER_POOL_MAX', 'invalid');
+    vi.stubEnv('BETTER_TRIGGER_API_KEY', 'unrelated-host-key');
+    vi.stubEnv('BETTER_TRIGGER_BODY_LIMIT', '1');
+    vi.stubEnv('BETTER_TRIGGER_VERSION', 'unrelated-host-version');
+    try {
+      await expect(createEmbeddedRuntime({ tasks: [sendEmail] })).rejects.toThrow('databaseUrl or pool');
+      runtime = await createEmbeddedRuntime({
+        tasks: [sendEmail],
+        databaseUrl: 'postgres://embedded.test/db',
+        notifications: false,
+        concurrency: 1,
+      });
+      expect(mocked.createPool).toHaveBeenCalledWith('postgres://embedded.test/db', expect.anything(), expect.objectContaining({ max: 9 }));
+      expect((await sendEmail.trigger({ to: 'embedded@example.com' })).id).toBe('run_embedded');
+      expect(kernel.registerWorker).toHaveBeenCalledWith(expect.objectContaining({
+        codeVersion: expect.not.stringContaining('unrelated-host-version'),
+      }));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('rejects malformed process timers before pool allocation, migration or registration', async () => {
     const interval = vi.spyOn(globalThis, 'setInterval');
     const timeout = vi.spyOn(globalThis, 'setTimeout');
@@ -180,13 +204,14 @@ describe('createEmbeddedRuntime', () => {
   });
 
   it('direct poolOptions pass through the real pool validation before any migration or loop', async () => {
-    const actualDb = await vi.importActual<typeof import('@better-trigger/db')>('@better-trigger/db');
+    const actualDb = await vi.importActual<typeof import('../../../packages/db/src/index')>('../../../packages/db/src/index');
     mocked.createPool.mockImplementation(actualDb.createPool);
     for (const name of ['max', 'connectionTimeoutMillis', 'statementTimeoutMs']) {
       const invalid = [-1, 1.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1, '10', null, true];
       invalid.push(name === 'max' ? 0 : 2_147_483_648);
       for (const value of invalid) {
         await expect(createEmbeddedRuntime({
+          databaseUrl: 'postgres://embedded.test/db',
           tasks: [sendEmail], notifications: false, poolOptions: { [name]: value },
         })).rejects.toThrow(name);
       }
@@ -196,7 +221,7 @@ describe('createEmbeddedRuntime', () => {
     expect(kernel.registerWorker).not.toHaveBeenCalled();
     expect(getResultResolver()).toBeNull();
     mocked.createPool.mockReset().mockReturnValue(pool);
-    runtime = await createEmbeddedRuntime({ tasks: [sendEmail], notifications: false });
+    runtime = await createEmbeddedRuntime({ databaseUrl: 'postgres://embedded.test/db', tasks: [sendEmail], notifications: false });
   });
 
   it.each([[1500, 500], [6_442_450_943, 2_147_483_647]])(
@@ -269,7 +294,7 @@ describe('createEmbeddedRuntime', () => {
     const previousFetch = vi.fn(async () =>
       Response.json({ runId: 'run_previous', idempotent: false }),
     );
-    const previous: BetterTrigger = (await import('better-trigger')).betterTrigger({
+    const previous: BetterTrigger = (await import('../../../packages/sdk/src/index')).betterTrigger({
       url: 'http://previous.test',
       fetch: previousFetch,
     });
@@ -394,10 +419,12 @@ describe('createEmbeddedRuntime', () => {
     // The embedded `app` may be mounted externally; that surface must stay
     // limited. An unmarked Request (never passed through the in-process fetch
     // adapter) still draws the write bucket and 429s past the burst.
-    process.env.BETTER_TRIGGER_RATE_LIMIT_RPS = '1';
-    process.env.BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS = '0';
-    process.env.BETTER_TRIGGER_RATE_LIMIT_BURST = '1';
     runtime = await createEmbeddedRuntime({
+      env: {
+        BETTER_TRIGGER_RATE_LIMIT_RPS: '1',
+        BETTER_TRIGGER_RATE_LIMIT_GLOBAL_RPS: '0',
+        BETTER_TRIGGER_RATE_LIMIT_BURST: '1',
+      },
       databaseUrl: 'postgres://embedded.test/db',
       tasks: [sendEmail],
       concurrency: 1,

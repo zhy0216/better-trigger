@@ -8,7 +8,7 @@
    cache never leaks from one namespace into another.
    ============================================================================= */
 import type { Pool } from 'pg';
-import type { Kernel } from '@better-trigger/kernel';
+import type { Kernel } from '../../../packages/kernel/src/index';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 

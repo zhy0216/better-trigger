@@ -9,7 +9,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError } from '../../core/src/index';
 import { batchTrigger, createRunIn } from '../src/runs';
 
 /** Answers the `SELECT ... FROM tasks` lookup and records every statement. */

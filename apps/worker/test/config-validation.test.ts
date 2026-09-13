@@ -20,7 +20,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { Pool } from 'pg';
-import { task } from 'better-trigger';
+import { task } from '../../../packages/sdk/src/index';
 import { describe, expect, it, vi } from 'vitest';
 import {
   MAX_CONCURRENCY,

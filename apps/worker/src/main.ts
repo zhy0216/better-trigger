@@ -23,11 +23,11 @@
    uncaught exception takes that same path and then exits non-zero.
    ============================================================================= */
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import { createHealthPool, createPool, DEFAULT_DATABASE_URL, migrate } from '@better-trigger/db';
-import { createKernel, type OrchestratorCounters } from '@better-trigger/kernel';
+import { DEFAULT_NAMESPACE } from '../../../packages/core/src/index';
+import { createHealthPool, createPool, DEFAULT_DATABASE_URL, migrate } from '../../../packages/db/src/index';
+import { createKernel, type OrchestratorCounters } from '../../../packages/kernel/src/index';
 import { derivePoolConfig } from './pool-config';
-import { setResultResolver, loadExecutorStorageAsync, setExecutorStorage } from 'better-trigger/internal';
+import { setResultResolver, loadExecutorStorageAsync, setExecutorStorage } from '../../../packages/sdk/src/internal';
 import { createApp } from './app';
 import { startHttpServer } from './listen';
 import { configuredApiKeys, setCorsOrigins } from './middleware';

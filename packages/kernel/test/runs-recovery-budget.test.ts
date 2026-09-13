@@ -13,7 +13,7 @@
    ============================================================================= */
 import type { PoolClient } from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE } from '../../core/src/index';
 import { createRunIn } from '../src/runs';
 
 const makeClient = () => {

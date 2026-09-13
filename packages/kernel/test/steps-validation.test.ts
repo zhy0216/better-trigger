@@ -21,7 +21,7 @@
    ============================================================================= */
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_NAMESPACE, KernelError } from '@better-trigger/core';
+import { DEFAULT_NAMESPACE, KernelError } from '../../core/src/index';
 import { suspendRun, upsertStep, type StepWriteArgs } from '../src/runs';
 
 /** Any use of this pool fails the test loudly — validation must throw first. */

@@ -14,7 +14,7 @@
    dynamic import) — that is exactly what a second copy sees at import time.
    ============================================================================= */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { WaitResult } from '@better-trigger/core';
+import type { WaitResult } from '../../core/src/index';
 import pkg from '../package.json';
 
 /** The exact key registry.ts stamps (Symbol.for, so copies share it). */

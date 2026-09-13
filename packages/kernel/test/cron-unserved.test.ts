@@ -17,7 +17,7 @@
    behaviour on a real database is test/pg/cron-unserved.test.ts.
    ============================================================================= */
 import type { Pool } from 'pg';
-import type { Namespace } from '@better-trigger/core';
+import type { Namespace } from '../../core/src/index';
 import { describe, expect, it, vi } from 'vitest';
 import { startOrchestrator } from '../src/orchestrator';
 

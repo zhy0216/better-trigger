@@ -15,7 +15,7 @@
        O4 exports over /api/v1/metrics — defined here, once, so the metrics
        route reads them rather than declaring its own.
    ============================================================================= */
-import type { KernelLogger } from '@better-trigger/kernel';
+import type { KernelLogger } from '../../../packages/kernel/src/index';
 
 /** The daemon's log sink. Structurally `console`; the kernel's own logger fits
  *  too, so a host that already has one passes the same object everywhere. */

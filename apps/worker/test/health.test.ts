@@ -13,7 +13,7 @@
    ============================================================================= */
 import { EventEmitter } from 'node:events';
 import type { Pool, PoolClient } from 'pg';
-import type { Kernel } from '@better-trigger/kernel';
+import type { Kernel } from '../../../packages/kernel/src/index';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
 // O4: the injected build metadata (package version + git sha) is the single

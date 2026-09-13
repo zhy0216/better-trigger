@@ -11,9 +11,9 @@
    naming the parameter, before registerWorker / startOrchestrator is ever
    reached.
    ============================================================================= */
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import type { Kernel } from '@better-trigger/kernel';
-import { task } from 'better-trigger';
+import { DEFAULT_NAMESPACE } from '../../../packages/core/src/index';
+import type { Kernel } from '../../../packages/kernel/src/index';
+import { task } from '../../../packages/sdk/src/index';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startWorkerRuntime } from '../src/runtime';
 

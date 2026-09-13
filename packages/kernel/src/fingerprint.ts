@@ -18,7 +18,7 @@
    order, and two spellings of the same object must not drift a ledger.
    ============================================================================= */
 import { createHash } from 'node:crypto';
-import { canonicalStringify as stringifyJson, type StepKind } from '@better-trigger/core';
+import { canonicalStringify as stringifyJson, type StepKind } from '../../core/src/index';
 
 /** Short sha256 of a function's source. Native/bound fns hash their
  *  placeholder source ("[native code]") — stable, just not discriminating.

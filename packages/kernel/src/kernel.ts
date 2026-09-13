@@ -18,7 +18,7 @@ import type {
   TriggerItem,
   WaitForResultOptions,
   WaitResult,
-} from '@better-trigger/core';
+} from '../../core/src/index';
 import {
   startOrchestrator,
   type OrchestratorHandle,
@@ -65,6 +65,7 @@ import {
   type RegisterWorkerArgs,
 } from './workers';
 import { prune, type PruneArgs, type PruneResult } from './prune';
+import { withKernelEnvironment, type KernelEnvironment } from './environment';
 
 export interface KernelLogger {
   warn(...args: unknown[]): void;
@@ -107,6 +108,8 @@ export interface KernelOptions {
   pool: Pool;
   /** Sink for orchestrator loop errors. Defaults to console. */
   logger?: KernelLogger;
+  /** Explicit configuration for embedded hosts; defaults to process.env. */
+  env?: KernelEnvironment;
 }
 
 export interface Kernel {
@@ -208,31 +211,33 @@ export function createKernel(opts: KernelOptions): Kernel {
   const { pool } = opts;
   const logger: KernelLogger = opts.logger ?? console;
   const waitGraph = createWaitGraphCounters();
+  const environment = opts.env ?? process.env;
+  const scoped = <T>(operation: () => T): T => withKernelEnvironment(environment, operation);
 
   return {
-    trigger: (args) => trigger(pool, args),
-    batchTrigger: (items, namespace) => batchTrigger(pool, items, namespace),
-    cancelRun: (runId, namespace) => cancelRun(pool, runId, namespace),
-    retryRun: (runId, namespace, opts) => retryRun(pool, runId, namespace, opts),
-    getRun: (runId, namespace) => getRunRecord(pool, runId, namespace),
-    getRunDetail: (runId, namespace) => getRunDetail(pool, runId, namespace),
-    waitForResult: (runId, namespace, o) => waitForResult(pool, runId, namespace, o),
+    trigger: (args) => scoped(() => trigger(pool, args)),
+    batchTrigger: (items, namespace) => scoped(() => batchTrigger(pool, items, namespace)),
+    cancelRun: (runId, namespace) => scoped(() => cancelRun(pool, runId, namespace)),
+    retryRun: (runId, namespace, opts) => scoped(() => retryRun(pool, runId, namespace, opts)),
+    getRun: (runId, namespace) => scoped(() => getRunRecord(pool, runId, namespace)),
+    getRunDetail: (runId, namespace) => scoped(() => getRunDetail(pool, runId, namespace)),
+    waitForResult: (runId, namespace, o) => scoped(() => waitForResult(pool, runId, namespace, o)),
 
-    registerWorker: (args) => registerWorker(pool, { ...args, logger: args.logger ?? logger }),
-    deregisterWorker: (args) => deregisterWorker(pool, args),
-    heartbeat: (args) => heartbeat(pool, args),
-    releaseClaims: (args) => releaseClaims(pool, args),
-    claimRuns: (args) => claimRuns(pool, { ...args, logger: args.logger ?? logger }),
-    reportStep: (args) => reportStep(pool, args),
-    suspendRun: (args) => suspendRun(pool, args),
-    waitForChildRun: (args) => waitForChildRun(pool, args, waitGraph),
-    batchTriggerChild: (args) => batchTriggerChild(pool, args),
-    completeRun: (args) => completeRun(pool, args),
-    failRun: (args) => failRun(pool, args),
-    appendLogs: (runId, namespace, entries) => appendLogs(pool, runId, namespace, entries, logger),
+    registerWorker: (args) => scoped(() => registerWorker(pool, { ...args, logger: args.logger ?? logger })),
+    deregisterWorker: (args) => scoped(() => deregisterWorker(pool, args)),
+    heartbeat: (args) => scoped(() => heartbeat(pool, args)),
+    releaseClaims: (args) => scoped(() => releaseClaims(pool, args)),
+    claimRuns: (args) => scoped(() => claimRuns(pool, { ...args, logger: args.logger ?? logger })),
+    reportStep: (args) => scoped(() => reportStep(pool, args)),
+    suspendRun: (args) => scoped(() => suspendRun(pool, args)),
+    waitForChildRun: (args) => scoped(() => waitForChildRun(pool, args, waitGraph)),
+    batchTriggerChild: (args) => scoped(() => batchTriggerChild(pool, args)),
+    completeRun: (args) => scoped(() => completeRun(pool, args)),
+    failRun: (args) => scoped(() => failRun(pool, args)),
+    appendLogs: (runId, namespace, entries) => scoped(() => appendLogs(pool, runId, namespace, entries, logger)),
 
-    startOrchestrator: (o) => startOrchestrator(pool, logger, o, waitGraph),
-    prune: (args) => prune(pool, args),
+    startOrchestrator: (o) => scoped(() => startOrchestrator(pool, logger, o, waitGraph)),
+    prune: (args) => scoped(() => prune(pool, args)),
     waitGraph,
   };
 }

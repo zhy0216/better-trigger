@@ -14,10 +14,10 @@
    without ever reporting a failure for the run, since attempt is the kernel's
    business and a handover spends none of it.
    ============================================================================= */
-import type { ClaimedRun } from '@better-trigger/core';
-import { DEFAULT_NAMESPACE } from '@better-trigger/core';
-import type { Kernel } from '@better-trigger/kernel';
-import { isRunAborted, task, type RunAbortedError } from 'better-trigger';
+import type { ClaimedRun } from '../../../packages/core/src/index';
+import { DEFAULT_NAMESPACE } from '../../../packages/core/src/index';
+import type { Kernel } from '../../../packages/kernel/src/index';
+import { isRunAborted, task, type RunAbortedError } from '../../../packages/sdk/src/index';
 import { describe, expect, it } from 'vitest';
 import { startWorkerRuntime } from '../src/runtime';
 
