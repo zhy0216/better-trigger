@@ -406,7 +406,7 @@ export async function createEmbeddedRuntime(
       // Narrow before constructing so adapters compile with both Bun and DOM
       // fetch types, without requiring Bun-specific fetch.preconnect helpers.
       const req = typeof input === 'string' || input instanceof URL
-        ? new Request(input, init)
+        ? new Request(String(input), init)
         : new Request(input, init);
       // This dispatch is in-process and trusted; mark it so the shared Hono
       // rate limiter skips it (the client must not 429 itself). The host may
