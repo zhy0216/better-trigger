@@ -56,13 +56,17 @@ const KERNEL_CODES = new Set<string>([
   'rate_limited',
 ]);
 
+/** Standard fetch call signature, excluding runtime extras such as Bun's
+ * fetch.preconnect that an in-process adapter cannot implement. */
+export type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
 export interface HttpClientOptions {
   /** Base URL of the worker daemon, e.g. http://localhost:4848. */
   url: string;
   /** Bearer token; required when the daemon runs with BETTER_TRIGGER_API_KEY. */
   apiKey?: string;
   /** Injectable fetch (tests, proxies, custom agents). Defaults to global fetch. */
-  fetch?: typeof globalThis.fetch;
+  fetch?: Fetch;
   /**
    * Per-request timeout: finite, 0 < ms <= 2147483647.
    * Default 30s; long-polls pass their own.
@@ -144,7 +148,7 @@ function mergeHeaders(
 export class HttpClient {
   private readonly base: string;
   private readonly apiKey?: string;
-  private readonly doFetch: typeof globalThis.fetch;
+  private readonly doFetch: Fetch;
   private readonly timeoutMs: number;
 
   constructor(opts: HttpClientOptions) {

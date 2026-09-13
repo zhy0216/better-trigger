@@ -33,6 +33,7 @@ import {
   betterTrigger,
   type BetterTrigger,
   type TaskHandle,
+  type Fetch,
 } from '../../../packages/sdk/src/index';
 import {
   executorStorage,
@@ -137,7 +138,7 @@ export interface EmbeddedRuntime {
   /** Hono application used by the client; may also be mounted by the host. */
   readonly app: ReturnType<typeof createApp>;
   /** Fetch-compatible adapter that dispatches directly to `app`. */
-  readonly fetch: typeof globalThis.fetch;
+  readonly fetch: Fetch;
   /** Worker runtime handle and live counters. */
   readonly worker: WorkerHandle;
   /** Pool used by the kernel (owned according to closePoolOnStop). */
@@ -399,7 +400,7 @@ export async function createEmbeddedRuntime(
       env,
     });
 
-    const inProcessFetch: typeof globalThis.fetch = async (input, init) => {
+    const inProcessFetch: Fetch = async (input, init) => {
       if (stopping) return stoppedResponse();
       const req = new Request(input, init);
       // This dispatch is in-process and trusted; mark it so the shared Hono

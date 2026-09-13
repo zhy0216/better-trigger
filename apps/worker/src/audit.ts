@@ -112,7 +112,7 @@ export function auditMiddleware(): MiddlewareHandler<{ Variables: AppVariables }
 async function buildEntry(
   c: Context<{ Variables: AppVariables }>,
   requestId: string,
-  bodyClone: Request | null,
+  bodyClone: Pick<Request, 'json'> | null,
 ): Promise<AuditEntry> {
   const method = c.req.method;
   const path = c.req.path;
@@ -162,7 +162,7 @@ async function buildEntry(
 async function taskIdsFromBody(
   _c: Context<{ Variables: AppVariables }>,
   endpoint: RateLimitedEndpoint,
-  bodyClone: Request | null,
+  bodyClone: Pick<Request, 'json'> | null,
 ): Promise<string[] | null> {
   if (endpoint !== 'trigger' && endpoint !== 'batch-trigger') return null;
   if (bodyClone === null) return null;
