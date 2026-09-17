@@ -1,1 +1,0 @@
-ALTER TABLE "waits" ADD COLUMN "fingerprint" text;

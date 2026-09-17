@@ -1,1 +1,0 @@
-ALTER TABLE "runs" ADD COLUMN "priority" integer DEFAULT 0 NOT NULL;

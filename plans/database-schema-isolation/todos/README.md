@@ -1,6 +1,6 @@
 # 执行队列 · database-schema-isolation
 
-方案：[../plan.md](../plan.md)。用户已确认没有需要保留的旧数据，按固定 `better_trigger` schema 全新建表。5 个任务全部待执行。
+方案：[../plan.md](../plan.md)。用户已确认没有需要保留的旧数据，按固定 `better_trigger` schema 全新建表。01 已完成（见 [done/](done/01-db-schema-and-baseline.md) 内执行记录），其余 4 个任务待执行。
 
 ## 执行偏好
 
@@ -15,7 +15,7 @@ default_model: alibaba-token-plan-cn/deepseek-v4.1-flash
 
 | 文件 | 优先级 | 难度 | agent / 来源 | 模型 / Codex 推理强度 | 一句话说明 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| [01-db-schema-and-baseline.md](01-db-schema-and-baseline.md) | P1 | hard | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | 专属 schema、独立 journal 与新迁移基线 | 待执行 |
+| [done/01-db-schema-and-baseline.md](done/01-db-schema-and-baseline.md) | P1 | hard | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | 专属 schema、独立 journal 与新迁移基线 | Done |
 | [02-kernel-qualified-sql.md](02-kernel-qualified-sql.md) | P1 | hard | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | kernel 表引用和相关回归测试 | 待执行 |
 | [03-worker-schema-integration.md](03-worker-schema-integration.md) | P1 | medium | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | dashboard、metrics、waiters 与 embedded 查询 | 待执行 |
 | [04-shared-database-acceptance.md](04-shared-database-acceptance.md) | P1 | hard | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | harness 适配与真实共库、迁移、连接池验收 | 待执行 |
@@ -23,7 +23,7 @@ default_model: alibaba-token-plan-cn/deepseek-v4.1-flash
 
 ## 文件
 
-1. [01-db-schema-and-baseline.md](01-db-schema-and-baseline.md) — 依赖：无。
+1. [done/01-db-schema-and-baseline.md](done/01-db-schema-and-baseline.md) — 依赖：无。已完成。
 2. [02-kernel-qualified-sql.md](02-kernel-qualified-sql.md) — 依赖 01-db-schema-and-baseline。
 3. [03-worker-schema-integration.md](03-worker-schema-integration.md) — 依赖 01-db-schema-and-baseline、02-kernel-qualified-sql。
 4. [04-shared-database-acceptance.md](04-shared-database-acceptance.md) — 依赖 01-db-schema-and-baseline、02-kernel-qualified-sql、03-worker-schema-integration。

@@ -11,13 +11,12 @@
     its 'waiting' parent; the orchestrator's wait-due scanner fails those
     parents with a ChildLostError), schedules → tasks CASCADE — and every
     status/kind/level/trigger column is a CHECK-constrained closed enum; a
-    manual DELETE or a hand-written bad status cannot leave orphan rows or
-    unreadable states behind. Migration 0011 cleans FK orphans automatically,
-    but CHECK constraints (0011's, plus 0016's trigger enums) assume
-    pre-existing values are already in-set (everything this engine writes is):
-    a hand-edited row outside the set makes the migration fail, which the
-    operator must resolve by fixing the row (the migration's header comment
-    spells out the UPDATEs).
+     manual DELETE or a hand-written bad status cannot leave orphan rows or
+     unreadable states behind. The regenerated baseline creates every FK and
+     CHECK together with its (empty) table, so no orphan cleanup exists any
+     more; CHECKs still assume every value written later is in-set (everything
+     this engine writes is): a hand-edited row outside the set is rejected at
+     write time.
     Indexing (0016): the `*_fk_idx` indexes — and logs_run_id_idx, which serves
     a log page and a cascade at once — are deliberately the only secondary
     indexes without the (project_id, env) prefix. Postgres enforces a foreign
@@ -36,19 +35,26 @@ import {
   index,
   integer,
   jsonb,
-  pgTable,
+  pgSchema,
   primaryKey,
   text,
   timestamp,
   uniqueIndex,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
+import { DB_SCHEMA } from './constants';
+
+/** Fixed PostgreSQL schema for every better-trigger object; independent of the
+ *  database name, so a host project's `public` tables and journal are untouched.
+ *  Migration numbers below (0011/0015/0016) refer to the pre-baseline chain in
+ *  Git history — the shipped baseline regenerates the same final shape. */
+const betterTrigger = pgSchema(DB_SCHEMA);
 
 /* ---------------------------------------------------------------------------
  * tasks — namespace-scoped: PK is (project_id, env, id), so the same task id
  * can exist independently in every namespace (C2, todos/01-correctness.md).
  * ------------------------------------------------------------------------- */
-export const tasks = pgTable(
+export const tasks = betterTrigger.table(
   'tasks',
   {
     id: text('id').notNull(),
@@ -79,7 +85,7 @@ export const tasks = pgTable(
 /* ---------------------------------------------------------------------------
  * runs
  * ------------------------------------------------------------------------- */
-export const runs = pgTable(
+export const runs = betterTrigger.table(
   'runs',
   {
     id: text('id').primaryKey(),
@@ -208,7 +214,7 @@ export const runs = pgTable(
  * transaction, so no reader can ever observe the row before its retry run
  * exists.
  * ------------------------------------------------------------------------- */
-export const runRetryOperations = pgTable(
+export const runRetryOperations = betterTrigger.table(
   'run_retry_operations',
   {
     projectId: text('project_id').notNull().default('default'),
@@ -240,7 +246,7 @@ export const runRetryOperations = pgTable(
 /* ---------------------------------------------------------------------------
  * run_steps — composite PK (run_id, seq)
  * ------------------------------------------------------------------------- */
-export const runSteps = pgTable(
+export const runSteps = betterTrigger.table(
   'run_steps',
   {
     // FK to runs, ON DELETE CASCADE: retention (todos/02-performance.md PF6)
@@ -284,7 +290,7 @@ export const runSteps = pgTable(
 /* ---------------------------------------------------------------------------
  * queue
  * ------------------------------------------------------------------------- */
-export const queue = pgTable(
+export const queue = betterTrigger.table(
   'queue',
   {
     id: bigserial('id', { mode: 'number' }).primaryKey(),
@@ -341,7 +347,7 @@ export const queue = pgTable(
 /* ---------------------------------------------------------------------------
  * waits
  * ------------------------------------------------------------------------- */
-export const waits = pgTable(
+export const waits = betterTrigger.table(
   'waits',
   {
     id: bigserial('id', { mode: 'number' }).primaryKey(),
@@ -419,7 +425,7 @@ export const waits = pgTable(
 /* ---------------------------------------------------------------------------
  * logs
  * ------------------------------------------------------------------------- */
-export const logs = pgTable(
+export const logs = betterTrigger.table(
   'logs',
   {
     id: bigserial('id', { mode: 'number' }).primaryKey(),
@@ -457,7 +463,7 @@ export const logs = pgTable(
  * schedule per task per namespace (C2). The (project_id, env, next_run_at)
  * index backs the cron due-scan, which is namespace-filtered.
  * ------------------------------------------------------------------------- */
-export const schedules = pgTable(
+export const schedules = betterTrigger.table(
   'schedules',
   {
     id: text('id').primaryKey(),
@@ -493,7 +499,7 @@ export const schedules = pgTable(
  * jsonb column declares which namespaces the worker serves
  * ([{projectId, env}, ...]). Task manifests live in the tasks jsonb.
  * ------------------------------------------------------------------------- */
-export const workers = pgTable('workers', {
+export const workers = betterTrigger.table('workers', {
   id: text('id').primaryKey(),
   projectId: text('project_id').notNull().default('default'),
   env: text('env').notNull().default('prod'),

@@ -2,20 +2,22 @@
    @better-trigger/db — the C5 referential-integrity and state constraints
    (todos/01-correctness.md) reach a database.
 
-   schema.ts declares the five relations (queue/waits → runs CASCADE,
-   runs.parent_run_id → runs SET NULL, schedules → tasks CASCADE) and the
+   schema.ts declares the relations (queue/waits/run_steps/logs/
+   run_retry_operations → runs, runs.parent_run_id → runs SET NULL,
+   waits.child_run_id → runs SET NULL, schedules → tasks CASCADE) and the
    CHECK-constrained enums, but nothing runs schema.ts: only the generated SQL
    in ../migrations is applied, so a schema edit without a `bun run db:generate`
    would leave the database with no constraints at all while the code believes
    they exist. These read the shipped .sql files (no Postgres, no drizzle-kit)
    and pin that pairing — the same guarantee schema-retention.test.ts gives the
-   0007 cascades.
+   prune cascades.
 
-   The second half is the one that matters operationally: `ADD CONSTRAINT ...
-   FOREIGN KEY` validates existing rows, daemons auto-migrate at boot
-   (apps/worker/src/main.ts), and a database carrying orphans would therefore
-   fail the migration and stop every daemon on it from starting. The 0011
-   migration deletes/sets-null orphans first; that ordering is pinned here.
+   The baseline creates every FK and CHECK together with its (empty) table in
+   the fixed "better_trigger" schema, so the old upgrade-path orphan cleanups
+   ("delete dangling rows before ADD CONSTRAINT validates them") no longer
+   exist and are no longer asserted — there are no pre-existing rows to clean.
+   Everything is schema-qualified so a host project's same-named tables in
+   `public` are never referenced.
 
    The live half (the constraints actually firing — a manual DELETE leaving no
    orphan, an illegal status refused) is examples/basic/scripts/constraints.ts.
@@ -33,10 +35,14 @@ const migrationSql = readdirSync(MIGRATIONS_DIR)
   .map((f) => readFileSync(`${MIGRATIONS_DIR}/${f}`, 'utf8'))
   .join('\n');
 
-/** The last statement adding a named constraint (a later drop would fail the
- *  test via the regex not matching, so no tombstone handling is needed). */
+/** The statement declaring a named constraint — either the baseline's inline
+ *  `CONSTRAINT "x" CHECK (...)` inside CREATE TABLE (one per line) or a
+ *  separate `ALTER TABLE ... ADD CONSTRAINT` for the FKs. `[^;\n]*` stops at
+ *  the end of that one declaration, never swallowing a sibling constraint. */
 const constraint = (name: string): string =>
-  migrationSql.match(new RegExp(`ALTER TABLE "[^"]+" ADD CONSTRAINT "${name}"[^;]*`))?.[0] ?? '';
+  migrationSql.match(
+    new RegExp(`(?:ALTER TABLE "better_trigger"\\."[^"]+" ADD )?CONSTRAINT "${name}"[^;\\n]*`),
+  )?.[0] ?? '';
 
 /* ---------------------------------------------------------------------------
  * Foreign keys
@@ -61,35 +67,19 @@ describe.each([
 ] as const)('%s %s', (table, name, column, refTable, refColumn, onDelete) => {
   const add = constraint(name);
 
-  it('is added by a migration, referencing the right table and column(s)', () => {
-    expect(add).toMatch(new RegExp(`FOREIGN KEY \\("${column}"\\) REFERENCES "public"\\."${refTable}"\\("${refColumn}"\\)`));
+  it('is added on the qualified table, referencing the qualified target', () => {
+    expect(add).toMatch(
+      new RegExp(`^ALTER TABLE "better_trigger"\\."${table}" ADD CONSTRAINT "${name}"`),
+    );
+    expect(add).toMatch(
+      new RegExp(
+        `FOREIGN KEY \\("${column}"\\) REFERENCES "better_trigger"\\."${refTable}"\\("${refColumn}"\\)`,
+      ),
+    );
   });
 
   it(`has ON DELETE ${onDelete}`, () => {
     expect(add).toMatch(new RegExp(`ON DELETE ${onDelete}`));
-  });
-
-  it('is preceded by the orphan cleanup for its referencing column', () => {
-    // ADD CONSTRAINT validates every existing row, and the daemon migrates on
-    // boot: an orphan left behind by an older database would fail the
-    // migration and stop everyone's daemon from starting.
-    const addIdx = migrationSql.indexOf(`ADD CONSTRAINT "${name}"`);
-    expect(addIdx).toBeGreaterThan(-1);
-    const prefix = migrationSql.slice(0, addIdx);
-    if (onDelete === 'set null') {
-      // The orphan is SET NULL, matching the FK's own ON DELETE action: the
-      // referencing row survives (for runs.parent_run_id the child run, for
-      // waits.child_run_id the parent wait — which the orchestrator then
-      // fails instead of stranding).
-      expect(prefix).toMatch(
-        new RegExp(`UPDATE "${table}" SET "${column}" = NULL WHERE "${column}" IS NOT NULL AND NOT EXISTS \\(SELECT 1 FROM "runs"`),
-      );
-    } else {
-      // The others are dangling derived rows (queue / waits / schedules): the
-      // cleanup deletes them.
-      expect(prefix).toMatch(new RegExp(`DELETE FROM "${table}"`));
-      expect(prefix).toMatch(/NOT EXISTS \(SELECT 1 FROM "runs"|NOT EXISTS \(SELECT 1 FROM "tasks"/);
-    }
   });
 });
 
@@ -109,16 +99,13 @@ describe.each([
   ['waits', 'waits_kind_check', "IN ('duration','until','run')"],
   ['workers', 'workers_status_check', "IN ('online','offline')"],
   ['logs', 'logs_level_check', "IN ('debug','info','warn','error')"],
-  // The two closed sets 0011 left out (backend-contract.md §2); added by 0016
-  // so the hardening is consistent — same "pre-existing values are in-set"
-  // assumption as every CHECK above.
   ['runs', 'runs_trigger_type_check', "IN ('api','schedule','subtask','retry','dashboard')"],
   ['tasks', 'tasks_trigger_source_check', "IN ('api','schedule')"],
 ] as const)('%s %s', (table, name, values) => {
   const add = constraint(name);
 
-  it('is added by a migration on the table it constrains', () => {
-    expect(add).toMatch(new RegExp(`CHECK \\("${table}"\\.`));
+  it('is declared by the baseline on the table it constrains', () => {
+    expect(add).toMatch(new RegExp(`CONSTRAINT "${name}" CHECK \\("better_trigger"\\."${table}"\\.`));
   });
 
   it('lists exactly the legal values', () => {
@@ -128,16 +115,20 @@ describe.each([
 
 describe('attempt / recoveries arithmetic checks', () => {
   it('runs.attempt >= 1 — attempts are 1-based', () => {
-    expect(constraint('runs_attempt_check')).toMatch(/CHECK \("runs"\."attempt" >= 1\)/);
+    expect(constraint('runs_attempt_check')).toMatch(
+      /CHECK \("better_trigger"\."runs"\."attempt" >= 1\)/,
+    );
   });
 
   it('run_steps.attempt >= 1', () => {
-    expect(constraint('run_steps_attempt_check')).toMatch(/CHECK \("run_steps"\."attempt" >= 1\)/);
+    expect(constraint('run_steps_attempt_check')).toMatch(
+      /CHECK \("better_trigger"\."run_steps"\."attempt" >= 1\)/,
+    );
   });
 
   it('runs.recoveries stays within its own ceiling', () => {
     expect(constraint('runs_recoveries_check')).toMatch(
-      /CHECK \("runs"\."recoveries" >= 0 AND "runs"\."recoveries" <= "runs"\."max_recoveries"\)/,
+      /CHECK \("better_trigger"\."runs"\."recoveries" >= 0 AND "better_trigger"\."runs"\."recoveries" <= "better_trigger"\."runs"\."max_recoveries"\)/,
     );
   });
 });

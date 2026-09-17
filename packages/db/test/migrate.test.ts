@@ -92,6 +92,23 @@ describe('migrate — advisory lock', () => {
     expect(calls.filter((c) => c.op === 'connect')).toHaveLength(1);
   });
 
+  it('points drizzle at the project-owned journal, never the host default', async () => {
+    const { pool } = stubPool();
+
+    await migrate(pool);
+
+    const config = drizzleMigrateMock.mock.calls[0]![1];
+    // Hard-coded strings on purpose: the journal location is a compatibility
+    // contract with deployed databases, not something a constant rename may
+    // silently move. The default (drizzle.__drizzle_migrations) would collide
+    // with — and be skipped by — a host project sharing the database.
+    expect(config).toMatchObject({
+      migrationsSchema: 'better_trigger',
+      migrationsTable: '__drizzle_migrations',
+    });
+    expect(typeof config.migrationsFolder).toBe('string');
+  });
+
   it('uses the two-argument key space, away from the kernel lock', async () => {
     const { pool, calls } = stubPool();
 

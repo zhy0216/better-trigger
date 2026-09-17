@@ -3,9 +3,12 @@
    reach a database. schema.ts is the source of truth, but nothing runs it: only
    the generated SQL in ../migrations is applied at boot, so a schema edit
    without a `bun run db:generate` is a silent sequential scan in production.
-   These read the shipped .sql files (no Postgres, no drizzle-kit) and pin that
-   pairing. Scans every migration, so a later one may rename or rebuild an index
-   as long as the shape survives.
+    These read the shipped .sql files (no Postgres, no drizzle-kit) and pin that
+    pairing. Scans every migration, so a later one may rename or rebuild an index
+    as long as the shape survives. Historical migration numbers below (0006/
+    0010/0016) refer to the pre-baseline chain in Git history; the regenerated
+    baseline ships the same final shapes, schema-qualified into
+    "better_trigger".
 
    The other half of the pairing — that schema.ts and the migrations still agree
    — is `bun run check:drift` (scripts/check-drift.mjs) in CI. These assertions
@@ -60,7 +63,9 @@ const indexNames = [
  * fastest-growing table is write amplification with no plan to show for it.
  */
 function liveIndexesOn(table: string): string[] {
-  return indexNames.filter((name) => shippedIndex(name)?.includes(` ON "${table}" `));
+  return indexNames.filter((name) =>
+    shippedIndex(name)?.includes(` ON "better_trigger"."${table}" `),
+  );
 }
 
 describe('queue_lease_until_idx (reaper scan, PF1)', () => {
@@ -70,7 +75,7 @@ describe('queue_lease_until_idx (reaper scan, PF1)', () => {
     expect(create).toBeDefined();
     // Namespace prefix first (C2): the reaper scan is namespace-filtered.
     expect(create).toMatch(
-      /ON "queue" USING btree \("project_id","env","lease_until"\)/,
+      /ON "better_trigger"."queue" USING btree \("project_id","env","lease_until"\)/,
     );
   });
 
@@ -78,7 +83,7 @@ describe('queue_lease_until_idx (reaper scan, PF1)', () => {
     // Without the predicate the index would carry one entry per queued row; the
     // reaper only ever looks at the in-flight subset. The predicate is also what
     // the reaper's own `lease_until IS NOT NULL` clause exists to match.
-    expect(create).toMatch(/WHERE "queue"\."lease_until" IS NOT NULL/);
+    expect(create).toMatch(/WHERE "better_trigger"."queue"\."lease_until" IS NOT NULL/);
   });
 });
 
@@ -95,7 +100,7 @@ describe('queue_claimable_idx (claim candidate scan, PF2)', () => {
     // every poll.
     expect(create).toBeDefined();
     expect(create).toMatch(
-      /ON "queue" USING btree \("project_id","env","priority" DESC NULLS FIRST,"id"\)/,
+      /ON "better_trigger"."queue" USING btree \("project_id","env","priority" DESC NULLS FIRST,"id"\)/,
     );
   });
 
@@ -103,7 +108,7 @@ describe('queue_claimable_idx (claim candidate scan, PF2)', () => {
     // The claimed rows are exactly the ones the pre-0006 plan read and discarded.
     // `available_at <= now()` is deliberately NOT in here: now() is not immutable
     // and cannot appear in an index predicate.
-    expect(create).toMatch(/WHERE "queue"\."locked_by" IS NULL/);
+    expect(create).toMatch(/WHERE "better_trigger"."queue"\."locked_by" IS NULL/);
     expect(create).not.toMatch(/available_at/);
   });
 });
@@ -118,7 +123,7 @@ describe('waits_run_idx (per-run waits lookups)', () => {
     // and getRunDetail's waits page all scan the never-deleted waits table.
     expect(create).toBeDefined();
     expect(create).toMatch(
-      /ON "waits" USING btree \("project_id","env","run_id","step_seq"\)/,
+      /ON "better_trigger"."waits" USING btree \("project_id","env","run_id","step_seq"\)/,
     );
   });
 });
@@ -147,7 +152,9 @@ describe.each([
 
   it('is created by a migration, keyed on the referencing column alone', () => {
     expect(create).toBeDefined();
-    expect(create).toMatch(new RegExp(`ON "${table}" USING btree \\("${column}"\\)$`));
+    expect(create).toMatch(
+      new RegExp(`ON "better_trigger"."${table}" USING btree \\("${column}"\\)$`),
+    );
   });
 
   it('is not namespace-prefixed — the FK check never binds those columns', () => {
@@ -165,7 +172,7 @@ describe('logs_run_id_idx (log page + run_id cascade, one index)', () => {
     // cascade gets the same index for `WHERE run_id = $1`, which the old
     // namespace-led shape could not answer at all.
     expect(create).toBeDefined();
-    expect(create).toMatch(/ON "logs" USING btree \("run_id","project_id","env","id"\)/);
+    expect(create).toMatch(/ON "better_trigger"."logs" USING btree \("run_id","project_id","env","id"\)/);
   });
 
   it('is the only secondary index on logs — no duplicate (run_id) beside it', () => {
@@ -184,12 +191,12 @@ describe('workers_online_heartbeat_idx (online-only worker scans, 0016)', () => 
     // registration's ownership check) filters status='online' plus a heartbeat
     // bound, and the table is append-only history with no other index.
     expect(create).toBeDefined();
-    expect(create).toMatch(/ON "workers" USING btree \("last_heartbeat_at"\)/);
+    expect(create).toMatch(/ON "better_trigger"."workers" USING btree \("last_heartbeat_at"\)/);
   });
 
   it('is partial — only the online set is ever scanned', () => {
     // The predicate is the point: it keeps the index at the live handful
     // instead of the whole (unbounded, retention-off-by-default) history.
-    expect(create).toMatch(/WHERE "workers"\."status" = 'online'/);
+    expect(create).toMatch(/WHERE "better_trigger"."workers"\."status" = 'online'/);
   });
 });

@@ -4,6 +4,7 @@
    runner, and the pg Pool factory.
    ============================================================================= */
 export * from './schema';
+export { DB_SCHEMA, MIGRATIONS_TABLE } from './constants';
 export {
   createPool,
   createHealthPool,

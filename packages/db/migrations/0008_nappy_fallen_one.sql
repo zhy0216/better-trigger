@@ -1,1 +1,0 @@
-ALTER TABLE "run_steps" ADD COLUMN "fingerprint" text;

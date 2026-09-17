@@ -1,13 +1,15 @@
 /* =============================================================================
    @better-trigger/db — startup migration.
-   Applies the drizzle-kit-generated SQL in ../migrations (tracked in the
-   drizzle.__drizzle_migrations journal table). Idempotent: safe on every boot.
+   Applies the drizzle-kit-generated SQL in ../migrations (tracked in this
+   project's OWN journal, better_trigger.__drizzle_migrations — never the
+   host's drizzle.__drizzle_migrations). Idempotent: safe on every boot.
    Regenerate migrations after schema.ts changes with `bun run db:generate`.
    ============================================================================= */
 import { fileURLToPath } from 'node:url';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate as drizzleMigrate } from 'drizzle-orm/node-postgres/migrator';
 import type pg from 'pg';
+import { DB_SCHEMA, MIGRATIONS_TABLE } from './constants';
 
 // Resolves to <package root>/migrations from both src/ (dev) and dist/ (built);
 // tsdown `shims: true` provides import.meta.url for the cjs build.
@@ -27,8 +29,8 @@ const LOCK_OBJECT = 1;
 export async function migrate(pool: pg.Pool): Promise<void> {
   // Daemons share one database and every one of them migrates on boot, so two
   // can enter drizzle's migrator at the same instant — it takes no lock of its
-  // own, and the concurrent CREATE of drizzle.__drizzle_migrations plus the
-  // duplicate journal inserts then fail at random. Serialize on an advisory
+  // own, and the concurrent CREATE of better_trigger.__drizzle_migrations plus
+  // the duplicate journal inserts then fail at random. Serialize on an advisory
   // lock: the loser waits for the winner and finds nothing left to do.
   // pg_advisory_lock is *session*-scoped, so it must be taken and released on
   // one pinned client — pool.query() would hand the unlock to whichever client
@@ -39,7 +41,16 @@ export async function migrate(pool: pg.Pool): Promise<void> {
   try {
     await client.query('SELECT pg_advisory_lock($1, $2)', [LOCK_CLASS, LOCK_OBJECT]);
     try {
-      await drizzleMigrate(drizzle({ client }), { migrationsFolder: MIGRATIONS_FOLDER });
+      await drizzleMigrate(drizzle({ client }), {
+        migrationsFolder: MIGRATIONS_FOLDER,
+        // Own journal in the project's own schema: the migrator creates
+        // schema+table before applying SQL (hence the baseline's CREATE SCHEMA
+        // IF NOT EXISTS), and a host sharing this database keeps its
+        // drizzle.__drizzle_migrations untouched — including its timestamps,
+        // which would otherwise skip this project's migrations.
+        migrationsSchema: DB_SCHEMA,
+        migrationsTable: MIGRATIONS_TABLE,
+      });
     } finally {
       // Swallowed on purpose: if the migration failed because the connection
       // died, this unlock dies with it, and a throw here would replace the

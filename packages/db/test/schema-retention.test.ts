@@ -1,7 +1,6 @@
 /* =============================================================================
    @better-trigger/db — the retention cascades reach a database
-   (todos/02-performance.md PF6), and the migration that adds them cannot brick
-   a boot.
+   (todos/02-performance.md PF6).
 
    schema.ts declares `logs.run_id` / `run_steps.run_id` as foreign keys ON
    DELETE CASCADE, but nothing runs schema.ts: only the generated SQL in
@@ -9,11 +8,10 @@
    trusts the database to take the rest. A schema edit without a
    `bun run db:generate` would leave every pruned run's logs behind, silently.
 
-   The second half is the one that matters operationally: `ADD CONSTRAINT ...
-   FOREIGN KEY` validates existing rows, daemons auto-migrate at boot
-   (apps/worker/src/main.ts), and a database carrying one orphaned log row would
-   therefore fail the migration and stop every daemon on it from starting. The
-   migration deletes orphans first; that ordering is pinned here.
+   The baseline creates both FKs together with their (empty) tables in the
+   fixed "better_trigger" schema, so the old upgrade-path orphan cleanup ("a
+   dangling log row would fail ADD CONSTRAINT's validation and brick boot")
+   no longer exists and is no longer asserted.
 
    Reads the shipped .sql files — no Postgres, no drizzle-kit. The live half
    (the cascade actually firing) is examples/basic/scripts/retention.ts.
@@ -36,30 +34,22 @@ describe.each([
   ['run_steps', 'run_steps_run_id_runs_id_fk'],
 ])('%s.run_id → runs.id', (table, constraint) => {
   const add = migrationSql.match(
-    new RegExp(`ALTER TABLE "${table}" ADD CONSTRAINT "${constraint}"[^;]*`),
+    new RegExp(
+      `ALTER TABLE "better_trigger"."${table}" ADD CONSTRAINT "${constraint}"[^;]*`,
+    ),
   )?.[0];
 
-  it('is added by a migration, referencing runs(id)', () => {
+  it('is added by the baseline, referencing runs(id) in better_trigger', () => {
     expect(add).toBeDefined();
-    expect(add).toMatch(/FOREIGN KEY \("run_id"\) REFERENCES "public"\."runs"\("id"\)/);
+    expect(add).toMatch(
+      /FOREIGN KEY \("run_id"\) REFERENCES "better_trigger"\."runs"\("id"\)/,
+    );
   });
 
   it('cascades on delete — pruning a run has to take its rows with it', () => {
-    // Without the cascade, `DELETE FROM runs` raises a foreign-key violation
-    // instead, which would turn retention from "deletes history" into
-    // "cannot delete anything at all".
+    // Without the cascade, `DELETE FROM better_trigger.runs` raises a
+    // foreign-key violation instead, which would turn retention from "deletes
+    // history" into "cannot delete anything at all".
     expect(add).toMatch(/ON DELETE cascade/);
-  });
-
-  it('is preceded by an orphan cleanup in the same migration', () => {
-    // ADD CONSTRAINT validates every existing row, and the daemon migrates on
-    // boot: an orphan left behind by an older database would fail the
-    // migration and stop everyone's daemon from starting.
-    const cleanup = migrationSql.indexOf(`DELETE FROM "${table}"`);
-    expect(cleanup).toBeGreaterThan(-1);
-    expect(migrationSql.slice(cleanup)).toMatch(
-      new RegExp(`NOT EXISTS \\(SELECT 1 FROM "runs"`),
-    );
-    expect(cleanup).toBeLessThan(migrationSql.indexOf(`ADD CONSTRAINT "${constraint}"`));
   });
 });

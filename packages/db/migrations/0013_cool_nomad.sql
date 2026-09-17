@@ -1,1 +1,0 @@
-DROP INDEX "queue_available_priority_idx";
