@@ -52,7 +52,7 @@ function stubPool(rows: unknown[], running: number) {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM queue q/.test(sql)) return { rows };
+      if (/FROM better_trigger\.queue q/.test(sql)) return { rows };
       if (/count\(\*\)/.test(sql)) return { rows: [{ n: String(running) }] };
       if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '1' }], rowCount: 1 };
       return { rows: [] };
@@ -114,6 +114,6 @@ describe('concurrency limiter advisory lock', () => {
     expect(stmts.some((s) => /pg_advisory_unlock/.test(s.sql))).toBe(false);
     const commitAt = stmts.findIndex((s) => s.sql === 'COMMIT');
     expect(commitAt).toBeGreaterThan(countAt);
-    expect(stmts.findIndex((s) => /FROM run_steps/.test(s.sql))).toBeGreaterThan(commitAt);
+    expect(stmts.findIndex((s) => /FROM better_trigger\.run_steps/.test(s.sql))).toBeGreaterThan(commitAt);
   });
 });

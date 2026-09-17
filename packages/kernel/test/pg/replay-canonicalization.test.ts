@@ -51,7 +51,7 @@ async function ledger(ctx: PgContext, runId: string) {
   // Include every stored column, not just fingerprint/output. A no-op replay
   // must also preserve the original timestamps, attempt and labels.
   const result = await ctx.pool.query<{ row: string }>(
-    'SELECT row_to_json(s)::text AS row FROM run_steps s WHERE run_id = $1 ORDER BY seq',
+    'SELECT row_to_json(s)::text AS row FROM better_trigger.run_steps s WHERE run_id = $1 ORDER BY seq',
     [runId],
   );
   return result.rows;
@@ -59,7 +59,7 @@ async function ledger(ctx: PgContext, runId: string) {
 
 async function children(ctx: PgContext, runId: string) {
   const result = await ctx.pool.query<{ id: string; payload: unknown }>(
-    'SELECT id, payload FROM runs WHERE parent_run_id = $1 ORDER BY id', [runId],
+    'SELECT id, payload FROM better_trigger.runs WHERE parent_run_id = $1 ORDER BY id', [runId],
   );
   return result.rows;
 }
@@ -145,7 +145,7 @@ describePg('canonical fingerprints across storage and replay', () => {
       expect(Object.hasOwn(child.payload as object, '__proto__')).toBe(true);
       expect(Object.getPrototypeOf(child.payload)).toBe(Object.prototype);
       const { rows: waits } = await ctx.pool.query<{ fingerprint: string }>(
-        'SELECT fingerprint FROM waits WHERE run_id = $1', [run.id],
+        'SELECT fingerprint FROM better_trigger.waits WHERE run_id = $1', [run.id],
       );
       expect(waits).toHaveLength(1);
       const fingerprint = stepFingerprint({
@@ -272,9 +272,9 @@ describePg('canonical fingerprints across storage and replay', () => {
         });
         expect(await children(ctx, run.id)).toEqual([]);
         expect(await ledger(ctx, run.id)).toEqual([]);
-        const pending = await ctx.pool.query('SELECT id FROM waits WHERE run_id = $1', [run.id]);
+        const pending = await ctx.pool.query('SELECT id FROM better_trigger.waits WHERE run_id = $1', [run.id]);
         expect(pending.rows).toEqual([]);
-        const queued = await ctx.pool.query('SELECT run_id FROM queue WHERE run_id = $1', [run.id]);
+        const queued = await ctx.pool.query('SELECT run_id FROM better_trigger.queue WHERE run_id = $1', [run.id]);
         expect(queued.rows).toEqual([]);
       });
     });

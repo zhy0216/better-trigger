@@ -56,7 +56,7 @@ function captureLogger(): { logger: KernelLogger; warns: string[] } {
 /** Insert a run row already 'running' (direct SQL — fastest per-round setup). */
 async function insertRunningRun(pool: Pool, runId: string, ns: Namespace = NS): Promise<void> {
   await pool.query(
-    `INSERT INTO runs (id, project_id, env, task_id, status, trigger_type)
+    `INSERT INTO better_trigger.runs (id, project_id, env, task_id, status, trigger_type)
      VALUES ($1, $2, $3, 'log-boundary-task', 'running', 'api')`,
     [runId, ns.projectId, ns.env],
   );
@@ -64,7 +64,7 @@ async function insertRunningRun(pool: Pool, runId: string, ns: Namespace = NS): 
 
 async function countLogs(pool: Pool, runId: string, ns: Namespace = NS): Promise<number> {
   const res = await pool.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM logs WHERE run_id = $1 AND project_id = $2 AND env = $3`,
+    `SELECT count(*)::int AS n FROM better_trigger.logs WHERE run_id = $1 AND project_id = $2 AND env = $3`,
     [runId, ns.projectId, ns.env],
   );
   return res.rows[0]!.n;
@@ -72,7 +72,7 @@ async function countLogs(pool: Pool, runId: string, ns: Namespace = NS): Promise
 
 async function runStatus(pool: Pool, runId: string): Promise<string> {
   const res = await pool.query<{ status: string }>(
-    `SELECT status FROM runs WHERE id = $1`,
+    `SELECT status FROM better_trigger.runs WHERE id = $1`,
     [runId],
   );
   return res.rows[0]!.status;
@@ -80,7 +80,7 @@ async function runStatus(pool: Pool, runId: string): Promise<string> {
 
 /** The exact lock-SELECT text appendLogs issues, for pg_stat_activity. */
 const LOCK_SELECT_TEXT =
-  'SELECT finished_at FROM runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE';
+  'SELECT finished_at FROM better_trigger.runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE';
 
 /**
  * Poll until some backend is blocked (state 'active' with a wait event) on a
@@ -121,7 +121,7 @@ describePg('log terminal boundary (p2-40)', () => {
       expect(warns).toHaveLength(0);
 
       await pool.query(
-        `UPDATE runs SET status = 'completed', finished_at = now() WHERE id = 'normal-1'`,
+        `UPDATE better_trigger.runs SET status = 'completed', finished_at = now() WHERE id = 'normal-1'`,
       );
       // The lines written before the boundary are the run's history — they stay.
       expect(await countLogs(pool, 'normal-1')).toBe(3);
@@ -148,7 +148,7 @@ describePg('log terminal boundary (p2-40)', () => {
     await withPg('log_boundary_terminal', async ({ pool }) => {
       await insertRunningRun(pool, 'done-1');
       await pool.query(
-        `UPDATE runs SET status = 'failed', finished_at = now() WHERE id = 'done-1'`,
+        `UPDATE better_trigger.runs SET status = 'failed', finished_at = now() WHERE id = 'done-1'`,
       );
       const { logger, warns } = captureLogger();
 
@@ -206,7 +206,7 @@ describePg('log terminal boundary (p2-40)', () => {
       await appendLogs(pool, 'casc-1', NS, entries(5));
       expect(await countLogs(pool, 'casc-1')).toBe(5);
 
-      await pool.query(`DELETE FROM runs WHERE id = 'casc-1'`);
+      await pool.query(`DELETE FROM better_trigger.runs WHERE id = 'casc-1'`);
       expect(await countLogs(pool, 'casc-1')).toBe(0);
     });
   });
@@ -226,7 +226,7 @@ describePg('log terminal boundary (p2-40)', () => {
         await sleep(5);
       }
       await pool.query(
-        `UPDATE runs SET status = 'completed', finished_at = now() WHERE id = 'mid-1'`,
+        `UPDATE better_trigger.runs SET status = 'completed', finished_at = now() WHERE id = 'mid-1'`,
       );
       await append;
 
@@ -255,7 +255,7 @@ describePg('log terminal boundary (p2-40)', () => {
         try {
           await terminal.query('BEGIN');
           await terminal.query(
-            `UPDATE runs SET status = 'completed', finished_at = now() WHERE id = $1`,
+            `UPDATE better_trigger.runs SET status = 'completed', finished_at = now() WHERE id = $1`,
             [runId],
           );
 
@@ -298,7 +298,7 @@ describePg('log terminal boundary (p2-40)', () => {
           // open to make the interleave deterministic.
           await app.query(LOCK_SELECT_TEXT, [runId, NS.projectId, NS.env]);
           await app.query(
-            `INSERT INTO logs (project_id, env, run_id, step_seq, level, message, data, ts)
+            `INSERT INTO better_trigger.logs (project_id, env, run_id, step_seq, level, message, data, ts)
              VALUES ($1, $2, $3, NULL, 'info', 'pre-terminal', NULL, now())`,
             [NS.projectId, NS.env, runId],
           );
@@ -309,12 +309,12 @@ describePg('log terminal boundary (p2-40)', () => {
           try {
             await terminal.query('BEGIN');
             const terminalUpdate = terminal.query(
-              `UPDATE runs SET status = 'completed', finished_at = now() WHERE id = $1`,
+              `UPDATE better_trigger.runs SET status = 'completed', finished_at = now() WHERE id = $1`,
               [runId],
             );
             await waitForBlocked(
               pool,
-              `UPDATE runs SET status = 'completed', finished_at = now()%`,
+              `UPDATE better_trigger.runs SET status = 'completed', finished_at = now()%`,
               `round ${i}: terminal never blocked`,
             );
 
@@ -360,7 +360,7 @@ describePg('log terminal boundary (p2-40)', () => {
         await app.query('BEGIN');
         await app.query(LOCK_SELECT_TEXT, [runId, NS.projectId, NS.env]);
         await app.query(
-          `INSERT INTO logs (project_id, env, run_id, step_seq, level, message, data, ts)
+          `INSERT INTO better_trigger.logs (project_id, env, run_id, step_seq, level, message, data, ts)
            VALUES ($1, $2, $3, NULL, 'info', 'just before complete', NULL, now())`,
           [NS.projectId, NS.env, runId],
         );
@@ -376,7 +376,7 @@ describePg('log terminal boundary (p2-40)', () => {
         // append's held lock; committing the append releases it.
         await waitForBlocked(
           pool,
-          `%FROM runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE%`,
+          `%FROM better_trigger.runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE%`,
           'completeRun never blocked on the run row',
         );
         await app.query('COMMIT');

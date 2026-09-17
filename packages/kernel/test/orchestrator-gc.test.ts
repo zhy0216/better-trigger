@@ -67,17 +67,17 @@ describe('retention GC loop', () => {
       gcIntervalMs: 10,
     });
     try {
-      await waitFor(() => texts.some((t) => /DELETE FROM workers/.test(t)));
+      await waitFor(() => texts.some((t) => /DELETE FROM better_trigger\.workers/.test(t)));
     } finally {
       handle.stop();
     }
 
-    expect(texts.some((t) => /SELECT r\.id FROM runs r/.test(t))).toBe(true);
+    expect(texts.some((t) => /SELECT r\.id FROM better_trigger\.runs r/.test(t))).toBe(true);
     expect(texts.some((t) => /r\.status = ANY/.test(t))).toBe(true);
   });
 
   it('counts its own failures instead of dying', async () => {
-    const { pool } = stubPool({ failOn: /FROM runs r/ });
+    const { pool } = stubPool({ failOn: /FROM better_trigger\.runs r/ });
 
     const handle = startOrchestrator(pool, silentLogger, {
       ...QUIET,

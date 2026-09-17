@@ -85,26 +85,26 @@ describePg('trigger-and-wait atomicity', () => {
       expect(err).toMatchObject({ code: 'task_not_found' });
 
       // The whole transaction rolled back: the parent never suspended...
-      const run = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [runId]);
+      const run = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [runId]);
       expect(run.rows[0]!.status).toBe('running');
 
       // ...no wait was ever written...
       const waits = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM waits WHERE run_id = $1`,
+        `SELECT count(*)::int AS n FROM better_trigger.waits WHERE run_id = $1`,
         [runId],
       );
       expect(waits.rows[0]!.n).toBe(0);
 
       // ...no child run was created for the typo'd task...
       const childRuns = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM runs WHERE task_id = $1`,
+        `SELECT count(*)::int AS n FROM better_trigger.runs WHERE task_id = $1`,
         ['typo-task'],
       );
       expect(childRuns.rows[0]!.n).toBe(0);
 
       // ...and the parent's queue row is still there, still claimed by us.
       const queue = await pool.query<{ n: number; locked_by: string | null }>(
-        `SELECT count(*)::int AS n, max(locked_by) AS locked_by FROM queue WHERE run_id = $1`,
+        `SELECT count(*)::int AS n, max(locked_by) AS locked_by FROM better_trigger.queue WHERE run_id = $1`,
         [runId],
       );
       expect(queue.rows[0]!.n).toBe(1);
@@ -141,13 +141,13 @@ describePg('trigger-and-wait atomicity', () => {
         parent_run_id: string | null;
         trigger_type: string;
         status: string;
-      }>(`SELECT parent_run_id, trigger_type, status FROM runs WHERE id = $1`, [res.childRunId]);
+      }>(`SELECT parent_run_id, trigger_type, status FROM better_trigger.runs WHERE id = $1`, [res.childRunId]);
       expect(child.rows).toHaveLength(1);
       expect(child.rows[0]!.parent_run_id).toBe(runId);
       expect(child.rows[0]!.trigger_type).toBe('subtask');
       expect(child.rows[0]!.status).toBe('queued');
 
-      const parent = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [runId]);
+      const parent = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [runId]);
       expect(parent.rows[0]!.status).toBe('waiting');
     });
   });
@@ -164,23 +164,23 @@ describePg('trigger-and-wait atomicity', () => {
       );
       await kernel.cancelRun(runId, NS);
 
-      const canceled = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [runId]);
+      const canceled = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [runId]);
       expect(canceled.rows[0]!.status).toBe('canceled');
 
       // Simulate the task no longer being registered by deleting its task row.
-      await pool.query(`DELETE FROM tasks WHERE id = $1 AND project_id = $2 AND env = $3`, [
+      await pool.query(`DELETE FROM better_trigger.tasks WHERE id = $1 AND project_id = $2 AND env = $3`, [
         'gone-task',
         NS.projectId,
         NS.env,
       ]);
       const tasksLeft = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM tasks WHERE id = $1`,
+        `SELECT count(*)::int AS n FROM better_trigger.tasks WHERE id = $1`,
         ['gone-task'],
       );
       expect(tasksLeft.rows[0]!.n).toBe(0);
 
-      const queueBefore = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM queue`);
-      const runsBefore = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM runs`);
+      const queueBefore = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM better_trigger.queue`);
+      const runsBefore = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM better_trigger.runs`);
 
       const err = await kernel.retryRun(runId, NS).then(
         () => {
@@ -192,8 +192,8 @@ describePg('trigger-and-wait atomicity', () => {
       expect(err).toMatchObject({ code: 'task_not_found' });
 
       // Nothing was enqueued and no new run row landed for the vanished task.
-      const queueAfter = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM queue`);
-      const runsAfter = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM runs`);
+      const queueAfter = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM better_trigger.queue`);
+      const runsAfter = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM better_trigger.runs`);
       expect(queueAfter.rows[0]!.n).toBe(queueBefore.rows[0]!.n);
       expect(runsAfter.rows[0]!.n).toBe(runsBefore.rows[0]!.n);
     });

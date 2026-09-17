@@ -59,7 +59,7 @@ function cronPool(schedules: DueSchedule[], served: string[] | 'all') {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM schedules\s+WHERE enabled/.test(sql)) {
+      if (/FROM better_trigger\.schedules\s+WHERE enabled/.test(sql)) {
         if (dueServed) return { rows: [] };
         dueServed = true;
         return {
@@ -76,7 +76,7 @@ function cronPool(schedules: DueSchedule[], served: string[] | 'all') {
         const servedSet = served === 'all' ? ids : served;
         return { rows: ids.filter((id) => servedSet.includes(id)).map((task_id) => ({ task_id })) };
       }
-      if (/INSERT INTO runs/.test(sql)) return { rows: [{ id: 'run_new' }], rowCount: 1 };
+      if (/INSERT INTO better_trigger\.runs/.test(sql)) return { rows: [{ id: 'run_new' }], rowCount: 1 };
       // createRunIn's database-clock read (T1): same tx ⇒ same now() the
       // due-scan carried as db_now.
       if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }], rowCount: 1 };
@@ -150,14 +150,14 @@ describe('scanCron — poisoned schedule isolation (04-T1)', () => {
 
     // Both schedules were served, so BOTH fired their legitimately-due run —
     // the quarantine starts AFTER the fire, not instead of it.
-    const inserts = stmts.filter((s) => /INSERT INTO runs/.test(s.sql));
+    const inserts = stmts.filter((s) => /INSERT INTO better_trigger\.runs/.test(s.sql));
     expect(inserts).toHaveLength(2);
 
     // The write-backs: the healthy schedule advanced to its next fire, the
     // poisoned one recorded its fire (last_run_*) but went next_run_at NULL —
     // the impossible-pattern treatment, silent until the pattern is fixed.
     const writeBacks = stmts.filter(
-      (s) => /UPDATE schedules/.test(s.sql) && /last_run_at = now\(\)/.test(s.sql),
+      (s) => /UPDATE better_trigger\.schedules/.test(s.sql) && /last_run_at = now\(\)/.test(s.sql),
     );
     expect(writeBacks).toHaveLength(2);
     const healthyWrite = writeBacks.find((s) => s.params[0] === HEALTHY.id)!;
@@ -195,13 +195,13 @@ describe('scanCron — poisoned schedule isolation (04-T1)', () => {
     expect(stmts.some((s) => s.sql === 'COMMIT')).toBe(true);
     expect(handle.counters.loopErrors.cron).toBe(0);
     // Only the healthy (served) schedule created a run.
-    expect(stmts.filter((s) => /INSERT INTO runs/.test(s.sql))).toHaveLength(1);
+    expect(stmts.filter((s) => /INSERT INTO better_trigger\.runs/.test(s.sql))).toHaveLength(1);
 
     // The poison went through the SKIP write-back shape (no last_run_*) with
     // a NULL next: quarantined silent, no fire.
     const skipWrite = stmts.find(
       (s) =>
-        /UPDATE schedules/.test(s.sql) &&
+        /UPDATE better_trigger\.schedules/.test(s.sql) &&
         !/last_run_at/.test(s.sql) &&
         s.params[0] === POISON.id,
     )!;

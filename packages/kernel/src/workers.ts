@@ -92,7 +92,7 @@ export async function registerWorker(
     // Insert worker row. The namespaces column is the worker's claim scope;
     // tasks/schedules are upserted per namespace below.
     await client.query(
-      `INSERT INTO workers
+      `INSERT INTO better_trigger.workers
          (id, name, code_version, runtime, tasks, namespaces, concurrency, started_at, last_heartbeat_at, status)
        VALUES ($1,$2,$3,$4,$5,$6,$7, now(), now(), 'online')`,
       [
@@ -157,7 +157,7 @@ export async function deregisterWorker(
   pool: Pool,
   args: DeregisterWorkerArgs,
 ): Promise<void> {
-  await pool.query(`UPDATE workers SET status = 'offline' WHERE id = $1`, [args.workerId]);
+  await pool.query(`UPDATE better_trigger.workers SET status = 'offline' WHERE id = $1`, [args.workerId]);
 }
 
 /* ---------------------------------------------------------------------------
@@ -216,7 +216,7 @@ async function upsertTask(
 ): Promise<boolean> {
   const triggerSource = t.cron ? 'schedule' : 'api';
   const res = await client.query(
-    `INSERT INTO tasks
+    `INSERT INTO better_trigger.tasks
        (id, project_id, env, name, file_path, trigger_source, cron_pattern, cron_tz, retry,
         concurrency_limit, latest_code_version, created_at, updated_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now(), now())
@@ -233,7 +233,7 @@ async function upsertTask(
       WHERE tasks.latest_code_version IS NULL
          OR tasks.latest_code_version = EXCLUDED.latest_code_version
          OR NOT EXISTS (
-           SELECT 1 FROM workers w
+           SELECT 1 FROM better_trigger.workers w
              CROSS JOIN LATERAL jsonb_array_elements(w.tasks) e
             WHERE w.status = 'online'
               AND w.last_heartbeat_at > now() - ($13::text || ' milliseconds')::interval
@@ -267,7 +267,7 @@ async function upsertTask(
     // still served. Name it (one indexed read on a rare path) so the log says
     // which build owns the metadata instead of only that ours lost.
     const stored = await client.query<{ latest_code_version: string | null }>(
-      `SELECT latest_code_version FROM tasks
+      `SELECT latest_code_version FROM better_trigger.tasks
         WHERE project_id = $1 AND env = $2 AND id = $3`,
       [namespace.projectId, namespace.env, t.id],
     );
@@ -323,7 +323,7 @@ async function syncSchedules(
     // enabled flag — the namespace is part of the key, so one namespace's sync
     // can never touch another's schedule rows (C2).
     await client.query(
-      `INSERT INTO schedules
+      `INSERT INTO better_trigger.schedules
          (id, project_id, env, task_id, cron_pattern, cron_tz, enabled, next_run_at, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6, true,
                CASE WHEN $7::timestamptz IS NULL THEN NULL
@@ -360,7 +360,7 @@ async function syncSchedules(
   const manifestTaskIds = tasks.map((t) => t.id);
   if (manifestTaskIds.length > 0) {
     await client.query(
-      `DELETE FROM schedules
+      `DELETE FROM better_trigger.schedules
         WHERE project_id = $1 AND env = $2
           AND task_id = ANY($3::text[]) AND task_id <> ALL($4::text[])`,
       [

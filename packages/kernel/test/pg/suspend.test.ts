@@ -78,7 +78,7 @@ describePg('suspend state machine', () => {
         status: string;
         resume_at: Date;
         fingerprint: string | null;
-      }>(`SELECT kind, status, resume_at, fingerprint FROM waits WHERE run_id = $1`, [runId]);
+      }>(`SELECT kind, status, resume_at, fingerprint FROM better_trigger.waits WHERE run_id = $1`, [runId]);
       expect(waits.rows).toHaveLength(1);
       expect(waits.rows[0]!.kind).toBe('duration');
       expect(waits.rows[0]!.status).toBe('pending');
@@ -89,18 +89,18 @@ describePg('suspend state machine', () => {
       // the offset, not equality with the host-computed timestamp.
       const rel = await pool.query<{ secs: number }>(
         `SELECT extract(epoch FROM (resume_at - now()))::float AS secs
-           FROM waits WHERE run_id = $1`,
+           FROM better_trigger.waits WHERE run_id = $1`,
         [runId],
       );
       expect(rel.rows[0]!.secs).toBeGreaterThan(55);
       expect(rel.rows[0]!.secs).toBeLessThanOrEqual(61);
       expect(waits.rows[0]!.fingerprint).toBe('fp1');
 
-      const run = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [runId]);
+      const run = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [runId]);
       expect(run.rows[0]!.status).toBe('waiting');
 
       const queue = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM queue WHERE run_id = $1`,
+        `SELECT count(*)::int AS n FROM better_trigger.queue WHERE run_id = $1`,
         [runId],
       );
       expect(queue.rows[0]!.n).toBe(0);
@@ -110,24 +110,24 @@ describePg('suspend state machine', () => {
       // the run back to 'queued' and re-insert its queue row (priority comes off
       // the runs row) — then the run must be claimable again.
       const runRow = await pool.query<{ priority: number; concurrency_key: string | null }>(
-        `SELECT priority, concurrency_key FROM runs WHERE id = $1`,
+        `SELECT priority, concurrency_key FROM better_trigger.runs WHERE id = $1`,
         [runId],
       );
       await pool.query(
-        `UPDATE waits SET status = 'completed' WHERE run_id = $1 AND project_id = $2 AND env = $3`,
+        `UPDATE better_trigger.waits SET status = 'completed' WHERE run_id = $1 AND project_id = $2 AND env = $3`,
         [runId, NS.projectId, NS.env],
       );
       await pool.query(
-        `INSERT INTO run_steps (run_id, seq, project_id, env, kind, label, status, output, error, attempt, started_at, finished_at, fingerprint)
+        `INSERT INTO better_trigger.run_steps (run_id, seq, project_id, env, kind, label, status, output, error, attempt, started_at, finished_at, fingerprint)
          VALUES ($1, $2, $3, $4, 'wait', NULL, 'completed', NULL, NULL, 1, now(), now(), $5)`,
         [runId, 0, NS.projectId, NS.env, 'fp1'],
       );
       await pool.query(
-        `UPDATE runs SET status = 'queued', updated_at = now() WHERE id = $1 AND project_id = $2 AND env = $3`,
+        `UPDATE better_trigger.runs SET status = 'queued', updated_at = now() WHERE id = $1 AND project_id = $2 AND env = $3`,
         [runId, NS.projectId, NS.env],
       );
       await pool.query(
-        `INSERT INTO queue (run_id, project_id, env, available_at, priority, concurrency_key)
+        `INSERT INTO better_trigger.queue (run_id, project_id, env, available_at, priority, concurrency_key)
          VALUES ($1, $2, $3, now(), $4, $5)`,
         [runId, NS.projectId, NS.env, runRow.rows[0]!.priority, runRow.rows[0]!.concurrency_key],
       );
@@ -162,7 +162,7 @@ describePg('suspend state machine', () => {
       expect(res).toEqual({ resumed: true });
 
       const steps = await pool.query<{ kind: string; status: string; fingerprint: string | null }>(
-        `SELECT kind, status, fingerprint FROM run_steps WHERE run_id = $1 AND seq = $2`,
+        `SELECT kind, status, fingerprint FROM better_trigger.run_steps WHERE run_id = $1 AND seq = $2`,
         [runId, 0],
       );
       expect(steps.rows).toHaveLength(1);
@@ -170,20 +170,20 @@ describePg('suspend state machine', () => {
       expect(steps.rows[0]!.status).toBe('completed');
       expect(steps.rows[0]!.fingerprint).toBe('fp1');
 
-      const run = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [runId]);
+      const run = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [runId]);
       expect(run.rows[0]!.status).toBe('running');
 
       // The claim was kept: the queue row still exists and is still this
       // worker's. No waits row was ever written.
       const queue = await pool.query<{ n: number; locked_by: string | null }>(
-        `SELECT count(*)::int AS n, max(locked_by) AS locked_by FROM queue WHERE run_id = $1`,
+        `SELECT count(*)::int AS n, max(locked_by) AS locked_by FROM better_trigger.queue WHERE run_id = $1`,
         [runId],
       );
       expect(queue.rows[0]!.n).toBe(1);
       expect(queue.rows[0]!.locked_by).toBe(workerId);
 
       const waits = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM waits WHERE run_id = $1`,
+        `SELECT count(*)::int AS n FROM better_trigger.waits WHERE run_id = $1`,
         [runId],
       );
       expect(waits.rows[0]!.n).toBe(0);
@@ -212,17 +212,17 @@ describePg('suspend state machine', () => {
         parent_run_id: string | null;
         trigger_type: string;
         status: string;
-      }>(`SELECT parent_run_id, trigger_type, status FROM runs WHERE id = $1`, [res.childRunId]);
+      }>(`SELECT parent_run_id, trigger_type, status FROM better_trigger.runs WHERE id = $1`, [res.childRunId]);
       expect(child.rows).toHaveLength(1);
       expect(child.rows[0]!.parent_run_id).toBe(runId);
       expect(child.rows[0]!.trigger_type).toBe('subtask');
       expect(child.rows[0]!.status).toBe('queued');
 
-      const parent = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [runId]);
+      const parent = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [runId]);
       expect(parent.rows[0]!.status).toBe('waiting');
 
       // The child is enqueued, the parent's queue row is gone.
-      const queues = await pool.query<{ run_id: string }>(`SELECT run_id FROM queue`);
+      const queues = await pool.query<{ run_id: string }>(`SELECT run_id FROM better_trigger.queue`);
       expect(queues.rows).toHaveLength(1);
       expect(queues.rows[0]!.run_id).toBe(res.childRunId);
 
@@ -231,7 +231,7 @@ describePg('suspend state machine', () => {
         status: string;
         child_run_id: string | null;
         fingerprint: string | null;
-      }>(`SELECT kind, status, child_run_id, fingerprint FROM waits WHERE run_id = $1`, [runId]);
+      }>(`SELECT kind, status, child_run_id, fingerprint FROM better_trigger.waits WHERE run_id = $1`, [runId]);
       expect(waits.rows).toHaveLength(1);
       expect(waits.rows[0]!.kind).toBe('run');
       expect(waits.rows[0]!.status).toBe('pending');
@@ -273,12 +273,12 @@ describePg('suspend state machine', () => {
 
       // Nothing was written: no waits row, run still running under the new claim.
       const waits = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM waits WHERE run_id = $1`,
+        `SELECT count(*)::int AS n FROM better_trigger.waits WHERE run_id = $1`,
         [runId],
       );
       expect(waits.rows[0]!.n).toBe(0);
 
-      const run = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [runId]);
+      const run = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [runId]);
       expect(run.rows[0]!.status).toBe('running');
     });
   });

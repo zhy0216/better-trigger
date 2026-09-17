@@ -52,10 +52,10 @@ const CANDIDATE_SQL = `SELECT q.id AS queue_id, q.run_id,
           r.task_id, r.payload, r.attempt, r.max_attempts,
           r.code_version, r.project_id, r.env, r.concurrency_key,
           t.concurrency_limit
-     FROM queue q
-     JOIN runs r ON r.id = q.run_id
+     FROM better_trigger.queue q
+     JOIN better_trigger.runs r ON r.id = q.run_id
                 AND r.project_id = q.project_id AND r.env = q.env
-     LEFT JOIN tasks t ON t.id = r.task_id
+     LEFT JOIN better_trigger.tasks t ON t.id = r.task_id
                 AND t.project_id = r.project_id AND t.env = r.env
     WHERE q.available_at <= now() AND q.locked_by IS NULL
       AND q.project_id = $3::text AND q.env = $4::text
@@ -77,10 +77,10 @@ const CANDIDATE_NS_SQL = `SELECT q.id AS queue_id, q.run_id,
       r.task_id, r.payload, r.attempt, r.max_attempts,
       r.code_version, r.project_id, r.env, r.concurrency_key,
       t.concurrency_limit
-   FROM queue q
-   JOIN runs r ON r.id = q.run_id
+   FROM better_trigger.queue q
+   JOIN better_trigger.runs r ON r.id = q.run_id
               AND r.project_id = q.project_id AND r.env = q.env
-   LEFT JOIN tasks t ON t.id = r.task_id
+   LEFT JOIN better_trigger.tasks t ON t.id = r.task_id
               AND t.project_id = r.project_id AND t.env = r.env
   WHERE q.available_at <= now() AND q.locked_by IS NULL
     AND q.project_id = $3::text AND q.env = $4::text
@@ -92,18 +92,18 @@ const CANDIDATE_NS_SQL = `SELECT q.id AS queue_id, q.run_id,
 
 /** The claim-time step snapshot — queue.ts claimRuns, verbatim. */
 const STEP_SQL = `SELECT seq, kind, label, status, output, error, fingerprint
-       FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
+       FROM better_trigger.run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
        ORDER BY seq ASC`;
 
 /** The run-detail newest-log page — runs.ts snapshotRun, verbatim. */
 const LOGS_SQL = `SELECT id, step_seq, level, message, data, ts
-     FROM logs WHERE run_id = $1 AND project_id = $2 AND env = $3
+     FROM better_trigger.logs WHERE run_id = $1 AND project_id = $2 AND env = $3
     ORDER BY id DESC LIMIT $4`;
 
 /** The due timer-wait scan — orchestrator.ts scanWaits phase 1, verbatim
  *  (the per-namespace form via nsPredicateFor — p1-08). */
 const TIMER_WAITS_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
-     FROM waits
+     FROM better_trigger.waits
     WHERE status = 'pending'
       AND kind IN ('duration','until')
       AND resume_at <= now()
@@ -114,7 +114,7 @@ const TIMER_WAITS_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerpri
 /** The orphan run-wait scan — orchestrator.ts scanWaits phase 1, verbatim
  *  (the per-namespace form via nsPredicateFor — p1-08). */
 const ORPHAN_WAITS_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind, child_run_id
-     FROM waits
+     FROM better_trigger.waits
     WHERE status = 'pending'
       AND kind = 'run'
       AND child_run_id IS NULL
@@ -126,13 +126,13 @@ const ORPHAN_WAITS_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerpr
 const RUNS_SQL = `SELECT id, task_id, status, attempt, max_attempts,
             recoveries, max_recoveries, parent_run_id,
             payload, project_id, env, concurrency_key, priority, code_version, fencing_token
-     FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`;
+     FROM better_trigger.runs WHERE id = $1 AND project_id = $2 AND env = $3`;
 
 /** The child-completion parent-wake probe — runs.ts wakeParentIfWaiting,
  *  verbatim. child_run_id + the child's namespace (default, prod) bind the
  *  leading columns of waits_child_run_idx; ORDER BY id gives the stable
  *  waiter order the wake walks (the sort runs over the tiny waiter set). */
-const WAKE_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerprint FROM waits
+const WAKE_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerprint FROM better_trigger.waits
       WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'
         AND project_id = $2 AND env = $3
       ORDER BY id ASC`;
@@ -140,14 +140,14 @@ const WAKE_SQL = `SELECT id, run_id, project_id, env, step_seq, fingerprint FROM
 /** The cancel-cleanup scan — runs.ts cancelRun's `UPDATE waits SET
  *  status='canceled' WHERE run_id=$1 AND status='pending' AND project_id=$2
  *  AND env=$3`, in SELECT form (EXPLAIN on the UPDATE would execute it). */
-const CANCEL_SELECT_SQL = `SELECT id FROM waits
+const CANCEL_SELECT_SQL = `SELECT id FROM better_trigger.waits
      WHERE run_id = $1 AND status = 'pending' AND project_id = $2 AND env = $3`;
 
 /** Seed `n` runs across `tasks` task ids (task rows may be absent — the claim
  *  query LEFT JOINs them; the other cases' FKs only need the runs row). */
 async function seedRuns(pool: Parameters<typeof assertIndexScan>[0], n: number, tasks: number) {
   await pool.query(
-    `INSERT INTO runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority)
+    `INSERT INTO better_trigger.runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority)
        SELECT 'run-' || g,
               'task-' || (g % $2::int),
               CASE WHEN g < $3::int THEN 'queued' ELSE 'running' END,
@@ -174,7 +174,7 @@ async function seedClaimBacklog(
   runPrefix: string,
 ) {
   await pool.query(
-    `INSERT INTO runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority, project_id, env)
+    `INSERT INTO better_trigger.runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority, project_id, env)
        SELECT $3::text || g,
               'task-' || (g % $2::int),
               CASE WHEN g < $4::int THEN 'queued' ELSE 'running' END,
@@ -186,7 +186,7 @@ async function seedClaimBacklog(
     [total, tasks, runPrefix, Math.floor(total / 2), projectId],
   );
   await pool.query(
-    `INSERT INTO queue (run_id, available_at, priority, locked_by, locked_at, lease_until, project_id, env)
+    `INSERT INTO better_trigger.queue (run_id, available_at, priority, locked_by, locked_at, lease_until, project_id, env)
        SELECT $3::text || g,
               now() - interval '1 minute',
               CASE WHEN g % 10 = 0 THEN 1 + (g % 5) ELSE 0 END,
@@ -205,7 +205,7 @@ async function seedClaimBacklog(
  *  branch), with some resolved rows the 'pending' predicate must skip. */
 async function seedWaits(pool: Parameters<typeof assertIndexScan>[0], n: number, runs: number) {
   await pool.query(
-    `INSERT INTO waits (run_id, step_seq, kind, resume_at, status, project_id, env)
+    `INSERT INTO better_trigger.waits (run_id, step_seq, kind, resume_at, status, project_id, env)
        SELECT 'run-' || (g % $2::int), g,
               CASE WHEN g % 10 = 0 THEN 'run' ELSE 'duration' END,
               CASE WHEN g % 10 = 0 THEN NULL ELSE now() - interval '1 minute' END,
@@ -229,7 +229,7 @@ async function seedScatteredWaits(
   matchG: number,
 ) {
   await pool.query(
-    `INSERT INTO waits (run_id, step_seq, kind, resume_at, status, project_id, env, child_run_id)
+    `INSERT INTO better_trigger.waits (run_id, step_seq, kind, resume_at, status, project_id, env, child_run_id)
        SELECT CASE WHEN g = $3::int THEN 'run-0' ELSE 'run-' || (g % $2::int) END, g,
               CASE WHEN g = $3::int THEN 'run'
                    WHEN g % 7 = 0 THEN 'run'
@@ -248,7 +248,7 @@ async function seedScatteredWaits(
         ORDER BY md5(g::text)`,
     [n, runs, matchG],
   );
-  await pool.query('VACUUM ANALYZE waits');
+  await pool.query('VACUUM ANALYZE better_trigger.waits');
 }
 
 describePg('index plans', () => {
@@ -260,12 +260,12 @@ describePg('index plans', () => {
       // those are exactly the rows the partial index must let the scan skip.
       const CLAIMABLE = 500;
       await pool.query(
-        `INSERT INTO tasks (id, name, trigger_source)
+        `INSERT INTO better_trigger.tasks (id, name, trigger_source)
            SELECT 'task-' || g, 'task ' || g, 'api' FROM generate_series(0, $1::int) g`,
         [TASKS - 1],
       );
       await seedClaimBacklog(pool, TOTAL, TASKS, CLAIMABLE, 'default', 'run-');
-      await pool.query('VACUUM ANALYZE tasks, runs, queue');
+      await pool.query('VACUUM ANALYZE better_trigger.tasks, better_trigger.runs, better_trigger.queue');
 
       const taskIds = Array.from({ length: TASKS }, (_, i) => `task-${i}`);
       const plan = await assertIndexScan(
@@ -289,7 +289,7 @@ describePg('index plans', () => {
       // those are exactly the rows the partial index must let the scan skip.
       const CLAIMABLE = 500;
       await pool.query(
-        `INSERT INTO tasks (id, name, trigger_source)
+        `INSERT INTO better_trigger.tasks (id, name, trigger_source)
            SELECT 'task-' || g, 'task ' || g, 'api' FROM generate_series(0, $1::int) g`,
         [TASKS - 1],
       );
@@ -301,7 +301,7 @@ describePg('index plans', () => {
       // single multi-namespace query used abandoned the index).
       await seedClaimBacklog(pool, TOTAL, TASKS, CLAIMABLE, 'default', 'run-');
       await seedClaimBacklog(pool, TOTAL, TASKS, CLAIMABLE, 'acme', 'run-acme-');
-      await pool.query('VACUUM ANALYZE tasks, runs, queue');
+      await pool.query('VACUUM ANALYZE better_trigger.tasks, better_trigger.runs, better_trigger.queue');
 
       const taskIds = Array.from({ length: TASKS }, (_, i) => `task-${i}`);
       for (const ns of [['default', 'prod'], ['acme', 'prod']] as const) {
@@ -325,12 +325,12 @@ describePg('index plans', () => {
       // PK), so the seed keeps each run's timeline at a single row to pin the
       // plain Index Scan that serves the hot snapshot path.
       await pool.query(
-        `INSERT INTO run_steps (run_id, seq, project_id, env, kind, status, attempt)
+        `INSERT INTO better_trigger.run_steps (run_id, seq, project_id, env, kind, status, attempt)
            SELECT 'run-' || (g % $1::int), 1, 'default', 'prod', 'step', 'completed', 1
              FROM generate_series(0, $1::int - 1) g`,
         [RUNS],
       );
-      await pool.query('ANALYZE runs, run_steps');
+      await pool.query('ANALYZE better_trigger.runs, better_trigger.run_steps');
 
       await assertIndexScan(pool, STEP_SQL, ['run-0', ...NS], 'run_steps');
     });
@@ -343,18 +343,18 @@ describePg('index plans', () => {
       // Logs spread across every run (so scanning the table is expensive) plus
       // a dense timeline for the queried run.
       await pool.query(
-        `INSERT INTO logs (run_id, step_seq, project_id, env, level, message)
+        `INSERT INTO better_trigger.logs (run_id, step_seq, project_id, env, level, message)
            SELECT 'run-' || (g % $2::int), g % 100, 'default', 'prod', 'info', 'log ' || g
              FROM generate_series(0, $1::int - 1) g`,
         [40000, RUNS],
       );
       await pool.query(
-        `INSERT INTO logs (run_id, step_seq, project_id, env, level, message)
+        `INSERT INTO better_trigger.logs (run_id, step_seq, project_id, env, level, message)
            SELECT $1, g, 'default', 'prod', 'info', 'log ' || g
              FROM generate_series(1, $2::int) g`,
         ['run-0', 200],
       );
-      await pool.query('ANALYZE runs, logs');
+      await pool.query('ANALYZE better_trigger.runs, better_trigger.logs');
 
       await assertIndexScan(pool, LOGS_SQL, ['run-0', ...NS, LIMIT], 'logs');
     });
@@ -365,7 +365,7 @@ describePg('index plans', () => {
       const RUNS = 8000;
       await seedRuns(pool, RUNS, 1);
       await seedWaits(pool, 20000, RUNS);
-      await pool.query('ANALYZE runs, waits');
+      await pool.query('ANALYZE better_trigger.runs, better_trigger.waits');
 
       await assertIndexScan(pool, TIMER_WAITS_SQL, [...NS], 'waits');
     });
@@ -376,7 +376,7 @@ describePg('index plans', () => {
       const RUNS = 8000;
       await seedRuns(pool, RUNS, 1);
       await seedWaits(pool, 20000, RUNS);
-      await pool.query('ANALYZE runs, waits');
+      await pool.query('ANALYZE better_trigger.runs, better_trigger.waits');
 
       await assertIndexScan(pool, ORPHAN_WAITS_SQL, [...NS], 'waits');
     });
@@ -414,7 +414,7 @@ describePg('index plans', () => {
     await withPg('plans_runs', async ({ pool }) => {
       const RUNS = 2000;
       await seedRuns(pool, RUNS, 1);
-      await pool.query('ANALYZE runs');
+      await pool.query('ANALYZE better_trigger.runs');
 
       await assertIndexScan(pool, RUNS_SQL, ['run-0', ...NS], 'runs');
     });

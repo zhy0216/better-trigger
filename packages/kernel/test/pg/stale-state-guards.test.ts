@@ -123,13 +123,13 @@ function capturingLogger(lines: string[]): KernelLogger {
 }
 
 async function runStatus(pool: Pool, id: string): Promise<string | null> {
-  const res = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [id]);
+  const res = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [id]);
   return res.rows[0]?.status ?? null;
 }
 
 async function queueRowCount(pool: Pool, id: string): Promise<number> {
   const res = await pool.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM queue WHERE run_id = $1`,
+    `SELECT count(*)::int AS n FROM better_trigger.queue WHERE run_id = $1`,
     [id],
   );
   return res.rows[0]!.n;
@@ -137,7 +137,7 @@ async function queueRowCount(pool: Pool, id: string): Promise<number> {
 
 async function pendingWaitCount(pool: Pool, id: string): Promise<number> {
   const res = await pool.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM waits WHERE run_id = $1 AND status = 'pending'`,
+    `SELECT count(*)::int AS n FROM better_trigger.waits WHERE run_id = $1 AND status = 'pending'`,
     [id],
   );
   return res.rows[0]!.n;
@@ -146,7 +146,7 @@ async function pendingWaitCount(pool: Pool, id: string): Promise<number> {
 /** Make a suspended timer due only after the race's setup has finished. */
 async function makeTimerDue(pool: Pool, runId: string): Promise<void> {
   const res = await pool.query(
-    `UPDATE waits SET resume_at = now() - interval '1 second'
+    `UPDATE better_trigger.waits SET resume_at = now() - interval '1 second'
       WHERE run_id = $1 AND kind = 'duration' AND status = 'pending'`,
     [runId],
   );
@@ -155,7 +155,7 @@ async function makeTimerDue(pool: Pool, runId: string): Promise<void> {
 
 async function stepCount(pool: Pool, id: string): Promise<number> {
   const res = await pool.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM run_steps WHERE run_id = $1`,
+    `SELECT count(*)::int AS n FROM better_trigger.run_steps WHERE run_id = $1`,
     [id],
   );
   return res.rows[0]!.n;
@@ -163,7 +163,7 @@ async function stepCount(pool: Pool, id: string): Promise<number> {
 
 async function tokenOf(pool: Pool, id: string): Promise<number> {
   const res = await pool.query<{ t: string }>(
-    `SELECT fencing_token::text AS t FROM runs WHERE id = $1`,
+    `SELECT fencing_token::text AS t FROM better_trigger.runs WHERE id = $1`,
     [id],
   );
   return Number(res.rows[0]?.t ?? '0');
@@ -179,25 +179,25 @@ async function tokenOf(pool: Pool, id: string): Promise<number> {
 async function assertStaleInvariants(pool: Pool): Promise<void> {
   const badQueue = await pool.query<{ n: number }>(
     `SELECT count(*)::int AS n
-       FROM queue q JOIN runs r ON r.id = q.run_id
+       FROM better_trigger.queue q JOIN better_trigger.runs r ON r.id = q.run_id
       WHERE r.status IN ('waiting','completed','failed','canceled')`,
   );
   expect(badQueue.rows[0]!.n).toBe(0);
   const badPending = await pool.query<{ n: number }>(
     `SELECT count(*)::int AS n
-       FROM waits w JOIN runs r ON r.id = w.run_id
+       FROM better_trigger.waits w JOIN better_trigger.runs r ON r.id = w.run_id
       WHERE w.status = 'pending' AND r.status <> 'waiting'`,
   );
   expect(badPending.rows[0]!.n).toBe(0);
   const badLock = await pool.query<{ n: number }>(
     `SELECT count(*)::int AS n
-       FROM queue q JOIN runs r ON r.id = q.run_id
+       FROM better_trigger.queue q JOIN better_trigger.runs r ON r.id = q.run_id
       WHERE q.locked_by IS NOT NULL AND r.status <> 'running'`,
   );
   expect(badLock.rows[0]!.n).toBe(0);
   const badUnlock = await pool.query<{ n: number }>(
     `SELECT count(*)::int AS n
-       FROM queue q JOIN runs r ON r.id = q.run_id
+       FROM better_trigger.queue q JOIN better_trigger.runs r ON r.id = q.run_id
       WHERE q.locked_by IS NULL AND r.status <> 'queued'`,
   );
   expect(badUnlock.rows[0]!.n).toBe(0);
@@ -229,7 +229,7 @@ describePg('stale-state transition guards (p2-39)', () => {
         expect(await runStatus(pool, `run-${status}`)).toBe(status);
         expect(await tokenOf(pool, `run-${status}`)).toBe(0);
         const q = await pool.query<{ locked_by: string | null }>(
-          `SELECT locked_by FROM queue WHERE run_id = $1`,
+          `SELECT locked_by FROM better_trigger.queue WHERE run_id = $1`,
           [`run-${status}`],
         );
         expect(q.rows).toHaveLength(1);
@@ -257,10 +257,10 @@ describePg('stale-state transition guards (p2-39)', () => {
       try {
         await raw.query('BEGIN');
         await raw.query(
-          `UPDATE runs SET status = 'completed', finished_at = now() WHERE id = 'run-race-terminal'`,
+          `UPDATE better_trigger.runs SET status = 'completed', finished_at = now() WHERE id = 'run-race-terminal'`,
         );
         await raw.query(
-          `UPDATE runs SET status = 'running' WHERE id = 'run-race-running'`,
+          `UPDATE better_trigger.runs SET status = 'running' WHERE id = 'run-race-running'`,
         );
 
         const pending = kernel.claimRuns({
@@ -357,7 +357,7 @@ describePg('stale-state transition guards (p2-39)', () => {
         while (left > 0 && Date.now() < deadline) {
           await sleep(50);
           const res = await pool.query<{ n: number }>(
-            `SELECT count(*)::int AS n FROM waits WHERE status = 'pending'`,
+            `SELECT count(*)::int AS n FROM better_trigger.waits WHERE status = 'pending'`,
           );
           left = res.rows[0]!.n;
         }
@@ -371,7 +371,7 @@ describePg('stale-state transition guards (p2-39)', () => {
         // the resume wrote nothing: no step row, no queue row.
         expect(await runStatus(pool, `run-${status}`)).toBe(status);
         const w = await pool.query<{ s: string }>(
-          `SELECT status AS s FROM waits WHERE run_id = $1`,
+          `SELECT status AS s FROM better_trigger.waits WHERE run_id = $1`,
           [`run-${status}`],
         );
         expect(w.rows[0]!.s).toBe('canceled');
@@ -449,15 +449,15 @@ describePg('stale-state transition guards (p2-39)', () => {
       expect(claimed).toEqual([]);
 
       const cross = await pool.query<{ status: string; t: string }>(
-        `SELECT status, fencing_token::text AS t FROM runs WHERE id = 'run-cross'`,
+        `SELECT status, fencing_token::text AS t FROM better_trigger.runs WHERE id = 'run-cross'`,
       );
       expect(cross.rows[0]).toMatchObject({ status: 'queued', t: '0' });
       const crossQ = await pool.query<{ locked_by: string | null }>(
-        `SELECT locked_by FROM queue WHERE run_id = 'run-cross'`,
+        `SELECT locked_by FROM better_trigger.queue WHERE run_id = 'run-cross'`,
       );
       expect(crossQ.rows[0]!.locked_by).toBeNull();
       const ghostQ = await pool.query<{ n: number; locked_by: string | null }>(
-        `SELECT count(*)::int AS n, max(locked_by) AS locked_by FROM queue WHERE run_id = 'run-ghost'`,
+        `SELECT count(*)::int AS n, max(locked_by) AS locked_by FROM better_trigger.queue WHERE run_id = 'run-ghost'`,
       );
       expect(ghostQ.rows[0]!.n).toBe(1);
       expect(ghostQ.rows[0]!.locked_by).toBeNull();
@@ -500,7 +500,7 @@ describePg('stale-state transition guards (p2-39)', () => {
       // recovery spent — the reaper must never transition a terminal run.
       expect(await runStatus(pool, 'run-completed')).toBe('completed');
       const completedRecoveries = await pool.query<{ r: number }>(
-        `SELECT recoveries AS r FROM runs WHERE id = 'run-completed'`,
+        `SELECT recoveries AS r FROM better_trigger.runs WHERE id = 'run-completed'`,
       );
       expect(completedRecoveries.rows[0]!.r).toBe(0);
       expect(await queueRowCount(pool, 'run-completed')).toBe(0);
@@ -509,11 +509,11 @@ describePg('stale-state transition guards (p2-39)', () => {
       // and becomes claimable again — never flipped, never re-spent.
       expect(await runStatus(pool, 'run-queued')).toBe('queued');
       const queuedRecoveries = await pool.query<{ r: number }>(
-        `SELECT recoveries AS r FROM runs WHERE id = 'run-queued'`,
+        `SELECT recoveries AS r FROM better_trigger.runs WHERE id = 'run-queued'`,
       );
       expect(queuedRecoveries.rows[0]!.r).toBe(0);
       const q = await pool.query<{ locked_by: string | null; lease: Date | null }>(
-        `SELECT locked_by, lease_until AS lease FROM queue WHERE run_id = 'run-queued'`,
+        `SELECT locked_by, lease_until AS lease FROM better_trigger.queue WHERE run_id = 'run-queued'`,
       );
       expect(q.rows[0]!.locked_by).toBeNull();
       expect(q.rows[0]!.lease).toBeNull();
@@ -553,12 +553,12 @@ describePg('stale-state transition guards (p2-39)', () => {
 
       expect(await runStatus(pool, runId)).toBe('queued');
       const rec = await pool.query<{ r: number }>(
-        `SELECT recoveries AS r FROM runs WHERE id = $1`,
+        `SELECT recoveries AS r FROM better_trigger.runs WHERE id = $1`,
         [runId],
       );
       expect(rec.rows[0]!.r).toBe(1);
       const q = await pool.query<{ locked_by: string | null }>(
-        `SELECT locked_by FROM queue WHERE run_id = $1`,
+        `SELECT locked_by FROM better_trigger.queue WHERE run_id = $1`,
         [runId],
       );
       expect(q.rows[0]!.locked_by).toBeNull();
@@ -688,7 +688,7 @@ describePg('stale-state transition guards (p2-39)', () => {
       // Final sweep: every row that ever existed is terminal and consistent.
       await assertStaleInvariants(pool);
       const leftover = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM runs WHERE status NOT IN ('completed','failed','canceled')`,
+        `SELECT count(*)::int AS n FROM better_trigger.runs WHERE status NOT IN ('completed','failed','canceled')`,
       );
       expect(leftover.rows[0]!.n).toBe(0);
     });

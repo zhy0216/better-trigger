@@ -51,7 +51,7 @@ async function seedRun(ctx: PgContext): Promise<{ workerId: string; runId: strin
 /** Plant `count` completed run_steps rows with a contiguous seq 0..count-1. */
 async function insertSteps(pool: Pool, runId: string, count: number): Promise<void> {
   await pool.query(
-    `INSERT INTO run_steps (run_id, seq, project_id, env, kind, label, status, output, error, attempt, started_at, finished_at, fingerprint)
+    `INSERT INTO better_trigger.run_steps (run_id, seq, project_id, env, kind, label, status, output, error, attempt, started_at, finished_at, fingerprint)
      SELECT $1, g, $2, $3, 'step', 's', 'completed', NULL, NULL, 1, now(), now(), NULL
        FROM generate_series(0, $4 - 1) AS g`,
     [runId, NS.projectId, NS.env, count],
@@ -88,7 +88,7 @@ describePg('maxSteps ledger cap', () => {
       // The truncation is a claim flag, not a claim escape: the run went
       // 'running', its fencing token was bumped, and the queue row is locked.
       const runRow = await pool.query<{ status: string; fencing_token: string }>(
-        `SELECT status, fencing_token FROM runs WHERE id = $1`,
+        `SELECT status, fencing_token FROM better_trigger.runs WHERE id = $1`,
         [runId],
       );
       expect(runRow.rows[0]!.status).toBe('running');
@@ -98,14 +98,14 @@ describePg('maxSteps ledger cap', () => {
         locked_by: string | null;
         locked_at: Date | null;
         lease_until: Date | null;
-      }>(`SELECT locked_by, locked_at, lease_until FROM queue WHERE run_id = $1`, [runId]);
+      }>(`SELECT locked_by, locked_at, lease_until FROM better_trigger.queue WHERE run_id = $1`, [runId]);
       expect(queue.rows[0]!.locked_by).toBe(workerId);
       expect(queue.rows[0]!.locked_at).not.toBeNull();
       expect(queue.rows[0]!.lease_until).not.toBeNull();
 
       // The ledger itself is intact — the cap only trims the claimed snapshot.
       const full = await pool.query<{ n: string }>(
-        `SELECT count(*)::text AS n FROM run_steps WHERE run_id = $1`,
+        `SELECT count(*)::text AS n FROM better_trigger.run_steps WHERE run_id = $1`,
         [runId],
       );
       expect(Number(full.rows[0]!.n)).toBe(FAT_STEPS);

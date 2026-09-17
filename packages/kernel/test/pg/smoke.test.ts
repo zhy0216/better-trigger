@@ -16,7 +16,7 @@ describePg('infra smoke', () => {
         payload: { n: 1 },
         namespace: { projectId: 'default', env: 'prod' },
       });
-      const row = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [
+      const row = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [
         created.runId,
       ]);
       expect(row.rows[0]?.status).toBe('queued');

@@ -67,7 +67,7 @@ const makePool = (
         rowCount: 1,
       };
     }
-    if (/^INSERT INTO logs/.test(sql)) {
+    if (/^INSERT INTO better_trigger\.logs/.test(sql)) {
       // $1 run id + $2/$3 namespace are shared; row params start at $4.
       const rows = (params.length - 3) / PARAMS_PER_ROW;
       inserts += 1;
@@ -108,7 +108,7 @@ const chunkShape = (stmts: Stmt[]): { select: Stmt; insert: Stmt }[] => {
   let select: Stmt | null = null;
   for (const s of stmts) {
     if (/^SELECT finished_at/.test(s.sql)) select = s;
-    else if (select && /^INSERT INTO logs/.test(s.sql)) {
+    else if (select && /^INSERT INTO better_trigger\.logs/.test(s.sql)) {
       shapes.push({ select, insert: s });
       select = null;
     }
@@ -124,8 +124,8 @@ describe('appendLogs', () => {
     // Exactly one chunk: BEGIN, lock SELECT, INSERT, COMMIT — nothing else.
     expect(stmts).toHaveLength(4);
     expect(stmts[0]!.sql).toBe('BEGIN');
-    expect(stmts[1]!.sql).toMatch(/^SELECT finished_at FROM runs .*FOR UPDATE$/);
-    expect(stmts[2]!.sql).toMatch(/^INSERT INTO logs /);
+    expect(stmts[1]!.sql).toMatch(/^SELECT finished_at FROM better_trigger\.runs .*FOR UPDATE$/);
+    expect(stmts[2]!.sql).toMatch(/^INSERT INTO better_trigger\.logs /);
     expect(stmts[3]!.sql).toBe('COMMIT');
     const shapes = chunkShape(stmts);
     expect(shapes).toHaveLength(1);
@@ -142,7 +142,7 @@ describe('appendLogs', () => {
       { ts: '2026-07-30T00:00:00.000Z', level: 'warn', message: 'hi', stepSeq: 2, data: { a: 1 } },
     ]);
 
-    const insert = stmts.find((s) => /^INSERT INTO logs/.test(s.sql))!;
+    const insert = stmts.find((s) => /^INSERT INTO better_trigger\.logs/.test(s.sql))!;
     // run id once at $1, namespace at $2/$3, then the row's five columns.
     expect(insert.params).toEqual([
       'run_1',
@@ -167,7 +167,7 @@ describe('appendLogs', () => {
     expect(inserted).toEqual([]);
     // Lock still taken (it IS the decision) — the INSERT never ran.
     expect(stmts.some((s) => /^SELECT finished_at/.test(s.sql))).toBe(true);
-    expect(stmts.some((s) => /^INSERT INTO logs/.test(s.sql))).toBe(false);
+    expect(stmts.some((s) => /^INSERT INTO better_trigger\.logs/.test(s.sql))).toBe(false);
     expect(warns).toHaveLength(1);
     expect(warns[0]).toMatch(/\[runs:logs\] dropped 3 log line\(s\): run run_1 \(default\/prod\) already terminal/);
   });
@@ -236,7 +236,7 @@ describe('appendLogs', () => {
     expect(inserted[0]!.rows).toBe(2);
     // Only the two good lines reach the VALUES list — the bad pair never
     // makes it anywhere near a cast or a CHECK.
-    const insert = stmts.find((s) => /^INSERT INTO logs/.test(s.sql))!;
+    const insert = stmts.find((s) => /^INSERT INTO better_trigger\.logs/.test(s.sql))!;
     const messages = insert.params.filter((p) => typeof p === 'string' && /^good \d$/.test(p));
     expect(messages).toEqual(['good 1', 'good 2']);
     expect(insert.params).not.toContain('bad level');

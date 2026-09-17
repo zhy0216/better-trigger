@@ -250,7 +250,7 @@ export async function appendLogs(
     // hold time is one INSERT at most, never the whole flush.
     await withTx(pool, async (client) => {
       const locked = await client.query<{ finished_at: Date | null }>(
-        `SELECT finished_at FROM runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
+        `SELECT finished_at FROM better_trigger.runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
         [runId, namespace.projectId, namespace.env],
       );
       if (!locked.rows[0]) {
@@ -273,7 +273,7 @@ export async function appendLogs(
       // slip through. The FK's key-share check on runs is satisfied by the
       // FOR UPDATE we already hold.
       await client.query(
-        `INSERT INTO logs (project_id, env, run_id, step_seq, level, message, data, ts)
+        `INSERT INTO better_trigger.logs (project_id, env, run_id, step_seq, level, message, data, ts)
          SELECT $2::text, $3::text, $1::text, v.step_seq, v.level, v.message, v.data, v.ts
            FROM (VALUES ${values.join(',')}) AS v(step_seq, level, message, data, ts)`,
         params,

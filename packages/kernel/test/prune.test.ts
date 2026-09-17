@@ -52,7 +52,7 @@ function stubPool(runIds: string[] = []) {
         rowCount: 0,
       };
     }
-    if (/SELECT r\.id FROM runs r/.test(sql)) {
+    if (/SELECT r\.id FROM better_trigger\.runs r/.test(sql)) {
       const limit = Number(params[2] ?? 0);
       return { rows: remaining.slice(0, limit).map((id) => ({ id })), rowCount: 0 };
     }
@@ -62,10 +62,10 @@ function stubPool(runIds: string[] = []) {
         rowCount: 0,
       };
     }
-    if (/count\(\*\) AS count FROM workers/.test(sql)) {
+    if (/count\(\*\) AS count FROM better_trigger\.workers/.test(sql)) {
       return { rows: [{ count: '5' }], rowCount: 0 };
     }
-    if (/^DELETE FROM runs/.test(sql)) {
+    if (/^DELETE FROM better_trigger\.runs/.test(sql)) {
       const ids = (params[0] as string[] | undefined) ?? [];
       remaining = remaining.filter((id) => !ids.includes(id));
       return { rows: [], rowCount: ids.length };
@@ -120,7 +120,7 @@ describe('prune candidate selection', () => {
 
     await prune(pool, { olderThanMs: RETENTION , namespaces: [DEFAULT_NAMESPACE]});
 
-    const candidate = find(stmts, /SELECT r\.id FROM runs r/)!;
+    const candidate = find(stmts, /SELECT r\.id FROM better_trigger\.runs r/)!;
     expect(candidate.sql).toMatch(/r\.status = ANY\(\$2::text\[\]\)/);
     expect(candidate.params[1]).toEqual(['completed', 'failed', 'canceled']);
     // queued / running / waiting are absent on purpose: a run stuck for a month
@@ -133,7 +133,7 @@ describe('prune candidate selection', () => {
 
     await prune(pool, { olderThanMs: RETENTION , namespaces: [DEFAULT_NAMESPACE]});
 
-    const candidate = find(stmts, /SELECT r\.id FROM runs r/)!;
+    const candidate = find(stmts, /SELECT r\.id FROM better_trigger\.runs r/)!;
     expect(candidate.sql).toMatch(/COALESCE\(r\.finished_at, r\.updated_at\) < \$1/);
     expect(candidate.sql).not.toMatch(/created_at/);
   });
@@ -144,7 +144,7 @@ describe('prune candidate selection', () => {
 
     const res = await prune(pool, { olderThanMs: RETENTION , namespaces: [DEFAULT_NAMESPACE]});
 
-    const candidate = find(stmts, /SELECT r\.id FROM runs r/)!;
+    const candidate = find(stmts, /SELECT r\.id FROM better_trigger\.runs r/)!;
     const cutoff = candidate.params[0] as Date;
     expect(cutoff).toBeInstanceOf(Date);
     expect(cutoff.getTime()).toBeGreaterThanOrEqual(before - RETENTION);
@@ -160,7 +160,7 @@ describe('prune deletion', () => {
     const res = await prune(pool, { olderThanMs: RETENTION, namespaces: [DEFAULT_NAMESPACE], batchSize: 2 });
 
     // 2 + 2 + 1 → the short batch ends the loop; a fourth pass would be a bug.
-    const runDeletes = stmts.filter((s) => /^DELETE FROM runs/.test(s.sql));
+    const runDeletes = stmts.filter((s) => /^DELETE FROM better_trigger\.runs/.test(s.sql));
     expect(runDeletes.map((s) => s.params[0])).toEqual([['a', 'b'], ['c', 'd'], ['e']]);
     expect(res.runs).toBe(5);
     // Counted per batch, from the pre-delete count query (3 steps / 7 logs).
@@ -177,13 +177,13 @@ describe('prune deletion', () => {
     // would be two definitions of "delete a run" free to drift apart. waits is
     // the same story since 0011 extended the cascade to it.
     const deleted = deletes(stmts).map((s) => s.sql);
-    expect(deleted.some((sql) => /DELETE FROM logs/.test(sql))).toBe(false);
-    expect(deleted.some((sql) => /DELETE FROM run_steps/.test(sql))).toBe(false);
-    expect(deleted.some((sql) => /DELETE FROM waits/.test(sql))).toBe(false);
+    expect(deleted.some((sql) => /DELETE FROM better_trigger\.logs/.test(sql))).toBe(false);
+    expect(deleted.some((sql) => /DELETE FROM better_trigger\.run_steps/.test(sql))).toBe(false);
+    expect(deleted.some((sql) => /DELETE FROM better_trigger\.waits/.test(sql))).toBe(false);
     // queue IS still deleted by hand — ahead of the runs DELETE, to take the
     // row in canonical lock order (position 1) instead of letting the cascade
     // reach it from behind the runs lock, where the reaper could deadlock.
-    expect(deleted.some((sql) => /DELETE FROM queue WHERE run_id/.test(sql))).toBe(true);
+    expect(deleted.some((sql) => /DELETE FROM better_trigger\.queue WHERE run_id/.test(sql))).toBe(true);
     // The counts the report needs must come from a pre-delete SELECT: the
     // cascade reports nothing back about the rows it removed. waits is
     // counted in both directions — run_id rows die by cascade, child_run_id
@@ -191,7 +191,7 @@ describe('prune deletion', () => {
     const counts = find(stmts, /AS run_steps/);
     expect(counts!.sql).toMatch(/AS waits/);
     expect(counts!.sql).toMatch(/AS queue/);
-    expect(counts!.sql).toMatch(/SELECT \(SELECT count\(\*\) FROM run_steps/);
+    expect(counts!.sql).toMatch(/SELECT \(SELECT count\(\*\) FROM better_trigger\.run_steps/);
     expect(counts!.sql).toMatch(/OR child_run_id = ANY\(\$1::text\[\]\)/);
   });
 
@@ -209,8 +209,8 @@ describe('prune deletion', () => {
 
     await prune(pool, { olderThanMs: RETENTION , namespaces: [DEFAULT_NAMESPACE]});
 
-    const workers = find(stmts, /DELETE FROM workers/)!;
-    const candidate = find(stmts, /SELECT r\.id FROM runs r/)!;
+    const workers = find(stmts, /DELETE FROM better_trigger\.workers/)!;
+    const candidate = find(stmts, /SELECT r\.id FROM better_trigger\.runs r/)!;
     expect(workers.params[0]).toEqual(candidate.params[0]);
   });
 });
@@ -221,7 +221,7 @@ describe('prune workers', () => {
 
     await prune(pool, { olderThanMs: RETENTION , namespaces: [DEFAULT_NAMESPACE]});
 
-    const workers = find(stmts, /DELETE FROM workers/)!;
+    const workers = find(stmts, /DELETE FROM better_trigger\.workers/)!;
     // A merely stale *online* row belongs to the offline-marker loop; deleting
     // it here would erase a daemon that is in fact still running.
     expect(workers.sql).toMatch(/status = 'offline'/);

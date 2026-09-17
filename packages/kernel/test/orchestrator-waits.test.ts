@@ -71,7 +71,7 @@ function stubPool(opts: StubOptions = {}) {
       if (/^SELECT now\(\)/.test(text)) return { rows: [{ now: new Date() }] };
 
       // Canonical position 2 — the runs row.
-      if (/FROM runs WHERE id = \$1/.test(text)) {
+      if (/FROM better_trigger\.runs WHERE id = \$1/.test(text)) {
         const runId = String(params?.[0]);
         const row = due.find((d) => d.runId === runId);
         if (heldRuns.has(runId)) {
@@ -106,7 +106,7 @@ function stubPool(opts: StubOptions = {}) {
       // The timer resume's expected-old-state flip (p2-39): a live server
       // answers 1 row for a run that is 'waiting' and 0 for anything else —
       // the 0-row answer is the stale branch (wait canceled, run untouched).
-      if (/UPDATE runs SET status = 'queued'/.test(text)) {
+      if (/UPDATE better_trigger\.runs SET status = 'queued'/.test(text)) {
         const runId = String(params?.[0]);
         const known = due.some((d) => d.runId === runId);
         return { rows: known ? [{ id: runId }] : [], rowCount: known ? 1 : 0 };
@@ -117,7 +117,7 @@ function stubPool(opts: StubOptions = {}) {
       // clause must be last — a C2 regression once put `AND project_id` after
       // `FOR UPDATE SKIP LOCKED`, which is a 42601 syntax error on every
       // Postgres), so match `pending'` → `FOR UPDATE` across the gap.
-      if (/FROM waits WHERE id = \$1 AND status = 'pending'[\s\S]*FOR UPDATE/.test(text)) {
+      if (/FROM better_trigger\.waits WHERE id = \$1 AND status = 'pending'[\s\S]*FOR UPDATE/.test(text)) {
         const id = Number(params?.[0]);
         if (heldWaits.has(id)) {
           if (!/SKIP LOCKED/.test(text)) {
@@ -131,7 +131,7 @@ function stubPool(opts: StubOptions = {}) {
 
       // The resume's step-row write (upsertStep): record the fingerprint slot
       // (param 11 of the INSERT) so tests can pin the waits→run_steps carry.
-      if (/INSERT INTO run_steps/.test(text)) {
+      if (/INSERT INTO better_trigger\.run_steps/.test(text)) {
         // $1 run id, $2/$3 namespace, $4 seq, … fingerprint is param 13.
         const fp = params?.[12];
         stepFingerprints.push(typeof fp === 'string' ? fp : null);
@@ -147,7 +147,7 @@ function stubPool(opts: StubOptions = {}) {
     connect: async () => client,
     query: async (text: string) => {
       texts.push(text);
-      if (/FROM waits/.test(text) && /resume_at <= now\(\)/.test(text)) {
+      if (/FROM better_trigger\.waits/.test(text) && /resume_at <= now\(\)/.test(text)) {
         // Served once: on a 20ms loop the same batch would come back forever
         // and nothing could be counted exactly.
         if (scanned) return { rows: [] };
@@ -184,9 +184,9 @@ async function waitFor(pred: () => boolean, timeoutMs = 5_000): Promise<void> {
 
 /** Statements that only a wait actually being resumed produces. */
 const resumedWaitIds = (texts: string[]) =>
-  texts.filter((t) => /UPDATE waits SET status = 'completed'/.test(t)).length;
+  texts.filter((t) => /UPDATE better_trigger\.waits SET status = 'completed'/.test(t)).length;
 const enqueued = (texts: string[]) =>
-  texts.filter((t) => /INSERT INTO queue/.test(t)).length;
+  texts.filter((t) => /INSERT INTO better_trigger\.queue/.test(t)).length;
 
 describe('scanWaits lock acquisition', () => {
   it('takes the runs and wait rows with SKIP LOCKED, the queue row without', async () => {
@@ -202,17 +202,17 @@ describe('scanWaits lock acquisition', () => {
     }
 
     expect(
-      texts.some((t) => /FROM runs WHERE id = \$1.*FOR UPDATE SKIP LOCKED/.test(t)),
+      texts.some((t) => /FROM better_trigger\.runs WHERE id = \$1.*FOR UPDATE SKIP LOCKED/.test(t)),
     ).toBe(true);
     expect(
-      texts.some((t) => /FROM waits WHERE id = \$1 AND status = 'pending'[\s\S]*FOR UPDATE SKIP LOCKED/.test(t)),
+      texts.some((t) => /FROM better_trigger\.waits WHERE id = \$1 AND status = 'pending'[\s\S]*FOR UPDATE SKIP LOCKED/.test(t)),
     ).toBe(true);
     // Position 1 is deliberately blocking: for a waiting run there is no queue
     // row at all, and holding it when a stale one exists is what stops the
     // closing INSERT ... ON CONFLICT from waiting on queue while runs is held
     // (see the lock-order header in runs.ts).
     expect(
-      texts.some((t) => /FROM queue WHERE run_id = \$1.*FOR UPDATE/.test(t)),
+      texts.some((t) => /FROM better_trigger\.queue WHERE run_id = \$1.*FOR UPDATE/.test(t)),
     ).toBe(true);
   }, 10_000);
 
@@ -238,7 +238,7 @@ describe('scanWaits lock acquisition', () => {
     // the lock; this instance wrote nothing for it.
     expect(resumedWaitIds(texts)).toBe(1);
     expect(enqueued(texts)).toBe(1);
-    expect(texts.some((t) => /FROM waits WHERE id = \$1/.test(t))).toBe(true);
+    expect(texts.some((t) => /FROM better_trigger\.waits WHERE id = \$1/.test(t))).toBe(true);
   }, 10_000);
 
   it('skips a wait whose wait row a peer holds', async () => {
@@ -299,7 +299,7 @@ describe('scanWaits lock acquisition', () => {
     // And the write goes through the immutable upsertStep path — the SQL shape
     // that refuses to overwrite a completed row (C1).
     expect(
-      texts.some((t) => /INSERT INTO run_steps/.test(t) && /status <> 'completed'/.test(t)),
+      texts.some((t) => /INSERT INTO better_trigger\.run_steps/.test(t) && /status <> 'completed'/.test(t)),
     ).toBe(true);
   }, 10_000);
 
@@ -320,7 +320,7 @@ describe('scanWaits lock acquisition', () => {
     }
 
     const timerQuery = texts.find(
-      (t) => /FROM waits/.test(t) && /resume_at <= now\(\)/.test(t),
+      (t) => /FROM better_trigger\.waits/.test(t) && /resume_at <= now\(\)/.test(t),
     );
     const orphanQuery = texts.find((t) => /kind = 'run'[\s\S]*child_run_id IS NULL/.test(t));
 

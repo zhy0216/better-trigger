@@ -30,12 +30,12 @@ describePg('idempotency', () => {
       expect(second.runId).toBe(first.runId);
       expect(second.idempotent).toBe(true);
 
-      const runs = await pool.query(`SELECT id, idempotency_key FROM runs`);
+      const runs = await pool.query(`SELECT id, idempotency_key FROM better_trigger.runs`);
       expect(runs.rows).toHaveLength(1);
       expect(runs.rows[0].id).toBe(first.runId);
       expect(runs.rows[0].idempotency_key).toBe('k-1');
 
-      const queue = await pool.query<{ run_id: string }>(`SELECT run_id FROM queue`);
+      const queue = await pool.query<{ run_id: string }>(`SELECT run_id FROM better_trigger.queue`);
       expect(queue.rows).toHaveLength(1);
       expect(queue.rows[0].run_id).toBe(first.runId);
     });
@@ -68,9 +68,9 @@ describePg('idempotency', () => {
       expect(b.idempotent).toBe(false);
       expect(b.runId).not.toBe(a.runId);
 
-      const runs = await pool.query(`SELECT count(*)::int AS n FROM runs`);
+      const runs = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.runs`);
       expect(runs.rows[0].n).toBe(2);
-      const queue = await pool.query(`SELECT count(*)::int AS n FROM queue`);
+      const queue = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.queue`);
       expect(queue.rows[0].n).toBe(2);
     });
   });
@@ -104,13 +104,13 @@ describePg('idempotency', () => {
       expect(b.runId).not.toBe(a.runId);
 
       const runs = await pool.query<{ id: string; project_id: string }>(
-        `SELECT id, project_id FROM runs ORDER BY project_id`,
+        `SELECT id, project_id FROM better_trigger.runs ORDER BY project_id`,
       );
       expect(runs.rows).toHaveLength(2);
       expect(runs.rows.map((r) => r.id).sort()).toEqual([a.runId, b.runId].sort());
       expect(runs.rows.map((r) => r.project_id).sort()).toEqual(['acme', 'default']);
 
-      const queue = await pool.query(`SELECT count(*)::int AS n FROM queue`);
+      const queue = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.queue`);
       expect(queue.rows[0].n).toBe(2);
     });
   });
@@ -140,9 +140,9 @@ describePg('idempotency', () => {
       expect(batch.runIds).toHaveLength(1);
       expect(batch.runIds[0]).toBe(single.runId);
 
-      const runs = await pool.query(`SELECT count(*)::int AS n FROM runs`);
+      const runs = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.runs`);
       expect(runs.rows[0].n).toBe(1);
-      const queue = await pool.query(`SELECT count(*)::int AS n FROM queue`);
+      const queue = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.queue`);
       expect(queue.rows[0].n).toBe(1);
     });
   });

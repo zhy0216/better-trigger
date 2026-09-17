@@ -32,7 +32,7 @@ async function seedPinnedRun(kernel: Kernel, pool: Pool): Promise<string> {
   // The run is stamped with the task's registered version — the column the
   // stranded scan filters on.
   const row = await pool.query<{ code_version: string }>(
-    `SELECT code_version FROM runs WHERE id = $1`,
+    `SELECT code_version FROM better_trigger.runs WHERE id = $1`,
     [runId],
   );
   expect(row.rows[0]!.code_version).toBe(VERSION);
@@ -57,25 +57,25 @@ describePg('stranded-run scan heartbeat window (04-T4)', () => {
       // scan must agree with the cron served-check and the registration
       // guard: the run IS stranded. Pre-fix this reported empty.
       await pool.query(
-        `UPDATE workers SET last_heartbeat_at = now() - interval '3 minutes'`,
+        `UPDATE better_trigger.workers SET last_heartbeat_at = now() - interval '3 minutes'`,
       );
       const stale = await scan(pool);
       expect(stale.groups).toEqual([{ taskId: TASK_ID, codeVersion: VERSION, count: 1 }]);
       expect(stale.truncated).toBe(false);
 
       // Inside the window again (heartbeat lands): served once more.
-      await pool.query(`UPDATE workers SET last_heartbeat_at = now()`);
+      await pool.query(`UPDATE better_trigger.workers SET last_heartbeat_at = now()`);
       expect((await scan(pool)).groups).toEqual([]);
 
       // And a row flipped offline by the marker is still stranded, of course.
-      await pool.query(`UPDATE workers SET status = 'offline'`);
+      await pool.query(`UPDATE better_trigger.workers SET status = 'offline'`);
       expect((await scan(pool)).groups).toEqual([
         { taskId: TASK_ID, codeVersion: VERSION, count: 1 },
       ]);
 
       // Cleanup sanity: the run was never claimed by any of this.
       const queue = await pool.query<{ locked_by: string | null }>(
-        `SELECT locked_by FROM queue WHERE run_id = $1`,
+        `SELECT locked_by FROM better_trigger.queue WHERE run_id = $1`,
         [runId],
       );
       expect(queue.rows[0]!.locked_by).toBeNull();
@@ -89,14 +89,14 @@ describePg('stranded-run scan heartbeat window (04-T4)', () => {
       // Rewrite the manifest to the OLD shape: a bare id string, no per-task
       // codeVersion. It normalizes to the worker-level code_version — the
       // version that build stamped — which is exactly the run's version.
-      await pool.query(`UPDATE workers SET tasks = $1::jsonb`, [
+      await pool.query(`UPDATE better_trigger.workers SET tasks = $1::jsonb`, [
         JSON.stringify([TASK_ID]),
       ]);
       expect((await scan(pool)).groups).toEqual([]);
 
       // A legacy row of a DIFFERENT build (code_version mismatch) does not
       // serve the run.
-      await pool.query(`UPDATE workers SET code_version = 'v-other'`);
+      await pool.query(`UPDATE better_trigger.workers SET code_version = 'v-other'`);
       expect((await scan(pool)).groups).toEqual([
         { taskId: TASK_ID, codeVersion: VERSION, count: 1 },
       ]);

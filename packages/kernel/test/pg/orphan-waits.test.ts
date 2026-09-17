@@ -53,25 +53,25 @@ const ORPHAN_RUN = 'run-orphan';
  *  resume_at NULL, the C5 shape after the child run was deleted). */
 async function seedBacklog(pool: Pool): Promise<void> {
   await pool.query(
-    `INSERT INTO runs (id, project_id, env, task_id, status, trigger_type)
+    `INSERT INTO better_trigger.runs (id, project_id, env, task_id, status, trigger_type)
        SELECT 'run-timer-' || g, $1, $2, $3, 'waiting', 'api'
          FROM generate_series(0, $4::int) g`,
     [NS.projectId, NS.env, TASK_ID, TIMER_RUNS - 1],
   );
   await pool.query(
-    `INSERT INTO waits (run_id, project_id, env, step_seq, kind, resume_at, status)
+    `INSERT INTO better_trigger.waits (run_id, project_id, env, step_seq, kind, resume_at, status)
        SELECT 'run-timer-' || g, $1, $2, 0, 'duration', now() - interval '1 hour', 'pending'
          FROM generate_series(0, $3::int) g`,
     [NS.projectId, NS.env, TIMER_RUNS - 1],
   );
 
   await pool.query(
-    `INSERT INTO runs (id, project_id, env, task_id, status, trigger_type)
+    `INSERT INTO better_trigger.runs (id, project_id, env, task_id, status, trigger_type)
      VALUES ($1, $2, $3, $4, 'waiting', 'api')`,
     [ORPHAN_RUN, NS.projectId, NS.env, TASK_ID],
   );
   await pool.query(
-    `INSERT INTO waits (run_id, project_id, env, step_seq, kind, child_run_id, resume_at, status)
+    `INSERT INTO better_trigger.waits (run_id, project_id, env, step_seq, kind, child_run_id, resume_at, status)
      VALUES ($1, $2, $3, 0, 'run', NULL, NULL, 'pending')`,
     [ORPHAN_RUN, NS.projectId, NS.env],
   );
@@ -98,12 +98,12 @@ async function readSnapshot(pool: Pool): Promise<Snapshot> {
     queued_timers: number;
   }>(
     `SELECT
-       (SELECT status FROM runs WHERE id = $1) AS orphan_status,
-       (SELECT error FROM runs WHERE id = $1) AS orphan_error,
-       (SELECT status FROM waits WHERE run_id = $1) AS orphan_wait_status,
-       (SELECT count(*)::int FROM waits
+       (SELECT status FROM better_trigger.runs WHERE id = $1) AS orphan_status,
+       (SELECT error FROM better_trigger.runs WHERE id = $1) AS orphan_error,
+       (SELECT status FROM better_trigger.waits WHERE run_id = $1) AS orphan_wait_status,
+       (SELECT count(*)::int FROM better_trigger.waits
          WHERE status = 'pending' AND kind IN ('duration','until')) AS pending_timers,
-       (SELECT count(*)::int FROM runs
+       (SELECT count(*)::int FROM better_trigger.runs
          WHERE id LIKE 'run-timer-%' AND status = 'queued') AS queued_timers`,
     [ORPHAN_RUN],
   );

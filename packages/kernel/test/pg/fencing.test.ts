@@ -28,7 +28,7 @@ const TASK = 'fencing-task';
 /** Count a run's step rows — the "was anything written?" oracle. */
 async function stepCount(pool: Pool, runId: string): Promise<number> {
   const res = await pool.query<{ n: string }>(
-    `SELECT count(*)::text AS n FROM run_steps WHERE run_id = $1`,
+    `SELECT count(*)::text AS n FROM better_trigger.run_steps WHERE run_id = $1`,
     [runId],
   );
   return Number(res.rows[0]?.n ?? '0');

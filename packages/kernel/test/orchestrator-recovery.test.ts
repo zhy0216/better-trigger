@@ -46,7 +46,7 @@ function stubPool(stale: Stale[]) {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM queue q/.test(sql)) {
+      if (/FROM better_trigger\.queue q/.test(sql)) {
         // Served once: the loop keeps ticking, and a second helping would
         // double every assertion below.
         if (scanned) return { rows: [] };
@@ -60,7 +60,7 @@ function stubPool(stale: Stale[]) {
           })),
         };
       }
-      if (/FROM runs WHERE id = \$1/.test(sql)) {
+      if (/FROM better_trigger\.runs WHERE id = \$1/.test(sql)) {
         const row = stale.find((s) => s.runId === params[0]);
         return {
           rows: row
@@ -131,7 +131,7 @@ async function reapOnce(stale: Stale[]): Promise<{ stmts: Stmt[]; failed: number
   };
 }
 
-const runsUpdates = (stmts: Stmt[]) => stmts.filter((s) => /UPDATE runs/.test(s.sql));
+const runsUpdates = (stmts: Stmt[]) => stmts.filter((s) => /UPDATE better_trigger\.runs/.test(s.sql));
 
 describe('lease recovery', () => {
   it('spends a recovery and leaves the attempt alone', async () => {
@@ -150,7 +150,7 @@ describe('lease recovery', () => {
     expect(writes.map((s) => s.sql).join('\n')).not.toMatch(/attempt/i);
 
     // The claim itself is handed back, so the next poll can pick the run up.
-    const queueUpdate = stmts.find((s) => /UPDATE queue/.test(s.sql));
+    const queueUpdate = stmts.find((s) => /UPDATE better_trigger\.queue/.test(s.sql));
     expect(queueUpdate!.sql).toMatch(/locked_by = NULL/);
     expect(queueUpdate!.sql).toMatch(/available_at = now\(\)/);
 
@@ -188,8 +188,8 @@ describe('lease recovery', () => {
     expect(error.name).toBe('WorkerLostError');
 
     // Full terminal wrap-up, so a waiting parent is not left hanging.
-    expect(stmts.some((s) => /DELETE FROM queue/.test(s.sql))).toBe(true);
-    expect(stmts.some((s) => /UPDATE waits SET status = 'canceled'/.test(s.sql))).toBe(true);
+    expect(stmts.some((s) => /DELETE FROM better_trigger\.queue/.test(s.sql))).toBe(true);
+    expect(stmts.some((s) => /UPDATE better_trigger\.waits SET status = 'canceled'/.test(s.sql))).toBe(true);
 
     expect(failed).toBe(1);
     expect(requeued).toBe(0);
@@ -213,7 +213,7 @@ describe('expired-lease scan', () => {
   /** The one SELECT the reaper issues against queue. */
   async function scanSql(): Promise<string> {
     const { stmts } = await reapOnce([]);
-    const scan = stmts.find((s) => /FROM queue q/.test(s.sql));
+    const scan = stmts.find((s) => /FROM better_trigger\.queue q/.test(s.sql));
     expect(scan).toBeDefined();
     return scan!.sql;
   }

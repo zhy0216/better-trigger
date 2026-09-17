@@ -121,15 +121,15 @@ describe('scanWaits re-enqueues a resumed run at its own priority', () => {
         stmts.push({ sql, params });
         // The resume's database-clock read (T1).
         if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
-        if (/FROM runs WHERE id = \$1/.test(sql)) {
+        if (/FROM better_trigger\.runs WHERE id = \$1/.test(sql)) {
           return { rows: [runRow({ id: 'run_1', status: 'waiting', priority })] };
         }
         // The p2-39 expected-state flip: a live server answers 1 affected row
         // for a run that is 'waiting' — without it the resume stops here.
-        if (/UPDATE runs SET status = 'queued'/.test(sql)) {
+        if (/UPDATE better_trigger\.runs SET status = 'queued'/.test(sql)) {
           return { rows: [{ id: 'run_1' }], rowCount: 1 };
         }
-        if (/FROM waits WHERE id = \$1/.test(sql)) return { rows: [{ id: 1 }] };
+        if (/FROM better_trigger\.waits WHERE id = \$1/.test(sql)) return { rows: [{ id: 1 }] };
         return { rows: [] };
       },
       release: () => {},
@@ -138,7 +138,7 @@ describe('scanWaits re-enqueues a resumed run at its own priority', () => {
       connect: async () => client,
       query: async (sql: string) => {
         stmts.push({ sql, params: [] });
-        if (/FROM waits/.test(sql) && /resume_at <= now\(\)/.test(sql)) {
+        if (/FROM better_trigger\.waits/.test(sql) && /resume_at <= now\(\)/.test(sql)) {
           // Served once — on a 20ms loop the same batch would repeat forever.
           if (scanned) return { rows: [] };
           scanned = true;
@@ -156,27 +156,27 @@ describe('scanWaits re-enqueues a resumed run at its own priority', () => {
     const { pool, stmts } = stubPool(10);
     const handle = startOrchestrator(pool, { warn: () => {}, error: () => {} }, WAITS_ONLY);
     try {
-      await waitFor(() => stmts.some((s) => /INSERT INTO queue/.test(s.sql)));
+      await waitFor(() => stmts.some((s) => /INSERT INTO better_trigger\.queue/.test(s.sql)));
     } finally {
       handle.stop();
     }
 
     // The whole point of the runs.priority column: the queue row that knew this
     // was urgent was deleted by suspendRun an hour ago.
-    expect(bound(find(stmts, /INSERT INTO queue/), 'priority')).toBe(10);
+    expect(bound(find(stmts, /INSERT INTO better_trigger\.queue/), 'priority')).toBe(10);
   }, 10_000);
 
   it('still writes 0 for a run that was triggered at 0', async () => {
     const { pool, stmts } = stubPool(0);
     const handle = startOrchestrator(pool, { warn: () => {}, error: () => {} }, WAITS_ONLY);
     try {
-      await waitFor(() => stmts.some((s) => /INSERT INTO queue/.test(s.sql)));
+      await waitFor(() => stmts.some((s) => /INSERT INTO better_trigger\.queue/.test(s.sql)));
     } finally {
       handle.stop();
     }
 
     // Reads the column rather than hard-coding a default that happens to match.
-    expect(bound(find(stmts, /INSERT INTO queue/), 'priority')).toBe(0);
+    expect(bound(find(stmts, /INSERT INTO better_trigger\.queue/), 'priority')).toBe(0);
   }, 10_000);
 });
 
@@ -194,10 +194,10 @@ describe('wakeParentIfWaiting re-enqueues the parent at its own priority', () =>
         stmts.push({ sql, params });
         // The wake's database-clock read (T1).
         if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
-        if (/FROM queue WHERE run_id = \$1/.test(sql)) {
+        if (/FROM better_trigger\.queue WHERE run_id = \$1/.test(sql)) {
           return { rows: [{ run_id: params[0], locked_by: 'w1' }] };
         }
-        if (/FROM runs WHERE id = \$1/.test(sql)) {
+        if (/FROM better_trigger\.runs WHERE id = \$1/.test(sql)) {
           return params[0] === 'run_parent'
             ? {
                 rows: [
@@ -211,10 +211,10 @@ describe('wakeParentIfWaiting re-enqueues the parent at its own priority', () =>
               }
             : { rows: [runRow({ id: 'run_child', parent_run_id: 'run_parent' })] };
         }
-        if (/FROM waits\s+WHERE child_run_id/.test(sql)) {
+        if (/FROM better_trigger\.waits\s+WHERE child_run_id/.test(sql)) {
           return { rows: [{ id: 5, run_id: 'run_parent', project_id: 'default', env: 'prod', step_seq: 2 }] };
         }
-        if (/FROM waits WHERE id = \$1/.test(sql)) return { rows: [{ id: 5 }] };
+        if (/FROM better_trigger\.waits WHERE id = \$1/.test(sql)) return { rows: [{ id: 5 }] };
         // Everything else is an UPDATE/DELETE the wake ignores — rowCount 1 so
         // the p1-37 `AND status = 'waiting'` flip (which checks affected rows)
         // proceeds to the re-enqueue this file exists to pin.
@@ -236,7 +236,7 @@ describe('wakeParentIfWaiting re-enqueues the parent at its own priority', () =>
       namespace: DEFAULT_NAMESPACE,
     });
 
-    const insert = find(stmts, /INSERT INTO queue/);
+    const insert = find(stmts, /INSERT INTO better_trigger\.queue/);
     expect(bound(insert, 'priority')).toBe(9);
     // The key is carried on the same call and must not have been displaced by
     // the new parameter.
@@ -257,7 +257,7 @@ describe('wakeParentIfWaiting re-enqueues the parent at its own priority', () =>
       namespace: DEFAULT_NAMESPACE,
     });
 
-    expect(bound(find(stmts, /INSERT INTO queue/), 'priority')).toBe(9);
+    expect(bound(find(stmts, /INSERT INTO better_trigger\.queue/), 'priority')).toBe(9);
   });
 });
 
@@ -271,10 +271,10 @@ describe('the UPDATE re-enqueue paths never touch priority', () => {
         stmts.push({ sql, params });
         // The retry's database-clock read (T1).
         if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
-        if (/FROM queue WHERE run_id = \$1/.test(sql)) {
+        if (/FROM better_trigger\.queue WHERE run_id = \$1/.test(sql)) {
           return { rows: [{ run_id: params[0], locked_by: 'w1' }] };
         }
-        if (/FROM runs WHERE id = \$1/.test(sql)) {
+        if (/FROM better_trigger\.runs WHERE id = \$1/.test(sql)) {
           // attempt < max_attempts → the retry branch.
           return { rows: [runRow({ id: 'run_1', attempt: 1, max_attempts: 3 })] };
         }
@@ -295,7 +295,7 @@ describe('the UPDATE re-enqueue paths never touch priority', () => {
 
     // No INSERT at all: the queue row survived, so its priority survived with
     // it — which is why only the two INSERT paths above needed fixing.
-    expect(stmts.some((s) => /INSERT INTO queue/.test(s.sql))).toBe(false);
-    expect(find(stmts, /UPDATE queue/).sql).not.toMatch(/priority/);
+    expect(stmts.some((s) => /INSERT INTO better_trigger\.queue/.test(s.sql))).toBe(false);
+    expect(find(stmts, /UPDATE better_trigger\.queue/).sql).not.toMatch(/priority/);
   });
 });

@@ -57,7 +57,7 @@ async function claimedRun(
 
 async function countRuns(pool: Pool, taskId: string): Promise<number> {
   const res = await pool.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM runs WHERE task_id = $1`,
+    `SELECT count(*)::int AS n FROM better_trigger.runs WHERE task_id = $1`,
     [taskId],
   );
   return res.rows[0]!.n;
@@ -98,17 +98,17 @@ describePg('batchTriggerChild requireTask (04-T3)', () => {
       expect(await countRuns(pool, 'ghost-task')).toBe(0);
       // ...no step row recorded for the fan-out...
       const steps = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM run_steps WHERE run_id = $1`,
+        `SELECT count(*)::int AS n FROM better_trigger.run_steps WHERE run_id = $1`,
         [runId],
       );
       expect(steps.rows[0]!.n).toBe(0);
       // ...and the parent stays exactly where it was: running, claim held.
-      const run = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [
+      const run = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [
         runId,
       ]);
       expect(run.rows[0]!.status).toBe('running');
       const queue = await pool.query<{ locked_by: string | null }>(
-        `SELECT locked_by FROM queue WHERE run_id = $1`,
+        `SELECT locked_by FROM better_trigger.queue WHERE run_id = $1`,
         [runId],
       );
       expect(queue.rows[0]!.locked_by).toBe(workerId);
@@ -183,7 +183,7 @@ describePg('batchTriggerChild requireTask (04-T3)', () => {
         code_version: string | null;
       }>(
         `SELECT id, parent_run_id, trigger_type, status, code_version
-           FROM runs WHERE task_id = $1 ORDER BY created_at`,
+           FROM better_trigger.runs WHERE task_id = $1 ORDER BY created_at`,
         ['fanout-child'],
       );
       expect(children.rows).toHaveLength(2);
@@ -199,7 +199,7 @@ describePg('batchTriggerChild requireTask (04-T3)', () => {
 
       // The durable step row recorded the fan-out.
       const step = await pool.query<{ kind: string; status: string }>(
-        `SELECT kind, status FROM run_steps WHERE run_id = $1 AND seq = 0`,
+        `SELECT kind, status FROM better_trigger.run_steps WHERE run_id = $1 AND seq = 0`,
         [runId],
       );
       expect(step.rows).toEqual([{ kind: 'batch-trigger', status: 'completed' }]);

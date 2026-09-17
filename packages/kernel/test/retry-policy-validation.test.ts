@@ -140,11 +140,11 @@ describe('createRunIn trigger-path retry validation', () => {
   it('still triggers with valid stored / option policies', async () => {
     const stored = trigger({ maxAttempts: 5, factor: 2 });
     await stored.run.catch(() => {});
-    expect(stored.sqls.some((s) => /INSERT INTO runs/.test(s))).toBe(true);
+    expect(stored.sqls.some((s) => /INSERT INTO better_trigger\.runs/.test(s))).toBe(true);
 
     const option = trigger({ maxAttempts: NaN }, { maxAttempts: 2 });
     await option.run.catch(() => {});
-    expect(option.sqls.some((s) => /INSERT INTO runs/.test(s))).toBe(true);
+    expect(option.sqls.some((s) => /INSERT INTO better_trigger\.runs/.test(s))).toBe(true);
   });
 });
 
@@ -155,10 +155,10 @@ describe('failRun retry timestamp validation', () => {
       query: async (sql: string, params: unknown[] = []) => {
         statements.push({ sql, params });
         if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: clock }] };
-        if (/FROM queue WHERE run_id/.test(sql)) {
+        if (/FROM better_trigger\.queue WHERE run_id/.test(sql)) {
           return { rows: [{ run_id: 'r', locked_by: 'w' }] };
         }
-        if (/FROM runs WHERE id/.test(sql)) {
+        if (/FROM better_trigger\.runs WHERE id/.test(sql)) {
           return {
             rows: [{ id: 'r', status: 'running', attempt: 1025, max_attempts: 2_147_483_647, fencing_token: '1' }],
           };
@@ -194,7 +194,7 @@ describe('failRun retry timestamp validation', () => {
     const clock = new Date(8.64e15);
     const { result, statements } = retryAt({ baseMs: 0, factor: 2 }, clock);
     await expect(result).resolves.toEqual({ willRetry: true, nextAttemptAt: clock.toISOString() });
-    const availableAt = statements.find(({ sql }) => /UPDATE queue/.test(sql))?.params[1];
+    const availableAt = statements.find(({ sql }) => /UPDATE better_trigger\.queue/.test(sql))?.params[1];
     expect(availableAt).toEqual(clock);
     expect(availableAt).not.toBe(clock);
     expect(clock.getTime()).toBe(8.64e15);
@@ -214,7 +214,7 @@ describePg('retry numeric boundaries in PostgreSQL', () => {
       const { runId } = await kernel.trigger({
         taskId: 'numeric', payload: null, namespace: DEFAULT_NAMESPACE,
       });
-      await pool.query('UPDATE runs SET attempt = 1025 WHERE id = $1', [runId]);
+      await pool.query('UPDATE better_trigger.runs SET attempt = 1025 WHERE id = $1', [runId]);
       const claimed = await kernel.claimRuns({
         workerId,
         namespaces: [DEFAULT_NAMESPACE],
@@ -231,7 +231,7 @@ describePg('retry numeric boundaries in PostgreSQL', () => {
       await expectBadRequest(kernel.failRun({
         ...args, retry: { baseMs: 2e16, maxMs: 2e16, factor: 1 },
       }), 'out of range');
-      const unchanged = await pool.query('SELECT status, attempt FROM runs WHERE id = $1', [runId]);
+      const unchanged = await pool.query('SELECT status, attempt FROM better_trigger.runs WHERE id = $1', [runId]);
       expect(unchanged.rows).toEqual([{ status: 'running', attempt: 1025 }]);
 
       const result = await kernel.failRun({ ...args, retry: { baseMs: 0, factor: 2 } });
@@ -239,7 +239,7 @@ describePg('retry numeric boundaries in PostgreSQL', () => {
       expect(Number.isFinite(new Date(result.nextAttemptAt!).getTime())).toBe(true);
       const retried = await pool.query(
         `SELECT r.status, r.attempt, q.available_at, q.available_at <= now() AS due
-           FROM runs r JOIN queue q ON q.run_id = r.id WHERE r.id = $1`, [runId],
+           FROM better_trigger.runs r JOIN better_trigger.queue q ON q.run_id = r.id WHERE r.id = $1`, [runId],
       );
       expect(retried.rows[0]).toMatchObject({ status: 'queued', attempt: 1026, due: true });
       expect(retried.rows[0].available_at.toISOString()).toBe(result.nextAttemptAt);

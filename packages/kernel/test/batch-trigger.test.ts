@@ -58,7 +58,7 @@ const makePool = (tasks: TaskRow[]) => {
       // createRunsInBatch's single database-clock read (T1): every per-item
       // delay is applied to this, never to the host clock.
       if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
-      if (/FROM tasks/.test(sql)) {
+      if (/FROM better_trigger\.tasks/.test(sql)) {
         // Params: projectId, env, id per task — ids at index 2 of each triple.
         const ids: string[] = [];
         for (let i = 2; i < params.length; i += 3) ids.push(String(params[i]));
@@ -68,7 +68,7 @@ const makePool = (tasks: TaskRow[]) => {
             .filter((t): t is TaskRow => t !== undefined),
         };
       }
-      if (/INSERT INTO runs/.test(sql)) {
+      if (/INSERT INTO better_trigger\.runs/.test(sql)) {
         const rows: { id: string }[] = [];
         for (let i = 0; i < params.length; i += 13) {
           const taskId = String(params[i + 3]);
@@ -81,7 +81,7 @@ const makePool = (tasks: TaskRow[]) => {
         }
         return { rows };
       }
-      if (/INSERT INTO queue/.test(sql)) return { rows: [] };
+      if (/INSERT INTO better_trigger\.queue/.test(sql)) return { rows: [] };
       if (/idempotency_key.*IN \(VALUES/.test(sql)) {
         // The conflict readback: params are projectId, env, taskId, key per
         // pair — 4 per tuple.
@@ -146,15 +146,15 @@ describe('batchTrigger statement count is O(1) in the item count', () => {
     expect(data).toHaveLength(4);
     // Task preload: one SELECT over the DEDUPLICATED task ids — 500 items of
     // one task is a single VALUES tuple, not 500 lookups.
-    expect(findByKind(data, /FROM tasks/)).toHaveLength(1);
-    expect(findByKind(data, /FROM tasks/)[0]!.params).toHaveLength(3);
+    expect(findByKind(data, /FROM better_trigger\.tasks/)).toHaveLength(1);
+    expect(findByKind(data, /FROM better_trigger\.tasks/)[0]!.params).toHaveLength(3);
     // Runs: one multi-row INSERT, 13 params per item.
-    const runs = findByKind(data, /INSERT INTO runs/);
+    const runs = findByKind(data, /INSERT INTO better_trigger\.runs/);
     expect(runs).toHaveLength(1);
     expect(runs[0]!.params).toHaveLength(500 * 13);
     expect(runs[0]!.sql).toMatch(/ON CONFLICT \(project_id, env, task_id, idempotency_key\)/);
     // Queue: one multi-row INSERT, 6 params per item.
-    const queue = findByKind(data, /INSERT INTO queue/);
+    const queue = findByKind(data, /INSERT INTO better_trigger\.queue/);
     expect(queue).toHaveLength(1);
     expect(queue[0]!.params).toHaveLength(500 * 6);
     expect(findByKind(data, /pg_notify/)).toHaveLength(1);
@@ -171,7 +171,7 @@ describe('batchTrigger statement count is O(1) in the item count', () => {
     expect(res.runIds).toHaveLength(500);
     const data = dataStmts(stmts);
     expect(data).toHaveLength(4);
-    const preload = findByKind(data, /FROM tasks/)[0]!;
+    const preload = findByKind(data, /FROM better_trigger\.tasks/)[0]!;
     // 500 distinct ids → 500 VALUES tuples → 1500 params. Still ONE statement.
     expect(preload.params).toHaveLength(500 * 3);
   });
@@ -220,7 +220,7 @@ describe('batchTrigger idempotency conflict readback', () => {
     expect(readback).toHaveLength(1);
     // 500 conflicted pairs → 4 params each → one batched readback.
     expect(readback[0]!.params).toHaveLength(500 * 4);
-    expect(findByKind(data, /INSERT INTO queue/)).toHaveLength(0);
+    expect(findByKind(data, /INSERT INTO better_trigger\.queue/)).toHaveLength(0);
     expect(findByKind(data, /pg_notify/)).toHaveLength(0);
   });
 
@@ -234,7 +234,7 @@ describe('batchTrigger idempotency conflict readback', () => {
 
     expect(res.runIds).toHaveLength(2);
     expect(res.runIds[0]).toBe(res.runIds[1]);
-    const queue = findByKind(dataStmts(stmts), /INSERT INTO queue/)[0]!;
+    const queue = findByKind(dataStmts(stmts), /INSERT INTO better_trigger\.queue/)[0]!;
     expect(queue.params).toHaveLength(6); // one VALUES tuple — one enqueue
   });
 });
@@ -302,9 +302,9 @@ describe('batchTrigger all-or-nothing and task resolution', () => {
 
     const data = dataStmts(stmts);
     // Only the preload ran; the failure aborted the tx before any INSERT.
-    expect(findByKind(data, /FROM tasks/)).toHaveLength(1);
-    expect(findByKind(data, /INSERT INTO runs/)).toHaveLength(0);
-    expect(findByKind(data, /INSERT INTO queue/)).toHaveLength(0);
+    expect(findByKind(data, /FROM better_trigger\.tasks/)).toHaveLength(1);
+    expect(findByKind(data, /INSERT INTO better_trigger\.runs/)).toHaveLength(0);
+    expect(findByKind(data, /INSERT INTO better_trigger\.queue/)).toHaveLength(0);
     expect(findByKind(data, /pg_notify/)).toHaveLength(0);
   });
 
@@ -320,14 +320,14 @@ describe('batchTrigger all-or-nothing and task resolution', () => {
       DEFAULT_NAMESPACE,
     );
 
-    const runs = findByKind(dataStmts(stmts), /INSERT INTO runs/)[0]!;
+    const runs = findByKind(dataStmts(stmts), /INSERT INTO better_trigger\.runs/)[0]!;
     // 13 params per row: concurrency_key at +8, priority at +9, task at +3.
     expect(runs.params[8]).toBe('tenant-1');
     expect(runs.params[8 + 13]).toBe('limited'); // limited task defaults to task id
     expect(runs.params[8 + 26]).toBe('own-key'); // open task keeps the caller's key
     expect(runs.params[9 + 26]).toBe(7);
 
-    const queue = findByKind(dataStmts(stmts), /INSERT INTO queue/)[0]!;
+    const queue = findByKind(dataStmts(stmts), /INSERT INTO better_trigger\.queue/)[0]!;
     // 6 params per row: available_at at +1, priority at +2, key at +3.
     expect(queue.params[1]).toBeInstanceOf(Date);
     expect(queue.params[1 + 6]).toBeInstanceOf(Date);

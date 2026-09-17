@@ -41,7 +41,7 @@ const makePool = (src: SourceRun = {}) => {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM runs WHERE id/.test(sql)) {
+      if (/FROM better_trigger\.runs WHERE id/.test(sql)) {
         return {
           rows: [
             {
@@ -64,7 +64,7 @@ const makePool = (src: SourceRun = {}) => {
           ],
         };
       }
-      if (/FROM tasks/.test(sql)) {
+      if (/FROM better_trigger\.tasks/.test(sql)) {
         return {
           rows: [
             {
@@ -78,7 +78,7 @@ const makePool = (src: SourceRun = {}) => {
       }
       // createRunIn's database-clock read (T1).
       if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
-      if (/INSERT INTO runs/.test(sql)) return { rows: [{ id: 'run_new' }] };
+      if (/INSERT INTO better_trigger\.runs/.test(sql)) return { rows: [{ id: 'run_new' }] };
       return { rows: [] };
     },
     release: () => {},
@@ -138,8 +138,8 @@ describe('retryRun carries the source run config', () => {
     });
     await retryRun(pool, 'run_src', DEFAULT_NAMESPACE);
 
-    expect(bound(find(stmts, /INSERT INTO runs/), 'concurrency_key')).toBe('tenant-42');
-    expect(find(stmts, /INSERT INTO queue/).params).toContain('tenant-42');
+    expect(bound(find(stmts, /INSERT INTO better_trigger\.runs/), 'concurrency_key')).toBe('tenant-42');
+    expect(find(stmts, /INSERT INTO better_trigger\.queue/).params).toContain('tenant-42');
   });
 
   it('reuses the source priority on both the run row and its queue row', async () => {
@@ -148,10 +148,10 @@ describe('retryRun carries the source run config', () => {
 
     // The redundant runs column is what made this possible: the source run is
     // terminal, so its queue row (the scheduler's copy) no longer exists.
-    expect(bound(find(stmts, /INSERT INTO runs/), 'priority')).toBe(7);
+    expect(bound(find(stmts, /INSERT INTO better_trigger\.runs/), 'priority')).toBe(7);
     // And the new run is actually scheduled at it — the queue row is what the
     // claim scan orders by.
-    expect(bound(find(stmts, /INSERT INTO queue/), 'priority')).toBe(7);
+    expect(bound(find(stmts, /INSERT INTO better_trigger\.queue/), 'priority')).toBe(7);
   });
 
   it('leaves a run with no key/priority on the task defaults', async () => {
@@ -160,8 +160,8 @@ describe('retryRun carries the source run config', () => {
 
     // NULL concurrency_key means "the task has no limit"; createRunIn re-derives
     // that from the task rather than being handed an empty string.
-    expect(bound(find(stmts, /INSERT INTO runs/), 'concurrency_key')).toBeNull();
-    expect(bound(find(stmts, /INSERT INTO runs/), 'priority')).toBe(0);
+    expect(bound(find(stmts, /INSERT INTO better_trigger\.runs/), 'concurrency_key')).toBeNull();
+    expect(bound(find(stmts, /INSERT INTO better_trigger\.runs/), 'priority')).toBe(0);
   });
 
   it('does not carry the idempotency key over', async () => {
@@ -170,7 +170,7 @@ describe('retryRun carries the source run config', () => {
 
     // A retry that reuses the key would hit the partial unique index and be
     // answered with the id of the run it was meant to retry.
-    const insert = find(stmts, /INSERT INTO runs/);
+    const insert = find(stmts, /INSERT INTO better_trigger\.runs/);
     expect(bound(insert, 'idempotency_key')).toBeNull();
     expect(insert.sql).not.toMatch(/ON CONFLICT/);
   });

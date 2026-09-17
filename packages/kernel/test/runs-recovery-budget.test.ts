@@ -21,14 +21,14 @@ const makeClient = () => {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM tasks/.test(sql)) {
+      if (/FROM better_trigger\.tasks/.test(sql)) {
         return {
           rows: [{ id: 't', retry: null, concurrency_limit: null, latest_code_version: null }],
         };
       }
       // createRunIn's database-clock read (T1).
       if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
-      if (/INSERT INTO runs/.test(sql)) return { rows: [{ id: 'run_1' }] };
+      if (/INSERT INTO better_trigger\.runs/.test(sql)) return { rows: [{ id: 'run_1' }] };
       return { rows: [] };
     },
   } as unknown as PoolClient;
@@ -44,7 +44,7 @@ async function stampedBudget(): Promise<number> {
       triggerType: 'api',
       namespace: DEFAULT_NAMESPACE,
     });
-  const insert = stmts.find((s) => /INSERT INTO runs/.test(s.sql));
+  const insert = stmts.find((s) => /INSERT INTO better_trigger\.runs/.test(s.sql));
   expect(insert).toBeDefined();
   // Column list and VALUES list are written side by side; find the position of
   // max_recoveries rather than hard-coding $9, so a later column insertion

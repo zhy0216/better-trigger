@@ -47,9 +47,9 @@ function makeFake() {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)) return { rows: [], rowCount: 0 };
-      if (sql.includes('FROM queue')) return { rows: [{ locked_by: 'w1' }], rowCount: 1 };
-      if (sql.includes('FROM runs')) return { rows: [RUNNING_ROW], rowCount: 1 };
-      if (sql.startsWith('INSERT INTO run_steps')) {
+      if (sql.includes('FROM better_trigger.queue')) return { rows: [{ locked_by: 'w1' }], rowCount: 1 };
+      if (sql.includes('FROM better_trigger.runs')) return { rows: [RUNNING_ROW], rowCount: 1 };
+      if (sql.startsWith('INSERT INTO better_trigger.run_steps')) {
         // $1 run id, $2/$3 namespace, $4 seq — the ledger key is run:seq.
         const key = `${params[0]}:${params[3]}`;
         const existing = table.get(key);

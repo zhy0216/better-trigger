@@ -433,7 +433,7 @@ export async function lockRunRow(
   namespace: Namespace,
 ): Promise<RunRow | null> {
   const res = await client.query<RunRow>(
-    `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
+    `SELECT ${RUN_ROW_COLS} FROM better_trigger.runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
     [id, namespace.projectId, namespace.env],
   );
   return res.rows[0] ?? null;
@@ -453,7 +453,7 @@ export async function tryLockRunRow(
   namespace: Namespace,
 ): Promise<RunRow | null> {
   const res = await client.query<RunRow>(
-    `SELECT ${RUN_ROW_COLS} FROM runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE SKIP LOCKED`,
+    `SELECT ${RUN_ROW_COLS} FROM better_trigger.runs WHERE id = $1 AND project_id = $2 AND env = $3 FOR UPDATE SKIP LOCKED`,
     [id, namespace.projectId, namespace.env],
   );
   return res.rows[0] ?? null;
@@ -490,7 +490,7 @@ export async function lockQueueRow(
   namespace: Namespace,
 ): Promise<{ locked_by: string | null } | null> {
   const res = await client.query<{ locked_by: string | null }>(
-    `SELECT locked_by FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
+    `SELECT locked_by FROM better_trigger.queue WHERE run_id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
     [runId, namespace.projectId, namespace.env],
   );
   return res.rows[0] ?? null;

@@ -36,7 +36,7 @@ describePg('waitForResult contract', () => {
       const locker = await pool.connect();
       try {
         await locker.query('BEGIN');
-        await locker.query('LOCK TABLE runs IN ACCESS EXCLUSIVE MODE');
+        await locker.query('LOCK TABLE better_trigger.runs IN ACCESS EXCLUSIVE MODE');
         const controller = new AbortController();
         const kernel = createKernel({ pool: reader });
         const pending = kernel.waitForResult('run_blocked', NS, {
@@ -46,7 +46,7 @@ describePg('waitForResult contract', () => {
           const result = await pool.query<{ n: number }>(
             `SELECT count(*)::int AS n FROM pg_stat_activity
              WHERE datname = current_database() AND state = 'active'
-               AND wait_event_type = 'Lock' AND query LIKE 'SELECT status, output, error FROM runs%'`,
+               AND wait_event_type = 'Lock' AND query LIKE 'SELECT status, output, error FROM better_trigger.runs%'`,
           );
           return result.rows[0].n;
         };

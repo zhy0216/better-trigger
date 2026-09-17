@@ -82,16 +82,16 @@ describePg('worker lease duration storage at timer boundaries', () => {
         });
         expect(claimed.map((run) => run.id)).toEqual([runId]);
         const { rows } = await pool.query(
-          'SELECT lease_until, extract(epoch FROM (lease_until - locked_at)) * 1000 AS duration FROM queue WHERE run_id = $1',
+          'SELECT lease_until, extract(epoch FROM (lease_until - locked_at)) * 1000 AS duration FROM better_trigger.queue WHERE run_id = $1',
           [runId],
         );
         expect(Number(rows[0].duration)).toBe(leaseMs);
         expect(Number.isFinite(rows[0].lease_until.getTime())).toBe(true);
         // Move the stored expiry into the past so renewal must actually write it.
-        await pool.query("UPDATE queue SET lease_until = now() - interval '1 second' WHERE run_id = $1", [runId]);
+        await pool.query("UPDATE better_trigger.queue SET lease_until = now() - interval '1 second' WHERE run_id = $1", [runId]);
         const renewed = await kernel.heartbeat({ workerId, runIds: [runId], namespaces: [namespace], leaseMs });
         expect(renewed.lostRunIds).toEqual([]);
-        const after = await pool.query('SELECT lease_until FROM queue WHERE run_id = $1', [runId]);
+        const after = await pool.query('SELECT lease_until FROM better_trigger.queue WHERE run_id = $1', [runId]);
         expect(after.rows[0].lease_until.getTime()).toBeGreaterThanOrEqual(rows[0].lease_until.getTime());
         // Complete this claimed run so the next boundary has its own claim.
         await kernel.completeRun({

@@ -33,7 +33,7 @@ afterEach(() => {
 async function countScheduleRuns(pool: Pool, taskId: string): Promise<number> {
   const res = await pool.query<{ count: number }>(
     `SELECT count(*)::int AS count
-       FROM runs WHERE task_id = $1 AND trigger_type = 'schedule'`,
+       FROM better_trigger.runs WHERE task_id = $1 AND trigger_type = 'schedule'`,
     [taskId],
   );
   return res.rows[0]!.count;
@@ -71,7 +71,7 @@ describePg('cron due-scan next-fire write-back', () => {
       // Make the schedule due 5 minutes ago, as a clock-skewed registration or
       // a stuck daemon would have left it.
       await pool.query(
-        `UPDATE schedules SET next_run_at = now() - interval '5 minutes' WHERE task_id = $1`,
+        `UPDATE better_trigger.schedules SET next_run_at = now() - interval '5 minutes' WHERE task_id = $1`,
         [CRON_TASK],
       );
 
@@ -106,7 +106,7 @@ describePg('cron due-scan next-fire write-back', () => {
       expect(await countScheduleRuns(pool, CRON_TASK)).toBe(1);
 
       const res = await pool.query<{ next_run_at: Date }>(
-        `SELECT next_run_at FROM schedules WHERE task_id = $1`,
+        `SELECT next_run_at FROM better_trigger.schedules WHERE task_id = $1`,
         [CRON_TASK],
       );
       // The clamp + db_now computation guarantees the DB sees the next fire as
@@ -122,7 +122,7 @@ describePg('cron due-scan next-fire write-back', () => {
       await registerCronWorker(kernel);
 
       await pool.query(
-        `UPDATE schedules SET next_run_at = now() + interval '1 hour' WHERE task_id = $1`,
+        `UPDATE better_trigger.schedules SET next_run_at = now() + interval '1 hour' WHERE task_id = $1`,
         [CRON_TASK],
       );
 

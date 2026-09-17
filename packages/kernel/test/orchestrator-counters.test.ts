@@ -54,7 +54,7 @@ function stubPool(opts: StubOptions = {}) {
     query: async (text: string, params?: unknown[]) => {
       texts.push(text);
       if (opts.failOn?.test(text)) throw new Error('connection terminated unexpectedly');
-      if (/FROM queue q/.test(text)) {
+      if (/FROM better_trigger\.queue q/.test(text)) {
         // Served once: a loop on a 20ms interval would otherwise keep finding
         // the same expired claims and the counts could not be pinned exactly.
         if (scanned) return { rows: [] };
@@ -68,7 +68,7 @@ function stubPool(opts: StubOptions = {}) {
           })),
         };
       }
-      if (/FROM runs WHERE id = \$1/.test(text)) {
+      if (/FROM better_trigger\.runs WHERE id = \$1/.test(text)) {
         const row = stale.find((s) => s.runId === params?.[0]);
         return {
           rows: row

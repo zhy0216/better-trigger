@@ -52,7 +52,7 @@ function cronPool(served: string[]) {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM schedules\s+WHERE enabled/.test(sql)) {
+      if (/FROM better_trigger\.schedules\s+WHERE enabled/.test(sql)) {
         if (dueServed) return { rows: [] };
         dueServed = true;
         return {
@@ -73,7 +73,7 @@ function cronPool(served: string[]) {
         const ids = params[1] as string[];
         return { rows: ids.filter((id) => served.includes(id)).map((task_id) => ({ task_id })) };
       }
-      if (/INSERT INTO runs/.test(sql)) return { rows: [{ id: 'run_new' }], rowCount: 1 };
+      if (/INSERT INTO better_trigger\.runs/.test(sql)) return { rows: [{ id: 'run_new' }], rowCount: 1 };
       // createRunIn's database-clock read (T1): same tx ⇒ same now() the
       // due-scan carried as db_now.
       if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }], rowCount: 1 };
@@ -149,13 +149,13 @@ describe('scanCron — unserved schedule skip (p2-18 C1)', () => {
 
     // No run was created, and no `work` wake either (that would be noise —
     // nothing claimable happened).
-    expect(stmts.some((s) => /INSERT INTO runs/.test(s.sql))).toBe(false);
+    expect(stmts.some((s) => /INSERT INTO better_trigger\.runs/.test(s.sql))).toBe(false);
     expect(stmts.some((s) => /pg_notify/.test(s.sql))).toBe(false);
 
     // The schedule advanced WITHOUT last_run_at / last_run_id: nothing ran.
     // Same DB-clock clamp + NULL guard as the fire path (p1-09).
     const advance = stmts.find(
-      (s) => /UPDATE schedules/.test(s.sql) && /next_run_at = CASE/.test(s.sql),
+      (s) => /UPDATE better_trigger\.schedules/.test(s.sql) && /next_run_at = CASE/.test(s.sql),
     )!;
     expect(advance).toBeDefined();
     expect(advance.sql).not.toMatch(/last_run_at/);
@@ -190,10 +190,10 @@ describe('scanCron — unserved schedule skip (p2-18 C1)', () => {
     }
 
     // createRunIn ran for the served schedule…
-    expect(stmts.some((s) => /INSERT INTO runs/.test(s.sql))).toBe(true);
+    expect(stmts.some((s) => /INSERT INTO better_trigger\.runs/.test(s.sql))).toBe(true);
     // …and the write-back is the fire path's (last_run_* set), not the skip's.
     const writeBack = stmts.find(
-      (s) => /UPDATE schedules/.test(s.sql) && /last_run_at = now\(\)/.test(s.sql),
+      (s) => /UPDATE better_trigger\.schedules/.test(s.sql) && /last_run_at = now\(\)/.test(s.sql),
     )!;
     expect(writeBack).toBeDefined();
     expect(handle.counters.cronSkippedUnserved).toBe(0);
@@ -226,7 +226,7 @@ describe('scanCron — namespace pairs containing slashes', () => {
       const client = {
         query: async (sql: string, params: unknown[] = []) => {
           stmts.push({ sql, params });
-          if (/FROM schedules\s+WHERE enabled/.test(sql)) {
+          if (/FROM better_trigger\.schedules\s+WHERE enabled/.test(sql)) {
             return { rows: due.filter((s) => s.project_id === params[0] && s.env === params[1]) };
           }
           if (/unnest\(\$2::text\[\]\) AS task_id/.test(sql)) {
@@ -234,7 +234,7 @@ describe('scanCron — namespace pairs containing slashes', () => {
             const online = served.some((s) => s.projectId === ns!.projectId && s.env === ns!.env);
             return { rows: online ? [{ task_id: 'same-task' }] : [] };
           }
-          if (/INSERT INTO runs/.test(sql)) return { rows: [{ id: 'run_pair' }], rowCount: 1 };
+          if (/INSERT INTO better_trigger\.runs/.test(sql)) return { rows: [{ id: 'run_pair' }], rowCount: 1 };
           if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: dbNow }], rowCount: 1 };
           return { rows: [], rowCount: 0 };
         },
@@ -255,9 +255,9 @@ describe('scanCron — namespace pairs containing slashes', () => {
       try {
         // An empty due scan queries both pairs and creates no work or warning.
         const empty = await tick();
-        expect(empty.filter((s) => /FROM schedules/.test(s.sql)).map((s) => s.params))
+        expect(empty.filter((s) => /FROM better_trigger\.schedules/.test(s.sql)).map((s) => s.params))
           .toEqual(namespaces.map((ns) => [ns.projectId, ns.env]));
-        expect(empty.some((s) => /unnest|INSERT INTO runs|pg_notify/.test(s.sql))).toBe(false);
+        expect(empty.some((s) => /unnest|INSERT INTO better_trigger\.runs|pg_notify/.test(s.sql))).toBe(false);
         expect(lines).toEqual([]);
 
         due = schedules;
@@ -268,10 +268,10 @@ describe('scanCron — namespace pairs containing slashes', () => {
           expect(check.params[1]).toEqual(['same-task']);
           expectAligned(check.sql, check.params);
         }
-        expect(first.filter((s) => /INSERT INTO runs/.test(s.sql))).toHaveLength(1);
-        const skip = first.find((s) => /UPDATE schedules/.test(s.sql) && !/last_run_at/.test(s.sql))!;
+        expect(first.filter((s) => /INSERT INTO better_trigger\.runs/.test(s.sql))).toHaveLength(1);
+        const skip = first.find((s) => /UPDATE better_trigger\.schedules/.test(s.sql) && !/last_run_at/.test(s.sql))!;
         expect(skip.params).toEqual(['sch_pair_1', new Date('2027-01-01T00:00:00.000Z'), B.projectId, B.env]);
-        const fire = first.find((s) => /UPDATE schedules/.test(s.sql) && /last_run_at/.test(s.sql))!;
+        const fire = first.find((s) => /UPDATE better_trigger\.schedules/.test(s.sql) && /last_run_at/.test(s.sql))!;
         expect(fire.params.slice(-2)).toEqual([A.projectId, A.env]);
         expect(first.filter((s) => /pg_notify/.test(s.sql)).map((s) => JSON.parse(s.params[1] as string)))
           .toEqual([{ type: 'work', ...A }]);
@@ -292,7 +292,7 @@ describe('scanCron — namespace pairs containing slashes', () => {
 
         served = [A, B];
         const recovered = await tick();
-        expect(recovered.filter((s) => /INSERT INTO runs/.test(s.sql))).toHaveLength(2);
+        expect(recovered.filter((s) => /INSERT INTO better_trigger\.runs/.test(s.sql))).toHaveLength(2);
         expect(recovered.filter((s) => /pg_notify/.test(s.sql)).map((s) => JSON.parse(s.params[1] as string)))
           .toEqual(namespaces.map((ns) => ({ type: 'work', ...ns })));
         expect(handle.counters.cronSkippedUnserved).toBe(3);
@@ -300,7 +300,7 @@ describe('scanCron — namespace pairs containing slashes', () => {
 
         due = [];
         const idle = await tick();
-        expect(idle.some((s) => /unnest|INSERT INTO runs|pg_notify/.test(s.sql))).toBe(false);
+        expect(idle.some((s) => /unnest|INSERT INTO better_trigger\.runs|pg_notify/.test(s.sql))).toBe(false);
         expect(handle.counters.cronSkippedUnserved).toBe(3);
         expect(lines).toHaveLength(3);
       } finally {

@@ -77,21 +77,21 @@ function makeClient() {
         tx.push('ROLLBACK');
         return { rows: [], rowCount: 0 };
       }
-      if (sql.includes('FROM queue') && sql.includes('locked_by')) {
+      if (sql.includes('FROM better_trigger.queue') && sql.includes('locked_by')) {
         return { rows: [{ locked_by: 'w1' }], rowCount: 1 };
       }
       // The create paths' database-clock read (T1).
       if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }], rowCount: 1 };
-      if (/UPDATE queue|UPDATE runs|UPDATE waits|DELETE FROM queue/.test(sql)) {
+      if (/UPDATE better_trigger\.queue|UPDATE better_trigger\.runs|UPDATE better_trigger\.waits|DELETE FROM better_trigger\.queue/.test(sql)) {
         return { rows: [], rowCount: 1 };
       }
-      if (/INSERT INTO runs/.test(sql)) {
+      if (/INSERT INTO better_trigger\.runs/.test(sql)) {
         // Echo the pre-generated run ids back: the single path only checks
         // rows.length, and the batch path (PF5) needs RETURNING to carry the
         // id of each VALUES row — every 13th param, starting at the first.
         return { rows: p.filter((_, i) => i % 13 === 0).map((id) => ({ id: String(id) })) };
       }
-      if (/FROM tasks/.test(sql)) {
+      if (/FROM better_trigger\.tasks/.test(sql)) {
         // Task-config lookup for the create paths: echo the requested id(s) —
         // params are (projectId, env, id) triples — so a requireTask lookup
         // finds a registered task. All-null config = engine defaults, the same
@@ -107,8 +107,8 @@ function makeClient() {
           rowCount: ids.length,
         };
       }
-      if (/INSERT INTO run_steps/.test(sql)) return { rows: [], rowCount: 1 };
-      if (/FROM runs/.test(sql)) return { rows: [RUNNING_ROW], rowCount: 1 };
+      if (/INSERT INTO better_trigger\.run_steps/.test(sql)) return { rows: [], rowCount: 1 };
+      if (/FROM better_trigger\.runs/.test(sql)) return { rows: [RUNNING_ROW], rowCount: 1 };
       if (sql.includes('child_run_id')) {
         return {
           rows: [
@@ -124,7 +124,7 @@ function makeClient() {
           rowCount: 1,
         };
       }
-      if (/FROM waits/.test(sql)) return { rows: [{ id: 1 }], rowCount: 1 };
+      if (/FROM better_trigger\.waits/.test(sql)) return { rows: [{ id: 1 }], rowCount: 1 };
       return { rows: [], rowCount: 0 };
     },
     release: () => {},
@@ -204,7 +204,7 @@ describe('createRunIn payload serialization (C3)', () => {
       triggerType: 'api',
       namespace: TEST_NS,
     }).catch(() => {});
-    expect(sqls.some((s) => /INSERT INTO runs/.test(s))).toBe(true);
+    expect(sqls.some((s) => /INSERT INTO better_trigger\.runs/.test(s))).toBe(true);
   });
 });
 
@@ -284,7 +284,7 @@ describe('completeRun output serialization (C3)', () => {
     ).rejects.toMatchObject({ code: 'payload_too_large' });
     // The tx was opened and the fencing locks taken, then rolled back with no
     // completion UPDATE — the run keeps its 'running' row for the executor to fail.
-    expect(sqls.some((s) => /UPDATE runs/.test(s))).toBe(false);
+    expect(sqls.some((s) => /UPDATE better_trigger\.runs/.test(s))).toBe(false);
     expect(tx).toEqual(['BEGIN', 'ROLLBACK']);
   });
 
@@ -369,7 +369,7 @@ const makeLogPool = () => {
     if (/^SELECT finished_at/.test(sql)) {
       return { rows: [{ finished_at: null }], rowCount: 1 };
     }
-    if (/^INSERT INTO logs/.test(sql)) {
+    if (/^INSERT INTO better_trigger\.logs/.test(sql)) {
       stmts.push({ sql, params });
       const rows = (params.length - 3) / 5;
       if (rows > 0) inserted.push({ runId: params[0] as string, rows });
@@ -432,7 +432,7 @@ describe('appendLogs serialization (C3)', () => {
         .map((p) => new TextEncoder().encode(String(p)).length)
         .reduce((n, b) => n + b, 0);
       expect(stmtBytes).toBeLessThanOrEqual(500);
-      expect(s.sql).toMatch(/INSERT INTO logs/);
+      expect(s.sql).toMatch(/INSERT INTO better_trigger\.logs/);
     }
     expect(inserted.reduce((n, i) => n + i.rows, 0)).toBe(20);
   });
@@ -578,7 +578,7 @@ describe('wakeParentIfWaiting step-row failure (C3)', () => {
     // The wait had already been flipped to 'completed' inside the (would-be)
     // caller tx; the rejection rolls it back, so the parent is never
     // re-enqueued and never replays into a duplicate child.
-    expect(sqls.some((s) => /UPDATE waits SET status = 'completed'/.test(s))).toBe(true);
-    expect(sqls.some((s) => /UPDATE runs SET status = 'queued'/.test(s))).toBe(false);
+    expect(sqls.some((s) => /UPDATE better_trigger\.waits SET status = 'completed'/.test(s))).toBe(true);
+    expect(sqls.some((s) => /UPDATE better_trigger\.runs SET status = 'queued'/.test(s))).toBe(false);
   });
 });

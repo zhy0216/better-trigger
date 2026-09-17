@@ -39,13 +39,13 @@ function stubPool(opts: { renewed: string[]; canceled?: string[]; workerRowPrese
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/UPDATE queue/.test(sql)) {
+      if (/UPDATE better_trigger\.queue/.test(sql)) {
         return { rows: opts.renewed.map((run_id) => ({ run_id })) };
       }
-      if (/UPDATE workers/.test(sql)) {
+      if (/UPDATE better_trigger\.workers/.test(sql)) {
         return { rows: [], rowCount: opts.workerRowPresent === false ? 0 : 1 };
       }
-      if (/FROM runs/.test(sql)) {
+      if (/FROM better_trigger\.runs/.test(sql)) {
         return { rows: (opts.canceled ?? []).map((id) => ({ id })) };
       }
       return { rows: [] };
@@ -104,7 +104,7 @@ describe('heartbeat lease loss', () => {
 
     // The renewal answers "which are still mine" because it is scoped by us
     // and returns its rows; no extra ownership query rides along.
-    const renew = stmts.find((s) => /UPDATE queue/.test(s.sql))!;
+    const renew = stmts.find((s) => /UPDATE better_trigger\.queue/.test(s.sql))!;
     expect(renew.sql).toMatch(/WHERE locked_by = \$2 AND run_id = ANY\(\$3::text\[\]\)/);
     expect(renew.sql).toMatch(/RETURNING run_id/);
     expect(stmts.filter((s) => /queue/.test(s.sql))).toHaveLength(1);
@@ -120,7 +120,7 @@ describe('heartbeat lease loss', () => {
     expect(res).toEqual({ cancelRunIds: [], lostRunIds: [] });
     // Only the worker's own liveness row is written.
     expect(stmts).toHaveLength(1);
-    expect(stmts[0]!.sql).toMatch(/UPDATE workers/);
+    expect(stmts[0]!.sql).toMatch(/UPDATE better_trigger\.workers/);
   });
 
   it('still renews the leases it does hold', async () => {
@@ -128,7 +128,7 @@ describe('heartbeat lease loss', () => {
 
     await heartbeat(pool, { ...ARGS, runIds: ['run_1', 'run_2'] });
 
-    const renew = stmts.find((s) => /UPDATE queue/.test(s.sql))!;
+    const renew = stmts.find((s) => /UPDATE better_trigger\.queue/.test(s.sql))!;
     expect(renew.sql).toMatch(/SET lease_until = now\(\)/);
     expect(renew.params).toEqual(['60000', 'w1', ['run_1', 'run_2'], 'default', 'prod']);
     // locked_at keeps its claim-time meaning.
@@ -155,7 +155,7 @@ describe('heartbeat with the workers row pruned away', () => {
     });
     // The cancel-check read never runs — the error is raised on the liveness
     // touch that sits where the old silent UPDATE was.
-    expect(stmts.some((s) => /SELECT id FROM runs/.test(s.sql))).toBe(false);
+    expect(stmts.some((s) => /SELECT id FROM better_trigger\.runs/.test(s.sql))).toBe(false);
   });
 
   it('also fires with nothing in flight — the row check is unconditional', async () => {
@@ -163,7 +163,7 @@ describe('heartbeat with the workers row pruned away', () => {
 
     await expect(heartbeat(pool, { ...ARGS, runIds: [] })).rejects.toBeInstanceOf(KernelError);
     expect(stmts).toHaveLength(1);
-    expect(stmts[0]!.sql).toMatch(/UPDATE workers/);
+    expect(stmts[0]!.sql).toMatch(/UPDATE better_trigger\.workers/);
   });
 
   it('a live row keeps the historical success shape', async () => {

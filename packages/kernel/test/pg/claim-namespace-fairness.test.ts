@@ -89,7 +89,7 @@ describePg('claim namespace fairness (P0-14)', () => {
 
       // And B is still queued — starved, not claimed, not lost.
       const stillQueued = await ctx.pool.query<{ n: string }>(
-        `SELECT count(*)::text AS n FROM runs
+        `SELECT count(*)::text AS n FROM better_trigger.runs
           WHERE task_id = $1 AND project_id = $2 AND env = $3 AND status = 'queued'`,
         [TASK, NS_B.projectId, NS_B.env],
       );

@@ -56,13 +56,13 @@ describePg('retry operation idempotency', () => {
       expect(a.runId).toBe(b.runId);
 
       const ops = await pool.query<{ retry_run_id: string }>(
-        `SELECT retry_run_id FROM run_retry_operations WHERE source_run_id = $1`,
+        `SELECT retry_run_id FROM better_trigger.run_retry_operations WHERE source_run_id = $1`,
         [src],
       );
       expect(ops.rows).toHaveLength(1);
       expect(ops.rows[0].retry_run_id).toBe(a.runId);
 
-      const runs = await pool.query(`SELECT count(*)::int AS n FROM runs WHERE trigger_type = 'retry'`);
+      const runs = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.runs WHERE trigger_type = 'retry'`);
       expect(runs.rows[0].n).toBe(1);
     });
   });
@@ -79,11 +79,11 @@ describePg('retry operation idempotency', () => {
       expect(replay.runId).toBe(first.runId);
 
       // Nothing new was created: one operation row, one retry run, one queue row.
-      const ops = await pool.query(`SELECT count(*)::int AS n FROM run_retry_operations`);
+      const ops = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.run_retry_operations`);
       expect(ops.rows[0].n).toBe(1);
-      const runs = await pool.query(`SELECT count(*)::int AS n FROM runs WHERE trigger_type = 'retry'`);
+      const runs = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.runs WHERE trigger_type = 'retry'`);
       expect(runs.rows[0].n).toBe(1);
-      const queue = await pool.query<{ run_id: string }>(`SELECT run_id FROM queue`);
+      const queue = await pool.query<{ run_id: string }>(`SELECT run_id FROM better_trigger.queue`);
       expect(queue.rows).toHaveLength(1);
       expect(queue.rows[0].run_id).toBe(first.runId);
     });
@@ -103,9 +103,9 @@ describePg('retry operation idempotency', () => {
       expect(noKey2.runId).not.toBe(noKey1.runId);
 
       // Four retry runs total; the no-key calls recorded nothing.
-      const runs = await pool.query(`SELECT count(*)::int AS n FROM runs WHERE trigger_type = 'retry'`);
+      const runs = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.runs WHERE trigger_type = 'retry'`);
       expect(runs.rows[0].n).toBe(4);
-      const ops = await pool.query(`SELECT count(*)::int AS n FROM run_retry_operations`);
+      const ops = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.run_retry_operations`);
       expect(ops.rows[0].n).toBe(2);
     });
   });
@@ -122,7 +122,7 @@ describePg('retry operation idempotency', () => {
       expect(b.runId).not.toBe(a.runId);
 
       const ops = await pool.query<{ project_id: string }>(
-        `SELECT project_id FROM run_retry_operations ORDER BY project_id`,
+        `SELECT project_id FROM better_trigger.run_retry_operations ORDER BY project_id`,
       );
       expect(ops.rows).toHaveLength(2);
       expect(ops.rows.map((r) => r.project_id)).toEqual(['acme', 'default']);
@@ -150,11 +150,11 @@ describePg('retry operation idempotency', () => {
         await ext.query('BEGIN');
         await ext.query(`SET LOCAL session_replication_role = replica`);
         await ext.query(
-          `INSERT INTO runs (id, project_id, env, task_id, status, trigger_type)
+          `INSERT INTO better_trigger.runs (id, project_id, env, task_id, status, trigger_type)
            VALUES ('run_ext', 'default', 'prod', 'rt-task', 'queued', 'retry')`,
         );
         await ext.query(
-          `INSERT INTO run_retry_operations
+          `INSERT INTO better_trigger.run_retry_operations
              (project_id, env, source_run_id, operation_key, retry_run_id)
            VALUES ('default', 'prod', $1, 'k-race', 'run_ext')`,
           [src],
@@ -168,7 +168,7 @@ describePg('retry operation idempotency', () => {
         for (;;) {
           const blocked = await pool.query(
             `SELECT count(*)::int AS n FROM pg_stat_activity
-              WHERE query LIKE '%INSERT INTO run_retry_operations%'
+              WHERE query LIKE '%INSERT INTO better_trigger.run_retry_operations%'
                 AND state = 'active' AND wait_event IS NOT NULL`,
           );
           if (blocked.rows[0].n > 0) break;
@@ -182,10 +182,10 @@ describePg('retry operation idempotency', () => {
 
         // The loser rolled its whole tx back: the winner's run is the ONLY
         // retry run and the ONLY operation row.
-        const runs = await pool.query<{ id: string }>(`SELECT id FROM runs WHERE trigger_type = 'retry'`);
+        const runs = await pool.query<{ id: string }>(`SELECT id FROM better_trigger.runs WHERE trigger_type = 'retry'`);
         expect(runs.rows).toHaveLength(1);
         expect(runs.rows[0].id).toBe('run_ext');
-        const ops = await pool.query(`SELECT count(*)::int AS n FROM run_retry_operations`);
+        const ops = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.run_retry_operations`);
         expect(ops.rows[0].n).toBe(1);
       } finally {
         await ext.release();
@@ -202,11 +202,11 @@ describePg('retry operation idempotency', () => {
       await expect(kernel.retryRun(runId, ns, { operationKey: 'k' })).rejects.toMatchObject({
         code: 'conflict',
       });
-      await pool.query(`UPDATE runs SET status = 'running' WHERE id = $1`, [runId]);
+      await pool.query(`UPDATE better_trigger.runs SET status = 'running' WHERE id = $1`, [runId]);
       await expect(kernel.retryRun(runId, ns, { operationKey: 'k' })).rejects.toMatchObject({
         code: 'conflict',
       });
-      await pool.query(`UPDATE runs SET status = 'completed', finished_at = now() WHERE id = $1`, [runId]);
+      await pool.query(`UPDATE better_trigger.runs SET status = 'completed', finished_at = now() WHERE id = $1`, [runId]);
       await expect(kernel.retryRun(runId, ns, { operationKey: 'k' })).rejects.toMatchObject({
         code: 'conflict',
       });
@@ -215,9 +215,9 @@ describePg('retry operation idempotency', () => {
       await expect(kernel.retryRun('run_missing', ns, { operationKey: 'k' })).rejects.toMatchObject({
         code: 'not_found',
       });
-      const ops = await pool.query(`SELECT count(*)::int AS n FROM run_retry_operations`);
+      const ops = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.run_retry_operations`);
       expect(ops.rows[0].n).toBe(0);
-      const retries = await pool.query(`SELECT count(*)::int AS n FROM runs WHERE trigger_type = 'retry'`);
+      const retries = await pool.query(`SELECT count(*)::int AS n FROM better_trigger.runs WHERE trigger_type = 'retry'`);
       expect(retries.rows[0].n).toBe(0);
     });
   });

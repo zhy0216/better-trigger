@@ -52,7 +52,7 @@ const ARGS = {
   taskIds: ['t1'],
   leaseMs: 60_000,
 };
-const candidateOf = (stmts: Stmt[]) => stmts.find((s) => /FROM queue q/.test(s.sql))!;
+const candidateOf = (stmts: Stmt[]) => stmts.find((s) => /FROM better_trigger\.queue q/.test(s.sql))!;
 
 describe('claimRuns candidate window', () => {
   it('keeps a floor of 10 for the single-slot poll', async () => {
@@ -137,7 +137,7 @@ describe('claimRuns limit ceiling', () => {
     const { pool, stmts } = stubPool();
     await expect(claimRuns(pool, { ...ARGS, limit: MAX_CLAIM_LIMIT })).resolves.toEqual([]);
     await expect(claimRuns(pool, { ...ARGS, limit: 1 })).resolves.toEqual([]);
-    const scans = stmts.filter((s) => /FROM queue q/.test(s.sql));
+    const scans = stmts.filter((s) => /FROM better_trigger\.queue q/.test(s.sql));
     expect(scans[0]!.params[1]).toBe(claimWindow(MAX_CLAIM_LIMIT));
     expect(scans[1]!.params[1]).toBe(claimWindow(1));
   });

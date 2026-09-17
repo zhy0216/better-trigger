@@ -45,7 +45,7 @@ function busyPool() {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM queue q/.test(sql)) {
+      if (/FROM better_trigger\.queue q/.test(sql)) {
         const projectId = params[2] as string;
         const env = params[3] as string;
         return {
@@ -66,10 +66,10 @@ function busyPool() {
           ],
         };
       }
-      if (/FROM run_steps/.test(sql)) return { rows: [] };
+      if (/FROM better_trigger\.run_steps/.test(sql)) return { rows: [] };
       if (/RETURNING fencing_token/.test(sql))
         return { rows: [{ fencing_token: '7' }], rowCount: 1 };
-      if (/UPDATE queue/.test(sql)) return { rows: [], rowCount: 1 };
+      if (/UPDATE better_trigger\.queue/.test(sql)) return { rows: [], rowCount: 1 };
       return { rows: [] };
     },
     release: () => {},
@@ -85,7 +85,7 @@ const ARGS = {
   leaseMs: 60_000,
 };
 
-const candidateScans = (stmts: Stmt[]) => stmts.filter((s) => /FROM queue q/.test(s.sql));
+const candidateScans = (stmts: Stmt[]) => stmts.filter((s) => /FROM better_trigger\.queue q/.test(s.sql));
 const scanPair = (s: Stmt) => `${s.params[2]}/${s.params[3]}`;
 
 describe('claimRuns namespace rotation (P0-14)', () => {

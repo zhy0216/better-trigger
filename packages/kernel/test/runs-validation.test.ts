@@ -70,11 +70,11 @@ describe('createRunIn option validation', () => {
     // Reaching the INSERT is proof enough that validation let the value through.
     const { run, sqls } = create({ delay: '10m' });
     await run.catch(() => {});
-    expect(sqls.some((s) => /INSERT INTO runs/.test(s))).toBe(true);
+    expect(sqls.some((s) => /INSERT INTO better_trigger\.runs/.test(s))).toBe(true);
 
     const ms = create({ delay: 5_000 });
     await ms.run.catch(() => {});
-    expect(ms.sqls.some((s) => /INSERT INTO runs/.test(s))).toBe(true);
+    expect(ms.sqls.some((s) => /INSERT INTO better_trigger\.runs/.test(s))).toBe(true);
   });
 
   it('rejects text options that are not text', async () => {
@@ -196,7 +196,7 @@ describe('payload size cap', () => {
   it('still accepts a payload under the cap', async () => {
     const { run, sqls } = create({}, { note: blob(1000) });
     await run.catch(() => {});
-    expect(sqls.some((s) => /INSERT INTO runs/.test(s))).toBe(true);
+    expect(sqls.some((s) => /INSERT INTO better_trigger\.runs/.test(s))).toBe(true);
   });
 
   it('honours BETTER_TRIGGER_MAX_PAYLOAD_BYTES', async () => {
@@ -207,7 +207,7 @@ describe('payload size cap', () => {
 
     const ok = create({}, 'x');
     await ok.run.catch(() => {});
-    expect(ok.sqls.some((s) => /INSERT INTO runs/.test(s))).toBe(true);
+    expect(ok.sqls.some((s) => /INSERT INTO better_trigger\.runs/.test(s))).toBe(true);
   });
 
   it('measures bytes, not characters', async () => {

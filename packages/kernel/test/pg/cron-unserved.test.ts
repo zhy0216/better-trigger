@@ -25,7 +25,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 async function countScheduleRuns(pool: Pool): Promise<number> {
   const res = await pool.query<{ count: number }>(
     `SELECT count(*)::int AS count
-       FROM runs WHERE task_id = $1 AND trigger_type = 'schedule'`,
+       FROM better_trigger.runs WHERE task_id = $1 AND trigger_type = 'schedule'`,
     [CRON_TASK],
   );
   return res.rows[0]!.count;
@@ -45,7 +45,7 @@ async function registerCronWorker(kernel: Kernel, namespace = NS): Promise<strin
 /** Make the schedule overdue so the next tick finds it due. */
 async function forceDue(pool: Pool): Promise<void> {
   await pool.query(
-    `UPDATE schedules SET next_run_at = now() - interval '5 minutes' WHERE task_id = $1`,
+    `UPDATE better_trigger.schedules SET next_run_at = now() - interval '5 minutes' WHERE task_id = $1`,
     [CRON_TASK],
   );
 }
@@ -76,7 +76,7 @@ describePg('cron skip of unserved schedules (p2-18 C1)', () => {
         await forceDue(pool);
         await waitForFirstRun(pool, 1);
         const fired = await pool.query<{ last_run_id: string | null }>(
-          `SELECT last_run_id FROM schedules WHERE task_id = $1`,
+          `SELECT last_run_id FROM better_trigger.schedules WHERE task_id = $1`,
           [CRON_TASK],
         );
         expect(fired.rows[0]!.last_run_id).toBeTruthy();
@@ -84,7 +84,7 @@ describePg('cron skip of unserved schedules (p2-18 C1)', () => {
         // The task leaves every manifest: the worker row goes offline. Force
         // the schedule due again — pre-fix this created another queued run on
         // every trip, forever.
-        await pool.query(`UPDATE workers SET status = 'offline'`);
+        await pool.query(`UPDATE better_trigger.workers SET status = 'offline'`);
         await forceDue(pool);
         // Past the skip's write-back and several clean idle ticks.
         await sleep(700);
@@ -96,13 +96,13 @@ describePg('cron skip of unserved schedules (p2-18 C1)', () => {
         const after = await pool.query<{
           next_run_at: Date | null;
           last_run_id: string | null;
-        }>(`SELECT next_run_at, last_run_id FROM schedules WHERE task_id = $1`, [CRON_TASK]);
+        }>(`SELECT next_run_at, last_run_id FROM better_trigger.schedules WHERE task_id = $1`, [CRON_TASK]);
         expect(after.rows[0]!.next_run_at).not.toBeNull();
         expect(after.rows[0]!.next_run_at!.getTime()).toBeGreaterThan(Date.now() - 10_000);
         expect(after.rows[0]!.last_run_id).toBe(fired.rows[0]!.last_run_id);
         expect(
           await pool.query(
-            `SELECT 1 FROM runs WHERE task_id = $1 AND trigger_type = 'schedule'
+            `SELECT 1 FROM better_trigger.runs WHERE task_id = $1 AND trigger_type = 'schedule'
                AND id <> $2`,
             [CRON_TASK, fired.rows[0]!.last_run_id],
           ),
@@ -111,7 +111,7 @@ describePg('cron skip of unserved schedules (p2-18 C1)', () => {
         // A serving worker comes back → the next due fire runs normally
         // again (the skip costs cadence, never the schedule).
         await pool.query(
-          `UPDATE workers SET status = 'online', last_heartbeat_at = now()`,
+          `UPDATE better_trigger.workers SET status = 'online', last_heartbeat_at = now()`,
         );
         await forceDue(pool);
         await waitForFirstRun(pool, 2);
@@ -137,7 +137,7 @@ describePg('cron skip of unserved schedules (p2-18 C1)', () => {
         // status still 'online', but silent longer than WORKER_OFFLINE_MS:
         // the same window the registration guard and the offline marker use.
         await pool.query(
-          `UPDATE workers SET last_heartbeat_at = now() - interval '3 minutes'`,
+          `UPDATE better_trigger.workers SET last_heartbeat_at = now() - interval '3 minutes'`,
         );
         await forceDue(pool);
         await sleep(700);
@@ -161,7 +161,7 @@ describePg('cron namespace pairs containing slashes', () => {
         const namespaces = reverse ? [B, A] : [A, B];
         await registerCronWorker(kernel, A);
         const workerB = await registerCronWorker(kernel, B);
-        await pool.query(`UPDATE workers SET status = 'offline' WHERE id = $1`, [workerB]);
+        await pool.query(`UPDATE better_trigger.workers SET status = 'offline' WHERE id = $1`, [workerB]);
 
         const snapshot = async () => {
           const result = await pool.query<{
@@ -175,12 +175,12 @@ describePg('cron namespace pairs containing slashes', () => {
           }>(
             `SELECT s.project_id, s.env, s.last_run_at, s.last_run_id,
                     s.next_run_at > now() AS advanced,
-                    (SELECT count(*)::int FROM runs r
+                    (SELECT count(*)::int FROM better_trigger.runs r
                       WHERE r.task_id = s.task_id AND r.trigger_type = 'schedule'
                         AND r.project_id = s.project_id AND r.env = s.env) AS runs,
-                    (SELECT count(*)::int FROM queue q
+                    (SELECT count(*)::int FROM better_trigger.queue q
                       WHERE q.project_id = s.project_id AND q.env = s.env) AS queued
-               FROM schedules s WHERE s.task_id = $1`,
+               FROM better_trigger.schedules s WHERE s.task_id = $1`,
             [CRON_TASK],
           );
           return result.rows;
@@ -238,7 +238,7 @@ describePg('cron namespace pairs containing slashes', () => {
           // Switch service to B without changing either task id. A's prior
           // last_run_* must survive its skipped fire unchanged.
           await pool.query(
-            `UPDATE workers
+            `UPDATE better_trigger.workers
                 SET status = CASE WHEN id = $1 THEN 'online' ELSE 'offline' END,
                     last_heartbeat_at = now()`,
             [workerB],
@@ -250,7 +250,7 @@ describePg('cron namespace pairs containing slashes', () => {
           expect(handle.counters.cronSkippedUnserved).toBe(2);
 
           // A returns: both pairs can fire independently on the next due scan.
-          await pool.query(`UPDATE workers SET status = 'online', last_heartbeat_at = now()`);
+          await pool.query(`UPDATE better_trigger.workers SET status = 'online', last_heartbeat_at = now()`);
           await fireDue();
           const recovered = await expectCounts([2, 2]);
           for (let i = 0; i < recovered.length; i++) {

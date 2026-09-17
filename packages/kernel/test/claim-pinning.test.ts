@@ -41,8 +41,8 @@ function stubPool(rows: unknown[] = []) {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM queue q/.test(sql)) return { rows };
-      if (/FROM run_steps/.test(sql)) return { rows: [] };
+      if (/FROM better_trigger\.queue q/.test(sql)) return { rows };
+      if (/FROM better_trigger\.run_steps/.test(sql)) return { rows: [] };
       if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '1' }], rowCount: 1 };
       return { rows: [] };
     },
@@ -58,7 +58,7 @@ const ARGS = {
   leaseMs: 60_000,
   limit: 1,
 };
-const candidateOf = (stmts: Stmt[]) => stmts.find((s) => /FROM queue q/.test(s.sql))!;
+const candidateOf = (stmts: Stmt[]) => stmts.find((s) => /FROM better_trigger\.queue q/.test(s.sql))!;
 
 describe('claimRuns without pinning', () => {
   it('sends no version predicate at all', async () => {

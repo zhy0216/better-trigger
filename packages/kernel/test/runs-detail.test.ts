@@ -142,21 +142,21 @@ function makeDb(opts: {
         return { rows: [] };
       }
       if (/^ROLLBACK/.test(sql)) return { rows: [] };
-      if (/FROM runs/.test(sql)) {
+      if (/FROM better_trigger\.runs/.test(sql)) {
         return { rows: opts.run === false ? [] : [RUN_ROW] };
       }
-      if (/FROM run_steps/.test(sql)) {
+      if (/FROM better_trigger\.run_steps/.test(sql)) {
         // ORDER BY seq DESC LIMIT $4 — the limit is the last bind param.
         const limit = params[params.length - 1] as number;
         const rows = [...(opts.steps ?? [])].sort((a, b) => b.seq - a.seq).slice(0, limit);
         return { rows };
       }
-      if (/FROM waits/.test(sql)) {
+      if (/FROM better_trigger\.waits/.test(sql)) {
         const limit = params[params.length - 1] as number;
         const rows = [...(opts.waits ?? [])].sort((a, b) => b.id - a.id).slice(0, limit);
         return { rows };
       }
-      if (/FROM logs/.test(sql)) {
+      if (/FROM better_trigger\.logs/.test(sql)) {
         // params: run id, projectId, env, [logsBefore at $4,] limit last.
         const before = params.length > 4 ? (params[3] as number) : undefined;
         const limit = params[params.length - 1] as number;
@@ -191,10 +191,10 @@ describe('getRunDetail — one REPEATABLE READ snapshot', () => {
     expect(counters.releases).toBe(1);
     expect(stmts.map((s) => s.sql.replace(/\s+/g, ' ').trim())).toEqual([
       'BEGIN ISOLATION LEVEL REPEATABLE READ',
-      expect.stringMatching(/FROM runs WHERE id = \$1 AND project_id = \$2 AND env = \$3/),
-      expect.stringMatching(/FROM run_steps WHERE run_id = \$1 AND project_id = \$2 AND env = \$3 ORDER BY seq DESC LIMIT \$4/),
-      expect.stringMatching(/FROM waits WHERE run_id = \$1 AND project_id = \$2 AND env = \$3 ORDER BY id DESC LIMIT \$4/),
-      expect.stringMatching(/FROM logs WHERE run_id = \$1 AND project_id = \$2 AND env = \$3 ORDER BY id DESC LIMIT \$4/),
+      expect.stringMatching(/FROM better_trigger\.runs WHERE id = \$1 AND project_id = \$2 AND env = \$3/),
+      expect.stringMatching(/FROM better_trigger\.run_steps WHERE run_id = \$1 AND project_id = \$2 AND env = \$3 ORDER BY seq DESC LIMIT \$4/),
+      expect.stringMatching(/FROM better_trigger\.waits WHERE run_id = \$1 AND project_id = \$2 AND env = \$3 ORDER BY id DESC LIMIT \$4/),
+      expect.stringMatching(/FROM better_trigger\.logs WHERE run_id = \$1 AND project_id = \$2 AND env = \$3 ORDER BY id DESC LIMIT \$4/),
       'COMMIT',
     ]);
   });
@@ -243,7 +243,7 @@ describe('getRunDetail — one REPEATABLE READ snapshot', () => {
     await getRunDetail(pool, 'run_1', DEFAULT_NAMESPACE, { logsLimit: 99_999 });
 
     // 5000 kept + 1 probe row = the LIMIT that reaches pg.
-    const logsStmt = stmts.find((s) => /FROM logs/.test(s.sql));
+    const logsStmt = stmts.find((s) => /FROM better_trigger\.logs/.test(s.sql));
     expect(logsStmt?.params[logsStmt.params.length - 1]).toBe(5001);
   });
 });

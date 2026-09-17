@@ -225,12 +225,12 @@ describePg('suspend work notification (p2-41)', () => {
 
         // A is waiting with its queue row gone.
         const runA = await pool.query<{ status: string }>(
-          `SELECT status FROM runs WHERE id = $1`,
+          `SELECT status FROM better_trigger.runs WHERE id = $1`,
           [a.id],
         );
         expect(runA.rows[0]!.status).toBe('waiting');
         const queueA = await pool.query<{ n: number }>(
-          `SELECT count(*)::int AS n FROM queue WHERE run_id = $1`,
+          `SELECT count(*)::int AS n FROM better_trigger.queue WHERE run_id = $1`,
           [a.id],
         );
         expect(queueA.rows[0]!.n).toBe(0);
@@ -273,12 +273,12 @@ describePg('suspend work notification (p2-41)', () => {
 
         // The claim was kept — run still running, queue row still held.
         const run = await pool.query<{ status: string }>(
-          `SELECT status FROM runs WHERE id = $1`,
+          `SELECT status FROM better_trigger.runs WHERE id = $1`,
           [a.id],
         );
         expect(run.rows[0]!.status).toBe('running');
         const queue = await pool.query<{ n: number; locked_by: string | null }>(
-          `SELECT count(*)::int AS n, max(locked_by) AS locked_by FROM queue WHERE run_id = $1`,
+          `SELECT count(*)::int AS n, max(locked_by) AS locked_by FROM better_trigger.queue WHERE run_id = $1`,
           [a.id],
         );
         expect(queue.rows[0]!.n).toBe(1);
@@ -334,7 +334,7 @@ describePg('suspend work notification (p2-41)', () => {
         expect(listener.received.length).toBe(baseline);
 
         const run = await pool.query<{ status: string }>(
-          `SELECT status FROM runs WHERE id = $1`,
+          `SELECT status FROM better_trigger.runs WHERE id = $1`,
           [a.id],
         );
         expect(run.rows[0]!.status).toBe('waiting');
@@ -396,30 +396,30 @@ describePg('suspend work notification (p2-41)', () => {
         // wait-due scan would, then the run is claimable again by plain
         // polling (claimRuns), no notification involved.
         const waits = await pool.query<{ n: number }>(
-          `SELECT count(*)::int AS n FROM waits WHERE run_id = $1 AND status = 'pending'`,
+          `SELECT count(*)::int AS n FROM better_trigger.waits WHERE run_id = $1 AND status = 'pending'`,
           [a.id],
         );
         expect(waits.rows[0]!.n).toBe(1);
         const run = await pool.query<{ status: string }>(
-          `SELECT status FROM runs WHERE id = $1`,
+          `SELECT status FROM better_trigger.runs WHERE id = $1`,
           [a.id],
         );
         expect(run.rows[0]!.status).toBe('waiting');
 
         await pool.query(
-          `UPDATE waits SET status = 'completed' WHERE run_id = $1 AND project_id = $2 AND env = $3`,
+          `UPDATE better_trigger.waits SET status = 'completed' WHERE run_id = $1 AND project_id = $2 AND env = $3`,
           [a.id, NS.projectId, NS.env],
         );
         await pool.query(
-          `UPDATE runs SET status = 'queued', updated_at = now() WHERE id = $1 AND project_id = $2 AND env = $3`,
+          `UPDATE better_trigger.runs SET status = 'queued', updated_at = now() WHERE id = $1 AND project_id = $2 AND env = $3`,
           [a.id, NS.projectId, NS.env],
         );
         const runRow = await pool.query<{ priority: number; concurrency_key: string | null }>(
-          `SELECT priority, concurrency_key FROM runs WHERE id = $1`,
+          `SELECT priority, concurrency_key FROM better_trigger.runs WHERE id = $1`,
           [a.id],
         );
         await pool.query(
-          `INSERT INTO queue (run_id, project_id, env, available_at, priority, concurrency_key)
+          `INSERT INTO better_trigger.queue (run_id, project_id, env, available_at, priority, concurrency_key)
            VALUES ($1, $2, $3, now(), $4, $5)`,
           [a.id, NS.projectId, NS.env, runRow.rows[0]!.priority, runRow.rows[0]!.concurrency_key],
         );
@@ -491,12 +491,12 @@ describePg('suspend work notification (p2-41)', () => {
         // the queued successor claimable.
         for (const c of claims) {
           const run = await pool.query<{ status: string }>(
-            `SELECT status FROM runs WHERE id = $1`,
+            `SELECT status FROM better_trigger.runs WHERE id = $1`,
             [c.id],
           );
           expect(run.rows[0]!.status).toBe('waiting');
           const queue = await pool.query<{ n: number }>(
-            `SELECT count(*)::int AS n FROM queue WHERE run_id = $1`,
+            `SELECT count(*)::int AS n FROM better_trigger.queue WHERE run_id = $1`,
             [c.id],
           );
           expect(queue.rows[0]!.n).toBe(0);

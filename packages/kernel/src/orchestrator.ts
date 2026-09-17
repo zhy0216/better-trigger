@@ -152,7 +152,7 @@ async function servedTaskIds(
     `SELECT t.task_id
        FROM (SELECT unnest($2::text[]) AS task_id) t
       WHERE EXISTS (
-        SELECT 1 FROM workers w
+        SELECT 1 FROM better_trigger.workers w
           CROSS JOIN LATERAL jsonb_array_elements(w.tasks) e
          WHERE w.status = 'online'
            AND w.last_heartbeat_at > now() - ($3::text || ' milliseconds')::interval
@@ -377,7 +377,7 @@ async function scanDueWaits(
     const timerPredicate = nsPredicateFor('waits', ns, timerParams);
     const timerRows = await pool.query<WaitRow>(
       `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind
-         FROM waits
+         FROM better_trigger.waits
         WHERE status = 'pending'
           AND kind IN ('duration','until')
           AND resume_at <= now()
@@ -393,7 +393,7 @@ async function scanDueWaits(
     // reads it, so fetching it would be dead weight on every row.
     const orphanRows = await pool.query<WaitRow>(
       `SELECT id, run_id, project_id, env, step_seq, fingerprint, kind
-         FROM waits
+         FROM better_trigger.waits
         WHERE status = 'pending'
           AND kind = 'run'
           AND child_run_id IS NULL
@@ -424,11 +424,11 @@ async function scanNoWaitRuns(
     const noWaitParams: unknown[] = [];
     const noWaitPredicate = nsPredicateFor('r', ns, noWaitParams);
     const noWaitRows = await pool.query<{ id: string }>(
-      `SELECT r.id FROM runs r
+      `SELECT r.id FROM better_trigger.runs r
         WHERE r.status = 'waiting'
           AND ${noWaitPredicate}
           AND NOT EXISTS (
-            SELECT 1 FROM waits w
+            SELECT 1 FROM better_trigger.waits w
              WHERE w.run_id = r.id AND w.project_id = r.project_id AND w.env = r.env
                AND w.status = 'pending'
           )
@@ -468,11 +468,11 @@ async function scanStuckWaits(
     // gradually instead of bursting one transaction (05-T2).
     const stuckRows = await pool.query<StuckWaitRow>(
       `SELECT w.id, w.run_id, w.child_run_id, w.project_id, w.env
-         FROM waits w
+         FROM better_trigger.waits w
         WHERE w.kind = 'run' AND w.status = 'pending' AND w.child_run_id IS NOT NULL
           AND ${stuckPredicate}
           AND EXISTS (
-            SELECT 1 FROM runs c
+            SELECT 1 FROM better_trigger.runs c
              WHERE c.id = w.child_run_id
                AND c.status IN (${TERMINAL_STATUS_SQL})
           )
@@ -537,7 +537,7 @@ async function healStuckWaits(
         // terminal) but the statement keeps this tx's acquisition order
         // identical to the terminal tx this replays.
         await client.query(
-          `SELECT run_id FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
+          `SELECT run_id FROM better_trigger.queue WHERE run_id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
           [childRunId, childNs.projectId, childNs.env],
         );
         const child = await lockRunRow(client, childRunId, childNs);
@@ -548,7 +548,7 @@ async function healStuckWaits(
         // The child's recorded result, read under its row lock — the same
         // values the terminal tx handed to wakeParentIfWaiting.
         const outRes = await client.query<{ output: unknown; error: unknown }>(
-          `SELECT output, error FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
+          `SELECT output, error FROM better_trigger.runs WHERE id = $1 AND project_id = $2 AND env = $3`,
           [childRunId, childNs.projectId, childNs.env],
         );
         const row = outRes.rows[0]!;
@@ -617,7 +617,7 @@ async function resumeOneWait(pool: Pool, logger: KernelLogger, w: WaitRow): Prom
   const wNs: Namespace = { projectId: w.project_id, env: w.env };
   await withTx(pool, async (client) => {
     await client.query(
-      `SELECT run_id FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
+      `SELECT run_id FROM better_trigger.queue WHERE run_id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
       [w.run_id, wNs.projectId, wNs.env],
     );
     const run = await tryLockRunRow(client, w.run_id, wNs);
@@ -628,7 +628,7 @@ async function resumeOneWait(pool: Pool, logger: KernelLogger, w: WaitRow): Prom
     // every Postgres and silently broke ALL wait resumes — the orphan
     // recovery branch below would sit behind the same broken statement.)
     const lockedWait = await client.query<{ id: number }>(
-      `SELECT id FROM waits WHERE id = $1 AND status = 'pending'
+      `SELECT id FROM better_trigger.waits WHERE id = $1 AND status = 'pending'
          AND project_id = $2 AND env = $3
        FOR UPDATE SKIP LOCKED`,
       [w.id, wNs.projectId, wNs.env],
@@ -662,7 +662,7 @@ async function resumeOneWait(pool: Pool, logger: KernelLogger, w: WaitRow): Prom
         // Defensive: a run that is not 'waiting' cannot be stranded by its
         // wait — never clobber its state, just retire the stale wait row.
         await client.query(
-          `UPDATE waits SET status = 'canceled' WHERE id = $1
+          `UPDATE better_trigger.waits SET status = 'canceled' WHERE id = $1
              AND project_id = $2 AND env = $3`,
           [w.id, wNs.projectId, wNs.env],
         );
@@ -678,13 +678,13 @@ async function resumeOneWait(pool: Pool, logger: KernelLogger, w: WaitRow): Prom
     // the run must NOT be resurrected: retire the wait, write nothing to
     // the ledger, enqueue nothing, notify nobody.
     const flip = await client.query(
-      `UPDATE runs SET status = 'queued', updated_at = now()
+      `UPDATE better_trigger.runs SET status = 'queued', updated_at = now()
         WHERE id = $1 AND project_id = $2 AND env = $3 AND status = 'waiting'`,
       [w.run_id, wNs.projectId, wNs.env],
     );
     if (flip.rowCount !== 1) {
       await client.query(
-        `UPDATE waits SET status = 'canceled' WHERE id = $1
+        `UPDATE better_trigger.waits SET status = 'canceled' WHERE id = $1
            AND project_id = $2 AND env = $3`,
         [w.id, wNs.projectId, wNs.env],
       );
@@ -696,7 +696,7 @@ async function resumeOneWait(pool: Pool, logger: KernelLogger, w: WaitRow): Prom
       const terminal = TERMINAL_STATUSES.includes(run.status);
       if (terminal) {
         await client.query(
-          `DELETE FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3`,
+          `DELETE FROM better_trigger.queue WHERE run_id = $1 AND project_id = $2 AND env = $3`,
           [w.run_id, wNs.projectId, wNs.env],
         );
       }
@@ -709,7 +709,7 @@ async function resumeOneWait(pool: Pool, logger: KernelLogger, w: WaitRow): Prom
     }
 
     await client.query(
-      `UPDATE waits SET status = 'completed' WHERE id = $1
+      `UPDATE better_trigger.waits SET status = 'completed' WHERE id = $1
          AND project_id = $2 AND env = $3`,
       [w.id, wNs.projectId, wNs.env],
     );
@@ -945,7 +945,7 @@ export function startOrchestrator(
         const predicate = nsPredicateFor('schedules', ns, params);
         const res = await client.query<ScheduleRow>(
           `SELECT id, task_id, cron_pattern, cron_tz, project_id, env, now() AS db_now
-             FROM schedules
+             FROM better_trigger.schedules
             WHERE enabled = true AND next_run_at IS NOT NULL AND next_run_at <= now()
               AND ${predicate}
             ORDER BY next_run_at ASC
@@ -1014,7 +1014,7 @@ export function startOrchestrator(
         // NULL guard are the fire path's (p1-09) — an impossible pattern must
         // stay silent, not spin (and so must a poisoned one).
         await client.query(
-          `UPDATE schedules
+          `UPDATE better_trigger.schedules
               SET next_run_at = CASE
                     WHEN $2::timestamptz IS NULL THEN NULL
                     ELSE GREATEST($2::timestamptz, now() + interval '1 second')
@@ -1050,7 +1050,7 @@ export function startOrchestrator(
         // turn that into now()+1s and fire an impossible schedule every tick
         // forever instead of leaving it silent.
         await client.query(
-          `UPDATE schedules
+          `UPDATE better_trigger.schedules
               SET last_run_at = now(), last_run_id = $2,
                   next_run_at = CASE
                     WHEN $3::timestamptz IS NULL THEN NULL
@@ -1178,7 +1178,7 @@ export function startOrchestrator(
         const predicate = nsPredicateFor('q', ns, params);
         const res = await client.query<StaleRow>(
           `SELECT q.id, q.run_id, q.project_id, q.env
-             FROM queue q
+             FROM better_trigger.queue q
             WHERE q.lease_until IS NOT NULL
               AND q.lease_until <= now()
               AND ${predicate}
@@ -1201,7 +1201,7 @@ export function startOrchestrator(
           // §2: queue rows without a corresponding run are deleted, and the
           // deletion is worth saying out loud).
           await client.query(
-            `DELETE FROM queue WHERE id = $1 AND project_id = $2 AND env = $3`,
+            `DELETE FROM better_trigger.queue WHERE id = $1 AND project_id = $2 AND env = $3`,
             [q.id, qNs.projectId, qNs.env],
           );
           logger.warn(
@@ -1220,12 +1220,12 @@ export function startOrchestrator(
         if (run.status !== 'running') {
           if (TERMINAL_STATUSES.includes(run.status)) {
             await client.query(
-              `DELETE FROM queue WHERE id = $1 AND project_id = $2 AND env = $3`,
+              `DELETE FROM better_trigger.queue WHERE id = $1 AND project_id = $2 AND env = $3`,
               [q.id, qNs.projectId, qNs.env],
             );
           } else {
             await client.query(
-              `UPDATE queue
+              `UPDATE better_trigger.queue
                   SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = now()
                 WHERE id = $1 AND project_id = $2 AND env = $3`,
               [q.id, qNs.projectId, qNs.env],
@@ -1263,7 +1263,7 @@ export function startOrchestrator(
           // `AND status = 'running'` is belt-and-braces on the guard above
           // (the row is held, so no one else can move it in between).
           await client.query(
-            `UPDATE runs
+            `UPDATE better_trigger.runs
                 SET status = 'queued', recoveries = recoveries + 1, updated_at = now()
               WHERE id = $1 AND project_id = $2 AND env = $3 AND status = 'running'`,
             [q.run_id, qNs.projectId, qNs.env],
@@ -1272,7 +1272,7 @@ export function startOrchestrator(
           // the next claim's token++ is what invalidates the lost worker's
           // writes.
           await client.query(
-            `UPDATE queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = now()
+            `UPDATE better_trigger.queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = now()
               WHERE id = $1 AND project_id = $2 AND env = $3`,
             [q.id, qNs.projectId, qNs.env],
           );
@@ -1310,7 +1310,7 @@ export function startOrchestrator(
   // decision, marking offline is not.)
   async function markOfflineWorkers(): Promise<void> {
     await pool.query(
-      `UPDATE workers
+      `UPDATE better_trigger.workers
           SET status = 'offline'
         WHERE status = 'online'
           AND last_heartbeat_at < now() - ($1::text || ' milliseconds')::interval`,

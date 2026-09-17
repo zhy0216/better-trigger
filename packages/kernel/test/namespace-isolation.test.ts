@@ -44,15 +44,15 @@ function conflictClient() {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM tasks/.test(sql)) {
+      if (/FROM better_trigger\.tasks/.test(sql)) {
         return {
           rows: [{ id: 't', retry: null, concurrency_limit: null, latest_code_version: null }],
         };
       }
       // createRunIn's database-clock read (T1).
       if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
-      if (/INSERT INTO runs/.test(sql)) return { rows: [] };
-      if (/SELECT id FROM runs/.test(sql)) return { rows: [{ id: 'existing_run' }] };
+      if (/INSERT INTO better_trigger\.runs/.test(sql)) return { rows: [] };
+      if (/SELECT id FROM better_trigger\.runs/.test(sql)) return { rows: [{ id: 'existing_run' }] };
       return { rows: [] };
     },
   } as unknown as PoolClient;
@@ -79,7 +79,7 @@ describe('idempotency is per namespace (C2)', () => {
     });
 
     const lookup = (stmts: { sql: string; params: unknown[] }[]) =>
-      stmts.find((s) => /SELECT id FROM runs/.test(s.sql))!;
+      stmts.find((s) => /SELECT id FROM better_trigger\.runs/.test(s.sql))!;
     expect(lookup(a.stmts).params).toEqual(['acme', 'staging', 't', 'k']);
     expect(lookup(b.stmts).params).toEqual(['acme', 'prod', 't', 'k']);
     // Both resolve as idempotent hits — each against ITS OWN namespace's run.
@@ -97,7 +97,7 @@ describe('idempotency is per namespace (C2)', () => {
       namespace: NS_STAGING,
     });
 
-    const insert = stmts.find((s) => /INSERT INTO runs/.test(s.sql))!;
+    const insert = stmts.find((s) => /INSERT INTO better_trigger\.runs/.test(s.sql))!;
     expect(insert.sql).toMatch(
       /ON CONFLICT \(project_id, env, task_id, idempotency_key\)/,
     );
@@ -113,7 +113,7 @@ describe('idempotency is per namespace (C2)', () => {
       namespace: NS_STAGING,
     });
 
-    const task = stmts.find((s) => /FROM tasks/.test(s.sql))!;
+    const task = stmts.find((s) => /FROM better_trigger\.tasks/.test(s.sql))!;
     expect(task.sql).toMatch(/WHERE project_id = \$1 AND env = \$2 AND id = \$3/);
     expect(task.params).toEqual(['acme', 'staging', 't']);
   });
@@ -128,7 +128,7 @@ function claimPool(candidateRows: unknown[]) {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM queue q/.test(sql)) return { rows: candidateRows };
+      if (/FROM better_trigger\.queue q/.test(sql)) return { rows: candidateRows };
       if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '1' }], rowCount: 1 };
       if (/count\(\*\)/.test(sql)) return { rows: [{ n: '1' }] };
       return { rows: [] };
@@ -150,7 +150,7 @@ describe('claim scoping (C2)', () => {
       leaseMs: 60_000,
     });
 
-    const cands = stmts.filter((s) => /FROM queue q/.test(s.sql));
+    const cands = stmts.filter((s) => /FROM better_trigger\.queue q/.test(s.sql));
     // p1-08: the claim hot path scans one namespace at a time, so a worker
     // serving two namespaces issues two candidate SELECTs — each a pair of
     // constant equalities. The q-side is what binds queue_claimable_idx's
@@ -188,7 +188,7 @@ describe('claim scoping (C2)', () => {
     });
 
     // A staging run must not pick up the prod task row's concurrency limit.
-    const cand = stmts.find((s) => /FROM queue q/.test(s.sql))!;
+    const cand = stmts.find((s) => /FROM better_trigger\.queue q/.test(s.sql))!;
     expect(cand.sql).toMatch(/t\.id = r\.task_id\s+AND t\.project_id = r\.project_id AND t\.env = r\.env/);
   });
 
@@ -314,7 +314,7 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
       leaseMs: 60_000,
     });
 
-    const cands = stmts.filter((s) => /FROM queue q/.test(s.sql));
+    const cands = stmts.filter((s) => /FROM better_trigger\.queue q/.test(s.sql));
     // p1-08: one scan per namespace — each carries its OWN ns pair, so there
     // is no VALUES list to align, just two constant equalities (q + r) sharing
     // one param pair.
@@ -323,7 +323,7 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
       expectAligned(cand.sql, cand.params);
       // $1 taskIds, $2 window, then THIS namespace's pair.
       expect(cand.sql).toMatch(
-        /JOIN runs r ON r\.id = q\.run_id\s+AND r\.project_id = q\.project_id AND r\.env = q\.env/,
+        /JOIN better_trigger\.runs r ON r\.id = q\.run_id\s+AND r\.project_id = q\.project_id AND r\.env = q\.env/,
       );
       expect(cand.sql).toMatch(/q\.project_id = \$3::text AND q\.env = \$4::text/);
       expect(cand.sql).toMatch(/r\.project_id = \$3::text AND r\.env = \$4::text/);
@@ -344,7 +344,7 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
       codeVersions: ['v1'],
     });
 
-    const cand = stmts.find((s) => /FROM queue q/.test(s.sql))!;
+    const cand = stmts.find((s) => /FROM better_trigger\.queue q/.test(s.sql))!;
     expectAligned(cand.sql, cand.params);
     // $1 taskIds, $2 window, $3 codeVersions, then the namespace pair.
     expect(cand.params).toEqual([['t'], 10, ['v1'], 'acme', 'staging']);
@@ -355,11 +355,11 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
 
   it('heartbeat numbers the renewal and cancel-check predicates after their clauses', async () => {
     const { pool, stmts } = recordPool([
-      (sql) => (/UPDATE queue/.test(sql) ? { rows: [{ run_id: 'r1' }] } : undefined),
+      (sql) => (/UPDATE better_trigger\.queue/.test(sql) ? { rows: [{ run_id: 'r1' }] } : undefined),
       // The workers liveness touch must report a row (rowCount 0 = pruned row
       // → not_found; see the heartbeat T7 guard).
-      (sql) => (/UPDATE workers/.test(sql) ? { rows: [], rowCount: 1 } : undefined),
-      (sql) => (/FROM runs/.test(sql) ? { rows: [] } : undefined),
+      (sql) => (/UPDATE better_trigger\.workers/.test(sql) ? { rows: [], rowCount: 1 } : undefined),
+      (sql) => (/FROM better_trigger\.runs/.test(sql) ? { rows: [] } : undefined),
     ]);
 
     await heartbeat(pool, {
@@ -369,13 +369,13 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
       leaseMs: 60_000,
     });
 
-    const renew = stmts.find((s) => /UPDATE queue/.test(s.sql))!;
+    const renew = stmts.find((s) => /UPDATE better_trigger\.queue/.test(s.sql))!;
     expectAligned(renew.sql, renew.params);
     // $1 leaseMs, $2 workerId, $3 runIds, then the namespace pair.
     expect(renew.params).toEqual(['60000', 'w1', ['r1', 'r2'], 'acme', 'staging']);
     expect(renew.sql).toMatch(/queue\.project_id = \$4::text AND queue\.env = \$5::text/);
 
-    const cancel = stmts.find((s) => /SELECT id FROM runs/.test(s.sql))!;
+    const cancel = stmts.find((s) => /SELECT id FROM better_trigger\.runs/.test(s.sql))!;
     expectAligned(cancel.sql, cancel.params);
     // $1 runIds, then the namespace pair.
     expect(cancel.params).toEqual([['r1', 'r2'], 'acme', 'staging']);
@@ -411,7 +411,7 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
         if (/WITH doomed AS/.test(sql)) {
           return { rows: [{ runs: '0', run_steps: '0', logs: '0', waits: '0', queue: '0' }] };
         }
-        if (/count\(\*\) AS count FROM workers/.test(sql)) return { rows: [{ count: '0' }] };
+        if (/count\(\*\) AS count FROM better_trigger\.workers/.test(sql)) return { rows: [{ count: '0' }] };
         return { rows: [] };
       },
     } as unknown as Pool;
@@ -434,7 +434,7 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
   it('prune deleteBatch numbers the predicate after cutoff + statuses + limit', async () => {
     const statuses = ['completed', 'failed', 'canceled'];
     const { pool, stmts } = recordPool([
-      (sql) => (/SELECT r\.id FROM runs r/.test(sql) ? { rows: [] } : undefined),
+      (sql) => (/SELECT r\.id FROM better_trigger\.runs r/.test(sql) ? { rows: [] } : undefined),
     ]);
 
     await prune(pool, {
@@ -443,7 +443,7 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
       batchSize: 2,
     });
 
-    const ids = stmts.find((s) => /SELECT r\.id FROM runs r/.test(s.sql))!;
+    const ids = stmts.find((s) => /SELECT r\.id FROM better_trigger\.runs r/.test(s.sql))!;
     expectAligned(ids.sql, ids.params);
     // $1 cutoff, $2 statuses, $3 batchSize (LIMIT), then the namespace pair.
     expect(ids.params[0]).toBeInstanceOf(Date);
@@ -455,14 +455,14 @@ describe('placeholder/param alignment on namespace predicates (P0)', () => {
   it('releaseClaims numbers the predicate after the worker id', async () => {
     const { pool, stmts } = recordPool([
       (sql) =>
-        /SELECT run_id, project_id, env FROM queue/.test(sql)
+        /SELECT run_id, project_id, env FROM better_trigger\.queue/.test(sql)
           ? { rows: [] }
           : undefined,
     ]);
 
     await releaseClaims(pool, { workerId: 'w1', namespaces: [NS_STAGING] });
 
-    const held = stmts.find((s) => /SELECT run_id, project_id, env FROM queue/.test(s.sql))!;
+    const held = stmts.find((s) => /SELECT run_id, project_id, env FROM better_trigger\.queue/.test(s.sql))!;
     expectAligned(held.sql, held.params);
     // $1 workerId (locked_by), then the namespace pair.
     expect(held.params).toEqual(['w1', 'acme', 'staging']);
@@ -519,13 +519,13 @@ function hasNamespaceMarker(sql: string): boolean {
 const ALLOWED_WITHOUT_MARKER: RegExp[] = [
   // workers is global scope (process registry): the id-keyed liveness touch,
   // the offline marker sweep and deregister all stay marker-free by design.
-  /^\s*UPDATE workers\b/,
+  /^\s*UPDATE better_trigger\.workers\b/,
   // prune: the dependent counts and deletes run over ids that came out of an
   // already namespace-scoped SELECT (same tx), so re-predicating them would be
   // dead weight, not isolation.
   /WHERE run_id = ANY\(\$1::text\[\]\)/,
   /run_id IN \(SELECT id FROM doomed\)/,
-  /DELETE FROM runs WHERE id = ANY/,
+  /DELETE FROM better_trigger\.runs WHERE id = ANY/,
 ];
 
 /**
@@ -617,24 +617,24 @@ describe('every business SQL statement is namespace-scoped (C2)', () => {
     // bare-substring marker let it through). predicateRegion() must cut to
     // WHERE, so this is flagged.
     const leaky = `SELECT id, run_id, project_id, env, step_seq, fingerprint
-      FROM waits WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'`;
+      FROM better_trigger.waits WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'`;
     expect(hasNamespaceMarker(leaky)).toBe(false);
 
     // And a genuinely scoped statement still passes.
-    const scoped = `SELECT id, run_id FROM waits
+    const scoped = `SELECT id, run_id FROM better_trigger.waits
       WHERE child_run_id = $1 AND status = 'pending'
         AND project_id = $2 AND env = $3`;
     expect(hasNamespaceMarker(scoped)).toBe(true);
     // The VALUES pairing form also passes.
     expect(
       hasNamespaceMarker(
-        `SELECT id FROM runs WHERE (r.project_id, r.env) IN (VALUES ($1::text, $2::text))`,
+        `SELECT id FROM better_trigger.runs WHERE (r.project_id, r.env) IN (VALUES ($1::text, $2::text))`,
       ),
     ).toBe(true);
     // An INSERT column list naming both columns passes.
     expect(
       hasNamespaceMarker(
-        `INSERT INTO runs (id, project_id, env, status) VALUES ($1, $2, $3, $4)`,
+        `INSERT INTO better_trigger.runs (id, project_id, env, status) VALUES ($1, $2, $3, $4)`,
       ),
     ).toBe(true);
   });

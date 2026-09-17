@@ -160,7 +160,7 @@ export async function enqueueMany(client: PoolClient, args: EnqueueArgs[]): Prom
              concurrency_key = EXCLUDED.concurrency_key,
              locked_by = NULL, locked_at = NULL, lease_until = NULL`;
   await client.query(
-    `INSERT INTO queue (run_id, available_at, priority, concurrency_key, project_id, env, locked_by, locked_at)
+    `INSERT INTO better_trigger.queue (run_id, available_at, priority, concurrency_key, project_id, env, locked_by, locked_at)
      VALUES ${values}
      ${conflict}`,
     args.flatMap((a) => [
@@ -182,7 +182,7 @@ export async function removeFromQueue(
   namespace: Namespace,
 ): Promise<void> {
   await db.query(
-    `DELETE FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3`,
+    `DELETE FROM better_trigger.queue WHERE run_id = $1 AND project_id = $2 AND env = $3`,
     [runId, namespace.projectId, namespace.env],
   );
 }
@@ -427,11 +427,11 @@ async function scanCandidates(
                   r.task_id, r.payload, r.attempt, r.max_attempts,
                   r.code_version, r.project_id, r.env, r.concurrency_key,
                   t.concurrency_limit
-             FROM queue q
-             JOIN runs r ON r.id = q.run_id
+             FROM better_trigger.queue q
+             JOIN better_trigger.runs r ON r.id = q.run_id
                         AND r.project_id = q.project_id AND r.env = q.env
              JOIN serving s ON s.task_id = r.task_id
-             LEFT JOIN tasks t ON t.id = r.task_id
+             LEFT JOIN better_trigger.tasks t ON t.id = r.task_id
                             AND t.project_id = r.project_id AND t.env = r.env
             WHERE q.available_at <= now() AND q.locked_by IS NULL
               AND r.status = 'queued'
@@ -445,10 +445,10 @@ async function scanCandidates(
                   r.task_id, r.payload, r.attempt, r.max_attempts,
                   r.code_version, r.project_id, r.env, r.concurrency_key,
                   t.concurrency_limit
-             FROM queue q
-             JOIN runs r ON r.id = q.run_id
+             FROM better_trigger.queue q
+             JOIN better_trigger.runs r ON r.id = q.run_id
                         AND r.project_id = q.project_id AND r.env = q.env
-             LEFT JOIN tasks t ON t.id = r.task_id
+             LEFT JOIN better_trigger.tasks t ON t.id = r.task_id
                             AND t.project_id = r.project_id AND t.env = r.env
             WHERE q.available_at <= now() AND q.locked_by IS NULL
               AND r.status = 'queued'
@@ -496,7 +496,7 @@ async function tryClaimOne(
     );
     const countRes = await client.query<{ n: string }>(
       `SELECT count(*)::text AS n
-         FROM runs
+         FROM better_trigger.runs
         WHERE status = 'running' AND concurrency_key = $1
           AND project_id = $2 AND env = $3`,
       [key, cand.project_id, cand.env],
@@ -515,7 +515,7 @@ async function tryClaimOne(
   // any later claim invalidates it, and it survives suspend/resume
   // because it lives on runs, not on the delete-and-reinserted queue row.
   const tokenRes = await client.query<{ fencing_token: string }>(
-    `UPDATE runs
+    `UPDATE better_trigger.runs
         SET status = 'running',
             started_at = COALESCE(started_at, now()),
             updated_at = now(),
@@ -538,7 +538,7 @@ async function tryClaimOne(
     // row another claim will retake — leave it alone. A missing run row
     // makes the queue row a ghost — delete it too (the reaper's rule).
     const st = await client.query<{ status: string }>(
-      `SELECT status FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
+      `SELECT status FROM better_trigger.runs WHERE id = $1 AND project_id = $2 AND env = $3`,
       [cand.run_id, cand.project_id, cand.env],
     );
     const oldStatus = st.rows[0]?.status ?? 'missing';
@@ -548,7 +548,7 @@ async function tryClaimOne(
       oldStatus === 'missing';
     if (removable) {
       await client.query(
-        `DELETE FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3`,
+        `DELETE FROM better_trigger.queue WHERE run_id = $1 AND project_id = $2 AND env = $3`,
         [cand.run_id, cand.project_id, cand.env],
       );
     }
@@ -564,7 +564,7 @@ async function tryClaimOne(
   // The lease, on the row the scan already holds (canonical position 1
   // was taken at scan time; this is a write, not a new lock).
   await client.query(
-    `UPDATE queue
+    `UPDATE better_trigger.queue
         SET locked_by = $1,
             locked_at = now(),
             lease_until = now() + ($2::text || ' milliseconds')::interval
@@ -602,11 +602,11 @@ async function readLedger(
   const stepsSql =
     cap > 0
       ? `SELECT seq, kind, label, status, output, error, fingerprint
-           FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
+           FROM better_trigger.run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
            ORDER BY seq ASC
            LIMIT $4`
       : `SELECT seq, kind, label, status, output, error, fingerprint
-           FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
+           FROM better_trigger.run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
            ORDER BY seq ASC`;
   const claimed: ClaimedRun[] = [];
   for (const p of pending) {
@@ -857,14 +857,14 @@ export async function scanStrandedRuns(
   const nsPredicate = namespacePredicate('r', namespaces, params);
   const res = await pool.query<{ task_id: string; code_version: string; n: string }>(
     `SELECT r.task_id, r.code_version, count(*)::text AS n
-       FROM queue q
-       JOIN runs r ON r.id = q.run_id
+       FROM better_trigger.queue q
+       JOIN better_trigger.runs r ON r.id = q.run_id
       WHERE q.locked_by IS NULL
         AND q.available_at <= now()
         AND r.code_version IS NOT NULL
         AND ${nsPredicate}
         AND NOT EXISTS (
-          SELECT 1 FROM workers w
+          SELECT 1 FROM better_trigger.workers w
            CROSS JOIN LATERAL jsonb_array_elements(w.tasks) e
            CROSS JOIN LATERAL jsonb_array_elements(w.namespaces) n
            WHERE w.status = 'online'
@@ -954,7 +954,7 @@ export async function heartbeat(
     const params: unknown[] = [String(args.leaseMs), args.workerId, args.runIds];
     const nsPredicate = namespacePredicate('queue', args.namespaces, params);
     const res = await pool.query<{ run_id: string }>(
-      `UPDATE queue SET lease_until = now() + ($1::text || ' milliseconds')::interval
+      `UPDATE better_trigger.queue SET lease_until = now() + ($1::text || ' milliseconds')::interval
         WHERE locked_by = $2 AND run_id = ANY($3::text[]) AND ${nsPredicate}
         RETURNING run_id`,
       params,
@@ -970,7 +970,7 @@ export async function heartbeat(
   // leases simply lapse to the reaper, which is the correct outcome for a
   // worker with no row.
   const touched = await pool.query(
-    `UPDATE workers SET last_heartbeat_at = now(), status = 'online' WHERE id = $1`,
+    `UPDATE better_trigger.workers SET last_heartbeat_at = now(), status = 'online' WHERE id = $1`,
     [args.workerId],
   );
   if (touched.rowCount === 0) {
@@ -986,7 +986,7 @@ export async function heartbeat(
   const params: unknown[] = [args.runIds];
   const nsPredicate = namespacePredicate('runs', args.namespaces, params);
   const res = await pool.query<{ id: string }>(
-    `SELECT id FROM runs
+    `SELECT id FROM better_trigger.runs
       WHERE id = ANY($1::text[]) AND status = 'canceled' AND ${nsPredicate}`,
     params,
   );
@@ -1084,7 +1084,7 @@ export async function releaseClaims(
       args.runIds !== undefined ? ` AND run_id = ANY($${params.length + 1}::text[])` : '';
     if (args.runIds !== undefined) params.push(args.runIds);
     const held = await client.query<{ run_id: string; project_id: string; env: string }>(
-      `SELECT run_id, project_id, env FROM queue
+      `SELECT run_id, project_id, env FROM better_trigger.queue
         WHERE locked_by = $1 AND ${nsPredicate}${runIdPredicate}
         ORDER BY run_id FOR UPDATE`,
       params,
@@ -1100,7 +1100,7 @@ export async function releaseClaims(
     // reached a terminal state between the two statements) keeps its own state.
     for (const r of runs) {
       await client.query(
-        `UPDATE runs SET status = 'queued', updated_at = now()
+        `UPDATE better_trigger.runs SET status = 'queued', updated_at = now()
           WHERE id = $1 AND status = 'running' AND project_id = $2 AND env = $3`,
         [r.run_id, r.project_id, r.env],
       );
@@ -1114,7 +1114,7 @@ export async function releaseClaims(
       .map((_, i) => `($${start + i * 3}::text, $${start + i * 3 + 1}::text, $${start + i * 3 + 2}::text)`)
       .join(', ');
     const released = await client.query<{ run_id: string }>(
-      `UPDATE queue
+      `UPDATE better_trigger.queue
           SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = now()
         WHERE locked_by = $1 AND (run_id, project_id, env) IN (VALUES ${triples})
         RETURNING run_id`,

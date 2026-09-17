@@ -166,7 +166,7 @@ export async function upsertStep(client: PoolClient, args: StepWriteArgs): Promi
   }
 
   const res = await client.query(
-    `INSERT INTO run_steps
+    `INSERT INTO better_trigger.run_steps
        (run_id, project_id, env, seq, kind, label, status, output, error, attempt, started_at, finished_at, fingerprint)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      ON CONFLICT (run_id, seq) DO UPDATE
@@ -201,7 +201,7 @@ export async function upsertStep(client: PoolClient, args: StepWriteArgs): Promi
   // Conflict on a 'completed' row: the WHERE clause refused the update. Same
   // transaction, so the row below is the row the INSERT conflicted with.
   const existing = await client.query<{ status: string; fingerprint: string | null }>(
-    `SELECT status, fingerprint FROM run_steps
+    `SELECT status, fingerprint FROM better_trigger.run_steps
       WHERE run_id = $1 AND project_id = $2 AND env = $3 AND seq = $4`,
     [args.runId, args.namespace.projectId, args.namespace.env, args.seq],
   );
@@ -322,7 +322,7 @@ export async function suspendRun(
     }
 
     await client.query(
-      `INSERT INTO waits (run_id, project_id, env, step_seq, kind, resume_at, fingerprint, status, created_at)
+      `INSERT INTO better_trigger.waits (run_id, project_id, env, step_seq, kind, resume_at, fingerprint, status, created_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,'pending', now())`,
       [
         args.runId,
@@ -335,7 +335,7 @@ export async function suspendRun(
       ],
     );
     await client.query(
-      `UPDATE runs SET status = 'waiting', updated_at = now()
+      `UPDATE better_trigger.runs SET status = 'waiting', updated_at = now()
         WHERE id = $1 AND project_id = $2 AND env = $3`,
       [args.runId, args.namespace.projectId, args.namespace.env],
     );
@@ -455,7 +455,7 @@ export async function waitForChildRun(
       // would otherwise be an unawaited orphan run) and re-read the winner's
       // committed wait/step instead of duplicating the parent→child edge.
       const inserted = await client.query(
-        `INSERT INTO waits (run_id, project_id, env, step_seq, kind, child_run_id, fingerprint, status, created_at)
+        `INSERT INTO better_trigger.waits (run_id, project_id, env, step_seq, kind, child_run_id, fingerprint, status, created_at)
          VALUES ($1,$2,$3,$4,'run',$5,$6,'pending', now())
          ON CONFLICT (project_id, env, run_id, step_seq, kind) WHERE status = 'pending' DO NOTHING
          RETURNING id`,
@@ -472,7 +472,7 @@ export async function waitForChildRun(
         throw new PendingWaitConflictError(args.runId, args.seq);
       }
       await client.query(
-        `UPDATE runs SET status = 'waiting', updated_at = now()
+        `UPDATE better_trigger.runs SET status = 'waiting', updated_at = now()
           WHERE id = $1 AND project_id = $2 AND env = $3`,
         [args.runId, args.namespace.projectId, args.namespace.env],
       );
@@ -521,7 +521,7 @@ async function readExistingChildRunId(
   args: WaitForChildRunArgs,
 ): Promise<string | null> {
   const existingStep = await client.query<{ output: unknown }>(
-    `SELECT output FROM run_steps
+    `SELECT output FROM better_trigger.run_steps
       WHERE run_id = $1 AND project_id = $2 AND env = $3 AND seq = $4 AND status = 'completed'`,
     [args.runId, args.namespace.projectId, args.namespace.env, args.seq],
   );
@@ -531,7 +531,7 @@ async function readExistingChildRunId(
   }
   // Or a pending wait already created the child.
   const existingWait = await client.query<{ child_run_id: string | null }>(
-    `SELECT child_run_id FROM waits
+    `SELECT child_run_id FROM better_trigger.waits
       WHERE run_id = $1 AND project_id = $2 AND env = $3
         AND step_seq = $4 AND kind = 'run' AND status = 'pending'`,
     [args.runId, args.namespace.projectId, args.namespace.env, args.seq],
@@ -597,7 +597,7 @@ export async function batchTriggerChild(
 
     // Idempotent: if the step row already exists, return its recorded runIds.
     const existing = await client.query<{ output: unknown }>(
-      `SELECT output FROM run_steps
+      `SELECT output FROM better_trigger.run_steps
         WHERE run_id = $1 AND project_id = $2 AND env = $3 AND seq = $4`,
       [args.runId, args.namespace.projectId, args.namespace.env, args.seq],
     );

@@ -27,7 +27,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 async function countScheduleRuns(pool: Pool, taskId: string): Promise<number> {
   const res = await pool.query<{ count: number }>(
     `SELECT count(*)::int AS count
-       FROM runs WHERE task_id = $1 AND trigger_type = 'schedule'`,
+       FROM better_trigger.runs WHERE task_id = $1 AND trigger_type = 'schedule'`,
     [taskId],
   );
   return res.rows[0]!.count;
@@ -36,7 +36,7 @@ async function countScheduleRuns(pool: Pool, taskId: string): Promise<number> {
 /** Make a schedule overdue so the next tick finds it due. */
 async function forceDue(pool: Pool, taskId: string): Promise<void> {
   await pool.query(
-    `UPDATE schedules SET next_run_at = now() - interval '5 minutes' WHERE task_id = $1`,
+    `UPDATE better_trigger.schedules SET next_run_at = now() - interval '5 minutes' WHERE task_id = $1`,
     [taskId],
   );
 }
@@ -97,7 +97,7 @@ describePg('cron poison isolation (04-T1)', () => {
 
         // Poison one row the way production does: an out-of-band edit of the
         // stored pattern (registration would have refused it).
-        await pool.query(`UPDATE schedules SET cron_pattern = 'not a cron' WHERE task_id = $1`, [
+        await pool.query(`UPDATE better_trigger.schedules SET cron_pattern = 'not a cron' WHERE task_id = $1`, [
           POISON_TASK,
         ]);
         await forceDue(pool, HEALTHY_TASK);
@@ -119,7 +119,7 @@ describePg('cron poison isolation (04-T1)', () => {
         const poisonedRow = await pool.query<{
           next_run_at: Date | null;
           last_run_id: string | null;
-        }>(`SELECT next_run_at, last_run_id FROM schedules WHERE task_id = $1`, [POISON_TASK]);
+        }>(`SELECT next_run_at, last_run_id FROM better_trigger.schedules WHERE task_id = $1`, [POISON_TASK]);
         expect(poisonedRow.rows[0]!.next_run_at).toBeNull();
         expect(poisonedRow.rows[0]!.last_run_id).toBeTruthy();
 

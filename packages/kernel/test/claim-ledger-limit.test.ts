@@ -89,8 +89,8 @@ function stubPool(rows: CandidateRow[], steps: unknown[] = []) {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM queue q/.test(sql)) return { rows };
-      if (/FROM run_steps/.test(sql)) return { rows: steps };
+      if (/FROM better_trigger\.queue q/.test(sql)) return { rows };
+      if (/FROM better_trigger\.run_steps/.test(sql)) return { rows: steps };
       if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '42' }], rowCount: 1 };
       return { rows: [] };
     },
@@ -108,8 +108,8 @@ const ARGS = {
   limit: 1,
 };
 
-const candidatesStmt = (stmts: Stmt[]) => stmts.find((s) => /FROM queue q/.test(s.sql))!;
-const stepsStmt = (stmts: Stmt[]) => stmts.find((s) => /FROM run_steps/.test(s.sql))!;
+const candidatesStmt = (stmts: Stmt[]) => stmts.find((s) => /FROM better_trigger\.queue q/.test(s.sql))!;
+const stepsStmt = (stmts: Stmt[]) => stmts.find((s) => /FROM better_trigger\.run_steps/.test(s.sql))!;
 
 describe('claimRuns step-ledger cap', () => {
   it('commits the claim transaction before any run_steps read', async () => {
@@ -120,7 +120,7 @@ describe('claimRuns step-ledger cap', () => {
     // The ledger read must never run with the claim window's FOR UPDATE rows
     // held: COMMIT comes first in the recorded sequence.
     const commitIdx = stmts.findIndex((s) => s.sql === 'COMMIT');
-    const stepsIdx = stmts.findIndex((s) => /FROM run_steps/.test(s.sql));
+    const stepsIdx = stmts.findIndex((s) => /FROM better_trigger\.run_steps/.test(s.sql));
     expect(commitIdx).toBeGreaterThanOrEqual(0);
     expect(stepsIdx).toBeGreaterThanOrEqual(0);
     expect(commitIdx).toBeLessThan(stepsIdx);

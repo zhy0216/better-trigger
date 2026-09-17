@@ -88,7 +88,7 @@ function registrationPool() {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
         return { rows: [], rowCount: 0 };
       }
-      if (/INSERT INTO workers/.test(sql)) {
+      if (/INSERT INTO better_trigger\.workers/.test(sql)) {
         // params[4] is the tasks jsonb: [{ id, codeVersion }] — the versions
         // this worker row serves (and the guard then sees as "still served").
         for (const entry of JSON.parse(String(params[4])) as Array<{ codeVersion: string }>) {
@@ -96,7 +96,7 @@ function registrationPool() {
         }
         return { rows: [], rowCount: 1 };
       }
-      if (/INSERT INTO tasks/.test(sql)) {
+      if (/INSERT INTO better_trigger\.tasks/.test(sql)) {
         const id = String(params[0]);
         const incoming = String(params[10]);
         const current = stored.get(id) ?? null;
@@ -106,15 +106,15 @@ function registrationPool() {
         }
         return { rows: [], rowCount: 0 };
       }
-      if (/SELECT latest_code_version FROM tasks/.test(sql)) {
+      if (/SELECT latest_code_version FROM better_trigger\.tasks/.test(sql)) {
         return {
           rows: stored.has(String(params[2]))
             ? [{ latest_code_version: stored.get(String(params[2])) }]
             : [],
         };
       }
-      if (/INSERT INTO schedules/.test(sql)) return { rows: [], rowCount: 1 };
-      if (/DELETE FROM schedules/.test(sql)) return { rows: [], rowCount: 0 };
+      if (/INSERT INTO better_trigger\.schedules/.test(sql)) return { rows: [], rowCount: 1 };
+      if (/DELETE FROM better_trigger\.schedules/.test(sql)) return { rows: [], rowCount: 0 };
       return { rows: [], rowCount: 0 };
     },
     release: () => {},
@@ -156,14 +156,14 @@ describe('registerWorker — task metadata owner/version rule (C4)', () => {
 
     expect(stmts[0]!.sql).toBe('BEGIN');
     expect(stmts.at(-1)!.sql).toBe('COMMIT');
-    expect(stmts.some((s) => /INSERT INTO workers/.test(s.sql))).toBe(true);
+    expect(stmts.some((s) => /INSERT INTO better_trigger\.workers/.test(s.sql))).toBe(true);
 
-    const upsert = stmts.find((s) => /INSERT INTO tasks/.test(s.sql))!;
+    const upsert = stmts.find((s) => /INSERT INTO better_trigger\.tasks/.test(s.sql))!;
     // The version guard: same version, or no longer served, may overwrite.
     expect(upsert.sql).toMatch(/WHERE tasks\.latest_code_version IS NULL/);
     expect(upsert.sql).toMatch(/tasks\.latest_code_version = EXCLUDED\.latest_code_version/);
     expect(upsert.sql).toMatch(
-      /NOT EXISTS \(\s*SELECT 1 FROM workers w\s+CROSS JOIN LATERAL jsonb_array_elements\(w\.tasks\) e\s+WHERE w\.status = 'online'/,
+      /NOT EXISTS \(\s*SELECT 1 FROM better_trigger\.workers w\s+CROSS JOIN LATERAL jsonb_array_elements\(w\.tasks\) e\s+WHERE w\.status = 'online'/,
     );
     // The stored version is protected while a live worker serves it: heartbeat
     // within the offline-marker window — WORKER_OFFLINE_MS bound as $13, the
@@ -226,7 +226,7 @@ describe('registerWorker — task metadata owner/version rule (C4)', () => {
     await register(pool, 'v2', logger, single('v2'));
     await register(pool, 'v1', logger, single('v1'));
 
-    const read = stmts.find((s) => /SELECT latest_code_version FROM tasks/.test(s.sql))!;
+    const read = stmts.find((s) => /SELECT latest_code_version FROM better_trigger\.tasks/.test(s.sql))!;
     expect(read).toBeDefined();
     expect(read.sql).toMatch(/WHERE project_id = \$1 AND env = \$2 AND id = \$3/);
     expect(read.params).toEqual(['default', 'prod', 'greet']);
@@ -285,7 +285,7 @@ describe('registerWorker — schedule sync (C4)', () => {
 
     await register(pool, 'v1', logger);
 
-    const upsert = stmts.find((s) => /INSERT INTO schedules/.test(s.sql))!;
+    const upsert = stmts.find((s) => /INSERT INTO better_trigger\.schedules/.test(s.sql))!;
     // p1-09: the daemon-clock `next` is clamped to at least 1s after the DB
     // clock on the fresh-INSERT branch (the ON CONFLICT branch keeps the
     // existing next_run_at unchanged — a due schedule stays due). The NULL
@@ -312,7 +312,7 @@ describe('registerWorker — schedule sync (C4)', () => {
     await register(pool, 'v1', logger);
     await register(pool, 'v1', logger);
 
-    const upsert = stmts.filter((s) => /INSERT INTO schedules/.test(s.sql)).at(-1)!;
+    const upsert = stmts.filter((s) => /INSERT INTO better_trigger\.schedules/.test(s.sql)).at(-1)!;
     // Recompute only on a real change (pattern or timezone); otherwise keep
     // schedules.next_run_at verbatim — a due schedule stays due across a
     // restart, and a disabled schedule's NULL stays NULL. The recompute branch
@@ -339,7 +339,7 @@ describe('registerWorker — schedule sync (C4)', () => {
     // never transitions disabled → enabled (that is the dashboard PATCH's job,
     // and it recomputes next_run_at itself), so the CASE has no enabled
     // condition and the unchanged row keeps its NULL via the ELSE branch.
-    const upsert = stmts.find((s) => /INSERT INTO schedules/.test(s.sql))!;
+    const upsert = stmts.find((s) => /INSERT INTO better_trigger\.schedules/.test(s.sql))!;
     expect(upsert.sql).toMatch(/ELSE schedules\.next_run_at/);
     // The conflict branch (SET + CASE) must not mention enabled at all: the
     // disabled row keeps its enabled=false and its NULL next_run_at.
@@ -356,7 +356,7 @@ describe('registerWorker — schedule sync (C4)', () => {
 
     // One CASE covers both pattern and timezone drift; a changed pattern
     // flows into the THEN branch (recomputed from now).
-    const upsert = stmts.find((s) => /INSERT INTO schedules/.test(s.sql))!;
+    const upsert = stmts.find((s) => /INSERT INTO better_trigger\.schedules/.test(s.sql))!;
     expect(upsert.params[4]).toBe('0 9 * * *');
     expect(upsert.sql).toMatch(
       /WHEN schedules\.cron_pattern IS DISTINCT FROM EXCLUDED\.cron_pattern\s+OR schedules\.cron_tz IS DISTINCT FROM EXCLUDED\.cron_tz/,
@@ -368,7 +368,7 @@ describe('registerWorker — schedule sync (C4)', () => {
 
     await register(pool, 'v1', logger);
 
-    const upsert = stmts.find((s) => /INSERT INTO schedules/.test(s.sql))!;
+    const upsert = stmts.find((s) => /INSERT INTO better_trigger\.schedules/.test(s.sql))!;
     expect(upsert.sql).not.toMatch(/enabled = EXCLUDED\.enabled/);
   });
 
@@ -377,7 +377,7 @@ describe('registerWorker — schedule sync (C4)', () => {
 
     await register(pool, 'v1', logger, manifest('v1', false));
 
-    const del = stmts.find((s) => /DELETE FROM schedules/.test(s.sql))!;
+    const del = stmts.find((s) => /DELETE FROM better_trigger\.schedules/.test(s.sql))!;
     expect(del.sql).toMatch(/WHERE project_id = \$1 AND env = \$2/);
     expect(del.params).toEqual(['default', 'prod', ['greet', 'plain'], ['']]);
   });
@@ -398,8 +398,8 @@ describe('registerWorker — schedule sync (C4)', () => {
     await register(pool, 'v1', logger, cronTask('v1', '0 9 * * *'));
     expect(warns).toHaveLength(1);
     const during = stmts.slice(before);
-    expect(during.some((s) => /INSERT INTO schedules/.test(s.sql))).toBe(false);
-    expect(during.some((s) => /DELETE FROM schedules/.test(s.sql))).toBe(false);
+    expect(during.some((s) => /INSERT INTO better_trigger\.schedules/.test(s.sql))).toBe(false);
+    expect(during.some((s) => /DELETE FROM better_trigger\.schedules/.test(s.sql))).toBe(false);
   });
 
   it('a non-owner manifest that dropped cron cannot delete the owner schedule (P0-2)', async () => {
@@ -417,7 +417,7 @@ describe('registerWorker — schedule sync (C4)', () => {
     await register(pool, 'v1', logger, [task({ id: 'greet', codeVersion: 'v1' })]);
     expect(warns).toHaveLength(1);
     const during = stmts.slice(before);
-    expect(during.some((s) => /DELETE FROM schedules/.test(s.sql))).toBe(false);
+    expect(during.some((s) => /DELETE FROM better_trigger\.schedules/.test(s.sql))).toBe(false);
   });
 
   it('an owner that dropped cron still deletes its schedule', async () => {
@@ -433,8 +433,8 @@ describe('registerWorker — schedule sync (C4)', () => {
     // deleted as before.
     await register(pool, 'v2', logger, [task({ id: 'greet', codeVersion: 'v2' })]);
     const during = stmts.slice(before);
-    expect(during.some((s) => /DELETE FROM schedules/.test(s.sql))).toBe(true);
-    expect(during.some((s) => /INSERT INTO schedules/.test(s.sql))).toBe(false);
+    expect(during.some((s) => /DELETE FROM better_trigger\.schedules/.test(s.sql))).toBe(true);
+    expect(during.some((s) => /INSERT INTO better_trigger\.schedules/.test(s.sql))).toBe(false);
   });
 });
 
@@ -474,7 +474,7 @@ describe('scanCron — due-scan locking structure (C4)', () => {
       handle.stop();
     }
 
-    const scan = stmts.find((s) => /FROM schedules/.test(s.sql))!;
+    const scan = stmts.find((s) => /FROM better_trigger\.schedules/.test(s.sql))!;
     expect(scan).toBeDefined();
     // Static proof that the due-scan's locking structure is intact: the
     // SELECT ... FOR UPDATE SKIP LOCKED inside one transaction is what

@@ -28,7 +28,7 @@ function stubPool(flipRows: 0 | 1, runStatus = 'completed') {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM queue q/.test(sql)) {
+      if (/FROM better_trigger\.queue q/.test(sql)) {
         return {
           rows: [
             {
@@ -52,7 +52,7 @@ function stubPool(flipRows: 0 | 1, runStatus = 'completed') {
           ? { rows: [{ fencing_token: '5' }], rowCount: 1 }
           : { rows: [], rowCount: 0 };
       }
-      if (/SELECT status FROM runs/.test(sql)) {
+      if (/SELECT status FROM better_trigger\.runs/.test(sql)) {
         return runStatus === 'missing' ? { rows: [] } : { rows: [{ status: runStatus }] };
       }
       if (/count\(\*\)/.test(sql)) return { rows: [{ n: '0' }] };
@@ -87,11 +87,11 @@ describe('claimRuns expected-state guard (p2-39)', () => {
       expect(claimed).toEqual([]);
       // The runs flip came back empty → the queue lease must never be written
       // (the queue UPDATE comes AFTER the flip) and the ledger is never read.
-      expect(stmts.some((s) => /UPDATE queue/.test(s.sql))).toBe(false);
-      expect(stmts.some((s) => /FROM run_steps/.test(s.sql))).toBe(false);
+      expect(stmts.some((s) => /UPDATE better_trigger\.queue/.test(s.sql))).toBe(false);
+      expect(stmts.some((s) => /FROM better_trigger\.run_steps/.test(s.sql))).toBe(false);
       // A 'running'/'queued' run is a live-claim race, not residue: its queue
       // row is kept — the delete branch must never fire.
-      expect(stmts.some((s) => /^DELETE FROM queue/.test(s.sql))).toBe(false);
+      expect(stmts.some((s) => /^DELETE FROM better_trigger\.queue/.test(s.sql))).toBe(false);
       // And the desync is diagnosed, not swallowed.
       expect(lines.some((m) => m.includes('[queue:claim]') && m.includes('stale'))).toBe(true);
       expect(lines.some((m) => m.includes(`runs.status '${status}'`))).toBe(true);
@@ -114,7 +114,7 @@ describe('claimRuns expected-state guard (p2-39)', () => {
       // deleted under the lock the claim already holds, scoped by the
       // (run_id, project_id, env) triple, and said out loud with the old
       // status and the source loop.
-      const del = stmts.find((s) => /^DELETE FROM queue/.test(s.sql));
+      const del = stmts.find((s) => /^DELETE FROM better_trigger\.queue/.test(s.sql));
       expect(del).toBeTruthy();
       expect(del!.params).toEqual(['run_1', 'default', 'prod']);
       expect(
@@ -127,8 +127,8 @@ describe('claimRuns expected-state guard (p2-39)', () => {
         ),
       ).toBe(true);
       // Still no lease write and no ledger read.
-      expect(stmts.some((s) => /UPDATE queue/.test(s.sql))).toBe(false);
-      expect(stmts.some((s) => /FROM run_steps/.test(s.sql))).toBe(false);
+      expect(stmts.some((s) => /UPDATE better_trigger\.queue/.test(s.sql))).toBe(false);
+      expect(stmts.some((s) => /FROM better_trigger\.run_steps/.test(s.sql))).toBe(false);
     }
   });
 
@@ -139,15 +139,15 @@ describe('claimRuns expected-state guard (p2-39)', () => {
 
     expect(claimed).toHaveLength(1);
     expect(claimed[0]!.fencingToken).toBe(5);
-    expect(stmts.some((s) => /UPDATE queue/.test(s.sql))).toBe(true);
-    expect(stmts.some((s) => /FROM run_steps/.test(s.sql))).toBe(true);
+    expect(stmts.some((s) => /UPDATE better_trigger\.queue/.test(s.sql))).toBe(true);
+    expect(stmts.some((s) => /FROM better_trigger\.run_steps/.test(s.sql))).toBe(true);
   });
 
   it('the candidate scan carries the status predicate and the flip UPDATE too', async () => {
     const { pool, stmts } = stubPool(1);
     await claimRuns(pool, ARGS);
 
-    const scan = stmts.find((s) => /FROM queue q/.test(s.sql))!;
+    const scan = stmts.find((s) => /FROM better_trigger\.queue q/.test(s.sql))!;
     expect(scan.sql).toMatch(/r\.status = 'queued'/);
     const flip = stmts.find((s) => /RETURNING fencing_token/.test(s.sql))!;
     expect(flip.sql).toMatch(/AND status = 'queued'/);

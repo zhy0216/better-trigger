@@ -71,7 +71,7 @@ export async function getRunRecord(
     `SELECT id, task_id, status, trigger_type, code_version, project_id, env,
             attempt, max_attempts, payload, output, error, parent_run_id,
             idempotency_key, queued_at, created_at, started_at, finished_at
-       FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
+       FROM better_trigger.runs WHERE id = $1 AND project_id = $2 AND env = $3`,
     [runId, namespace.projectId, namespace.env],
   );
   const r = runRes.rows[0];
@@ -193,7 +193,7 @@ async function readRunDetail(
     finished_at: Date | null;
   }>(
     `SELECT seq, kind, label, status, output, error, attempt, started_at, finished_at
-       FROM run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
+       FROM better_trigger.run_steps WHERE run_id = $1 AND project_id = $2 AND env = $3
       ORDER BY seq DESC LIMIT $4`,
     [runId, namespace.projectId, namespace.env, opts.stepsLimit + 1],
   );
@@ -222,7 +222,7 @@ async function readRunDetail(
     status: string;
   }>(
     `SELECT id, step_seq, kind, resume_at, child_run_id, status
-       FROM waits WHERE run_id = $1 AND project_id = $2 AND env = $3
+       FROM better_trigger.waits WHERE run_id = $1 AND project_id = $2 AND env = $3
       ORDER BY id DESC LIMIT $4`,
     [runId, namespace.projectId, namespace.env, opts.waitsLimit + 1],
   );
@@ -241,10 +241,10 @@ async function readRunDetail(
   // display; `id < $n` walks back through older pages via the cursor.
   const logsSql = opts.logsBefore === undefined
     ? `SELECT id, step_seq, level, message, data, ts
-         FROM logs WHERE run_id = $1 AND project_id = $2 AND env = $3
+         FROM better_trigger.logs WHERE run_id = $1 AND project_id = $2 AND env = $3
         ORDER BY id DESC LIMIT $4`
     : `SELECT id, step_seq, level, message, data, ts
-         FROM logs WHERE run_id = $1 AND project_id = $2 AND env = $3 AND id < $4
+         FROM better_trigger.logs WHERE run_id = $1 AND project_id = $2 AND env = $3 AND id < $4
         ORDER BY id DESC LIMIT $5`;
   const logsParams = opts.logsBefore === undefined
     ? [runId, namespace.projectId, namespace.env, opts.logsLimit + 1]
@@ -337,7 +337,7 @@ export async function waitForResult(
     async function poll(): Promise<void> {
       try {
         const res = await pool.query<{ status: string; output: unknown; error: unknown }>(
-          `SELECT status, output, error FROM runs
+          `SELECT status, output, error FROM better_trigger.runs
             WHERE id = $1 AND project_id = $2 AND env = $3`,
           [runId, namespace.projectId, namespace.env],
         );

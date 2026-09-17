@@ -25,7 +25,7 @@ export async function seedRun(
   ns: Namespace,
 ): Promise<void> {
   await pool.query(
-    `INSERT INTO runs (id, project_id, env, task_id, status, trigger_type, created_at, updated_at)
+    `INSERT INTO better_trigger.runs (id, project_id, env, task_id, status, trigger_type, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, 'api', now(), now())`,
     [run.id, ns.projectId, ns.env, run.taskId, run.status],
   );
@@ -43,7 +43,7 @@ export async function seedQueueRow(
   ns: Namespace,
 ): Promise<void> {
   await pool.query(
-    `INSERT INTO queue (run_id, project_id, env, available_at, locked_by, lease_until)
+    `INSERT INTO better_trigger.queue (run_id, project_id, env, available_at, locked_by, lease_until)
      VALUES ($1, $2, $3, now(), $4, $5)`,
     [q.runId, ns.projectId, ns.env, q.lockedBy ?? null, q.leaseUntil ?? null],
   );
@@ -62,7 +62,7 @@ export async function seedWait(
   ns: Namespace,
 ): Promise<void> {
   await pool.query(
-    `INSERT INTO waits (run_id, project_id, env, step_seq, kind, resume_at, status, created_at)
+    `INSERT INTO better_trigger.waits (run_id, project_id, env, step_seq, kind, resume_at, status, created_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
     [
       w.runId,
@@ -92,7 +92,7 @@ export async function seedGhostQueueRow(
   try {
     await raw.query(`SET session_replication_role = replica`);
     await raw.query(
-      `INSERT INTO queue (run_id, project_id, env, available_at)
+      `INSERT INTO better_trigger.queue (run_id, project_id, env, available_at)
        VALUES ($1, $2, $3, now())`,
       [runId, ns.projectId, ns.env],
     );

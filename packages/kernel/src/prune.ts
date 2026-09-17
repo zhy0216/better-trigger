@@ -178,14 +178,14 @@ async function countPrunable(
     waits: string;
     queue: string;
   }>(
-    `WITH doomed AS (SELECT r.id FROM runs r WHERE ${PRUNABLE_RUNS} AND ${nsPredicate})
+    `WITH doomed AS (SELECT r.id FROM better_trigger.runs r WHERE ${PRUNABLE_RUNS} AND ${nsPredicate})
      SELECT (SELECT count(*) FROM doomed)                                          AS runs,
-            (SELECT count(*) FROM run_steps WHERE run_id IN (SELECT id FROM doomed)) AS run_steps,
-            (SELECT count(*) FROM logs      WHERE run_id IN (SELECT id FROM doomed)) AS logs,
-            (SELECT count(*) FROM waits
+            (SELECT count(*) FROM better_trigger.run_steps WHERE run_id IN (SELECT id FROM doomed)) AS run_steps,
+            (SELECT count(*) FROM better_trigger.logs      WHERE run_id IN (SELECT id FROM doomed)) AS logs,
+            (SELECT count(*) FROM better_trigger.waits
               WHERE run_id IN (SELECT id FROM doomed)
                  OR child_run_id IN (SELECT id FROM doomed))                        AS waits,
-            (SELECT count(*) FROM queue     WHERE run_id IN (SELECT id FROM doomed)) AS queue`,
+            (SELECT count(*) FROM better_trigger.queue     WHERE run_id IN (SELECT id FROM doomed)) AS queue`,
     params,
   );
   const row = res.rows[0];
@@ -245,7 +245,7 @@ async function deleteBatch(
     const params: unknown[] = [cutoff, TERMINAL_STATUSES, batchSize];
     const nsPredicate = namespacePredicate('r', namespaces, params);
     const ids = await client.query<{ id: string }>(
-      `SELECT r.id FROM runs r
+      `SELECT r.id FROM better_trigger.runs r
         WHERE ${PRUNABLE_RUNS} AND ${nsPredicate}
         ORDER BY ${RUN_AGE} ASC
         LIMIT $3`,
@@ -271,12 +271,12 @@ async function deleteBatch(
       waits: string;
       queue: string;
     }>(
-      `SELECT (SELECT count(*) FROM run_steps WHERE run_id = ANY($1::text[])) AS run_steps,
-              (SELECT count(*) FROM logs      WHERE run_id = ANY($1::text[])) AS logs,
-              (SELECT count(*) FROM waits
+      `SELECT (SELECT count(*) FROM better_trigger.run_steps WHERE run_id = ANY($1::text[])) AS run_steps,
+              (SELECT count(*) FROM better_trigger.logs      WHERE run_id = ANY($1::text[])) AS logs,
+              (SELECT count(*) FROM better_trigger.waits
                 WHERE run_id = ANY($1::text[])
                    OR child_run_id = ANY($1::text[]))                          AS waits,
-              (SELECT count(*) FROM queue     WHERE run_id = ANY($1::text[])) AS queue`,
+              (SELECT count(*) FROM better_trigger.queue     WHERE run_id = ANY($1::text[])) AS queue`,
       [runIds],
     );
     batch.runSteps = num(counts.rows[0]?.run_steps);
@@ -293,11 +293,11 @@ async function deleteBatch(
     // concurrent reaper that already holds a queue row of this batch (SKIP
     // LOCKED) could block our cascade while we hold the runs row it wants —
     // a deadlock that the queue-first order cannot reach.
-    await client.query(`DELETE FROM queue WHERE run_id = ANY($1::text[])`, [runIds]);
+    await client.query(`DELETE FROM better_trigger.queue WHERE run_id = ANY($1::text[])`, [runIds]);
 
     // run_steps + logs + waits go with it, in the database, by the 0007/0011
     // cascades.
-    const runs = await client.query(`DELETE FROM runs WHERE id = ANY($1::text[])`, [runIds]);
+    const runs = await client.query(`DELETE FROM better_trigger.runs WHERE id = ANY($1::text[])`, [runIds]);
     batch.runs = num(runs.rowCount);
     return batch;
   });
@@ -331,14 +331,14 @@ async function pruneWorkers(
     )`;
   if (dryRun) {
     const res = await pool.query<{ count: string }>(
-      `SELECT count(*) AS count FROM workers w
+      `SELECT count(*) AS count FROM better_trigger.workers w
         WHERE status = 'offline' AND last_heartbeat_at < $1 AND ${nsScope}`,
       [cutoff, ...nsParams],
     );
     return num(res.rows[0]?.count);
   }
   const res = await pool.query(
-    `DELETE FROM workers w WHERE status = 'offline' AND last_heartbeat_at < $1 AND ${nsScope}`,
+    `DELETE FROM better_trigger.workers w WHERE status = 'offline' AND last_heartbeat_at < $1 AND ${nsScope}`,
     [cutoff, ...nsParams],
   );
   return num(res.rowCount);

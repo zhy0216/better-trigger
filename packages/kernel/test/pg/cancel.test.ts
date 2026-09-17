@@ -57,13 +57,13 @@ async function runRow(pool: import('pg').Pool, runId: string) {
     status: string;
     finished_at: Date | null;
     updated_at: Date;
-  }>(`SELECT status, finished_at, updated_at FROM runs WHERE id = $1`, [runId]);
+  }>(`SELECT status, finished_at, updated_at FROM better_trigger.runs WHERE id = $1`, [runId]);
   return res.rows[0];
 }
 
 async function queueCount(pool: import('pg').Pool, runId: string): Promise<number> {
   const res = await pool.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM queue WHERE run_id = $1`,
+    `SELECT count(*)::int AS n FROM better_trigger.queue WHERE run_id = $1`,
     [runId],
   );
   return res.rows[0].n;
@@ -128,7 +128,7 @@ describePg('cancelRun', () => {
       expect(suspended.resumed).toBe(false);
 
       const waits = await pool.query<{ status: string }>(
-        `SELECT status FROM waits WHERE run_id = $1`,
+        `SELECT status FROM better_trigger.waits WHERE run_id = $1`,
         [runId],
       );
       expect(waits.rows).toEqual([{ status: 'pending' }]);
@@ -138,7 +138,7 @@ describePg('cancelRun', () => {
       await kernel.cancelRun(runId, NS);
 
       const waitsAfter = await pool.query<{ status: string }>(
-        `SELECT status FROM waits WHERE run_id = $1`,
+        `SELECT status FROM better_trigger.waits WHERE run_id = $1`,
         [runId],
       );
       expect(waitsAfter.rows).toEqual([{ status: 'canceled' }]);
@@ -159,7 +159,7 @@ describePg('cancelRun', () => {
       try {
         await claimClient.query('BEGIN');
         await claimClient.query(
-          `SELECT locked_by FROM queue WHERE run_id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
+          `SELECT locked_by FROM better_trigger.queue WHERE run_id = $1 AND project_id = $2 AND env = $3 FOR UPDATE`,
           [runId, NS.projectId, NS.env],
         );
 
@@ -177,7 +177,7 @@ describePg('cancelRun', () => {
         expect(race).toBe('blocked');
         const waiters = await pool.query<{ n: number }>(
           `SELECT count(*)::int AS n FROM pg_stat_activity
-            WHERE state = 'active' AND wait_event_type = 'Lock' AND query LIKE '%FROM queue%'`,
+            WHERE state = 'active' AND wait_event_type = 'Lock' AND query LIKE '%FROM better_trigger.queue%'`,
         );
         expect(waiters.rows[0].n).toBeGreaterThan(0);
         expect(settled).toBe('blocked');

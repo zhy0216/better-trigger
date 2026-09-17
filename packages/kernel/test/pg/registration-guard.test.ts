@@ -48,7 +48,7 @@ async function register(kernel: Kernel, codeVersion: string, logger: KernelLogge
 /** Rewrite a worker's manifest to the OLD shape: bare task-id strings, no
  *  per-task codeVersion (what an older build wrote). */
 async function toLegacyFormat(pool: Pool, workerId: string): Promise<void> {
-  await pool.query(`UPDATE workers SET tasks = $2::jsonb WHERE id = $1`, [
+  await pool.query(`UPDATE better_trigger.workers SET tasks = $2::jsonb WHERE id = $1`, [
     workerId,
     JSON.stringify([TASK_ID]),
   ]);
@@ -56,7 +56,7 @@ async function toLegacyFormat(pool: Pool, workerId: string): Promise<void> {
 
 async function storedVersion(pool: Pool): Promise<string | null> {
   const res = await pool.query<{ latest_code_version: string | null }>(
-    `SELECT latest_code_version FROM tasks
+    `SELECT latest_code_version FROM better_trigger.tasks
       WHERE project_id = $1 AND env = $2 AND id = $3`,
     [NS.projectId, NS.env, TASK_ID],
   );
@@ -86,7 +86,7 @@ describePg('C4 takeover guard — legacy manifest normalization (04-T2)', () => 
       // The new worker row itself still landed — only the metadata takeover
       // was refused.
       const workers = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM workers WHERE status = 'online'`,
+        `SELECT count(*)::int AS n FROM better_trigger.workers WHERE status = 'online'`,
       );
       expect(workers.rows[0]!.n).toBe(2);
     });
@@ -113,7 +113,7 @@ describePg('C4 takeover guard — legacy manifest normalization (04-T2)', () => 
       await toLegacyFormat(pool, workerId);
       // The old worker goes offline (deregistered / marker sweep) — nothing
       // serves v1 anymore, so the upgrade path opens.
-      await pool.query(`UPDATE workers SET status = 'offline' WHERE id = $1`, [workerId]);
+      await pool.query(`UPDATE better_trigger.workers SET status = 'offline' WHERE id = $1`, [workerId]);
 
       await register(kernel, 'v2', logger);
 
@@ -130,7 +130,7 @@ describePg('C4 takeover guard — legacy manifest normalization (04-T2)', () => 
       // Still status='online', but silent past WORKER_OFFLINE_MS — the same
       // window the cron served-check and the stranded scan apply (04-T4).
       await pool.query(
-        `UPDATE workers SET last_heartbeat_at = now() - interval '3 minutes' WHERE id = $1`,
+        `UPDATE better_trigger.workers SET last_heartbeat_at = now() - interval '3 minutes' WHERE id = $1`,
         [workerId],
       );
 
@@ -147,7 +147,7 @@ describePg('C4 takeover guard — legacy manifest normalization (04-T2)', () => 
       const { workerId } = await register(kernel, 'v1', logger);
       // Legacy rows normalize their bare ids to the WORKER-level code_version:
       // a row from v0 serves (greet, v0), not the stored (greet, v1).
-      await pool.query(`UPDATE workers SET tasks = $2::jsonb, code_version = 'v0' WHERE id = $1`, [
+      await pool.query(`UPDATE better_trigger.workers SET tasks = $2::jsonb, code_version = 'v0' WHERE id = $1`, [
         workerId,
         JSON.stringify([TASK_ID]),
       ]);

@@ -70,8 +70,8 @@ function stubPool(rows: CandidateRow[], opts: { steps?: unknown[]; running?: num
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM queue q/.test(sql)) return { rows };
-      if (/FROM run_steps/.test(sql)) return { rows: opts.steps ?? [] };
+      if (/FROM better_trigger\.queue q/.test(sql)) return { rows };
+      if (/FROM better_trigger\.run_steps/.test(sql)) return { rows: opts.steps ?? [] };
       if (/RETURNING fencing_token/.test(sql)) return { rows: [{ fencing_token: '42' }], rowCount: 1 };
       if (/count\(\*\)/.test(sql)) return { rows: [{ n: String(opts.running ?? 0) }] };
       return { rows: [] };
@@ -108,9 +108,9 @@ describe('claimRuns candidate fan-out', () => {
     // BEGIN + candidates + (advisory lock + count) × 10 + COMMIT.
     expect(stmts).toHaveLength(23);
 
-    const cand = stmts.find((s) => /FROM queue q/.test(s.sql))!;
-    expect(cand.sql).toMatch(/JOIN runs r ON r\.id = q\.run_id/);
-    expect(cand.sql).toMatch(/LEFT JOIN tasks t ON t\.id = r\.task_id/);
+    const cand = stmts.find((s) => /FROM better_trigger\.queue q/.test(s.sql))!;
+    expect(cand.sql).toMatch(/JOIN better_trigger\.runs r ON r\.id = q\.run_id/);
+    expect(cand.sql).toMatch(/LEFT JOIN better_trigger\.tasks t ON t\.id = r\.task_id/);
     expect(cand.sql).toMatch(/t\.concurrency_limit/);
   });
 
@@ -119,7 +119,7 @@ describe('claimRuns candidate fan-out', () => {
 
     await claimRuns(pool, { ...ARGS, limit: 1 });
 
-    const cand = stmts.find((s) => /FROM queue q/.test(s.sql))!;
+    const cand = stmts.find((s) => /FROM better_trigger\.queue q/.test(s.sql))!;
     expect(cand.sql).toMatch(/FOR UPDATE OF q SKIP LOCKED/);
     // A bare `FOR UPDATE` would lock r (and t) as well, breaking the 1→2 order.
     expect(cand.sql).not.toMatch(/FOR UPDATE SKIP LOCKED/);
@@ -141,8 +141,8 @@ describe('claimRuns candidate fan-out', () => {
     expect(stmts.map((s) => s.sql.trim().split(/\s+/).slice(0, 2).join(' '))).toEqual([
       'BEGIN',
       'SELECT q.id',
-      'UPDATE runs',
-      'UPDATE queue',
+      'UPDATE better_trigger.runs',
+      'UPDATE better_trigger.queue',
       'COMMIT',
       'SELECT seq,',
     ]);
@@ -202,7 +202,7 @@ describe('claimRuns candidate fan-out', () => {
 
     // The lease goes on the queue row's own id (q.id), not the run id — the
     // merged SELECT aliases it, and mixing the two would lease a stranger's row.
-    const lease = stmts.find((s) => /UPDATE queue/.test(s.sql))!;
+    const lease = stmts.find((s) => /UPDATE better_trigger\.queue/.test(s.sql))!;
     expect(lease.params[2]).toBe(77);
     // Fencing token comes from the runs UPDATE, keyed by run id.
     const bump = stmts.find((s) => /RETURNING fencing_token/.test(s.sql))!;

@@ -79,7 +79,7 @@ export async function wakeParentIfWaiting(
     step_seq: number;
     fingerprint: string | null;
   }>(
-    `SELECT id, run_id, project_id, env, step_seq, fingerprint FROM waits
+    `SELECT id, run_id, project_id, env, step_seq, fingerprint FROM better_trigger.waits
       WHERE child_run_id = $1 AND kind = 'run' AND status = 'pending'
         AND project_id = $2 AND env = $3
       ORDER BY id ASC`,
@@ -103,7 +103,7 @@ export async function wakeParentIfWaiting(
       // Row-lock clause LAST (same C2 regression as the orchestrator's wait
       // lock once had: `AND project_id` after `FOR UPDATE` is a 42601 syntax
       // error on every Postgres and silently breaks child completion).
-      `SELECT id FROM waits WHERE id = $1 AND status = 'pending'
+      `SELECT id FROM better_trigger.waits WHERE id = $1 AND status = 'pending'
          AND project_id = $2 AND env = $3
        FOR UPDATE`,
       [wait.id, parentNs.projectId, parentNs.env],
@@ -112,7 +112,7 @@ export async function wakeParentIfWaiting(
     resolved += 1;
 
     await client.query(
-      `UPDATE waits SET status = 'completed' WHERE id = $1
+      `UPDATE better_trigger.waits SET status = 'completed' WHERE id = $1
          AND project_id = $2 AND env = $3`,
       [wait.id, parentNs.projectId, parentNs.env],
     );
@@ -149,7 +149,7 @@ export async function wakeParentIfWaiting(
     // other path from being resurrected to 'queued'.
     if (parent && parent.status === 'waiting') {
       const flipped = await client.query(
-        `UPDATE runs SET status = 'queued', updated_at = now()
+        `UPDATE better_trigger.runs SET status = 'queued', updated_at = now()
           WHERE id = $1 AND project_id = $2 AND env = $3 AND status = 'waiting'`,
         [wait.run_id, parentNs.projectId, parentNs.env],
       );
@@ -187,14 +187,14 @@ export async function terminalFail(
 ): Promise<void> {
   const ns: Namespace = { projectId: run.project_id, env: run.env };
   await client.query(
-    `UPDATE runs
+    `UPDATE better_trigger.runs
         SET status = 'failed', error = $2, finished_at = now(), updated_at = now()
       WHERE id = $1 AND project_id = $3 AND env = $4`,
     [run.id, serializeErrorForStorage(error), ns.projectId, ns.env],
   );
   await removeFromQueue(client, run.id, ns);
   await client.query(
-    `UPDATE waits SET status = 'canceled' WHERE run_id = $1 AND status = 'pending'
+    `UPDATE better_trigger.waits SET status = 'canceled' WHERE run_id = $1 AND status = 'pending'
        AND project_id = $2 AND env = $3`,
     [run.id, ns.projectId, ns.env],
   );
@@ -245,7 +245,7 @@ export async function completeRun(pool: Pool, args: CompleteRunArgs): Promise<vo
     );
     if (!serialized.ok) throwSerializeFailure(serialized);
     await client.query(
-      `UPDATE runs
+      `UPDATE better_trigger.runs
           SET status = 'completed', output = $2, finished_at = now(), updated_at = now()
         WHERE id = $1 AND project_id = $3 AND env = $4`,
       [args.runId, serialized.json, args.namespace.projectId, args.namespace.env],
@@ -320,7 +320,7 @@ export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult
     // Reject finite delays that exceed Date's range before any retry writes.
     const nextAt = durationToDate(backoff, await dbNow(client));
     await client.query(
-      `UPDATE runs
+      `UPDATE better_trigger.runs
           SET status = 'queued', attempt = attempt + 1, error = $2, updated_at = now()
         WHERE id = $1 AND project_id = $3 AND env = $4`,
       [args.runId, serializeErrorForStorage(args.error), args.namespace.projectId, args.namespace.env],
@@ -328,7 +328,7 @@ export async function failRun(pool: Pool, args: FailRunArgs): Promise<FailResult
     // Keep the queue row but release the claim (owner + lease) and push
     // availability out. runs.fencing_token stays — it only grows via claims.
     await client.query(
-      `UPDATE queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = $2
+      `UPDATE better_trigger.queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL, available_at = $2
         WHERE run_id = $1 AND project_id = $3 AND env = $4`,
       [args.runId, nextAt, args.namespace.projectId, args.namespace.env],
     );
@@ -358,13 +358,13 @@ export async function cancelRun(
       return;
     }
     await client.query(
-      `UPDATE runs SET status = 'canceled', finished_at = now(), updated_at = now()
+      `UPDATE better_trigger.runs SET status = 'canceled', finished_at = now(), updated_at = now()
         WHERE id = $1 AND project_id = $2 AND env = $3`,
       [runId, namespace.projectId, namespace.env],
     );
     await removeFromQueue(client, runId, namespace);
     await client.query(
-      `UPDATE waits SET status = 'canceled' WHERE run_id = $1 AND status = 'pending'
+      `UPDATE better_trigger.waits SET status = 'canceled' WHERE run_id = $1 AND status = 'pending'
          AND project_id = $2 AND env = $3`,
       [runId, namespace.projectId, namespace.env],
     );
@@ -409,7 +409,7 @@ export async function retryRun(
       }
       if (operationKey) {
         const existing = await client.query<{ retry_run_id: string }>(
-          `SELECT retry_run_id FROM run_retry_operations
+          `SELECT retry_run_id FROM better_trigger.run_retry_operations
             WHERE project_id = $1 AND env = $2 AND source_run_id = $3 AND operation_key = $4
             FOR UPDATE`,
           [namespace.projectId, namespace.env, runId, operationKey],
@@ -457,7 +457,7 @@ export async function retryRun(
         // included, so no unrecorded retry run survives — and the catch below
         // re-reads the winner's row.
         await client.query(
-          `INSERT INTO run_retry_operations
+          `INSERT INTO better_trigger.run_retry_operations
              (project_id, env, source_run_id, operation_key, retry_run_id)
            VALUES ($1, $2, $3, $4, $5)`,
           [namespace.projectId, namespace.env, runId, operationKey, created.runId],
@@ -474,7 +474,7 @@ export async function retryRun(
       // committed runs, so answering with it cannot return a run this loser
       // would otherwise have had to create.
       const winner = await pool.query<{ retry_run_id: string }>(
-        `SELECT retry_run_id FROM run_retry_operations
+        `SELECT retry_run_id FROM better_trigger.run_retry_operations
           WHERE project_id = $1 AND env = $2 AND source_run_id = $3 AND operation_key = $4`,
         [namespace.projectId, namespace.env, runId, operationKey],
       );

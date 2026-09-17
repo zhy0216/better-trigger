@@ -105,7 +105,7 @@ async function triggerAndClaim(
 async function assertWaitGraphInvariants(pool: Pool): Promise<void> {
   const bad = await pool.query<{ n: number }>(
     `SELECT count(*)::int AS n
-       FROM waits w JOIN runs c ON c.id = w.child_run_id
+       FROM better_trigger.waits w JOIN better_trigger.runs c ON c.id = w.child_run_id
       WHERE w.status = 'pending' AND w.kind = 'run' AND w.child_run_id IS NOT NULL
         AND c.status IN ('completed','failed','canceled')
         AND w.project_id = $1 AND w.env = $2`,
@@ -113,10 +113,10 @@ async function assertWaitGraphInvariants(pool: Pool): Promise<void> {
   );
   expect(bad.rows[0]!.n).toBe(0);
   const stranded = await pool.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM runs r
+    `SELECT count(*)::int AS n FROM better_trigger.runs r
       WHERE r.status = 'waiting' AND r.project_id = $1 AND r.env = $2
         AND NOT EXISTS (
-          SELECT 1 FROM waits w WHERE w.run_id = r.id AND w.status = 'pending'
+          SELECT 1 FROM better_trigger.waits w WHERE w.run_id = r.id AND w.status = 'pending'
         )`,
     [NS.projectId, NS.env],
   );
@@ -158,17 +158,17 @@ describePg('wait-graph invariants (p1-37)', () => {
       expect(kernel.waitGraph.cycleRejected).toBe(0);
 
       // Nothing happened: the parent is still running and nothing was written.
-      const run = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [
+      const run = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [
         parent.id,
       ]);
       expect(run.rows[0]!.status).toBe('running');
       const waits = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM waits WHERE run_id = $1`,
+        `SELECT count(*)::int AS n FROM better_trigger.waits WHERE run_id = $1`,
         [parent.id],
       );
       expect(waits.rows[0]!.n).toBe(0);
       const children = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM runs WHERE task_id = $1`,
+        `SELECT count(*)::int AS n FROM better_trigger.runs WHERE task_id = $1`,
         [TASK_B],
       );
       expect(children.rows[0]!.n).toBe(0);
@@ -212,23 +212,23 @@ describePg('wait-graph invariants (p1-37)', () => {
       // completed state"): the child went terminal, the wake wrote the parent's
       // step row and resolved the wait, and the parent was claimed again.
       await pool.query(
-        `UPDATE runs SET status = 'completed', output = '{"n":1}'::jsonb, finished_at = now()
+        `UPDATE better_trigger.runs SET status = 'completed', output = '{"n":1}'::jsonb, finished_at = now()
           WHERE id = $1`,
         [first.childRunId],
       );
       await pool.query(
-        `UPDATE waits SET status = 'completed' WHERE run_id = $1 AND step_seq = 0 AND kind = 'run'`,
+        `UPDATE better_trigger.waits SET status = 'completed' WHERE run_id = $1 AND step_seq = 0 AND kind = 'run'`,
         [parent.id],
       );
       await pool.query(
-        `INSERT INTO run_steps (run_id, project_id, env, seq, kind, status, output, attempt)
+        `INSERT INTO better_trigger.run_steps (run_id, project_id, env, seq, kind, status, output, attempt)
          VALUES ($1,$2,$3,0,'trigger-and-wait','completed',
                  jsonb_build_object('id', $4::text, 'ok', true, 'output', jsonb_build_object('n', 1)), 1)`,
         [parent.id, NS.projectId, NS.env, first.childRunId],
       );
-      await pool.query(`UPDATE runs SET status = 'running' WHERE id = $1`, [parent.id]);
+      await pool.query(`UPDATE better_trigger.runs SET status = 'running' WHERE id = $1`, [parent.id]);
       await pool.query(
-        `INSERT INTO queue (run_id, project_id, env, available_at, locked_by)
+        `INSERT INTO better_trigger.queue (run_id, project_id, env, available_at, locked_by)
          VALUES ($1, $2, $3, now(), $4)`,
         [parent.id, NS.projectId, NS.env, workerId],
       );
@@ -248,18 +248,18 @@ describePg('wait-graph invariants (p1-37)', () => {
       });
       expect(replay.childRunId).toBe(first.childRunId);
 
-      const run = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [
+      const run = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [
         parent.id,
       ]);
       expect(run.rows[0]!.status).toBe('running'); // never flipped to waiting
       const waits = await pool.query<{ n: number; s: string | null }>(
-        `SELECT count(*)::int AS n, max(status) AS s FROM waits WHERE run_id = $1`,
+        `SELECT count(*)::int AS n, max(status) AS s FROM better_trigger.waits WHERE run_id = $1`,
         [parent.id],
       );
       expect(waits.rows[0]!.n).toBe(1);
       expect(waits.rows[0]!.s).toBe('completed');
       const children = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM runs WHERE task_id = $1`,
+        `SELECT count(*)::int AS n FROM better_trigger.runs WHERE task_id = $1`,
         [TASK_B],
       );
       expect(children.rows[0]!.n).toBe(1);
@@ -297,13 +297,13 @@ describePg('wait-graph invariants (p1-37)', () => {
         .childRunId;
 
       const waits = await pool.query<{ n: number; s: string | null }>(
-        `SELECT count(*)::int AS n, max(status) AS s FROM waits WHERE run_id = $1`,
+        `SELECT count(*)::int AS n, max(status) AS s FROM better_trigger.waits WHERE run_id = $1`,
         [parent.id],
       );
       expect(waits.rows[0]!.n).toBe(1);
       expect(waits.rows[0]!.s).toBe('pending');
       const children = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM runs WHERE task_id = $1 AND parent_run_id = $2`,
+        `SELECT count(*)::int AS n FROM better_trigger.runs WHERE task_id = $1 AND parent_run_id = $2`,
         [TASK_B, parent.id],
       );
       expect(children.rows[0]!.n).toBe(1);
@@ -313,7 +313,7 @@ describePg('wait-graph invariants (p1-37)', () => {
       // refused by the database itself.
       const dup = await pool
         .query(
-          `INSERT INTO waits (run_id, project_id, env, step_seq, kind, child_run_id, status)
+          `INSERT INTO better_trigger.waits (run_id, project_id, env, step_seq, kind, child_run_id, status)
            VALUES ($1, $2, $3, 0, 'run', $4, 'pending')`,
           [parent.id, NS.projectId, NS.env, childRunId],
         )
@@ -339,12 +339,12 @@ describePg('wait-graph invariants (p1-37)', () => {
         fencingToken: child.fencingToken,
         namespace: NS,
       });
-      const run = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [
+      const run = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [
         parent.id,
       ]);
       expect(run.rows[0]!.status).toBe('queued');
       const step = await pool.query<{ output: unknown }>(
-        `SELECT output FROM run_steps WHERE run_id = $1 AND seq = 0`,
+        `SELECT output FROM better_trigger.run_steps WHERE run_id = $1 AND seq = 0`,
         [parent.id],
       );
       expect(step.rows[0]!.output).toMatchObject({ id: childRunId, ok: true });
@@ -370,7 +370,7 @@ describePg('wait-graph invariants (p1-37)', () => {
         await raw.query(`SET session_replication_role = replica`);
         await raw.query('BEGIN');
         await raw.query(
-          `INSERT INTO waits (run_id, project_id, env, step_seq, kind, child_run_id, fingerprint, status)
+          `INSERT INTO better_trigger.waits (run_id, project_id, env, step_seq, kind, child_run_id, fingerprint, status)
            VALUES ($1, $2, $3, 0, 'run', $4, 'fp-winner', 'pending')`,
           [parent.id, NS.projectId, NS.env, winnerChildId],
         );
@@ -427,19 +427,19 @@ describePg('wait-graph invariants (p1-37)', () => {
       // carrying the winner's child id and fingerprint.
       const waits = await pool.query<{ n: number; child: string | null; fp: string | null }>(
         `SELECT count(*)::int AS n, max(child_run_id) AS child, max(fingerprint) AS fp
-           FROM waits WHERE run_id = $1 AND step_seq = 0 AND kind = 'run' AND status = 'pending'`,
+           FROM better_trigger.waits WHERE run_id = $1 AND step_seq = 0 AND kind = 'run' AND status = 'pending'`,
         [parent.id],
       );
       expect(waits.rows[0]).toMatchObject({ n: 1, child: winnerChildId, fp: 'fp-winner' });
 
       // The parent carries the winner's committed state — the loser's tx left
       // no trace: still 'running', still claimed by us, queue row intact.
-      const run = await pool.query<{ status: string }>(`SELECT status FROM runs WHERE id = $1`, [
+      const run = await pool.query<{ status: string }>(`SELECT status FROM better_trigger.runs WHERE id = $1`, [
         parent.id,
       ]);
       expect(run.rows[0]!.status).toBe('running');
       const queue = await pool.query<{ n: number; locked_by: string | null }>(
-        `SELECT count(*)::int AS n, max(locked_by) AS locked_by FROM queue WHERE run_id = $1`,
+        `SELECT count(*)::int AS n, max(locked_by) AS locked_by FROM better_trigger.queue WHERE run_id = $1`,
         [parent.id],
       );
       expect(queue.rows[0]!.n).toBe(1);
@@ -448,11 +448,11 @@ describePg('wait-graph invariants (p1-37)', () => {
       // No orphan child run: the loser's child died with its rolled-back tx,
       // and the winner's fake child id never had a row — only the parent.
       const children = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM runs WHERE task_id = $1`,
+        `SELECT count(*)::int AS n FROM better_trigger.runs WHERE task_id = $1`,
         [TASK_B],
       );
       expect(children.rows[0]!.n).toBe(0);
-      const allRuns = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM runs`);
+      const allRuns = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM better_trigger.runs`);
       expect(allRuns.rows[0]!.n).toBe(1);
     });
   });
@@ -472,12 +472,12 @@ describePg('wait-graph invariants (p1-37)', () => {
       // child, with no further terminal event to ever fire. Pre-05-T2 this
       // stranded the parent forever; the scanner now heals it.
       await pool.query(
-        `INSERT INTO runs (id, project_id, env, task_id, status, trigger_type, parent_run_id)
+        `INSERT INTO better_trigger.runs (id, project_id, env, task_id, status, trigger_type, parent_run_id)
          VALUES ($1, $2, $3, $4, 'waiting', 'api', NULL)`,
         ['stuck-parent', NS.projectId, NS.env, TASK_A],
       );
       await pool.query(
-        `INSERT INTO runs (id, project_id, env, task_id, status, trigger_type, parent_run_id)
+        `INSERT INTO better_trigger.runs (id, project_id, env, task_id, status, trigger_type, parent_run_id)
          VALUES ($1, $2, $3, $4, 'queued', 'subtask', $5)`,
         ['stuck-child', NS.projectId, NS.env, TASK_B, 'stuck-parent'],
       );
@@ -486,16 +486,16 @@ describePg('wait-graph invariants (p1-37)', () => {
       const b = await pool.connect();
       try {
         await a.query('BEGIN');
-        await a.query(`SELECT id FROM runs WHERE id = 'stuck-child' FOR UPDATE`);
+        await a.query(`SELECT id FROM better_trigger.runs WHERE id = 'stuck-child' FOR UPDATE`);
         await a.query(
-          `UPDATE runs SET status = 'completed', output = '{"n":7}'::jsonb, finished_at = now()
+          `UPDATE better_trigger.runs SET status = 'completed', output = '{"n":7}'::jsonb, finished_at = now()
              WHERE id = 'stuck-child'`,
         );
 
         let bLanded: 'blocked' | 'done' = 'blocked';
         const bInsert = b
           .query(
-            `INSERT INTO waits (run_id, project_id, env, step_seq, kind, child_run_id, fingerprint, status)
+            `INSERT INTO better_trigger.waits (run_id, project_id, env, step_seq, kind, child_run_id, fingerprint, status)
              VALUES ('stuck-parent', $1, $2, 0, 'run', 'stuck-child', 'fp-stuck', 'pending') RETURNING id`,
             [NS.projectId, NS.env],
           )
@@ -519,10 +519,10 @@ describePg('wait-graph invariants (p1-37)', () => {
 
       // The stale row exists, exactly once.
       const stuck = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM waits w
+        `SELECT count(*)::int AS n FROM better_trigger.waits w
            WHERE w.kind = 'run' AND w.status = 'pending' AND w.child_run_id IS NOT NULL
              AND EXISTS (
-               SELECT 1 FROM runs c
+               SELECT 1 FROM better_trigger.runs c
                 WHERE c.id = w.child_run_id
                   AND c.status IN ('completed','failed','canceled')
              )`,
@@ -551,7 +551,7 @@ describePg('wait-graph invariants (p1-37)', () => {
         let parentStatus = '';
         for (;;) {
           const r = await pool.query<{ status: string }>(
-            `SELECT status FROM runs WHERE id = 'stuck-parent'`,
+            `SELECT status FROM better_trigger.runs WHERE id = 'stuck-parent'`,
           );
           parentStatus = r.rows[0]!.status;
           if (parentStatus === 'queued') break;
@@ -563,7 +563,7 @@ describePg('wait-graph invariants (p1-37)', () => {
 
         // The wake resolved the wait exactly once ...
         const wait = await pool.query<{ status: string }>(
-          `SELECT status FROM waits WHERE run_id = 'stuck-parent' AND step_seq = 0 AND kind = 'run'`,
+          `SELECT status FROM better_trigger.waits WHERE run_id = 'stuck-parent' AND step_seq = 0 AND kind = 'run'`,
         );
         expect(wait.rows).toHaveLength(1);
         expect(wait.rows[0]!.status).toBe('completed');
@@ -571,7 +571,7 @@ describePg('wait-graph invariants (p1-37)', () => {
         // ... filled the parent's step row with the child's recorded result and
         // the wait's fingerprint (the same fill wakeParentIfWaiting does) ...
         const step = await pool.query<{ output: unknown; fingerprint: string | null }>(
-          `SELECT output, fingerprint FROM run_steps WHERE run_id = 'stuck-parent' AND seq = 0`,
+          `SELECT output, fingerprint FROM better_trigger.run_steps WHERE run_id = 'stuck-parent' AND seq = 0`,
         );
         expect(step.rows).toHaveLength(1);
         expect(step.rows[0]!.output).toEqual({ id: 'stuck-child', ok: true, output: { n: 7 } });
@@ -579,7 +579,7 @@ describePg('wait-graph invariants (p1-37)', () => {
 
         // ... and re-enqueued the parent exactly once (no duplicate wake).
         const queue = await pool.query<{ n: number }>(
-          `SELECT count(*)::int AS n FROM queue WHERE run_id = 'stuck-parent'`,
+          `SELECT count(*)::int AS n FROM better_trigger.queue WHERE run_id = 'stuck-parent'`,
         );
         expect(queue.rows[0]!.n).toBe(1);
 
@@ -593,7 +593,7 @@ describePg('wait-graph invariants (p1-37)', () => {
         await sleep(400);
         expect(orch.counters.waitGraphHealed).toBe(1);
         const queueAgain = await pool.query<{ n: number }>(
-          `SELECT count(*)::int AS n FROM queue WHERE run_id = 'stuck-parent'`,
+          `SELECT count(*)::int AS n FROM better_trigger.queue WHERE run_id = 'stuck-parent'`,
         );
         expect(queueAgain.rows[0]!.n).toBe(1);
         // The violation gauge drains back to zero once the heal lands.
@@ -616,12 +616,12 @@ describePg('wait-graph invariants (p1-37)', () => {
       const N = 3;
       for (let i = 0; i < N; i++) {
         await pool.query(
-          `INSERT INTO runs (id, project_id, env, task_id, status, trigger_type, parent_run_id)
+          `INSERT INTO better_trigger.runs (id, project_id, env, task_id, status, trigger_type, parent_run_id)
            VALUES ($1, $2, $3, $4, 'waiting', 'api', $5)`,
           [`parent-${i}`, NS.projectId, NS.env, TASK_A, child.id],
         );
         await pool.query(
-          `INSERT INTO waits (run_id, project_id, env, step_seq, kind, child_run_id, fingerprint, status)
+          `INSERT INTO better_trigger.waits (run_id, project_id, env, step_seq, kind, child_run_id, fingerprint, status)
            VALUES ($1, $2, $3, 0, 'run', $4, $5, 'pending')`,
           [`parent-${i}`, NS.projectId, NS.env, child.id, `fp-${i}`],
         );
@@ -637,22 +637,22 @@ describePg('wait-graph invariants (p1-37)', () => {
 
       for (let i = 0; i < N; i++) {
         const run = await pool.query<{ status: string }>(
-          `SELECT status FROM runs WHERE id = $1`,
+          `SELECT status FROM better_trigger.runs WHERE id = $1`,
           [`parent-${i}`],
         );
         expect(run.rows[0]!.status).toBe('queued');
         const queue = await pool.query<{ n: number }>(
-          `SELECT count(*)::int AS n FROM queue WHERE run_id = $1`,
+          `SELECT count(*)::int AS n FROM better_trigger.queue WHERE run_id = $1`,
           [`parent-${i}`],
         );
         expect(queue.rows[0]!.n).toBe(1);
         const wait = await pool.query<{ s: string }>(
-          `SELECT status AS s FROM waits WHERE run_id = $1 AND step_seq = 0 AND kind = 'run'`,
+          `SELECT status AS s FROM better_trigger.waits WHERE run_id = $1 AND step_seq = 0 AND kind = 'run'`,
           [`parent-${i}`],
         );
         expect(wait.rows[0]!.s).toBe('completed');
         const step = await pool.query<{ output: unknown; fingerprint: string | null }>(
-          `SELECT output, fingerprint FROM run_steps WHERE run_id = $1 AND seq = 0`,
+          `SELECT output, fingerprint FROM better_trigger.run_steps WHERE run_id = $1 AND seq = 0`,
           [`parent-${i}`],
         );
         expect(step.rows[0]!.output).toEqual({ id: child.id, ok: true, output: { n: 7 } });
@@ -661,12 +661,12 @@ describePg('wait-graph invariants (p1-37)', () => {
 
       // The child itself is terminal with no queue row left.
       const childRow = await pool.query<{ status: string }>(
-        `SELECT status FROM runs WHERE id = $1`,
+        `SELECT status FROM better_trigger.runs WHERE id = $1`,
         [child.id],
       );
       expect(childRow.rows[0]!.status).toBe('completed');
       const childQueue = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM queue WHERE run_id = $1`,
+        `SELECT count(*)::int AS n FROM better_trigger.queue WHERE run_id = $1`,
         [child.id],
       );
       expect(childQueue.rows[0]!.n).toBe(0);
@@ -757,14 +757,14 @@ describePg('wait-graph invariants (p1-37)', () => {
         // Drain: whatever the race left behind, drive it to a clean terminal
         // so the next round starts from an empty queue.
         const childRow = await pool.query<{ status: string }>(
-          `SELECT status FROM runs WHERE id = $1`,
+          `SELECT status FROM better_trigger.runs WHERE id = $1`,
           [child.id],
         );
         if (!['completed', 'failed', 'canceled'].includes(childRow.rows[0]!.status)) {
           await kernel.cancelRun(child.id, NS);
         }
         const parentRow = await pool.query<{ status: string }>(
-          `SELECT status FROM runs WHERE id = $1`,
+          `SELECT status FROM better_trigger.runs WHERE id = $1`,
           [parent.id],
         );
         if (parentRow.rows[0]!.status === 'queued') {
@@ -835,7 +835,7 @@ describePg('wait-graph invariants (p1-37)', () => {
 
       // No wait row points at its own run — self-loops are structurally absent.
       const selfRef = await pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM waits w WHERE w.child_run_id = w.run_id`,
+        `SELECT count(*)::int AS n FROM better_trigger.waits w WHERE w.child_run_id = w.run_id`,
       );
       expect(selfRef.rows[0]!.n).toBe(0);
 
@@ -888,12 +888,12 @@ describePg('wait-graph invariants (p1-37)', () => {
       // Everything reached a terminal state through its own resolution — the
       // chain A→B→A2 is a DAG, and the step rows carry the exact lineage.
       const stepA = await pool.query<{ output: unknown }>(
-        `SELECT output FROM run_steps WHERE run_id = $1 AND seq = 0`,
+        `SELECT output FROM better_trigger.run_steps WHERE run_id = $1 AND seq = 0`,
         [a.id],
       );
       expect(stepA.rows[0]!.output).toMatchObject({ id: b, ok: true });
       const stepB = await pool.query<{ output: unknown }>(
-        `SELECT output FROM run_steps WHERE run_id = $1 AND seq = 0`,
+        `SELECT output FROM better_trigger.run_steps WHERE run_id = $1 AND seq = 0`,
         [b],
       );
       expect(stepB.rows[0]!.output).toMatchObject({ id: a2, ok: true });

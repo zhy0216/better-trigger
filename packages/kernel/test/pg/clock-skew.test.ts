@@ -85,7 +85,7 @@ describePg('write paths stamp the database clock (05-T1)', () => {
       expect(claimed[0]!.id).toBe(created.runId);
       // And the DB itself agrees the row is due.
       const due = await ctx.pool.query<{ due: boolean }>(
-        `SELECT available_at <= now() AS due FROM queue WHERE run_id = $1`,
+        `SELECT available_at <= now() AS due FROM better_trigger.queue WHERE run_id = $1`,
         [created.runId],
       );
       expect(due.rows[0]!.due).toBe(true);
@@ -107,7 +107,7 @@ describePg('write paths stamp the database clock (05-T1)', () => {
       // ~1 minute from the DB's now(). A host-clock stamp would sit ~5min+1min
       // out instead.
       const rel = await ctx.pool.query<{ secs: number }>(
-        `SELECT extract(epoch FROM (available_at - now()))::float AS secs FROM queue`,
+        `SELECT extract(epoch FROM (available_at - now()))::float AS secs FROM better_trigger.queue`,
       );
       expect(rel.rows).toHaveLength(1);
       expect(rel.rows[0]!.secs).toBeGreaterThan(55);
@@ -147,7 +147,7 @@ describePg('write paths stamp the database clock (05-T1)', () => {
       // Backoff 60s × 0.8–1.2 jitter, applied to the DB clock: a host-clock
       // stamp would add the +5min skew on top.
       const rel = await ctx.pool.query<{ secs: number }>(
-        `SELECT extract(epoch FROM (available_at - now()))::float AS secs FROM queue`,
+        `SELECT extract(epoch FROM (available_at - now()))::float AS secs FROM better_trigger.queue`,
       );
       expect(rel.rows[0]!.secs).toBeGreaterThan(40);
       expect(rel.rows[0]!.secs).toBeLessThan(80);
@@ -176,7 +176,7 @@ describePg('write paths stamp the database clock (05-T1)', () => {
       expect(res).toEqual({ resumed: false });
 
       const rel = await ctx.pool.query<{ secs: number }>(
-        `SELECT extract(epoch FROM (resume_at - now()))::float AS secs FROM waits`,
+        `SELECT extract(epoch FROM (resume_at - now()))::float AS secs FROM better_trigger.waits`,
       );
       expect(rel.rows[0]!.secs).toBeGreaterThan(25);
       expect(rel.rows[0]!.secs).toBeLessThan(35);
@@ -204,7 +204,7 @@ describePg('write paths stamp the database clock (05-T1)', () => {
       expect(res).toEqual({ resumed: false });
 
       const waits = await ctx.pool.query<{ resume_at: Date }>(
-        `SELECT resume_at FROM waits WHERE run_id = $1`,
+        `SELECT resume_at FROM better_trigger.waits WHERE run_id = $1`,
         [run.id],
       );
       expect(waits.rows[0]!.resume_at.toISOString()).toBe(until);

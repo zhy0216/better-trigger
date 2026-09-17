@@ -60,17 +60,17 @@ const makePool = (cfg: PoolConfig = {}) => {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM run_retry_operations/.test(sql)) {
+      if (/FROM better_trigger\.run_retry_operations/.test(sql)) {
         return { rows: cfg.opRow ? [cfg.opRow] : [] };
       }
-      if (/FROM runs WHERE id/.test(sql)) return { rows: [{ ...SOURCE }] };
-      if (/FROM tasks/.test(sql)) {
+      if (/FROM better_trigger\.runs WHERE id/.test(sql)) return { rows: [{ ...SOURCE }] };
+      if (/FROM better_trigger\.tasks/.test(sql)) {
         return { rows: [{ id: 't', retry: null, concurrency_limit: null, latest_code_version: null }] };
       }
       // createRunIn's database-clock read (T1).
       if (/^SELECT now\(\)/.test(sql)) return { rows: [{ now: new Date() }] };
-      if (/INSERT INTO runs/.test(sql)) return { rows: [{ id: 'run_new' }] };
-      if (/INSERT INTO run_retry_operations/.test(sql)) {
+      if (/INSERT INTO better_trigger\.runs/.test(sql)) return { rows: [{ id: 'run_new' }] };
+      if (/INSERT INTO better_trigger\.run_retry_operations/.test(sql)) {
         if (cfg.opInsertError) throw cfg.opInsertError;
         return { rows: [] };
       }
@@ -84,7 +84,7 @@ const makePool = (cfg: PoolConfig = {}) => {
     // (outside the aborted tx); the stub pool answers it directly.
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (/FROM run_retry_operations/.test(sql)) {
+      if (/FROM better_trigger\.run_retry_operations/.test(sql)) {
         return { rows: cfg.winner ? [cfg.winner] : [] };
       }
       return { rows: [] };
@@ -99,7 +99,7 @@ const find = (stmts: Stmt[], re: RegExp): Stmt => {
   return stmt!;
 };
 
-const opInsert = (stmts: Stmt[]): Stmt => find(stmts, /INSERT INTO run_retry_operations/);
+const opInsert = (stmts: Stmt[]): Stmt => find(stmts, /INSERT INTO better_trigger\.run_retry_operations/);
 
 describe('retryRun operation key', () => {
   it('locks the source in canonical order, then records the operation after its run', async () => {
@@ -107,12 +107,12 @@ describe('retryRun operation key', () => {
     const res = await retryRun(pool, 'run_src', DEFAULT_NAMESPACE, { operationKey: 'k-1' });
 
     // Canonical lock order: queue row first, then the runs row (FOR UPDATE).
-    const queueLock = find(stmts, /FROM queue WHERE run_id/);
+    const queueLock = find(stmts, /FROM better_trigger\.queue WHERE run_id/);
     expect(queueLock.sql).toMatch(/FOR UPDATE/);
-    const runsLock = find(stmts, /FROM runs WHERE id/);
+    const runsLock = find(stmts, /FROM better_trigger\.runs WHERE id/);
     expect(runsLock.sql).toMatch(/FOR UPDATE/);
     // The probe is a locked read, the INSERT binds the key and the new run id.
-    const probe = find(stmts, /SELECT retry_run_id FROM run_retry_operations/);
+    const probe = find(stmts, /SELECT retry_run_id FROM better_trigger\.run_retry_operations/);
     expect(probe.sql).toMatch(/FOR UPDATE/);
     expect(opInsert(stmts).params).toEqual([
       'default',
@@ -122,7 +122,7 @@ describe('retryRun operation key', () => {
       res.runId,
     ]);
     // The operation row lands after its run was created (FK to runs).
-    expect(stmts.findIndex((s) => /INSERT INTO runs/.test(s.sql))).toBeLessThan(
+    expect(stmts.findIndex((s) => /INSERT INTO better_trigger\.runs/.test(s.sql))).toBeLessThan(
       stmts.indexOf(opInsert(stmts)),
     );
     // The work notification follows the operation insert (delivered at COMMIT).
@@ -154,7 +154,7 @@ describe('retryRun operation key', () => {
 
     expect(res.runId).toBe('run_winner');
     // The read-back happened on a fresh connection after the tx aborted…
-    expect(stmts.filter((s) => /SELECT retry_run_id FROM run_retry_operations/.test(s.sql))).toHaveLength(2);
+    expect(stmts.filter((s) => /SELECT retry_run_id FROM better_trigger\.run_retry_operations/.test(s.sql))).toHaveLength(2);
     // …and nothing notified: the whole transaction rolled back.
     expect(stmts.some((s) => /pg_notify/.test(s.sql))).toBe(false);
   });
@@ -191,7 +191,7 @@ describe('retryRun operation key', () => {
     await expect(attempt).rejects.toMatchObject({ code: 'conflict' });
     await expect(attempt).rejects.toThrow(/duplicate key value violates unique constraint/);
     // The read-back still happened after the rollback.
-    expect(stmts.filter((s) => /SELECT retry_run_id FROM run_retry_operations/.test(s.sql))).toHaveLength(2);
+    expect(stmts.filter((s) => /SELECT retry_run_id FROM better_trigger\.run_retry_operations/.test(s.sql))).toHaveLength(2);
   });
 
   it('without a key there is no operation SQL at all (legacy semantics)', async () => {

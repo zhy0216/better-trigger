@@ -42,7 +42,7 @@ function stubPool(heldRunIds: string[], opts: { failOn?: RegExp } = {}) {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
       if (opts.failOn?.test(sql)) throw new Error('boom');
-      if (/FROM queue/.test(sql)) {
+      if (/FROM better_trigger\.queue/.test(sql)) {
         return {
           rows: heldRunIds.map((run_id) => ({
             run_id,
@@ -51,7 +51,7 @@ function stubPool(heldRunIds: string[], opts: { failOn?: RegExp } = {}) {
           })),
         };
       }
-      if (/UPDATE queue/.test(sql)) {
+      if (/UPDATE better_trigger\.queue/.test(sql)) {
         return { rows: heldRunIds.map((run_id) => ({ run_id })) };
       }
       return { rows: [] };
@@ -93,7 +93,7 @@ describe('releaseClaims', () => {
 
     await releaseClaims(pool, { workerId: 'w1', namespaces: [DEFAULT_NAMESPACE] });
 
-    const update = stmts.find((s) => /UPDATE queue/.test(s.sql));
+    const update = stmts.find((s) => /UPDATE better_trigger\.queue/.test(s.sql));
     expect(update).toBeDefined();
     expect(update!.sql).toMatch(/locked_by = NULL/);
     expect(update!.sql).toMatch(/locked_at = NULL/);
@@ -107,12 +107,12 @@ describe('releaseClaims', () => {
     await releaseClaims(pool, { workerId: 'w1', namespaces: [DEFAULT_NAMESPACE] });
 
     // Both the lock and the release are scoped by locked_by, bound to us.
-    const lock = stmts.find((s) => /FROM queue/.test(s.sql))!;
+    const lock = stmts.find((s) => /FROM better_trigger\.queue/.test(s.sql))!;
     expect(lock.sql).toMatch(/WHERE locked_by = \$1/);
     expect(lock.sql).toMatch(/FOR UPDATE/);
     expect(lock.params[0]).toBe('w1');
 
-    const update = stmts.find((s) => /UPDATE queue/.test(s.sql))!;
+    const update = stmts.find((s) => /UPDATE better_trigger\.queue/.test(s.sql))!;
     expect(update.sql).toMatch(/WHERE locked_by = \$1 AND \(run_id, project_id, env\) IN \(VALUES/);
     expect(update.params).toEqual(['w1', 'run_1', 'default', 'prod']);
   });
@@ -134,7 +134,7 @@ describe('releaseClaims', () => {
     // The lock SELECT restricts to the named runs on top of this worker's
     // namespace scoping: $1 = worker, $2/$3 = the namespace pair, $4 = the
     // run-id array (the namespace predicate sits between them).
-    const lock = stmts.find((s) => /FROM queue/.test(s.sql))!;
+    const lock = stmts.find((s) => /FROM better_trigger\.queue/.test(s.sql))!;
     expect(lock.sql).toMatch(/WHERE locked_by = \$1 AND .*AND run_id = ANY\(\$4::text\[\]\)/);
     expect(lock.sql).toMatch(/FOR UPDATE/);
     expect(lock.params).toEqual(['w1', 'default', 'prod', ['run_1']]);
@@ -148,7 +148,7 @@ describe('releaseClaims', () => {
 
     await releaseClaims(pool, { workerId: 'w1', namespaces: [DEFAULT_NAMESPACE] });
 
-    const runsUpdate = stmts.find((s) => /UPDATE runs/.test(s.sql))!;
+    const runsUpdate = stmts.find((s) => /UPDATE better_trigger\.runs/.test(s.sql))!;
     expect(runsUpdate.sql).toMatch(/SET status = 'queued'/);
     expect(runsUpdate.sql).toMatch(/WHERE id = \$1 AND status = 'running' AND project_id = \$2 AND env = \$3/);
     expect(runsUpdate.params).toEqual(['run_1', 'default', 'prod']);
@@ -160,8 +160,8 @@ describe('releaseClaims', () => {
     await releaseClaims(pool, { workerId: 'w1', namespaces: [DEFAULT_NAMESPACE] });
 
     // Position 1 before position 2 — the invariant runs.ts's header pins.
-    expect(indexOf(stmts, /FROM queue/)).toBeLessThan(
-      indexOf(stmts, /UPDATE runs/),
+    expect(indexOf(stmts, /FROM better_trigger\.queue/)).toBeLessThan(
+      indexOf(stmts, /UPDATE better_trigger\.runs/),
     );
     expect(stmts[0]!.sql).toBe('BEGIN');
     expect(stmts.at(-1)!.sql).toBe('COMMIT');
@@ -176,13 +176,13 @@ describe('releaseClaims', () => {
     expect(sqlOf(stmts)).not.toMatch(/UPDATE (queue|runs)/);
     expect(stmts.map((s) => s.sql)).toEqual([
       'BEGIN',
-      expect.stringMatching(/FROM queue/) as unknown as string,
+      expect.stringMatching(/FROM better_trigger\.queue/) as unknown as string,
       'COMMIT',
     ]);
   });
 
   it('rolls back and rethrows rather than half-releasing', async () => {
-    const { pool, stmts, wasReleased } = stubPool(['run_1'], { failOn: /UPDATE runs/ });
+    const { pool, stmts, wasReleased } = stubPool(['run_1'], { failOn: /UPDATE better_trigger\.runs/ });
 
     await expect(releaseClaims(pool, { workerId: 'w1', namespaces: [DEFAULT_NAMESPACE] })).rejects.toThrow('boom');
 
@@ -199,7 +199,7 @@ describe('deregisterWorker', () => {
     await deregisterWorker(pool, { workerId: 'w1' });
 
     expect(stmts).toHaveLength(1);
-    expect(stmts[0]!.sql).toMatch(/UPDATE workers SET status = 'offline' WHERE id = \$1/);
+    expect(stmts[0]!.sql).toMatch(/UPDATE better_trigger\.workers SET status = 'offline' WHERE id = \$1/);
     expect(stmts[0]!.params).toEqual(['w1']);
   });
 });

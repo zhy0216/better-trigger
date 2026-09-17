@@ -97,7 +97,7 @@ export async function createRunIn(
     db_now: Date;
   }>(
     `SELECT id, retry, concurrency_limit, latest_code_version, now() AS db_now
-       FROM tasks WHERE project_id = $1 AND env = $2 AND id = $3`,
+       FROM better_trigger.tasks WHERE project_id = $1 AND env = $2 AND id = $3`,
     [args.namespace.projectId, args.namespace.env, args.taskId],
   );
   const task = taskRes.rows[0];
@@ -139,7 +139,7 @@ export async function createRunIn(
   // a loser gets no row back and reads the existing run. (Without a key there
   // is no conflict target, so insert plainly.)
   const insertSql = parsed.idempotencyKey !== null
-    ? `INSERT INTO runs
+    ? `INSERT INTO better_trigger.runs
          (id, project_id, env, task_id, status, payload, trigger_type, parent_run_id,
           idempotency_key, concurrency_key, priority, attempt, max_attempts,
           recoveries, max_recoveries, code_version,
@@ -148,7 +148,7 @@ export async function createRunIn(
        ON CONFLICT (project_id, env, task_id, idempotency_key)
          WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING id`
-    : `INSERT INTO runs
+    : `INSERT INTO better_trigger.runs
          (id, project_id, env, task_id, status, payload, trigger_type, parent_run_id,
           idempotency_key, concurrency_key, priority, attempt, max_attempts,
           recoveries, max_recoveries, code_version,
@@ -182,7 +182,7 @@ export async function createRunIn(
   // scoped like the unique index that produced the conflict (C2).
   if (inserted.rows.length === 0) {
     const existing = await client.query<{ id: string }>(
-      `SELECT id FROM runs
+      `SELECT id FROM better_trigger.runs
         WHERE project_id = $1 AND env = $2 AND task_id = $3 AND idempotency_key = $4
         LIMIT 1`,
       [projectId, env, args.taskId, parsed.idempotencyKey],
@@ -401,7 +401,7 @@ export async function createRunsInBatch(
     db_now: Date;
   }>(
     `SELECT id, retry, concurrency_limit, latest_code_version, now() AS db_now
-       FROM tasks WHERE (project_id, env, id) IN (VALUES ${preloadValues})`,
+       FROM better_trigger.tasks WHERE (project_id, env, id) IN (VALUES ${preloadValues})`,
     taskIds.flatMap((id) => [projectId, env, id]),
   );
   const tasks = new Map(taskRes.rows.map((t) => [t.id, t]));
@@ -461,7 +461,7 @@ export async function createRunsInBatch(
     })
     .join(', ');
   const inserted = await client.query<{ id: string }>(
-    `INSERT INTO runs
+    `INSERT INTO better_trigger.runs
        (id, project_id, env, task_id, status, payload, trigger_type, parent_run_id,
         idempotency_key, concurrency_key, priority, attempt, max_attempts,
         recoveries, max_recoveries, code_version,
@@ -509,7 +509,7 @@ export async function createRunsInBatch(
       task_id: string;
       idempotency_key: string;
     }>(
-      `SELECT id, task_id, idempotency_key FROM runs
+      `SELECT id, task_id, idempotency_key FROM better_trigger.runs
         WHERE (project_id, env, task_id, idempotency_key) IN (VALUES ${conflictValues})`,
       conflictPairs.flatMap((p) => [projectId, env, p.taskId, p.key]),
     );

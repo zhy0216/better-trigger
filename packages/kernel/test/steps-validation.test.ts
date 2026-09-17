@@ -124,7 +124,7 @@ describe('upsertStep kind/status validation', () => {
       for (const status of ['completed', 'failed'] as const) {
         const { client, sqls } = makeClient();
         await expect(upsertStep(client, step({ kind, status }))).resolves.toEqual({ ok: true });
-        expect(sqls.some((sql) => /INSERT INTO run_steps/.test(sql))).toBe(true);
+        expect(sqls.some((sql) => /INSERT INTO better_trigger\.run_steps/.test(sql))).toBe(true);
       }
     }
   });
