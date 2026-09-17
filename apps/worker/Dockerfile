@@ -61,6 +61,9 @@ COPY --from=manifests /app ./
 # takes its dependency trees from prod-deps instead, so none of that ships.
 RUN bun install --frozen-lockfile
 
+# Shared declaration config and package externals are required by tsdown.
+COPY tsconfig.build.json ./
+COPY scripts/source-package-externals.mjs scripts/source-package-externals.mjs
 COPY packages/core packages/core
 COPY packages/kernel packages/kernel
 COPY packages/db packages/db
