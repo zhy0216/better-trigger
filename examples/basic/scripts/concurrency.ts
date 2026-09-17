@@ -150,7 +150,7 @@ async function readSpans(s: Scenario, keys: readonly string[]): Promise<Span[]> 
             concurrency_key AS key,
             EXTRACT(EPOCH FROM started_at) * 1000 AS from_ms,
             EXTRACT(EPOCH FROM finished_at) * 1000 AS to_ms
-       FROM runs
+       FROM better_trigger.runs
       WHERE concurrency_key = ANY($1::text[])
         AND started_at IS NOT NULL AND finished_at IS NOT NULL`,
     [keys],
@@ -209,7 +209,7 @@ function startSampler(s: Scenario, intervalMs = 20): { stop(): Promise<SampleSta
       try {
         const res = await s.pool.query<{ key: string; n: number }>(
           `SELECT concurrency_key AS key, count(*)::int AS n
-             FROM runs
+             FROM better_trigger.runs
             WHERE status = 'running' AND concurrency_key IS NOT NULL
             GROUP BY concurrency_key`,
         );
@@ -270,7 +270,7 @@ async function main(s: Scenario): Promise<void> {
   await registrar.stop();
 
   const limitRes = await s.pool.query<{ concurrency_limit: number | null }>(
-    `SELECT concurrency_limit FROM tasks WHERE id = $1`,
+    `SELECT concurrency_limit FROM better_trigger.tasks WHERE id = $1`,
     [ccLimited.id],
   );
   // The check that keeps this scenario from going vacuous: with a NULL limit
@@ -282,7 +282,7 @@ async function main(s: Scenario): Promise<void> {
   // Same guard for the serialized chain: the latency assertion is meaningless
   // if cc-serial has anything but a hard cap of 1.
   const serialLimit = await s.pool.query<{ concurrency_limit: number | null }>(
-    `SELECT concurrency_limit FROM tasks WHERE id = $1`,
+    `SELECT concurrency_limit FROM better_trigger.tasks WHERE id = $1`,
     [ccSerial.id],
   );
   s.assertEqual(
@@ -305,7 +305,7 @@ async function main(s: Scenario): Promise<void> {
   // limiter counts by that column, so a run without one is invisible to it.
   const keyed = await countRows(
     s,
-    `SELECT count(*)::int AS n FROM runs WHERE concurrency_key = ANY($1::text[])`,
+    `SELECT count(*)::int AS n FROM better_trigger.runs WHERE concurrency_key = ANY($1::text[])`,
     [GROUPS],
   );
   s.assertEqual(keyed, runIds.length, 'queued runs carrying a concurrency key');
@@ -334,14 +334,14 @@ async function main(s: Scenario): Promise<void> {
   await waitFor(`all ${runIds.length} runs to complete`, 120_000, async () => {
     const done = await countRows(
       s,
-      `SELECT count(*)::int AS n FROM runs
+      `SELECT count(*)::int AS n FROM better_trigger.runs
         WHERE concurrency_key = ANY($1::text[]) AND status = 'completed'`,
       [GROUPS],
     );
     if (done === runIds.length) return true;
     const broken = await countRows(
       s,
-      `SELECT count(*)::int AS n FROM runs
+      `SELECT count(*)::int AS n FROM better_trigger.runs
         WHERE concurrency_key = ANY($1::text[]) AND status IN ('failed', 'canceled')`,
       [GROUPS],
     );
@@ -355,7 +355,7 @@ async function main(s: Scenario): Promise<void> {
   s.assertEqual(spans.length, runIds.length, 'runs with a measured running window');
   const retried = await countRows(
     s,
-    `SELECT count(*)::int AS n FROM runs
+    `SELECT count(*)::int AS n FROM better_trigger.runs
       WHERE concurrency_key = ANY($1::text[]) AND attempt <> 1`,
     [GROUPS],
   );
@@ -458,7 +458,7 @@ async function main(s: Scenario): Promise<void> {
   // written by the claim itself, so this is "never claimed", not "not finished".
   const startedUnderLock = await countRows(
     s,
-    `SELECT count(*)::int AS n FROM runs
+    `SELECT count(*)::int AS n FROM better_trigger.runs
       WHERE concurrency_key = $1 AND started_at IS NOT NULL`,
     [GATED_GROUP],
   );
@@ -510,14 +510,14 @@ async function main(s: Scenario): Promise<void> {
   await waitFor(`all ${SERIAL_RUNS} serial runs to complete`, 30_000, async () => {
     const done = await countRows(
       s,
-      `SELECT count(*)::int AS n FROM runs
+      `SELECT count(*)::int AS n FROM better_trigger.runs
         WHERE concurrency_key = $1 AND status = 'completed'`,
       [SERIAL_GROUP],
     );
     if (done === SERIAL_RUNS) return true;
     const broken = await countRows(
       s,
-      `SELECT count(*)::int AS n FROM runs
+      `SELECT count(*)::int AS n FROM better_trigger.runs
         WHERE concurrency_key = $1 AND status IN ('failed', 'canceled')`,
       [SERIAL_GROUP],
     );

@@ -144,7 +144,7 @@ async function checkReady(c: E2E): Promise<void> {
     s.assert(h.rows[0]?.ok === 1, 'database must answer SELECT 1');
 
     const w = await s.pool.query<{ id: string; status: string }>(
-      `SELECT id, status FROM workers WHERE status = 'online'`,
+      `SELECT id, status FROM better_trigger.workers WHERE status = 'online'`,
     );
     s.assert(w.rows.length === 1, `expected 1 online worker row, got ${w.rows.length}`);
   });
@@ -153,7 +153,7 @@ async function checkReady(c: E2E): Promise<void> {
 async function checkTasksRegistered(c: E2E): Promise<void> {
   const s: Scenario = c.s;
   await s.check('tasks table contains every example task', async () => {
-    const res = await s.pool.query<{ id: string }>('SELECT id FROM tasks');
+    const res = await s.pool.query<{ id: string }>('SELECT id FROM better_trigger.tasks');
     const ids = new Set(res.rows.map((t) => t.id));
     const expected = [
       'hello-world',
@@ -442,7 +442,7 @@ async function checkSchedules(c: E2E): Promise<void> {
       task_id: string;
       cron_pattern: string;
       next_run_at: Date | null;
-    }>('SELECT task_id, cron_pattern, next_run_at FROM schedules');
+    }>('SELECT task_id, cron_pattern, next_run_at FROM better_trigger.schedules');
     const row = res.rows.find((sched) => sched.task_id === 'every-minute');
     s.assert(!!row, 'no schedule row for "every-minute"');
     s.assertEqual(row!.cron_pattern, '* * * * *', 'every-minute cron pattern');
@@ -473,7 +473,7 @@ async function checkCronFires(c: E2E): Promise<void> {
       6_000,
       async () => {
         const res = await s.pool.query<{ id: string }>(
-          `SELECT id FROM runs
+          `SELECT id FROM better_trigger.runs
             WHERE task_id = 'every-2s' AND trigger_type = 'schedule' AND status = 'completed'
             ORDER BY created_at ASC
             LIMIT 1`,
@@ -500,7 +500,7 @@ async function checkCronFires(c: E2E): Promise<void> {
       next_run_at: Date | null;
     }>(
       `SELECT cron_pattern, last_run_at, last_run_id, next_run_at
-         FROM schedules WHERE task_id = 'every-2s'`,
+         FROM better_trigger.schedules WHERE task_id = 'every-2s'`,
     );
     const row = sched.rows[0];
     s.assert(!!row, `no schedule row for 'every-2s'`);

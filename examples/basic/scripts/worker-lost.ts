@@ -111,7 +111,7 @@ async function main(s: Scenario): Promise<void> {
   let childRunId = '';
   await waitFor(`wl-child run 'running'`, 60_000, async () => {
     const res = await s.pool.query<{ id: string; status: string }>(
-      `SELECT id, status FROM runs WHERE task_id = 'wl-child'`,
+      `SELECT id, status FROM better_trigger.runs WHERE task_id = 'wl-child'`,
     );
     const row = res.rows[0];
     if (!row) return false;
@@ -132,7 +132,7 @@ async function main(s: Scenario): Promise<void> {
   const budget = async () =>
     (
       await s.pool.query<{ status: string; attempt: number; recoveries: number }>(
-        `SELECT status, attempt, recoveries FROM runs WHERE id = $1`,
+        `SELECT status, attempt, recoveries FROM better_trigger.runs WHERE id = $1`,
         [childRunId],
       )
     ).rows[0]!;

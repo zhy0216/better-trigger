@@ -76,12 +76,12 @@ const makeItems = (n: number, key?: (i: number) => string | undefined): TriggerI
   }));
 
 async function countRuns(s: Scenario): Promise<number> {
-  return (await s.pool.query(`SELECT count(*)::int AS n FROM runs`)).rows[0].n;
+  return (await s.pool.query(`SELECT count(*)::int AS n FROM better_trigger.runs`)).rows[0].n;
 }
 
 async function main(s: Scenario): Promise<void> {
   await s.pool.query(
-    `INSERT INTO tasks (id, name, trigger_source) VALUES ('t1', 'batch t1', 'api')`,
+    `INSERT INTO better_trigger.tasks (id, name, trigger_source) VALUES ('t1', 'batch t1', 'api')`,
   );
   const counting = makeCountingPool(s.pool);
   const kernel = createKernel({ pool: counting.pool });
@@ -97,7 +97,7 @@ async function main(s: Scenario): Promise<void> {
     s.assertEqual(res.runIds.length, 500, '500 runIds returned');
     s.assertEqual(await countRuns(s), 500, '500 runs rows');
     s.assertEqual(
-      (await s.pool.query(`SELECT count(*)::int AS n FROM queue`)).rows[0].n,
+      (await s.pool.query(`SELECT count(*)::int AS n FROM better_trigger.queue`)).rows[0].n,
       500,
       '500 queue rows',
     );
@@ -134,7 +134,7 @@ async function main(s: Scenario): Promise<void> {
       `expected exactly 3 data statements for a fully-conflicted 500-item batch, got ${used}`,
     );
     s.assertEqual(
-      (await s.pool.query(`SELECT count(*)::int AS n FROM queue`)).rows[0].n,
+      (await s.pool.query(`SELECT count(*)::int AS n FROM better_trigger.queue`)).rows[0].n,
       600,
       'queue still has exactly the 500 + 100 rows created so far',
     );
@@ -206,7 +206,7 @@ async function main(s: Scenario): Promise<void> {
     // All-or-nothing: the 499 valid items of the batch must not exist.
     s.assertEqual(await countRuns(s), before, 'no partial insert');
     s.assertEqual(
-      (await s.pool.query(`SELECT count(*)::int AS n FROM queue`)).rows[0].n,
+      (await s.pool.query(`SELECT count(*)::int AS n FROM better_trigger.queue`)).rows[0].n,
       850,
       'queue untouched',
     );
@@ -214,7 +214,7 @@ async function main(s: Scenario): Promise<void> {
 
   await s.check('a failure DURING the batch INSERT rolls the whole transaction back', async () => {
     const beforeRuns = await countRuns(s);
-    const beforeQueue = (await s.pool.query(`SELECT count(*)::int AS n FROM queue`)).rows[0].n;
+    const beforeQueue = (await s.pool.query(`SELECT count(*)::int AS n FROM better_trigger.queue`)).rows[0].n;
     // The NUL byte passes every kernel pre-check (a non-empty string) but
     // PostgreSQL refuses it at INSERT time ("null character not permitted") —
     // so the multi-row runs INSERT fails mid-batch, after the preload and
@@ -239,7 +239,7 @@ async function main(s: Scenario): Promise<void> {
     s.assert(threw !== null, 'the NUL-byte item must be refused by the database');
     s.assertEqual(await countRuns(s), beforeRuns, 'no run survives the rollback');
     s.assertEqual(
-      (await s.pool.query(`SELECT count(*)::int AS n FROM queue`)).rows[0].n,
+      (await s.pool.query(`SELECT count(*)::int AS n FROM better_trigger.queue`)).rows[0].n,
       beforeQueue,
       'no queue row survives the rollback',
     );

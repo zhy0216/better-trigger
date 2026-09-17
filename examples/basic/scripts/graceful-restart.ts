@@ -129,7 +129,7 @@ async function main(s: Scenario): Promise<void> {
   s.cleanup(() => proc.stop());
 
   await waitForTasks(s.pool, ['gr-restart']);
-  const workerRes = await s.pool.query<{ id: string }>(`SELECT id FROM workers`);
+  const workerRes = await s.pool.query<{ id: string }>(`SELECT id FROM better_trigger.workers`);
   s.assert(
     workerRes.rows.length === 1,
     `expected exactly 1 registered worker (the executor), got ${workerRes.rows.length}`,
@@ -148,7 +148,7 @@ async function main(s: Scenario): Promise<void> {
   const readQueue = async (): Promise<QueueRow | undefined> => {
     const res = await s.pool.query<QueueRow>(
       `SELECT locked_by, locked_at, lease_until, available_at <= now() AS due
-         FROM queue WHERE run_id = $1`,
+         FROM better_trigger.queue WHERE run_id = $1`,
       [handle.id],
     );
     return res.rows[0];
@@ -202,7 +202,7 @@ async function main(s: Scenario): Promise<void> {
   // either, so the reaper's counter must be untouched as well — otherwise
   // enough deploys would still eventually declare the run 'worker lost'.
   const recovered = await s.pool.query<{ recoveries: number }>(
-    `SELECT recoveries FROM runs WHERE id = $1`,
+    `SELECT recoveries FROM better_trigger.runs WHERE id = $1`,
     [handle.id],
   );
   s.assert(
@@ -212,7 +212,7 @@ async function main(s: Scenario): Promise<void> {
   s.ok(`attempt AND recoveries untouched, run back to 'queued' — a handover, not a failure`);
 
   const workerAfter = await s.pool.query<{ status: string }>(
-    `SELECT status FROM workers WHERE id = $1`,
+    `SELECT status FROM better_trigger.workers WHERE id = $1`,
     [workerId],
   );
   s.assert(

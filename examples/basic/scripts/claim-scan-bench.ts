@@ -119,10 +119,10 @@ const CANDIDATE_SQL = `SELECT q.id AS queue_id, q.run_id,
           r.task_id, r.payload, r.attempt, r.max_attempts,
           r.code_version, r.project_id, r.env, r.concurrency_key,
           t.concurrency_limit
-     FROM queue q
-     JOIN runs r ON r.id = q.run_id
+     FROM better_trigger.queue q
+     JOIN better_trigger.runs r ON r.id = q.run_id
                 AND r.project_id = q.project_id AND r.env = q.env
-     LEFT JOIN tasks t ON t.id = r.task_id
+     LEFT JOIN better_trigger.tasks t ON t.id = r.task_id
                 AND t.project_id = r.project_id AND t.env = r.env
     WHERE q.available_at <= now() AND q.locked_by IS NULL
       AND q.project_id = $3::text AND q.env = $4::text
@@ -158,12 +158,12 @@ async function main(s: Scenario): Promise<void> {
    * in one contiguous block a sequential scan would find immediately.
    * ----------------------------------------------------------------------- */
   await pool.query(
-    `INSERT INTO tasks (id, name, trigger_source)
+    `INSERT INTO better_trigger.tasks (id, name, trigger_source)
        SELECT 'task-' || g, 'task ' || g, 'api' FROM generate_series(0, $1::int) g`,
     [TASKS - 1],
   );
   await pool.query(
-    `INSERT INTO runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority)
+    `INSERT INTO better_trigger.runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority)
        SELECT 'run-' || g,
               'task-' || (g % $2::int),
               CASE WHEN g < $3::int THEN 'queued' ELSE 'running' END,
@@ -174,7 +174,7 @@ async function main(s: Scenario): Promise<void> {
     [TOTAL, TASKS, CLAIMABLE],
   );
   await pool.query(
-    `INSERT INTO queue (run_id, available_at, priority, locked_by, locked_at, lease_until)
+    `INSERT INTO better_trigger.queue (run_id, available_at, priority, locked_by, locked_at, lease_until)
        SELECT 'run-' || g,
               CASE WHEN g < $4::int THEN now() + interval '1 hour'
                    ELSE now() - interval '1 minute' END,
@@ -188,7 +188,7 @@ async function main(s: Scenario): Promise<void> {
   );
   // Statistics, not cleanup: without ANALYZE the planner costs this table from
   // defaults and the comparison below measures nothing but a stale estimate.
-  await pool.query('VACUUM ANALYZE tasks, runs, queue');
+  await pool.query('VACUUM ANALYZE better_trigger.tasks, better_trigger.runs, better_trigger.queue');
   s.log(
     `seeded ${TOTAL} queue rows — ${CLAIMABLE} claimable (${FUTURE} future-dated), ` +
       `${TOTAL - CLAIMABLE} already held by a worker`,
@@ -236,17 +236,17 @@ async function main(s: Scenario): Promise<void> {
   // CREATE INDEX: this bench has to measure the index that ships, and reading it
   // back also fails loudly here if 0006 was never applied.
   const def = await pool.query<{ indexdef: string }>(
-    `SELECT indexdef FROM pg_indexes WHERE tablename = 'queue' AND indexname = 'queue_claimable_idx'`,
+    `SELECT indexdef FROM pg_indexes WHERE schemaname = 'better_trigger' AND tablename = 'queue' AND indexname = 'queue_claimable_idx'`,
   );
   const indexDef = def.rows[0]?.indexdef;
   s.assert(indexDef, 'queue_claimable_idx is missing — did the migrations apply?');
 
-  await pool.query('DROP INDEX queue_claimable_idx');
-  await pool.query('ANALYZE queue');
+  await pool.query('DROP INDEX better_trigger.queue_claimable_idx');
+  await pool.query('ANALYZE better_trigger.queue');
   const before = await explain('BEFORE — without queue_claimable_idx');
 
   await pool.query(indexDef);
-  await pool.query('ANALYZE queue');
+  await pool.query('ANALYZE better_trigger.queue');
   const after = await explain('AFTER — with queue_claimable_idx');
 
   s.log(
@@ -284,9 +284,9 @@ async function main(s: Scenario): Promise<void> {
    * interleave with the 3k due ones INSIDE the index — the scan really has to
    * skip delayed rows to fill its window.
    * ----------------------------------------------------------------------- */
-  await pool.query('DELETE FROM runs'); // queue cascades
+  await pool.query('DELETE FROM better_trigger.runs'); // queue cascades
   await pool.query(
-    `INSERT INTO runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority)
+    `INSERT INTO better_trigger.runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority)
        SELECT 'dly-' || g,
               'task-' || (g % $2::int),
               CASE WHEN g < $3::int THEN 'queued' ELSE 'running' END,
@@ -296,7 +296,7 @@ async function main(s: Scenario): Promise<void> {
     [D2_TOTAL, TASKS, D2_TOTAL - D2_HELD],
   );
   await pool.query(
-    `INSERT INTO queue (run_id, available_at, priority, locked_by, locked_at, lease_until)
+    `INSERT INTO better_trigger.queue (run_id, available_at, priority, locked_by, locked_at, lease_until)
        SELECT 'dly-' || g,
               CASE WHEN g < $4::int THEN now() + interval '1 hour'
                    ELSE now() - interval '1 minute' END,
@@ -308,7 +308,7 @@ async function main(s: Scenario): Promise<void> {
         ORDER BY md5(g::text)`,
     [D2_TOTAL, TASKS, D2_TOTAL - D2_HELD, D2_DELAYED],
   );
-  await pool.query('VACUUM ANALYZE runs, queue');
+  await pool.query('VACUUM ANALYZE better_trigger.runs, better_trigger.queue');
   s.log(
     `phase 2: ${D2_TOTAL} rows — ${D2_HELD} held, ` +
       `${D2_DELAYED} delayed (future), ${D2_DUE} due — all priority 0`,
@@ -330,9 +330,9 @@ async function main(s: Scenario): Promise<void> {
   // delayed rows — the claim that "many delayed rows do not worsen claim
   // latency" (PF5 acceptance 3).
   await pool.query(
-    `UPDATE queue SET available_at = now() - interval '1 minute' WHERE available_at > now()`,
+    `UPDATE better_trigger.queue SET available_at = now() - interval '1 minute' WHERE available_at > now()`,
   );
-  await pool.query('VACUUM ANALYZE queue');
+  await pool.query('VACUUM ANALYZE better_trigger.queue');
   const baseline = await explain('BASELINE — the same rows, all due');
 
   await s.check('the same rows without the delay keep the same plan', async () => {
@@ -380,9 +380,9 @@ async function main(s: Scenario): Promise<void> {
    * stepsTruncated; the end-to-end claim time with the fat run in the window
    * must stay within a small multiple of the same claim without it.
    * ----------------------------------------------------------------------- */
-  await pool.query('DELETE FROM runs'); // queue cascades
+  await pool.query('DELETE FROM better_trigger.runs'); // queue cascades
   await pool.query(
-    `INSERT INTO runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority)
+    `INSERT INTO better_trigger.runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority)
        SELECT 'p3-' || g,
               'task-' || (g % $2::int),
               'queued',
@@ -393,7 +393,7 @@ async function main(s: Scenario): Promise<void> {
     [P3_TOTAL, TASKS],
   );
   await pool.query(
-    `INSERT INTO queue (run_id, available_at, priority)
+    `INSERT INTO better_trigger.queue (run_id, available_at, priority)
        SELECT 'p3-' || g,
               now() - interval '1 minute',
               CASE WHEN g % 10 = 0 THEN 1 + (g % 5) ELSE 0 END
@@ -402,22 +402,22 @@ async function main(s: Scenario): Promise<void> {
     [P3_TOTAL],
   );
   await pool.query(
-    `INSERT INTO runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority)
+    `INSERT INTO better_trigger.runs (id, task_id, status, payload, trigger_type, attempt, max_attempts, priority)
        VALUES ($1, 'task-0', 'queued', jsonb_build_object('fat', true), 'api', 1, 3, $2)`,
     [P3_FAT_RUN, P3_FAT_PRIORITY],
   );
   await pool.query(
-    `INSERT INTO queue (run_id, available_at, priority) VALUES ($1, now() - interval '1 minute', $2)`,
+    `INSERT INTO better_trigger.queue (run_id, available_at, priority) VALUES ($1, now() - interval '1 minute', $2)`,
     [P3_FAT_RUN, P3_FAT_PRIORITY],
   );
   await pool.query(
-    `INSERT INTO run_steps (run_id, seq, kind, status, label, output, attempt, started_at, finished_at)
+    `INSERT INTO better_trigger.run_steps (run_id, seq, kind, status, label, output, attempt, started_at, finished_at)
        SELECT $1, g, 'step', 'completed', 'step ' || g, jsonb_build_object('n', g), 1,
               now() - interval '1 minute', now()
          FROM generate_series(0, $2::int - 1) g`,
     [P3_FAT_RUN, P3_FAT_STEPS],
   );
-  await pool.query('VACUUM ANALYZE runs, queue, run_steps');
+  await pool.query('VACUUM ANALYZE better_trigger.runs, better_trigger.queue, better_trigger.run_steps');
   s.log(
     `phase 3: ${P3_TOTAL} claimable rows (scattered priorities) + ` +
       `${P3_FAT_RUN} with a ${P3_FAT_STEPS}-step ledger (priority ${P3_FAT_PRIORITY})`,
@@ -450,19 +450,19 @@ async function main(s: Scenario): Promise<void> {
     aTimes.push(Date.now() - t0);
     if (i === 0) fatClaim = claimed.find((c) => c.id === P3_FAT_RUN);
     await pool.query(
-      `UPDATE queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL
+      `UPDATE better_trigger.queue SET locked_by = NULL, locked_at = NULL, lease_until = NULL
         WHERE run_id = $1`,
       [P3_FAT_RUN],
     );
     await pool.query(
-      `UPDATE runs SET status = 'queued', fencing_token = fencing_token + 1
+      `UPDATE better_trigger.runs SET status = 'queued', fencing_token = fencing_token + 1
         WHERE id = $1`,
       [P3_FAT_RUN],
     );
   }
   const timingA = Math.min(...aTimes);
 
-  await pool.query('DELETE FROM queue WHERE run_id = $1', [P3_FAT_RUN]);
+  await pool.query('DELETE FROM better_trigger.queue WHERE run_id = $1', [P3_FAT_RUN]);
   const bTimes: number[] = [];
   for (let i = 0; i < P3_TRIALS; i++) {
     const t0 = Date.now();

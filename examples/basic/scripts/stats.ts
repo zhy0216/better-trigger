@@ -41,7 +41,7 @@ async function main(s: Scenario): Promise<void> {
   const { projectId, env } = DEFAULT_NAMESPACE;
 
   await s.pool.query(
-    `INSERT INTO tasks (id, project_id, env, name, trigger_source)
+    `INSERT INTO better_trigger.tasks (id, project_id, env, name, trigger_source)
        VALUES ('warm', $1, $2, 'warm', 'api'),
               ('cold', $1, $2, 'cold', 'api'),
               ('idle', $1, $2, 'idle', 'api')`,
@@ -53,7 +53,7 @@ async function main(s: Scenario): Promise<void> {
   // the old runs would drag p50/p95 up to ~500s and push successRate to 7/8.
   // cold: only 26h-old completed runs (999s long).
   await s.pool.query(
-    `INSERT INTO runs (id, project_id, env, task_id, status, trigger_type,
+    `INSERT INTO better_trigger.runs (id, project_id, env, task_id, status, trigger_type,
                        attempt, max_attempts, created_at, started_at, finished_at)
      SELECT 'warm-' || g, $1, $2, 'warm',
             CASE WHEN g < 3 THEN 'completed' ELSE 'failed' END,

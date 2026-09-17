@@ -61,7 +61,7 @@ const STATS_SQL = `SELECT
                          AND r.created_at >= now() - interval '24 hours') AS success,
         count(*) FILTER (WHERE r.status IN ('completed','failed','canceled')
                          AND r.created_at >= now() - interval '24 hours') AS finished_total
-   FROM runs r
+   FROM better_trigger.runs r
   WHERE r.project_id = $1 AND r.env = $2
     AND r.created_at >= now() - interval '24 hours'
   GROUP BY r.task_id`;
@@ -90,12 +90,12 @@ async function main(s: Scenario): Promise<void> {
   const oldShare = Math.floor(TOTAL * (1 - WINDOWED));
 
   await s.pool.query(
-    `INSERT INTO tasks (id, name, trigger_source)
+    `INSERT INTO better_trigger.tasks (id, name, trigger_source)
        SELECT 'task-' || g, 'task ' || g, 'api' FROM generate_series(0, $1::int) g`,
     [TASKS - 1],
   );
   await s.pool.query(
-    `INSERT INTO runs (id, task_id, status, trigger_type, attempt, max_attempts,
+    `INSERT INTO better_trigger.runs (id, task_id, status, trigger_type, attempt, max_attempts,
                        created_at, started_at, finished_at)
      SELECT 'run-' || g,
             'task-' || (g % $2::int),
@@ -111,7 +111,7 @@ async function main(s: Scenario): Promise<void> {
        FROM generate_series(0, $1::int - 1) g`,
     [TOTAL, TASKS, oldShare],
   );
-  await s.pool.query('VACUUM ANALYZE tasks, runs');
+  await s.pool.query('VACUUM ANALYZE better_trigger.tasks, better_trigger.runs');
   s.log(
     `seeded ${TOTAL} runs — ${oldShare} predate the 24h window, ` +
       `${TOTAL - oldShare} created within it`,
@@ -129,8 +129,8 @@ async function main(s: Scenario): Promise<void> {
     );
   });
 
-  await s.pool.query('DROP INDEX runs_created_idx');
-  await s.pool.query('ANALYZE runs');
+  await s.pool.query('DROP INDEX better_trigger.runs_created_idx');
+  await s.pool.query('ANALYZE better_trigger.runs');
   const without = await explain(s, 'WITHOUT runs_created_idx — same query');
 
   await s.check('without the index the plan degrades to a full-table scan', async () => {

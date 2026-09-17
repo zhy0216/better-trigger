@@ -4,10 +4,10 @@
    The harnesses in this directory (one per scenario; the suite header prints
    the live count) are the project's real correctness
    evidence (exactly-once steps under SIGKILL, fencing, replay drift, version
-   pinning, rolling deploys, migration upgrades, worker loss, graceful
-   restart, per-key concurrency limits, retention cascades, probe-pool
-   behaviour on a live Postgres, orchestrator-loop self-healing under a
-   statement timeout).
+   pinning, rolling deploys, shared-database schema isolation, migration
+   installs, worker loss, graceful restart, per-key concurrency limits,
+   retention cascades, probe-pool behaviour on a live Postgres,
+   orchestrator-loop self-healing under a statement timeout).
    Each one is a `runScenario()` call from @better-trigger/testing, so it
    already provisions its own database, spawns its own daemons, runs its own
    teardown and exits non-zero on any failed assertion — this script only runs
@@ -50,7 +50,12 @@ const HARNESSES: Harness[] = [
   {
     name: 'embedded',
     file: 'embedded.ts',
-    what: 'the same runtime runs in-process without a daemon or TCP listener',
+    what: 'the runtime runs in-process on the host pool (max:1, host-first search_path) beside same-name host tables',
+  },
+  {
+    name: 'schema-isolation',
+    file: 'schema-isolation.ts',
+    what: 'daemon install + execution coexist with same-name host tables, a newer host journal and host-first search_path',
   },
   { name: 'fencing', file: 'fencing.ts', what: 'fencing tokens reject late writes' },
   { name: 'replay-drift', file: 'replay-drift.ts', what: 'replay drift across code versions' },
@@ -67,7 +72,7 @@ const HARNESSES: Harness[] = [
   {
     name: 'migration',
     file: 'migration.ts',
-    what: '0007→latest upgrade preserves data and fires new constraints; old schema stays a subset',
+    what: 'baseline install beside a newer host Drizzle journal; repeat and concurrent installs stay no-op/once',
   },
   {
     name: 'concurrency',
@@ -114,7 +119,7 @@ const HARNESSES: Harness[] = [
   {
     name: 'health-pool',
     file: 'health-pool.ts',
-    what: 'probe pool: statement_timeout server-side, 57014 cancellation, connection return, single-flight (PF4)',
+    what: 'probe pool: statement_timeout server-side, 57014 cancellation, connection return, single-flight (PF4); gauges read better_trigger under a host-first search_path',
   },
   {
     name: 'loop-hang',

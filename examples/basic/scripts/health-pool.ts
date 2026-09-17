@@ -17,14 +17,20 @@
      c. pool-level concurrency: concurrent probes queue through max=2 without
         losing work — 6 × pg_sleep(0.3) all succeed in ~2 batches, not 6
         sequential sleeps.
-     d. daemon-level single-flight: an API-only daemon with a real
-        createHealthPool; the gauge query is blocked server-side (LOCK TABLE
-        queue), 10 concurrent /metrics scrapes all answer within ~1s because
-        they share ONE blocked query that statement_timeout cancels — without
-        the guard they would queue on the max=2 pool and hit their own 2s HTTP
-        deadlines in waves (~5s+). After the lock is released the same scrape
-        sees db_up 1 again, and concurrent deep /health?deep=1 probes stay
-        fast.
+      d. daemon-level single-flight: an API-only daemon with a real
+         createHealthPool; the gauge query is blocked server-side (LOCK TABLE
+         better_trigger.queue), 10 concurrent /metrics scrapes all answer
+         within ~1s because they share ONE blocked query that
+         statement_timeout cancels — without the guard they would queue on the
+         max=2 pool and hit their own 2s HTTP deadlines in waves (~5s+). After
+         the lock is released the same scrape sees db_up 1 again, and
+         concurrent deep /health?deep=1 probes stay fast.
+      e. schema isolation of the probe pool: the daemon (business pool AND
+         probe pool) connects with a host-schema-first search_path
+         (`host_app, public`) while the host owns same-name `public.queue` /
+         `public.runs` tables with sentinel rows. The queue gauge must report
+         the better_trigger.queue depth, never the host table's; unqualified
+         host queries keep resolving to the host tables.
 
    Env:
      DATABASE_URL      base connection derived from it; default
@@ -34,7 +40,7 @@
    ============================================================================= */
 import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
-import { createHealthPool } from '@better-trigger/db';
+import { createHealthPool, createPool } from '@better-trigger/db';
 import {
   runScenario,
   spawnDaemon,
@@ -52,6 +58,13 @@ function freePort(): Promise<number> {
       server.close(() => resolve(port));
     });
   });
+}
+
+/** Connection string whose sessions resolve unqualified names host-first. */
+function hostFirstUrl(url: string): string {
+  const parsed = new URL(url);
+  parsed.searchParams.set('options', '-csearch_path=host_app,public');
+  return parsed.toString();
 }
 
 /** Reject if `p` has not settled within `ms` — a hang must fail, not stall. */
@@ -148,8 +161,31 @@ async function main(s: Scenario): Promise<void> {
   });
 
   /* -- d. daemon-level single-flight under a blocked gauge query ----------- */
+  // Host-side setup for d + e: same-name host tables with sentinel rows, and
+  // a known better_trigger.queue depth the gauge must report instead.
+  await s.pool.query(`CREATE SCHEMA host_app`);
+  await s.pool.query(`CREATE TABLE public.queue (id text PRIMARY KEY, note text NOT NULL)`);
+  await s.pool.query(`CREATE TABLE public.runs (id text PRIMARY KEY, note text NOT NULL)`);
+  await s.pool.query(
+    `INSERT INTO public.queue (id, note)
+       SELECT 'host-q-' || g, 'keep me' FROM generate_series(1, 7) g`,
+  );
+  await s.pool.query(`INSERT INTO public.runs (id, note) VALUES ('host-run', 'keep me')`);
+  await s.pool.query(
+    `INSERT INTO better_trigger.tasks (id, name, trigger_source) VALUES ('hp-task', 'hp-task', 'api')`,
+  );
+  await s.pool.query(
+    `INSERT INTO better_trigger.runs (id, task_id, status, trigger_type, created_at, updated_at)
+       SELECT 'hp-run-' || g, 'hp-task', 'queued', 'api', now(), now() FROM generate_series(1, 3) g`,
+  );
+  await s.pool.query(
+    `INSERT INTO better_trigger.queue (run_id, available_at)
+       SELECT 'hp-run-' || g, now() - interval '1 minute' FROM generate_series(1, 3) g`,
+  );
+
   await s.check('concurrent /metrics scrapes share one blocked gauge query (single-flight)', async () => {
-    const daemon = spawnDaemon({ databaseUrl: s.db.url, port: await freePort() });
+    // The daemon's business pool AND probe pool connect host-schema-first.
+    const daemon = spawnDaemon({ databaseUrl: hostFirstUrl(s.db.url), port: await freePort() });
     try {
       await waitForHealth(daemon.url!);
     } catch (err) {
@@ -158,11 +194,11 @@ async function main(s: Scenario): Promise<void> {
     }
     try {
       // Block the gauge query server-side: an ACCESS EXCLUSIVE lock on the
-      // queue table makes every scrape's `SELECT ... FROM queue` wait — and
-      // statement_timeout cancels the waiting statement at ~1s.
+      // queue table makes every scrape's `SELECT ... FROM better_trigger.queue`
+      // wait — and statement_timeout cancels the waiting statement at ~1s.
       const blocker = await s.pool.connect();
       await blocker.query('BEGIN');
-      await blocker.query('LOCK TABLE queue IN ACCESS EXCLUSIVE MODE');
+      await blocker.query('LOCK TABLE better_trigger.queue IN ACCESS EXCLUSIVE MODE');
       try {
         const started = Date.now();
         const scrapes = await withDeadline(
@@ -193,9 +229,15 @@ async function main(s: Scenario): Promise<void> {
       // With the lock gone, the same scrape sees the gauges again — the probe
       // pool survived the storm.
       const after = await withDeadline(fetch(`${daemon.url}/api/v1/metrics`), 10_000, 'post-lock scrape');
+      const afterBody = await after.text();
+      s.assert(afterBody.includes('better_trigger_db_up 1'), 'db_up 1 after the lock is released');
+      // The gauge reads better_trigger.queue (3 rows), never the host's
+      // same-name public.queue (7 rows), even though the probe pool's session
+      // resolves unqualified names host-first.
       s.assert(
-        (await after.text()).includes('better_trigger_db_up 1'),
-        'db_up 1 after the lock is released',
+        /better_trigger_queue_depth\{project_id="default",env="prod",state="available"\} 3\b/.test(afterBody),
+        'queue_depth gauge counts better_trigger.queue, not the host table:\n' +
+          afterBody.split('\n').filter((l) => l.startsWith('better_trigger_queue_depth')).join('\n'),
       );
 
       // The health probe is a SELECT 1 (nothing to block), so its guard shows
@@ -218,12 +260,29 @@ async function main(s: Scenario): Promise<void> {
       await daemon.stop();
     }
   });
+
+  /* -- e. host resolution stays host-first around the daemon --------------- */
+  await s.check('unqualified host queries hit the host tables, not better_trigger', async () => {
+    const host = createPool(hostFirstUrl(s.db.url), { error: () => {} });
+    try {
+      const path = await host.query<{ search_path: string }>('SHOW search_path');
+      s.assertEqual(path.rows[0]?.search_path, 'host_app,public', 'search_path on a host connection');
+      const queue = await host.query<{ n: number }>('SELECT count(*)::int AS n FROM queue');
+      s.assertEqual(queue.rows[0]?.n, 7, 'unqualified queue is the host table');
+      const runs = await host.query<{ n: number }>('SELECT count(*)::int AS n FROM runs');
+      s.assertEqual(runs.rows[0]?.n, 1, 'unqualified runs is the host table');
+      const bt = await host.query<{ n: number }>('SELECT count(*)::int AS n FROM better_trigger.queue');
+      s.assertEqual(bt.rows[0]?.n, 3, 'better_trigger.queue keeps its own rows');
+    } finally {
+      await host.end();
+    }
+  });
 }
 
 void runScenario(
   {
     name: 'health-pool',
-    what: 'probe pool: statement_timeout server-side, 57014 cancellation, connection return, single-flight',
+    what: 'probe pool: statement_timeout server-side, 57014 cancellation, connection return, single-flight; gauges read better_trigger under a host-first search_path',
     db: { name: 'better_trigger_health_pool', envVar: 'BT_HEALTH_POOL_DB' },
   },
   main,

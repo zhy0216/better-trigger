@@ -116,7 +116,7 @@ async function main(s: Scenario): Promise<void> {
 
   const readWorkers = async (): Promise<WorkerRow[]> => {
     const res = await s.pool.query<WorkerRow>(
-      `SELECT name, status, code_version, tasks FROM workers
+      `SELECT name, status, code_version, tasks FROM better_trigger.workers
        WHERE name IN ('deploy-v1', 'deploy-v2') ORDER BY name`,
     );
     return res.rows;

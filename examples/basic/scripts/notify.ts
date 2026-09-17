@@ -98,7 +98,7 @@ async function main(s: Scenario): Promise<void> {
       5_000,
       async () => {
         const rec = await s.pool.query<{ status: string }>(
-          `SELECT status FROM runs WHERE id = $1`,
+          `SELECT status FROM better_trigger.runs WHERE id = $1`,
           [handle.id],
         );
         return rec.rows[0]!.status !== 'queued';
@@ -205,7 +205,7 @@ async function main(s: Scenario): Promise<void> {
     const result = await client.waitForResult(handle.id, undefined, { timeoutMs: 10_000 });
     s.assert(result.status === 'completed', `run completed, got '${result.status}'`);
     const run = await s.pool.query<{ attempt: number; status: string }>(
-      `SELECT attempt, status FROM runs WHERE id = $1`,
+      `SELECT attempt, status FROM better_trigger.runs WHERE id = $1`,
       [handle.id],
     );
     s.assert(run.rows[0]!.status === 'completed', 'run row is completed');
@@ -226,7 +226,7 @@ async function main(s: Scenario): Promise<void> {
     );
     await sleep(300); // let any spurious wake/settle land
     const after = await s.pool.query<{ attempt: number; status: string }>(
-      `SELECT attempt, status FROM runs WHERE id = $1`,
+      `SELECT attempt, status FROM better_trigger.runs WHERE id = $1`,
       [handle.id],
     );
     s.assert(

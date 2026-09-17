@@ -122,17 +122,17 @@ async function main(s: Scenario): Promise<void> {
     // legally complete the resume first and the lock grab is purely sequential.
     const runId = `loop-hang-${Date.now()}`;
     await s.pool.query(
-      `INSERT INTO runs (id, project_id, env, task_id, status, trigger_type)
+      `INSERT INTO better_trigger.runs (id, project_id, env, task_id, status, trigger_type)
        VALUES ($1, 'default', 'prod', $2, 'waiting', 'api')`,
       [runId, LOOP_HANG_TASK_ID],
     );
     await s.pool.query(
-      `INSERT INTO queue (run_id, project_id, env, available_at)
+      `INSERT INTO better_trigger.queue (run_id, project_id, env, available_at)
        VALUES ($1, 'default', 'prod', now() + interval '1 hour')`,
       [runId],
     );
     await s.pool.query(
-      `INSERT INTO waits (run_id, project_id, env, step_seq, kind, resume_at, status)
+      `INSERT INTO better_trigger.waits (run_id, project_id, env, step_seq, kind, resume_at, status)
        VALUES ($1, 'default', 'prod', 0, 'duration', now() + interval '1 hour', 'pending')`,
       [runId],
     );
@@ -163,7 +163,7 @@ async function main(s: Scenario): Promise<void> {
 
     await blocker.query('BEGIN');
     await blocker.query(
-      `SELECT run_id FROM queue
+      `SELECT run_id FROM better_trigger.queue
         WHERE run_id = $1 AND project_id = 'default' AND env = 'prod'
         FOR UPDATE`,
       [runId],
@@ -174,7 +174,7 @@ async function main(s: Scenario): Promise<void> {
     // phase-2 position-1 statement blocks on OUR lock (it is the plain blocking
     // FOR UPDATE, not SKIP LOCKED).
     await s.pool.query(
-      `UPDATE waits SET resume_at = now() - interval '1 minute'
+      `UPDATE better_trigger.waits SET resume_at = now() - interval '1 minute'
         WHERE run_id = $1 AND project_id = 'default' AND env = 'prod'`,
       [runId],
     );
@@ -234,7 +234,7 @@ async function main(s: Scenario): Promise<void> {
       20_000,
       async () => {
         const res = await s.pool.query<{ status: string }>(
-          `SELECT status FROM runs WHERE id = $1`,
+          `SELECT status FROM better_trigger.runs WHERE id = $1`,
           [runId],
         );
         const status = res.rows[0]?.status;

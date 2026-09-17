@@ -66,7 +66,7 @@ export async function readRun(pool: Pool, runId: string): Promise<RunRow> {
     finished_at: Date | null;
   }>(
     `SELECT id, task_id, status, output, error, attempt, fencing_token, finished_at
-       FROM runs WHERE id = $1`,
+       FROM better_trigger.runs WHERE id = $1`,
     [runId],
   );
   const row = res.rows[0];
@@ -97,7 +97,7 @@ export async function readSteps(pool: Pool, runId: string): Promise<StepRow[]> {
     finished_at: Date | null;
   }>(
     `SELECT seq, kind, label, status, output, error, attempt, started_at, finished_at
-       FROM run_steps WHERE run_id = $1 ORDER BY seq`,
+       FROM better_trigger.run_steps WHERE run_id = $1 ORDER BY seq`,
     [runId],
   );
   return res.rows.map((r) => ({
@@ -209,7 +209,7 @@ export function createInvariants(pool: Pool): Invariants {
     assert(run.finishedAt !== null, `run ${runId}: a terminal run must have finished_at`);
 
     const queued = await pool.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM queue WHERE run_id = $1`,
+      `SELECT count(*)::int AS n FROM better_trigger.queue WHERE run_id = $1`,
       [runId],
     );
     assert(
@@ -217,7 +217,7 @@ export function createInvariants(pool: Pool): Invariants {
       `run ${runId}: a terminal run must hold no queue row, got ${queued.rows[0].n}`,
     );
     const pending = await pool.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM waits WHERE run_id = $1 AND status = 'pending'`,
+      `SELECT count(*)::int AS n FROM better_trigger.waits WHERE run_id = $1 AND status = 'pending'`,
       [runId],
     );
     assert(

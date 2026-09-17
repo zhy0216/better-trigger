@@ -30,7 +30,7 @@ export async function waitForTasks(
 ): Promise<void> {
   await waitFor(`tasks ${taskIds.join(' + ')} to be registered`, opts.timeoutMs ?? 30_000, async () => {
     const res = await pool.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM tasks WHERE id = ANY($1::text[])`,
+      `SELECT count(*)::int AS n FROM better_trigger.tasks WHERE id = ANY($1::text[])`,
       [taskIds],
     );
     return res.rows[0].n === taskIds.length;
@@ -40,7 +40,7 @@ export async function waitForTasks(
 /** How many queue rows this run holds (0 = no worker owns it right now). */
 export async function countQueueRows(pool: Pool, runId: string): Promise<number> {
   const res = await pool.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM queue WHERE run_id = $1`,
+    `SELECT count(*)::int AS n FROM better_trigger.queue WHERE run_id = $1`,
     [runId],
   );
   return res.rows[0].n;
@@ -49,7 +49,7 @@ export async function countQueueRows(pool: Pool, runId: string): Promise<number>
 /** `tasks.latest_code_version` for a task, or null when it is unregistered. */
 export async function readLatestCodeVersion(pool: Pool, taskId: string): Promise<string | null> {
   const res = await pool.query<{ v: string | null }>(
-    `SELECT latest_code_version AS v FROM tasks WHERE id = $1`,
+    `SELECT latest_code_version AS v FROM better_trigger.tasks WHERE id = $1`,
     [taskId],
   );
   return res.rows[0]?.v ?? null;

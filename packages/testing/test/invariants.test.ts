@@ -19,10 +19,10 @@ interface FakeState {
 function poolFor(state: FakeState): Pool {
   return {
     query: vi.fn(async (sql: string) => {
-      if (sql.includes('FROM run_steps')) return { rows: state.steps };
-      if (sql.includes('FROM runs')) return { rows: state.run ? [state.run] : [] };
-      if (sql.includes('FROM queue')) return { rows: [{ n: state.queueRows }] };
-      if (sql.includes('FROM waits')) return { rows: [{ n: state.pendingWaits }] };
+      if (sql.includes('FROM better_trigger.run_steps')) return { rows: state.steps };
+      if (sql.includes('FROM better_trigger.runs')) return { rows: state.run ? [state.run] : [] };
+      if (sql.includes('FROM better_trigger.queue')) return { rows: [{ n: state.queueRows }] };
+      if (sql.includes('FROM better_trigger.waits')) return { rows: [{ n: state.pendingWaits }] };
       throw new Error(`unexpected SQL: ${sql}`);
     }),
   } as unknown as Pool;
@@ -176,13 +176,13 @@ describe('assertTerminalImmutable', () => {
     let runReads = 0;
     const pool = {
       query: vi.fn(async (sql: string) => {
-        if (sql.includes('FROM runs')) {
+        if (sql.includes('FROM better_trigger.runs')) {
           runReads += 1;
           const status = runReads === 1 ? 'completed' : 'running';
           return { rows: [completedRun({ status, finished_at: runReads === 1 ? at('2026-01-01T00:00:02Z') : null })] };
         }
-        if (sql.includes('FROM run_steps')) return { rows: [] };
-        if (sql.includes('FROM queue') || sql.includes('FROM waits')) return { rows: [{ n: 0 }] };
+        if (sql.includes('FROM better_trigger.run_steps')) return { rows: [] };
+        if (sql.includes('FROM better_trigger.queue') || sql.includes('FROM better_trigger.waits')) return { rows: [{ n: 0 }] };
         throw new Error(`unexpected SQL: ${sql}`);
       }),
     } as unknown as Pool;

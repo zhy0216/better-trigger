@@ -57,19 +57,19 @@ async function main(s: Scenario): Promise<void> {
   async function snapshot(id: string): Promise<StateSnap> {
     const run = (
       await pool.query(
-        `SELECT status, attempt, output, error, fencing_token FROM runs WHERE id = $1`,
+        `SELECT status, attempt, output, error, fencing_token FROM better_trigger.runs WHERE id = $1`,
         [id],
       )
     ).rows[0];
     s.assert(run, `snapshot: run ${id} not found`);
-    const q = (await pool.query(`SELECT locked_by FROM queue WHERE run_id = $1`, [id])).rows[0];
+    const q = (await pool.query(`SELECT locked_by FROM better_trigger.queue WHERE run_id = $1`, [id])).rows[0];
     const steps = (
-      await pool.query(`SELECT seq, status FROM run_steps WHERE run_id = $1 ORDER BY seq`, [id])
+      await pool.query(`SELECT seq, status FROM better_trigger.run_steps WHERE run_id = $1 ORDER BY seq`, [id])
     ).rows;
     const waits = (
-      await pool.query(`SELECT count(*)::int AS n FROM waits WHERE run_id = $1`, [id])
+      await pool.query(`SELECT count(*)::int AS n FROM better_trigger.waits WHERE run_id = $1`, [id])
     ).rows[0];
-    const runs = (await pool.query(`SELECT count(*)::int AS n FROM runs`)).rows[0];
+    const runs = (await pool.query(`SELECT count(*)::int AS n FROM better_trigger.runs`)).rows[0];
     return {
       status: run.status,
       attempt: run.attempt,
@@ -158,7 +158,7 @@ async function main(s: Scenario): Promise<void> {
   // Since C4 the reaper charges the run a *recovery*, not an attempt: A
   // vanishing is infrastructure, and the run resumes on the same attempt.
   const reapedRecoveries = (
-    await pool.query<{ recoveries: number }>(`SELECT recoveries FROM runs WHERE id = $1`, [runId])
+    await pool.query<{ recoveries: number }>(`SELECT recoveries FROM better_trigger.runs WHERE id = $1`, [runId])
   ).rows[0]!.recoveries;
   s.assert(
     reaped.status === 'queued' && reaped.attempt === 1 && reapedRecoveries === 1,
@@ -233,7 +233,7 @@ async function main(s: Scenario): Promise<void> {
     }),
   );
   {
-    const seq99 = await pool.query(`SELECT 1 FROM run_steps WHERE run_id = $1 AND seq = 99`, [
+    const seq99 = await pool.query(`SELECT 1 FROM better_trigger.run_steps WHERE run_id = $1 AND seq = 99`, [
       runId,
     ]);
     s.assert(seq99.rows.length === 0, `seq 99 must have no step row, got ${seq99.rows.length}`);
@@ -311,7 +311,7 @@ async function main(s: Scenario): Promise<void> {
    * statement Postgres rejects — so the statement gets exercised here,
    * against a real database. --------------------------------------------- */
   const countLogs = async (id: string): Promise<number> =>
-    (await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM logs WHERE run_id = $1`, [id]))
+    (await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM better_trigger.logs WHERE run_id = $1`, [id]))
       .rows[0]!.n;
 
   // One shape per cast in the statement: stepSeq absent / present / 0, data
@@ -440,7 +440,7 @@ async function main(s: Scenario): Promise<void> {
   });
   s.assert(!resumed, 'suspend with a future resumeAt must not resume synchronously');
   {
-    const q = await pool.query(`SELECT 1 FROM queue WHERE run_id = $1`, [runId2]);
+    const q = await pool.query(`SELECT 1 FROM better_trigger.queue WHERE run_id = $1`, [runId2]);
     s.assert(q.rows.length === 0, 'suspend should delete the queue row');
   }
   s.ok('run #2 suspended on wait.for (queue row deleted)');

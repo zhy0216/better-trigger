@@ -88,7 +88,7 @@ async function main(s: Scenario): Promise<void> {
   /** runs.recoveries — engine bookkeeping, not part of the public run record. */
   const recoveriesOf = async (runId: string): Promise<number> =>
     (
-      await s.pool.query<{ recoveries: number }>(`SELECT recoveries FROM runs WHERE id = $1`, [
+      await s.pool.query<{ recoveries: number }>(`SELECT recoveries FROM better_trigger.runs WHERE id = $1`, [
         runId,
       ])
     ).rows[0]!.recoveries;
