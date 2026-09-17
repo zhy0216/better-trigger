@@ -172,3 +172,36 @@ bun run verify:git-install
 - **基线重建可能漏掉历史最终行为。** 以当前 `schema.ts`、最新 snapshot、已提交 SQL 和现有真实数据库行为测试共同校对，重点检查索引、外键、CHECK 和序列；不能只依赖离线 drift 检查。
 - **新权限要求需写清楚。** 自动迁移账号需有创建目标 schema 和对象的权限；关闭自动迁移的运行账号需有对应 schema、表和序列的访问权限。schema 主要解决命名冲突，访问权限仍由数据库角色控制。
 - 本方案没有需要用户继续决定的阻塞问题；schema 名称默认采用 `better_trigger`，无需新增运行时参数。
+
+## 执行结果 · 2026-09-17
+
+本轮 5/5 个 todo 已在独立 Herdr worktree 中完成、复核并串行快进合入 `main`。队列 README 声明本队列无独立并行任务（迁移、运行时 SQL 与验收共享同一数据库契约），因此按 `01 → 02 → 03 → 04 → 05` 单项滑动窗口执行，每个任务先 rebase 原分支再合入，任务代码最终提交为 `5e030ad5683da8afa102ef3adeb7cc39b44a427d`。全部 todo 原文及逐项验收记录已归档到 `todos/done/`。
+
+用户 2026-09-17 启动时按难度覆盖了队列保存的单一模型默认值：hard 用 `alibaba-token-plan-cn/qwen3.8-max`（01、02、04），medium 用 `alibaba-token-plan-cn/deepseek-v4.1-flash`（03、05）；agent 类型全部为 OpenCode，均以 `--auto` 启动，没有重启、换 agent 或降档。
+
+| todo / 归档 | 合入 commit | 实际 agent / 模型 | 协调器复核 gate（真实 PG，无 skip） |
+| --- | --- | --- | --- |
+| [01-db-schema-and-baseline.md](todos/done/01-db-schema-and-baseline.md) | `9f75dc74f3c8be3d462084a00411be4b053e9ccc` | opencode / qwen3.8-max | `packages/db test` 83/83、typecheck、`check:drift`、`check:deps`；另以 psql 独立复核 9 表 + journal + 4 序列全在 `better_trigger`、`public` 空、无 `drizzle` schema、重复 migrate no-op |
+| [02-kernel-qualified-sql.md](todos/done/02-kernel-qualified-sql.md) | `1490c8ac9fda196069c7a7bf7ca3d7f7e5346098` | opencode / qwen3.8-max | kernel+testing build、kernel typecheck、`packages/kernel test` 60 文件 / 484 用例（0 skip）、`check:deps` |
+| [03-worker-schema-integration.md](todos/done/03-worker-schema-integration.md) | `74e738b8d0ceb6e92b06d41a75a5bdcb86dad5b5` | opencode / deepseek-v4.1-flash | `bun run build` 7/7（worker 非缓存重建）、worker typecheck、`apps/worker test` 49 文件 / 702 用例、`check:artifacts` 33 dist / 36 packed |
+| [04-shared-database-acceptance.md](todos/done/04-shared-database-acceptance.md) | `c8a07cde2a21456df756920a550127bdae6a893c` | opencode / qwen3.8-max | testing test 104/104（真实 PG）、testing/examples typecheck、`check:drift`、acceptance 8 场景（migration embedded constraints retention health-pool stats notify schema-isolation）全通过，新增 schema-isolation 7 checks |
+| [05-docs-and-delivery-verification.md](todos/done/05-docs-and-delivery-verification.md) | `5e030ad5683da8afa102ef3adeb7cc39b44a427d` | opencode / deepseek-v4.1-flash | `check:drift`、`check:deps`、`check:pkg-meta` 40/40、`check:exports`、lint 9/9、build 7/7、typecheck 14/14、`test -- --force` 13/13（1,933 用例，kernel 484 真实 PG）、`test:acceptance` 20/20 harness、`verify:git-install` exit 0（对已提交 HEAD `5e030ad`，真库完成共库同名表 / 共享 `max:1` 池 / 迁移与执行）、`git diff --check` |
+
+每个任务在集成前由原 agent 亲自 rebase 到当时 `main`（本轮主线仅由本队列推进，五次 rebase 均为 up-to-date、零冲突、无额外 amend 需求；05 的唯一 amend 只追加归档记录，被验证源码提交 `43bf390` 与最终 `5e030ad` 的源码/文档树一致）。复核未通过项为零；没有任务需要恢复操作。
+
+### 结果与验收
+
+- 新安装契约已落地：9 张业务表、索引、序列与 `better_trigger.__drizzle_migrations` 全部属于固定 schema `better_trigger`；`public` 与本项目无关，宿主 `drizzle.__drizzle_migrations` 不被读取或改写（宿主 journal 含更晚时间戳的哨兵记录也不会跳过本项目基线）。
+- 迁移账号 DDL 权限、`--no-migrate` / `migrate: false`、无存量数据的新安装边界、不可配置 schema、schema 不带来权限/资源隔离均已写入 README、worker README、backend-contract、architecture 与中英文 embedded 文档，并与 `packages/db/src/constants.ts`、`migrate.ts` 实现一致。
+- Git 源码安装与发布产物都读取同一份新迁移；`verify:git-install` 在真实数据库上完成共库与共享池验证。
+- 无 blocked、deferred 或未完成队列项。
+
+### 保留的既有问题（本轮未改）
+
+- `BT_STATS_ROWS` 缩小规模（如 200000）时 `bench:stats` 的若干计划断言失败（规划器改选位图扫描），属规模相关期望问题，默认规模通过。
+- tsdown 构建的 TS2688 'node' 噪音为既有问题，构建 exit 0。
+- `bun run test -- --force` 下 packages/sdk 的自身重建 clean 窗口偶发竞态（本轮仅 05 记录到一次，随后 canonical `bun run test` 与协调器的 `--force` 全量重跑均全绿，未复现），与本次改动无关。
+
+### 归档、范围与清理
+
+本轮 5 个 Herdr agent 均正常退出，对应 workspace、worktree 和任务分支已删除；协调器自建临时 PostgreSQL 实例已停止并清理。没有 push、创建 PR 或修改远端。仓库中仍存在的 `scheduled/database-schema-isolation-20260917*` worktree 与分支来自上一轮无关执行，来源不明，本轮未触碰、未清理。原 checkout 保持 `main`，本节及队列 README 状态以单独的收尾文档 commit 提交，提交后 `git status --short` 为空。

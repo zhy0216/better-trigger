@@ -9,14 +9,16 @@ default_model: alibaba-token-plan-cn/deepseek-v4.1-flash
 
 来源：用户本次明确指定 OpenCode、Alibaba Token Plan 的 DeepSeek Flash v4.1，覆盖 plan 中来自宿主的 Codex 默认值。已通过本机 OpenCode 1.18.31 的模型列表核对完整 ID。所有任务 `agent: inherit`；没有单任务覆盖，也没有 Codex 推理强度设置。模型覆盖适用于所有难度，不再按难度切换模型。
 
+执行时用户改按难度分派模型：hard 任务用 `alibaba-token-plan-cn/qwen3.8-max`（01、02、04），medium 任务用 `alibaba-token-plan-cn/deepseek-v4.1-flash`（03、05）。上表“模型”列已改为各任务实际启动结果，选择来源为用户 2026-09-17 的启动指令，agent 类型仍为 OpenCode。
+
 计划开始时间：**2026-09-17 22:00:00 Asia/Shanghai（北京时间）**，即 `2026-09-17 14:00:00 UTC`。提前只准备和提交方案/队列，到点才启动开发。执行命令必须显式包含 `--auto --model alibaba-token-plan-cn/deepseek-v4.1-flash`；不能静默改 provider 或模型。
 
 ## 优先级
 
 | 文件 | 优先级 | 难度 | agent / 来源 | 模型 / Codex 推理强度 | 一句话说明 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| [done/01-db-schema-and-baseline.md](done/01-db-schema-and-baseline.md) | P1 | hard | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | 专属 schema、独立 journal 与新迁移基线 | Done |
-| [done/02-kernel-qualified-sql.md](done/02-kernel-qualified-sql.md) | P1 | hard | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | kernel 表引用和相关回归测试 | Done |
+| [done/01-db-schema-and-baseline.md](done/01-db-schema-and-baseline.md) | P1 | hard | opencode / 继承用户默认 | alibaba-token-plan-cn/qwen3.8-max / 不适用 | 专属 schema、独立 journal 与新迁移基线 | Done |
+| [done/02-kernel-qualified-sql.md](done/02-kernel-qualified-sql.md) | P1 | hard | opencode / 继承用户默认 | alibaba-token-plan-cn/qwen3.8-max / 不适用 | kernel 表引用和相关回归测试 | Done |
 | [done/03-worker-schema-integration.md](done/03-worker-schema-integration.md) | P1 | medium | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | dashboard、metrics、waiters 与 embedded 查询 | Done |
 | [done/04-shared-database-acceptance.md](done/04-shared-database-acceptance.md) | P1 | hard | opencode / 继承用户默认 | alibaba-token-plan-cn/qwen3.8-max / 不适用 | harness 适配与真实共库、迁移、连接池验收 | Done |
 | [done/05-docs-and-delivery-verification.md](done/05-docs-and-delivery-verification.md) | P1 | medium | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | 文档、发布产物、Git 安装及最终校验 | Done |
