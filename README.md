@@ -126,13 +126,41 @@ await runtime.stop();
 The runtime applies migrations by default, owns its pool when given a
 `databaseUrl`, starts claim/heartbeat/timer/cron/reaper loops, and drains plus
 releases claims on `stop()`. Pass an existing `pool` to share the application's
-pool; injected pools are not closed unless `closePoolOnStop: true` is set.
+pool; injected pools are not closed unless `closePoolOnStop: true` is set. The
+runtime never sets `search_path` on the pool it uses, so the host's unqualified
+queries keep resolving exactly as before.
 
 Pass `databaseUrl` or `pool` explicitly. Embedded mode does not read the host's
 environment implicitly; `env` optionally accepts validated daemon-style
 configuration (for example `{ NODE_ENV: "production" }`). A `namespaces` option
 controls which work the worker serves; triggers still use `default/prod` unless
 their options include the matching `{ projectId, env }` pair.
+
+### Sharing a Postgres database
+
+better-trigger creates and touches only the fixed PostgreSQL schema
+`better_trigger`. The schema name is independent of the database name, so
+`DATABASE_URL` can point at your application's database. The nine business
+tables, their indexes and sequences, and this project's own migration journal
+(`better_trigger.__drizzle_migrations`) all live there. The host's `public`
+tables and its own Drizzle journal (`drizzle.__drizzle_migrations`) are never
+read or written, even when the same table names exist.
+
+The runtime does not set `search_path`: every better-trigger query names
+`better_trigger.<table>`, so the host's unqualified queries keep resolving
+through its own `search_path` — including on a pool shared with embedded mode.
+
+Migrations run automatically at startup and need a role that may `CREATE
+SCHEMA` and create tables/indexes/sequences in it. To migrate with one role and
+run with a less privileged one, apply migrations first and start with
+`--no-migrate` (daemon) or `migrate: false` (embedded); the running role then
+needs `USAGE` on `better_trigger` plus privileges on its tables and sequences.
+
+This is a **fresh-install contract**: a database installed by a pre-schema
+version (tables in `public`, default journal) is not upgraded in place. The
+schema name is deliberately fixed — no runtime option changes it — and the
+schema separates names, not permissions or resources: access is still governed
+by the database roles you grant.
 
 ### Pinned Git source dependency (Bun)
 
@@ -169,10 +197,12 @@ try {
 Run `bun install --ignore-scripts`; no sibling checkout, workspace link,
 consumer `tsconfig.paths`, or generated `dist` is required. Both entries use
 the same SDK registry. SQL migrations resolve relative to the installed source
-and use `public` tables (`tasks`, `runs`, `queue`, etc.) plus the
-`drizzle.__drizzle_migrations` journal. An application can share its pool when
-those names and the migration journal are unused; this entry does not isolate
-the database schema or expose the worker HTTP app automatically.
+and install into the same fixed `better_trigger` schema as every other entry,
+with their own `better_trigger.__drizzle_migrations` journal — so the Git
+dependency can share a database with the application and leaves the host's
+`public` objects and `drizzle.__drizzle_migrations` untouched. The first
+install needs a database role allowed to run that DDL (or migrations applied
+separately); this entry does not expose the worker HTTP app automatically.
 
 `bun run verify:git-install` tests a fresh install of committed HEAD with
 lifecycle scripts disabled and a strict Bun/TypeScript consumer. Pass
@@ -383,11 +413,11 @@ bun run check:exports  # publint + attw on the published core/sdk/worker artifac
 ```
 
 `test:acceptance` runs every harness in `examples/basic/scripts/acceptance.ts`
-(e2e, embedded, fencing, replay-drift, code-version-pinning, rolling-deploy,
-migration, concurrency, crash, worker-lost, graceful-restart, retention, stats,
-run-detail, notify, batch-perf, constraints, health-pool, loop-hang). Each
-provisions its own database and starts the hosts it needs; the embedded scenario
-uses no daemon or TCP port. Pass names to run a subset:
+(e2e, embedded, schema-isolation, fencing, replay-drift, code-version-pinning,
+rolling-deploy, migration, concurrency, crash, worker-lost, graceful-restart,
+retention, stats, run-detail, notify, batch-perf, constraints, health-pool,
+loop-hang). Each provisions its own database and starts the hosts it needs; the
+embedded scenario uses no daemon or TCP port. Pass names to run a subset:
 `bun scripts/acceptance.ts embedded fencing crash`.
 Everything above runs on every PR — see
 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).

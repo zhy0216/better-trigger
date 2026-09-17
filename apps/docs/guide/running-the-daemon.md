@@ -30,6 +30,19 @@ Run any number of daemons against one database — every claim and scan uses
 multi-node deployment is one API/dashboard node plus several `--no-serve`
 executor nodes.
 
+## Database schema and migrations
+
+All better-trigger objects live in the fixed `better_trigger` schema — the
+business tables, their indexes and sequences, and the project's own
+`better_trigger.__drizzle_migrations` journal — and the pool never sets
+`search_path`. `DATABASE_URL` can therefore point at a database your
+application already uses, with same-name `public` tables and its own
+`drizzle.__drizzle_migrations`; neither is read or written. Boot migrations
+need a role allowed to `CREATE SCHEMA better_trigger` and create objects in it;
+apply them separately with that role and start with `--no-migrate` to run
+behind a less privileged role. See
+[Database](/architecture/database#schema-and-migrations).
+
 ## Task loading
 
 Every export of a `--tasks` module that looks like a `task()` handle is

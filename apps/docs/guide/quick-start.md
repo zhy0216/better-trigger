@@ -28,6 +28,11 @@ bun install && bun run build
 createdb better_trigger      # or: docker compose up -d postgres
 ```
 
+`better_trigger` here is just a convenient database name: all better-trigger
+objects live in the fixed `better_trigger` **schema**, so `DATABASE_URL` can
+point at any database — including one your application already uses. See
+[Database · Schema and migrations](/architecture/database#schema-and-migrations).
+
 ```ts
 // tasks.ts — imported by the daemon, and by your app for type-safe triggers
 import { task } from "better-trigger";

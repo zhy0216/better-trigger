@@ -64,11 +64,21 @@ CORS(`hono/cors`):默认只放行 dashboard 自己的来源 —— http/https + 
 
 ## 2. 数据库 schema(Drizzle,Postgres)
 
+所有 better-trigger 对象位于固定 PostgreSQL schema `better_trigger`,与数据库名无关:
+9 张业务表、它们的索引与序列,以及本项目的迁移记录 `better_trigger.__drizzle_migrations`。
+宿主可以在同一数据库的 `public` (或自己的 schema)保留同名表和自己的
+`drizzle.__drizzle_migrations`——better-trigger 既不读取也不改写它们。连接池不设置
+`search_path`:运行时 SQL 显式限定 `better_trigger.<table>`,宿主未限定表名的查询仍按
+自身 `search_path` 解析,共享池时亦然。自动迁移需要可创建 schema 和对象的 DDL 权限;
+`--no-migrate`(daemon)或 `migrate: false`(embedded)关闭自动迁移后,运行角色只需目标
+schema、表和序列的访问权限。本契约面向无存量数据的新安装:不承诺旧 `public` 部署原地
+升级,固定 schema 名不可配置,且 schema 只是命名边界——权限仍由数据库角色决定。
+
 单租户:所有业务表带 `project_id text NOT NULL DEFAULT 'default'` 与 `env text NOT NULL DEFAULT 'prod'`。
 除 tasks/schedules/run_retry_operations 三张表的复合主键与下文逐一列出的索引外,下表
 的列清单里省略这两列,但**几乎所有索引都以 (project_id, env) 打头**(C2 命名空间隔离;
 唯一例外是 `*_fk_idx` 一族 FK 支撑索引,见各表说明)。迁移用 drizzle-kit 生成 SQL 并提交,
-host 启动时自动 `migrate()`。
+host 启动时自动 `migrate()`,journal 是本项目专属的 `better_trigger.__drizzle_migrations`。
 
 ```
 tasks        复合 PK (project_id, env, id)(同一 task id 在每个命名空间独立存在,C2)
@@ -202,18 +212,14 @@ run_retry_operations  手动重试的请求级幂等记录(§3.7):
              前缀的 FK 支撑索引(两端级联都只按 run id 查找)
 ```
 
-以上 FK / CHECK 来自迁移 0011(状态/种类/级别的闭集 CHECK 与 FK,C5)、0015
-(run_retry_operations)与 0016(0011 漏掉的 trigger_type / trigger_source 两个闭集
-CHECK、`*_fk_idx` 一族 FK 支撑索引、workers 在线部分索引)。0011 先扫描并清理
-orphan(不存在的 run/task 的 queue / waits 行直接删除,孤儿 `parent_run_id` 与
-`waits.child_run_id` 置 NULL —— 与 FK 自身的 ON DELETE 行为一致),再加约束,所以带脏数据
-的旧库也能自动迁移;之后**手工 DELETE 或非法状态写不进去**。注意两个 ON DELETE SET NULL
+以上 FK / CHECK 全部由初始基线迁移 `0000_initial_schema.sql` 一次建成,建表即带约束,
+没有「先建表再加约束」的历史阶段,也不做旧 `public` 部署的原地升级。所以**手工 DELETE 或
+非法状态写不进去**。注意两个 ON DELETE SET NULL
 的语义:`runs.parent_run_id` 被置 NULL 的子 run 照常执行(只丢血缘指针);
 `waits.child_run_id` 被置 NULL 的父 run 会被编排器的 wait 扫描以 `ChildLostError`
 判失败(子 run 被删,结果永远不会来;不判失败父 run 会永远 'waiting' 卡死)。
-CHECK 约束假定存量 status/kind/level/trigger 值已在合法集合内(引擎写出的值必然如此):若
-库里有手工写入的非法值,对应迁移的 `ADD CONSTRAINT CHECK` 会失败并停掉所有 daemon 的
-启动,此时需先手工修复该行(具体 UPDATE 语句见各迁移头部注释),迁移不会替你猜。
+目标 schema 内已存在不兼容的同名对象时,首次安装会以具体错误失败(基线不会用
+`IF NOT EXISTS` 掩盖形状冲突),需要人工处理,不会静默跳过。
 priority 没有 CHECK:应用层显式允许 int32 范围内任意值(负优先级合法,见 §3.5),与列类型一致即可。
 
 ### 2.1 数据保留(默认不删任何东西)
@@ -228,10 +234,9 @@ priority 没有 CHECK:应用层显式允许 int32 范围内任意值(负优先�
 - `--retention 30d` —— 打开 daemon 里的低频 GC 循环(默认 1h 一次,`--gc-interval-ms` 可调),
   逻辑与 `prune` 完全同一份实现。**不给这个参数就没有这个循环**:默认行为不能是悄悄删用户数据。
 
-`logs.run_id` / `run_steps.run_id` 上的 `ON DELETE CASCADE`(迁移 0007)是这件事的支点 ——
-删 run 就是删它的日志和步骤账本,不需要第二份「删干净」的 SQL。迁移 0011(C5)把同一
-支点扩展到了 `waits`(run 删 → 它的 wait 删;被等待的子 run 删 → 父的 wait 删)和
-`queue`(run 删 → 排队行删),所以**任何**删除路径(prune、CLI、手工 psql)都留不下
+`logs.run_id` / `run_steps.run_id` / `waits.run_id` / `queue.run_id` 上的 `ON DELETE CASCADE`
+(初始基线)是这件事的支点 —— 删 run 就是删它的日志、步骤账本、wait 与排队行,不需要第二份
+「删干净」的 SQL,所以**任何**删除路径(prune、CLI、手工 psql)都留不下
 orphan。prune 仍会在删 runs 之前手删一遍 queue 行 —— 这不是历史包袱,而是锁序:
 queue 是规范锁序的 1 号位(见 §3.2),先拿它再拿 runs,才能避免级联从 runs 锁背后去
 够 queue 行时与 reaper 互相等待。窗口有下限(60s):

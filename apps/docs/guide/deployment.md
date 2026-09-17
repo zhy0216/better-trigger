@@ -51,6 +51,13 @@ reason. Payloads and `Authorization` headers are never recorded. The
   the audit log records the TCP peer only.
 - Keep Postgres reachable only by the daemon. The SDK never opens a database
   connection, so "app may not touch the DB" is a network rule, not a code rule.
+- better-trigger owns only the fixed `better_trigger` schema in whatever
+  database `DATABASE_URL` names — its own `better_trigger.__drizzle_migrations`
+  journal included — so sharing a database with the application is safe, but
+  grant the migration role the DDL rights to create that schema and its objects
+  and give the runtime role `USAGE` plus table/sequence privileges. The schema
+  separates names, not permissions. See
+  [Database](/architecture/database#schema-and-migrations).
 
 ## Limits
 

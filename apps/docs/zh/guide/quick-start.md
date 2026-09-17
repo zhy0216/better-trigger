@@ -23,6 +23,8 @@ bun install && bun run build
 createdb better_trigger      # 或：docker compose up -d postgres
 ```
 
+这里的 `better_trigger` 只是方便的数据库名：better-trigger 的所有对象都在固定的 `better_trigger` **schema** 内，所以 `DATABASE_URL` 可以指向任意数据库——包括你的应用已经在用的那个。见[数据库 · Schema 与迁移](/zh/architecture/database#schema-与迁移)。
+
 ```ts
 // tasks.ts —— daemon 和你的 app 都会 import 它
 import { task } from "better-trigger";

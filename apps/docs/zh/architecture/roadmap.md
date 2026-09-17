@@ -19,7 +19,7 @@
 - 代码版本盖章 + `--pin-code-version`（滞留 run 检测）
 - 通知快路径（`pg_notify` 在 `bt` 频道上）
 - 保留 / prune · 健康检查 + Prometheus 指标 · 内置 dashboard
-- 一整套验收套件（e2e、fencing、replay-drift、crash、worker-lost、rolling-deploy、migration、notify……）在每次 PR 上运行
+- 一整套验收套件（e2e、embedded、schema-isolation、fencing、replay-drift、crash、worker-lost、rolling-deploy、migration、notify……）在每次 PR 上运行
 
 ## 阶段
 

@@ -36,6 +36,13 @@ including supplied intervals for disabled loops. The existing boolean loop
 switches, GC off without retention and stranded scan off without pinning are
 unchanged; a zero interval does not disable a loop.
 
+`--no-migrate` skips boot migrations. With migrations applied beforehand by a
+role that can `CREATE SCHEMA better_trigger` and create objects in it, it lets
+the daemon run behind a less privileged role that only needs `USAGE` on the
+fixed `better_trigger` schema plus its table and sequence privileges — see
+[Database](/architecture/database#schema-and-migrations). Embedded hosts use
+`migrate: false` for the same thing.
+
 `--lease-ms` and runtime/embedded `leaseMs` accept **1500..6442450943 ms**
 (integer, default 60000). The heartbeat is `max(500, floor(leaseMs / 3))`, so
 the lease can exceed a single timer's 24.8-day range while fitting both its

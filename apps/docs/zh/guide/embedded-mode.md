@@ -37,6 +37,8 @@ await runtime.stop();
 
 传一个已有的 `pool` 来共享应用的连接池；注入的 pool 默认不会被关闭，除非设置 `closePoolOnStop: true`。给了 `databaseUrl` 时，runtime 自管连接池。每个进程只允许一个 embedded runtime，因为任务上下文与 run 内结果解析依赖进程级 SDK registry。
 
+runtime 不设置 `search_path` 或其他 session 状态，宿主未限定表名的查询保持原样解析。better-trigger 的所有对象都在固定 `better_trigger` schema 内，并使用专属 journal `better_trigger.__drizzle_migrations`；宿主的 `public` 同名表与 `drizzle.__drizzle_migrations` 永远不会被读取或改写。启动迁移需要具备相应 DDL 权限的角色——传 `migrate: false` 可关闭自动迁移并单独执行迁移；届时运行角色只需 schema 的 `USAGE` 以及表和序列的相应权限。
+
 ## 嵌入式模式**没有**改变什么
 
 嵌入式模式去掉的是额外的 OS 进程，**不是**对在线 worker 的需求：

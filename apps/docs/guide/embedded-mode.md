@@ -45,6 +45,15 @@ pools are not closed unless `closePoolOnStop: true` is set. With a
 per process, because task context and in-run result resolution use the
 process-wide SDK registry.
 
+The runtime never sets `search_path` or other session state, so the host's
+unqualified queries keep resolving exactly as before. All better-trigger
+objects live in the fixed `better_trigger` schema with their own
+`better_trigger.__drizzle_migrations` journal; the host's `public` tables and
+its `drizzle.__drizzle_migrations` are never read or written, even with
+same-name tables. Boot migrations need a role allowed to run that DDL — pass
+`migrate: false` to disable them and apply migrations separately; the runtime
+role then needs `USAGE` on the schema plus its table and sequence privileges.
+
 ## What embedded mode does *not* change
 
 Embedded mode removes the extra OS process, **not** the need for an online

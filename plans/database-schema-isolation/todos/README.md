@@ -1,6 +1,6 @@
 # 执行队列 · database-schema-isolation
 
-方案：[../plan.md](../plan.md)。用户已确认没有需要保留的旧数据，按固定 `better_trigger` schema 全新建表。01、02、03、04 已完成（见 [done/](done/) 内执行记录），其余 1 个任务待执行。
+方案：[../plan.md](../plan.md)。用户已确认没有需要保留的旧数据，按固定 `better_trigger` schema 全新建表。01–05 全部完成（见 [done/](done/) 内执行记录）。
 
 ## 执行偏好
 
@@ -19,7 +19,7 @@ default_model: alibaba-token-plan-cn/deepseek-v4.1-flash
 | [done/02-kernel-qualified-sql.md](done/02-kernel-qualified-sql.md) | P1 | hard | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | kernel 表引用和相关回归测试 | Done |
 | [done/03-worker-schema-integration.md](done/03-worker-schema-integration.md) | P1 | medium | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | dashboard、metrics、waiters 与 embedded 查询 | Done |
 | [done/04-shared-database-acceptance.md](done/04-shared-database-acceptance.md) | P1 | hard | opencode / 继承用户默认 | alibaba-token-plan-cn/qwen3.8-max / 不适用 | harness 适配与真实共库、迁移、连接池验收 | Done |
-| [05-docs-and-delivery-verification.md](05-docs-and-delivery-verification.md) | P1 | medium | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | 文档、发布产物、Git 安装及最终校验 | 待执行 |
+| [done/05-docs-and-delivery-verification.md](done/05-docs-and-delivery-verification.md) | P1 | medium | opencode / 继承用户默认 | alibaba-token-plan-cn/deepseek-v4.1-flash / 不适用 | 文档、发布产物、Git 安装及最终校验 | Done |
 
 ## 文件
 
@@ -27,7 +27,7 @@ default_model: alibaba-token-plan-cn/deepseek-v4.1-flash
 2. [done/02-kernel-qualified-sql.md](done/02-kernel-qualified-sql.md) — 依赖 01-db-schema-and-baseline。已完成。
 3. [done/03-worker-schema-integration.md](done/03-worker-schema-integration.md) — 依赖 01-db-schema-and-baseline、02-kernel-qualified-sql。已完成。
 4. [done/04-shared-database-acceptance.md](done/04-shared-database-acceptance.md) — 依赖 01-db-schema-and-baseline、02-kernel-qualified-sql、03-worker-schema-integration。已完成。
-5. [05-docs-and-delivery-verification.md](05-docs-and-delivery-verification.md) — 依赖 01–04 全部完成。
+5. [done/05-docs-and-delivery-verification.md](done/05-docs-and-delivery-verification.md) — 依赖 01–04 全部完成。已完成。
 
 执行顺序：`01 → 02 → 03 → 04 → 05`。本队列没有独立并行任务；迁移、运行时 SQL 与验收必须按同一数据库契约逐步集成。
 

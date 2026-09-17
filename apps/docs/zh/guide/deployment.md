@@ -30,6 +30,7 @@ BETTER_TRIGGER_API_KEYS=sk-new-bbbbbbbb better-trigger-worker --host 0.0.0.0
 - 在 daemon 前面用反向代理（nginx、Caddy、Traefik、ALB）终结 TLS——daemon 只说明文 HTTP。
 - 永远不要用 `X-Forwarded-For` 做执行或审计依据（可伪造）；审计日志只记录 TCP 对端。
 - 让 Postgres 只有 daemon 能访问。SDK 从不打开数据库连接，所以“app 不许碰库”是网络规则，不是代码规则。
+- better-trigger 只占用 `DATABASE_URL` 所指数据库里的固定 `better_trigger` schema（含专属 journal `better_trigger.__drizzle_migrations`），因此与业务共库是安全的；但要给迁移角色创建该 schema 及其对象的 DDL 权限，并给运行角色 schema 的 `USAGE` 以及表和序列权限。schema 区分的是命名，不是权限。见[数据库](/zh/architecture/database#schema-与迁移)。
 
 ## 限制
 

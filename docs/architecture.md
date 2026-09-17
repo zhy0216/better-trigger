@@ -17,7 +17,7 @@
 1. **应用侧默认零负担**:`better-trigger` 只做两件事——`task()` 定义、`betterTrigger({url})` 触发。零运行时依赖,不打开数据库连接,可以安心 import 进 web server / CLI。需要单进程部署时,应用显式安装 `@better-trigger/worker` 并选择 embedded host,重依赖不会进入基础 SDK。
 2. **API 维持 trigger.dev/Inngest 风格**:`task()` + inline `ctx.step()` + 直线 async(2026-06-05 用户选定)。不采用 Temporal 的 `defineWorkflow` / `proxyActivities` 表面。
 3. **执行模型维持 step 记忆重放**(位置 seq + memoized 结果 + SuspendSignal),不重写为 event-history/command-matching;用 step fingerprint 硬化漂移检测。
-4. **v1 绑定 PostgreSQL、不绑定用户 ORM**:runtime 自管 `better_trigger` system schema(drizzle 迁移,host 启动时 auto-migrate,daemon 用 `--no-migrate`、embedded 用 `migrate:false` 可关)。措辞:*PostgreSQL-backed and ORM-agnostic*,不说「数据库无关」。
+4. **v1 绑定 PostgreSQL、不绑定用户 ORM**:runtime 自管固定 `better_trigger` schema(9 张业务表、索引/序列与专属迁移 journal `better_trigger.__drizzle_migrations`;drizzle 迁移,host 启动时 auto-migrate,daemon 用 `--no-migrate`、embedded 用 `migrate:false` 可关)。措辞:*PostgreSQL-backed and ORM-agnostic*,不说「数据库无关」。
 5. **Dashboard 由 daemon 直接托管**,不是独立组件;agent 原语(P5)建立在 signal/event 内核(P3)之上。
 
 ## 形态速写
@@ -116,6 +116,8 @@ better-trigger-worker(daemon)
 | 唤醒延迟 | trigger → claim 与 result 等待两条路径已由 **LISTEN/NOTIFY 快速路径**覆盖(`work` 通知唤醒空闲 claim 退避,`terminal` 通知立即结算等待者;轮询保留为兜底)。**wait 到期与 cron 唤醒仍是纯轮询**(50 次/秒的全局/线性上限,且没有推送源可去掉);数字与出处见分阶段计划 P2 下的「轮询代价」 |
 
 ## Schema
+
+所有对象(9 张业务表、索引、序列与 `better_trigger.__drizzle_migrations`)都归属固定 schema `better_trigger`,与数据库名无关;宿主同名 `public` 表和自己的 `drizzle.__drizzle_migrations` 不受影响。连接池不设置 `search_path`,运行时 SQL 显式限定 `better_trigger.<table>`,宿主未限定表名的查询仍走宿主解析。schema 名不可配置,也不承担权限隔离;本次是无存量数据的新安装契约,不做旧 `public` 部署原地升级。
 
 - `runs`:`fencing_token bigint`(**每 run 单调递增计数器**,claim 时 +1,一切写回校验;放在 runs 行而非 queue 行,使 queue 行被删除/重建(重试、resume)也不会重置 token)
 - `runs`:`recoveries int` / `max_recoveries int`(reaper 接管计数,与 `attempt`/`max_attempts` 分开;创建时按 `BETTER_TRIGGER_MAX_RECOVERIES` 盖章,默认 10)
@@ -222,7 +224,7 @@ planner fan-out 3 个 researcher → `gather` 汇总 → `requestApproval` 人�
 | embedded 与业务共享事件循环/内存/连接预算 | embedded 是显式 opt-in;共享 pool 时由宿主定容量,需要故障隔离或独立扩缩容时使用 daemon |
 | embedded 被误解为“无需在线 worker” | 文档明确:它只去掉独立 OS 进程;宿主停止时状态仍 durable,但 task/timer/cron 不执行 |
 | 「没有 runtime host 在线仍会调度」的误解 | README/文档使用承诺表原文;dashboard 显示「无在线 worker」警示 |
-| daemon 与业务共库干扰 | 独立 `better_trigger` schema;建议独立数据库 |
+| daemon 与业务共库干扰 | 固定 `better_trigger` schema(名与数据库名无关,不读不改宿主的 `public` 表与 `drizzle.__drizzle_migrations`);建议独立数据库;schema 只解决命名冲突,访问权限仍由数据库角色控制 |
 | step 非幂等 + at-least-once → 副作用重复 | 幂等键由调用方在 trigger `options.idempotencyKey` 提供;文档强调;LLM 步骤给出幂等实践 |
 | 确定性被违反 | fingerprint 硬检测 + eslint-plugin + `ctx.now/random/uuid`;VM sandbox 明确为远期(本地跑可信代码) |
 | run_steps 无限增长(agent 长循环) | `continueAsNew` + 长度警告;不做 snapshot(与代码版本兼容复杂) |

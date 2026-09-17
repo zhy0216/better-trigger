@@ -5,6 +5,28 @@ waits, logs, schedules and the worker registry. The schema is defined in
 `packages/db` with Drizzle and applied as generated SQL migrations — daemons
 auto-migrate at boot (`--no-migrate` to disable).
 
+## Schema and migrations
+
+Every object better-trigger creates lives in the fixed PostgreSQL schema
+`better_trigger`: the nine business tables, their indexes and sequences, and
+the project's own migration journal `better_trigger.__drizzle_migrations`. The
+schema name is independent of the database name, so `DATABASE_URL` can point at
+a database shared with your application — same-name `public` tables and the
+host's `drizzle.__drizzle_migrations` are never read or written.
+
+The pool sets no `search_path`: runtime SQL qualifies `better_trigger.<table>`,
+so the host's unqualified queries keep resolving through its own `search_path`
+even on a shared pool. Boot migrations need a role that may `CREATE SCHEMA
+better_trigger` and create the tables/indexes/sequences; apply migrations with
+that role and run with `--no-migrate` (or embedded `migrate: false`) to use a
+less privileged runtime role, which then needs `USAGE` on the schema plus its
+table and sequence privileges.
+
+This is a fresh-install contract: installs from pre-schema versions (tables in
+`public`) are not upgraded in place, the schema name is not configurable, and
+the schema is a namespace boundary — permissions still come from database
+roles.
+
 ## Tables
 
 ```mermaid
@@ -124,9 +146,9 @@ SELECT q.id AS queue_id, q.run_id,
        r.task_id, r.payload, r.attempt, r.max_attempts,
        r.code_version, r.env, r.concurrency_key,
        t.concurrency_limit
-  FROM queue q
-  JOIN runs r ON r.id = q.run_id
-  LEFT JOIN tasks t ON t.id = r.task_id
+  FROM better_trigger.queue q
+  JOIN better_trigger.runs r ON r.id = q.run_id
+  LEFT JOIN better_trigger.tasks t ON t.id = r.task_id
  WHERE q.available_at <= now() AND q.locked_by IS NULL
    AND r.task_id = ANY($1::text[])   -- the tasks THIS worker registered
  ORDER BY q.priority DESC, q.id ASC

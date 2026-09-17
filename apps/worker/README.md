@@ -41,10 +41,10 @@ daemon in a container with `--tasks /app/examples/basic/src/tasks.ts`, published
 on `127.0.0.1:4848`.
 
 On boot it imports the `--tasks` modules, applies pending migrations from
-`@better-trigger/db` (drizzle-kit-generated SQL, tracked in the
-`drizzle.__drizzle_migrations` journal), registers itself and its tasks, starts
-the claim + orchestrator loops, then listens on `PORT` (default `4848`) at
-`--host` (default `127.0.0.1` — reachable from this machine only).
+`@better-trigger/db` (drizzle-kit-generated SQL, tracked in this project's own
+`better_trigger.__drizzle_migrations` journal), registers itself and its tasks,
+starts the claim + orchestrator loops, then listens on `PORT` (default `4848`)
+at `--host` (default `127.0.0.1` — reachable from this machine only).
 `SIGINT` / `SIGTERM` shut it down gracefully: stop claiming → drain in-flight
 runs → stop the loops → close the server → drain the pool.
 
@@ -80,8 +80,37 @@ resolution use the process-wide SDK registry.
 
 An injected `pool` remains application-owned by default. Supply `databaseUrl`
 alongside an injected pool to enable the dedicated LISTEN connection, or omit
-it to use the polling fallback. This mode requires a long-lived Node/Bun host:
-Postgres persists queued state while the host is down, but cannot execute it.
+it to use the polling fallback. The runtime never sets `search_path` (nor any
+other session state) on an injected pool. This mode requires a long-lived
+Node/Bun host: Postgres persists queued state while the host is down, but
+cannot execute it.
+
+### Database schema and migrations
+
+Every object better-trigger creates lives in the fixed PostgreSQL schema
+`better_trigger`: the nine business tables (`tasks`, `runs`,
+`run_retry_operations`, `run_steps`, `queue`, `waits`, `logs`, `schedules`,
+`workers`), their indexes and sequences, and the migration journal
+`better_trigger.__drizzle_migrations`. The schema name is independent of the
+database name, so `DATABASE_URL` can point at an application's database that
+already has same-name `public` tables and its own
+`drizzle.__drizzle_migrations`; neither is read or written by better-trigger.
+
+The pool never sets `search_path`: runtime SQL names `better_trigger.<table>`,
+so host queries with unqualified names keep resolving through the host's own
+`search_path`, even on a shared pool. Embedded hosts use `migrate: false` to
+skip boot migrations.
+
+Migrations run at boot and need a role allowed to `CREATE SCHEMA
+better_trigger` and create the tables, indexes and sequences in it. To migrate
+with one role and run with a less privileged one, apply migrations first (for
+example with a migration job) and start the daemon with `--no-migrate`; the
+running role then needs `USAGE` on the schema plus privileges on its tables and
+sequences.
+
+This is a fresh-install contract: pre-schema installs (tables in `public`) are
+not migrated in place, the schema name is not configurable, and the schema is a
+namespace boundary — permissions still come from the database roles you grant.
 
 ### Node shapes
 

@@ -31,6 +31,8 @@ daemon 二进制是 `better-trigger-worker`。每个 flag 都有对应的环境�
 显式传入的 interval 也会校验。布尔循环开关、未设置 retention 时关闭 GC、
 未启用 pinning 时关闭 stranded scan 的语义保留；interval 为 0 不表示关闭循环。
 
+`--no-migrate` 跳过启动迁移。先用可 `CREATE SCHEMA better_trigger` 并在其中建对象的角色执行迁移，再以 `--no-migrate` 启动，就能让 daemon 运行在只需固定 `better_trigger` schema 的 `USAGE` 及表和序列权限的更低权限角色上——见[数据库](/zh/architecture/database#schema-与迁移)。embedded 用 `migrate: false` 达到同样效果。
+
 `--lease-ms` 和 runtime/embedded 的 `leaseMs` 接受 **1500..6442450943 ms 的整数**，
 默认 60000。心跳间隔为 `max(500, floor(leaseMs / 3))`，因此 lease 可超过单次
 timer 约 24.8 天的范围，同时满足派生心跳 timer 和日期/数据库存储边界。

@@ -2,6 +2,14 @@
 
 一个 Postgres 数据库装下所有东西：队列、run 账本、step 记忆、waits、日志、调度与 worker 注册表。schema 用 Drizzle 定义在 `packages/db`，以生成的 SQL 迁移应用——daemon 启动时自动迁移（可用 `--no-migrate` 关闭）。
 
+## Schema 与迁移
+
+better-trigger 创建的所有对象都在固定 PostgreSQL schema `better_trigger` 里：9 张业务表、它们的索引与序列，以及本项目专属的迁移 journal `better_trigger.__drizzle_migrations`。schema 名与数据库名无关，所以 `DATABASE_URL` 可以指向与宿主应用共用的数据库——宿主的 `public` 同名表和 `drizzle.__drizzle_migrations` 永远不会被读取或改写。
+
+连接池不设置 `search_path`：运行时 SQL 显式限定 `better_trigger.<table>`，因此即使共享连接池，宿主未限定表名的查询仍按其自身 `search_path` 解析。启动迁移需要可 `CREATE SCHEMA better_trigger` 并创建表/索引/序列的角色；用该角色先迁移、再以更低权限角色运行（`--no-migrate` 或 embedded 的 `migrate: false`），后者只需 schema 的 `USAGE` 以及表和序列的相应权限。
+
+这是无存量数据的新安装契约：pre-schema 版本（表在 `public`）不做原地升级，schema 名不可配置，schema 只是命名边界——权限仍由数据库角色决定。
+
 ## 表结构
 
 ```mermaid
@@ -113,9 +121,9 @@ SELECT q.id AS queue_id, q.run_id,
        r.task_id, r.payload, r.attempt, r.max_attempts,
        r.code_version, r.env, r.concurrency_key,
        t.concurrency_limit
-  FROM queue q
-  JOIN runs r ON r.id = q.run_id
-  LEFT JOIN tasks t ON t.id = r.task_id
+  FROM better_trigger.queue q
+  JOIN better_trigger.runs r ON r.id = q.run_id
+  LEFT JOIN better_trigger.tasks t ON t.id = r.task_id
  WHERE q.available_at <= now() AND q.locked_by IS NULL
    AND r.task_id = ANY($1::text[])   -- 这个 worker 注册的任务
  ORDER BY q.priority DESC, q.id ASC

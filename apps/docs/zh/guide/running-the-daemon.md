@@ -22,6 +22,10 @@ daemon 会 `import()` 你的 `--tasks` 模块，所以 **TypeScript 入口需要
 
 任意多个 daemon 共享一个数据库——每条 claim 与扫描都用 `FOR UPDATE SKIP LOCKED`，所以**没有 leader 选举**。典型的多节点部署是一个 API/dashboard 节点加若干 `--no-serve` 执行节点。
 
+## 数据库 schema 与迁移
+
+better-trigger 的所有对象都在固定 `better_trigger` schema 内——业务表、索引与序列，以及本项目专属的 `better_trigger.__drizzle_migrations` journal——连接池从不设置 `search_path`。因此 `DATABASE_URL` 可以指向你的应用已在使用的数据库，那里有同名 `public` 表和自己的 `drizzle.__drizzle_migrations`；两者都不会被读取或改写。启动迁移需要可 `CREATE SCHEMA better_trigger` 并在其中建对象的角色；用该角色单独执行迁移并以 `--no-migrate` 启动，即可让运行时使用更低权限的角色。见[数据库](/zh/architecture/database#schema-与迁移)。
+
 ## 任务加载
 
 `--tasks` 模块里每个长得像 `task()` handle 的导出都会被注册，包括导出数组里的 handle：

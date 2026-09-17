@@ -22,8 +22,9 @@ This page is the public summary.
 - Code version stamping + `--pin-code-version` (stranded-run detection)
 - Notification fast-path (`pg_notify` on the `bt` channel)
 - Retention / prune · health + Prometheus metrics · built-in dashboard
-- A large acceptance suite (e2e, fencing, replay-drift, crash, worker-lost,
-  rolling-deploy, migration, notify, …) that runs on every PR
+- A large acceptance suite (e2e, embedded, schema-isolation, fencing,
+  replay-drift, crash, worker-lost, rolling-deploy, migration, notify, …) that
+  runs on every PR
 
 ## Phases
 
