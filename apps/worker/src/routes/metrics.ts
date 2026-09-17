@@ -213,9 +213,9 @@ async function queryGauges(
         count(*) FILTER (WHERE q.locked_by IS NULL AND q.available_at <= now()) AS available,
         count(*) FILTER (WHERE q.locked_by IS NULL AND q.available_at >  now()) AS scheduled,
         count(*) FILTER (WHERE q.locked_by IS NOT NULL)                         AS claimed,
-        (SELECT count(*) FROM runs
+        (SELECT count(*) FROM better_trigger.runs
           WHERE status = 'running' AND project_id = q.project_id AND env = q.env) AS running
-       FROM queue q
+       FROM better_trigger.queue q
       WHERE (q.project_id, q.env) IN (VALUES ${pairs})
       GROUP BY q.project_id, q.env`,
     nsParams,

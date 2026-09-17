@@ -75,12 +75,12 @@ function makeDb(opts: { run?: boolean; logs?: LogRow[] } = {}) {
       if (/^BEGIN/.test(sql)) return { rows: [] };
       if (/^COMMIT/.test(sql)) return { rows: [] };
       if (/^ROLLBACK/.test(sql)) return { rows: [] };
-      if (/FROM runs/.test(sql)) {
+      if (/FROM better_trigger\.runs/.test(sql)) {
         return { rows: opts.run === false ? [] : [RUN_ROW] };
       }
-      if (/FROM run_steps/.test(sql)) return { rows: [] };
-      if (/FROM waits/.test(sql)) return { rows: [] };
-      if (/FROM logs/.test(sql)) {
+      if (/FROM better_trigger\.run_steps/.test(sql)) return { rows: [] };
+      if (/FROM better_trigger\.waits/.test(sql)) return { rows: [] };
+      if (/FROM better_trigger\.logs/.test(sql)) {
         const before = params.length > 4 ? (params[3] as number) : undefined;
         const limit = params[params.length - 1] as number;
         const base = before === undefined ? (opts.logs ?? []) : (opts.logs ?? []).filter((l) => l.id < before);
@@ -122,10 +122,10 @@ describe('GET /runs/:id', () => {
     // the route itself never touched the pool.
     expect(db.stmts.map((s) => s.sql.replace(/\s+/g, ' ').trim())).toEqual([
       'BEGIN ISOLATION LEVEL REPEATABLE READ',
-      expect.stringMatching(/FROM runs WHERE id = \$1 AND project_id = \$2 AND env = \$3/),
-      expect.stringMatching(/FROM run_steps/),
-      expect.stringMatching(/FROM waits/),
-      expect.stringMatching(/FROM logs/),
+      expect.stringMatching(/FROM better_trigger\.runs WHERE id = \$1 AND project_id = \$2 AND env = \$3/),
+      expect.stringMatching(/FROM better_trigger\.run_steps/),
+      expect.stringMatching(/FROM better_trigger\.waits/),
+      expect.stringMatching(/FROM better_trigger\.logs/),
       'COMMIT',
     ]);
   });
@@ -139,7 +139,7 @@ describe('GET /runs/:id', () => {
     expect(body.logs.map((l) => l.id)).toEqual([5]);
     expect(body.logsNextCursor).toBe(null);
 
-    const logsStmt = db.stmts.find((s) => /FROM logs/.test(s.sql));
+    const logsStmt = db.stmts.find((s) => /FROM better_trigger\.logs/.test(s.sql));
     expect(logsStmt?.params[3]).toBe(6);
   });
 

@@ -45,7 +45,7 @@ const makeApp = (waiters?: WaiterRegistry) => {
     query: async (sql: string, params: unknown[] = []) => {
       calls.query.push({ sql, params });
       // Only the schedules lookup needs a row (so PATCH gets past its 404).
-      return /FROM schedules/.test(sql)
+      return /FROM better_trigger\.schedules/.test(sql)
         ? { rows: [{ cron_pattern: '0 * * * *', cron_tz: null }] }
         : { rows: [] };
     },
@@ -174,7 +174,7 @@ describe('origin checks across the HTTP boundary', () => {
     });
     expect(res.status).toBe(200);
     const writes = calls.trigger.length + calls.batchTrigger.length +
-      calls.query.filter(({ sql }) => /UPDATE schedules/.test(sql)).length;
+      calls.query.filter(({ sql }) => /UPDATE better_trigger\.schedules/.test(sql)).length;
     expect(writes).toBe(1);
   });
 
@@ -238,14 +238,14 @@ describe('PATCH /schedules/:id body fields', () => {
     const off = await app.fetch(patch('/schedules/sch_1', '{"enabled":false}'));
     expect(off.status).toBe(200);
     expect(await off.json()).toEqual({ ok: true });
-    const update = calls.query.find((q) => /UPDATE schedules/.test(q.sql));
+    const update = calls.query.find((q) => /UPDATE better_trigger\.schedules/.test(q.sql));
     expect(update?.params[1]).toBe(false);
     // Disabled schedules have no next occurrence.
     expect(update?.params[2]).toBeNull();
 
     const on = makeApp();
     expect((await on.app.fetch(patch('/schedules/sch_1', '{"enabled":true}'))).status).toBe(200);
-    const enabling = on.calls.query.find((q) => /UPDATE schedules/.test(q.sql));
+    const enabling = on.calls.query.find((q) => /UPDATE better_trigger\.schedules/.test(q.sql));
     expect(enabling?.params[1]).toBe(true);
     expect(enabling?.params[2]).toBeInstanceOf(Date);
     expect(errorSpy).not.toHaveBeenCalled();

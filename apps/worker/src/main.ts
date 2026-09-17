@@ -84,9 +84,9 @@ async function runPrune(argv: string[]): Promise<void> {
   const opts = parsePruneArgs(argv);
   const pool = createPool(opts.databaseUrl);
   daemon.pool = pool;
-  // --dry-run promises to delete nothing, and migrating is a write: 0007 cleans
-  // orphaned logs/run_steps before it can add the foreign keys, so a dry run
-  // against a not-yet-migrated database would delete rows and then print
+  // --dry-run promises to delete nothing, and migrating is itself a write: it
+  // creates the better_trigger schema and tables and records a journal row, so
+  // a dry run against a not-yet-migrated database would write before it prints
   // "nothing was deleted". A dry run therefore never migrates; if the schema is
   // behind, prune's own statements fail and say so, which is the honest outcome.
   if (opts.migrate && !opts.dryRun) await migrate(pool);

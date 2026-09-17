@@ -116,7 +116,7 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool; env?: Read
         cron_pattern: string | null;
       }>(
         `SELECT id, name, file_path, trigger_source, cron_pattern
-           FROM tasks WHERE project_id = $1 AND env = $2 ORDER BY name ASC`,
+           FROM better_trigger.tasks WHERE project_id = $1 AND env = $2 ORDER BY name ASC`,
         [namespace.projectId, namespace.env],
       ),
       computeTaskStats(pool, namespace),
@@ -300,7 +300,7 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool; env?: Read
               created_at,
               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') AS created_at_us,
               started_at, finished_at
-         FROM runs
+         FROM better_trigger.runs
          ${whereSql}
         ORDER BY created_at DESC, id DESC
         LIMIT $${limitParam}`,
@@ -374,8 +374,8 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool; env?: Read
     }>(
       `SELECT s.id, s.task_id, s.cron_pattern, s.cron_tz, s.enabled,
               s.next_run_at, s.last_run_at, r.status AS last_run_status
-         FROM schedules s
-         LEFT JOIN runs r ON r.id = s.last_run_id
+         FROM better_trigger.schedules s
+         LEFT JOIN better_trigger.runs r ON r.id = s.last_run_id
                         AND r.project_id = s.project_id AND r.env = s.env
         WHERE s.project_id = $1 AND s.env = $2
         ORDER BY s.task_id ASC`,
@@ -406,7 +406,7 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool; env?: Read
     const enabled = requireBoolean(body.enabled, 'enabled');
 
     const existing = await pool.query<{ cron_pattern: string; cron_tz: string | null }>(
-      `SELECT cron_pattern, cron_tz FROM schedules
+      `SELECT cron_pattern, cron_tz FROM better_trigger.schedules
         WHERE id = $1 AND project_id = $2 AND env = $3`,
       [id, ns.projectId, ns.env],
     );
@@ -423,7 +423,7 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool; env?: Read
     // single spurious fire on enable). The NULL guard keeps an impossible
     // pattern silent instead of firing every tick.
     await pool.query(
-      `UPDATE schedules SET enabled = $2,
+      `UPDATE better_trigger.schedules SET enabled = $2,
          next_run_at = CASE
            WHEN $3::timestamptz IS NULL THEN NULL
            ELSE GREATEST($3::timestamptz, now() + interval '1 second')
@@ -491,7 +491,7 @@ export function dashboardRoutes(deps: { pool: Pool; probePool?: Pool; env?: Read
     }>(
       `SELECT id, name, code_version, runtime, tasks, concurrency, status,
               started_at, last_heartbeat_at
-         FROM workers
+         FROM better_trigger.workers
          ${whereSql}
         ORDER BY started_at DESC, id DESC
         LIMIT $${params.length}`,

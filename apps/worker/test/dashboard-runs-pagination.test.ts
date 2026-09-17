@@ -49,7 +49,7 @@ function makeApp(rows: StubRow[], stmts: { sql: string; params: unknown[] }[]) {
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (!/FROM runs/.test(sql)) return { rows: [] };
+      if (!/FROM better_trigger\.runs/.test(sql)) return { rows: [] };
       // The route's binding shapes: [projectId, env, (limit+1)] or
       // [projectId, env, cursorTs, cursorId, (limit+1)].
       const keyed = params.length === 5;

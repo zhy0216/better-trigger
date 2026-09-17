@@ -289,9 +289,9 @@ Options:
                            other user of this machine (ps, /proc/<pid>/
                            cmdline); prefer the env form.
   --no-migrate             Skip applying migrations first. The cascade that
-                           removes steps and logs is a constraint added by
-                           migration 0007, so on a database that has not been
-                           migrated this would leave them behind.
+                           removes steps and logs comes from the run foreign
+                           keys in the initial schema, so on a database that
+                           has not been migrated this would leave them behind.
   -h, --help               Show this help
 `;
 

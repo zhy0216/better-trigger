@@ -24,7 +24,7 @@ function makeApp() {
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
       stmts.push({ sql, params });
-      if (sql.includes('FROM tasks')) {
+      if (sql.includes('FROM better_trigger.tasks')) {
         return {
           rows: [
             { id: 't1', name: 'one', file_path: null, trigger_source: 'api', cron_pattern: null },
@@ -111,7 +111,7 @@ describe('GET /tasks — stats cache', () => {
     const pool = {
       query: async (sql: string, params: unknown[] = []) => {
         stmts.push({ sql, params });
-        if (sql.includes('FROM tasks')) {
+        if (sql.includes('FROM better_trigger.tasks')) {
           return {
             rows: [
               { id: 'idle', name: 'idle', file_path: null, trigger_source: 'api', cron_pattern: null },
@@ -151,7 +151,7 @@ describe('GET /tasks — stats cache', () => {
     const pool = {
       query: async (sql: string, params: unknown[] = []) => {
         stmts.push({ sql, params });
-        if (sql.includes('FROM tasks')) {
+        if (sql.includes('FROM better_trigger.tasks')) {
           const id = params[0] === 'a/b' ? 'task-proj' : 'task-env';
           return {
             rows: [{ id, name: id, file_path: null, trigger_source: 'api', cron_pattern: null }],
@@ -192,7 +192,7 @@ describe('GET /tasks — stats cache', () => {
       query: async (sql: string, params: unknown[] = []) => {
         stmts.push({ sql, params });
         await gate; // hold every query until both requests have arrived
-        if (sql.includes('FROM tasks')) {
+        if (sql.includes('FROM better_trigger.tasks')) {
           return {
             rows: [
               { id: 't1', name: 'one', file_path: null, trigger_source: 'api', cron_pattern: null },
@@ -230,7 +230,7 @@ describe('GET /tasks — stats cache', () => {
       query: async (sql: string, params: unknown[] = []) => {
         stmts.push({ sql, params });
         if (fail) throw new Error('db down');
-        if (sql.includes('FROM tasks')) {
+        if (sql.includes('FROM better_trigger.tasks')) {
           return {
             rows: [
               { id: 't1', name: 'one', file_path: null, trigger_source: 'api', cron_pattern: null },

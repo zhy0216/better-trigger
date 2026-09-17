@@ -81,7 +81,7 @@ export async function computeTaskStats(
           ) FILTER (WHERE r.finished_at IS NOT NULL AND r.started_at IS NOT NULL AND ${RUNS_24H_WINDOW}) AS p95,
           count(*) FILTER (WHERE r.status = 'completed' AND ${RUNS_24H_WINDOW}) AS success,
           count(*) FILTER (WHERE r.status IN ('completed','failed','canceled') AND ${RUNS_24H_WINDOW}) AS finished_total
-         FROM runs r
+         FROM better_trigger.runs r
         WHERE r.project_id = $1 AND r.env = $2
           AND ${RUNS_24H_WINDOW}
         GROUP BY r.task_id`,
@@ -92,7 +92,7 @@ export async function computeTaskStats(
           r.task_id,
           floor(EXTRACT(EPOCH FROM (now() - r.created_at)) / 7200)::int AS bucket,
           count(*)                                                       AS n
-         FROM runs r
+         FROM better_trigger.runs r
         WHERE ${RUNS_24H_WINDOW}
           AND r.project_id = $1 AND r.env = $2
         GROUP BY r.task_id, bucket`,
@@ -100,7 +100,7 @@ export async function computeTaskStats(
     ),
     pool.query<{ task_id: string; last_run_at: Date | null }>(
       `SELECT r.task_id, max(r.created_at) AS last_run_at
-         FROM runs r
+         FROM better_trigger.runs r
         WHERE r.project_id = $1 AND r.env = $2
         GROUP BY r.task_id`,
       [namespace.projectId, namespace.env],

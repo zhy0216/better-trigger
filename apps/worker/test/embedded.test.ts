@@ -54,7 +54,7 @@ function fakePool(): FakePool {
     idleCount: 0,
     waitingCount: 0,
     query: vi.fn(async (sql: string) => {
-      if (sql.includes('SELECT status, output, error FROM runs')) {
+      if (sql.includes('SELECT status, output, error FROM better_trigger.runs')) {
         return {
           rows: [{ status: 'completed', output: { delivered: true }, error: null }],
         };
@@ -336,6 +336,27 @@ describe('createEmbeddedRuntime', () => {
     runtime = null;
     expect(pool.end).not.toHaveBeenCalled();
     expect(getResultResolver()).toBeNull();
+  });
+
+  it('migrates through an injected pool and leaves it usable after stop', async () => {
+    runtime = await createEmbeddedRuntime({
+      pool,
+      tasks: [sendEmail],
+      concurrency: 1,
+      notifications: false,
+    });
+
+    // The host pool carries the migration: embedded never swaps in a
+    // replacement pool for the schema's sake.
+    expect(mocked.createPool).not.toHaveBeenCalled();
+    expect(mocked.migrate).toHaveBeenCalledWith(pool);
+
+    await runtime.stop();
+    runtime = null;
+    // The host owns the pool, so stop must not close it — and it must still
+    // answer queries afterwards.
+    expect(pool.end).not.toHaveBeenCalled();
+    await expect(pool.query('SELECT 1')).resolves.toEqual({ rows: [] });
   });
 
   it('rejects a second active runtime and releases the slot after stop', async () => {

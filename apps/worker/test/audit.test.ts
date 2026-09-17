@@ -143,7 +143,7 @@ describe('audit — accepted requests', () => {
     // The schedules lookup needs a row so the PATCH gets past its 404.
     const pool = {
       query: async (sql: string) =>
-        /FROM schedules/.test(sql)
+        /FROM better_trigger\.schedules/.test(sql)
           ? { rows: [{ cron_pattern: '0 * * * *', cron_tz: null }] }
           : { rows: [] },
     } as unknown as Pool;

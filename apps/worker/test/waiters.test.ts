@@ -58,7 +58,7 @@ function fakePool() {
   let selects = 0;
   const pool = {
     query: async (text: string, params?: unknown[]) => {
-      if (/FROM runs/.test(text)) selects += 1;
+      if (/FROM better_trigger\.runs/.test(text)) selects += 1;
       if (/WHERE id = \$1/.test(text)) {
         const row = runs.get(String(params?.[0]));
         return {

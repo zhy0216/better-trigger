@@ -171,7 +171,7 @@ export function createWaiterRegistry(deps: {
 
   async function readRun(runId: string, namespace: Namespace): Promise<RunRead | null> {
     const res = await pool.query<{ status: string; output: unknown; error: unknown }>(
-      `SELECT status, output, error FROM runs WHERE id = $1 AND project_id = $2 AND env = $3`,
+      `SELECT status, output, error FROM better_trigger.runs WHERE id = $1 AND project_id = $2 AND env = $3`,
       [runId, namespace.projectId, namespace.env],
     );
     const row = res.rows[0];
@@ -326,7 +326,7 @@ export function createWaiterRegistry(deps: {
     let rows: Array<{ id: string; status: string; output: unknown; error: unknown }>;
     try {
       const res = await pool.query<{ id: string; status: string; output: unknown; error: unknown }>(
-        `SELECT id, status, output, error FROM runs WHERE id = ANY($1::text[])`,
+        `SELECT id, status, output, error FROM better_trigger.runs WHERE id = ANY($1::text[])`,
         [ids],
       );
       rows = res.rows;

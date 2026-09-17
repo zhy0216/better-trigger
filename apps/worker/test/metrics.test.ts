@@ -389,9 +389,9 @@ describe('database gauges', () => {
     const query = vi.fn(async (..._args: unknown[]) => ({ rows: [GAUGE_ROW] }));
     await scrape({ query });
     const sql = String(query.mock.calls[0]?.[0]);
-    expect(sql).toMatch(/FROM queue/);
+    expect(sql).toMatch(/FROM better_trigger\.queue/);
     // The one predicate that keeps the runs count on runs_status_concurrency_idx.
-    expect(sql).toMatch(/FROM runs\s+WHERE status = 'running'/);
+    expect(sql).toMatch(/FROM better_trigger\.runs\s+WHERE status = 'running'/);
   });
 
   const slashNamespaces = [
@@ -654,7 +654,7 @@ describe('database gauges — dedicated probe pool (PF4)', () => {
         }
       }
       expect(clients.map((c) => String(c.query.mock.calls[0]![0])).filter((sql) => sql === 'SELECT 1')).toHaveLength(1);
-      expect(clients.map((c) => String(c.query.mock.calls[0]![0])).filter((sql) => sql.includes('FROM queue'))).toHaveLength(1);
+      expect(clients.map((c) => String(c.query.mock.calls[0]![0])).filter((sql) => sql.includes('FROM better_trigger.queue'))).toHaveLength(1);
       recovering = true;
       settle.forEach((resolve) => resolve({ rows: [GAUGE_ROW] }));
       await vi.advanceTimersByTimeAsync(0);
