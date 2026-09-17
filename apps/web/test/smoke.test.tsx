@@ -155,6 +155,31 @@ describe('dashboard smoke — the states that used to need a live daemon', () =>
     expect((screen.getByPlaceholderText('Bearer token') as HTMLInputElement).value).toBe('wrong-token');
   });
 
+  it('2c. rejects a remembered key with the token preserved', async () => {
+    setApiKey('remembered-invalid-token');
+    fetchMock.mockImplementation(() => new Response('{}', { status: 401 }));
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+    expect((screen.getByPlaceholderText('Bearer token') as HTMLInputElement).value).toBe('remembered-invalid-token');
+  });
+
+  it('2d. forgets a key from the connected dashboard', async () => {
+    setApiKey('remembered-valid-token');
+    fetchMock.mockImplementation((_input: unknown, init: RequestInit) =>
+      (init.headers as Record<string, string> | undefined)?.Authorization
+        ? new Response(JSON.stringify(runsPage([], null)))
+        : new Response('{}', { status: 401 }),
+    );
+    render(<App />);
+
+    const forget = await screen.findByRole('button', { name: 'Forget API key' });
+    fireEvent.click(forget);
+    await waitFor(() => expect(screen.getByText('Enter your API key')).toBeTruthy());
+    expect(screen.queryByRole('button', { name: 'Forget API key' })).toBeNull();
+    expect((screen.getByPlaceholderText('Bearer token') as HTMLInputElement).value).toBe('');
+  });
+
   it('3. empty data: the runs list renders its empty state', async () => {
     fetchMock.mockImplementation(() => 
       new Response(JSON.stringify(runsPage([], null)), { status: 200 }),

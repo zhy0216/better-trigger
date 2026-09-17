@@ -69,8 +69,9 @@ const cases = [
 
 let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
-  vi.useFakeTimers();
+  // Keep jsdom's setup storage events out of the polling timer assertions.
   setApiKey('key-a');
+  vi.useFakeTimers();
   resetConnection();
   fetchMock = vi.fn();
   vi.stubGlobal('fetch', fetchMock);

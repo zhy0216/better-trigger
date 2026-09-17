@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiKeyPrompt } from '../src/App';
-import { api, ApiError, getApiKey, setApiKey } from '../src/api/client';
+import { api, ApiError, getApiKey, getApiKeySource, setApiKey } from '../src/api/client';
 import { classifyConnectionError, getConnection, recordConnectionError, resetConnection, useSchedules, useTasks, useWorkers } from '../src/api/hooks';
 
 describe('dashboard API key authentication', () => {
@@ -14,7 +14,7 @@ describe('dashboard API key authentication', () => {
     vi.unstubAllGlobals();
   });
 
-  it('adds the in-memory key as a Bearer header', async () => {
+  it('adds the entered key as a Bearer header', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ ok: true, version: 'test' }), { status: 200 }),
     );
@@ -28,15 +28,15 @@ describe('dashboard API key authentication', () => {
     });
   });
 
-  it('does not write the key to browser storage', () => {
+  it('saves the key in browser storage', () => {
     const storageWrites = vi.fn();
     vi.stubGlobal('localStorage', { setItem: storageWrites });
-    vi.stubGlobal('sessionStorage', { setItem: storageWrites });
 
-    setApiKey('memory-only');
+    setApiKey('  remembered-key  ');
 
-    expect(getApiKey()).toBe('memory-only');
-    expect(storageWrites).not.toHaveBeenCalled();
+    expect(getApiKey()).toBe('remembered-key');
+    expect(getApiKeySource()).toBe('local-storage');
+    expect(storageWrites).toHaveBeenCalledWith(expect.any(String), 'remembered-key');
   });
 
   it('classifies an API 401 separately from a network failure', () => {

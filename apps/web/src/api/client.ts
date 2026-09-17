@@ -24,15 +24,39 @@ import type {
   WorkerSummary as WorkerSummaryModel,
 } from '@better-trigger/core';
 
-const viteApiKey = import.meta.env.VITE_BT_API_KEY;
-let apiKey: string | null = viteApiKey?.trim() || null;
-let apiKeySource: 'vite-env' | 'memory' | 'none' = apiKey ? 'vite-env' : 'none';
+const API_KEY_STORAGE_KEY = import.meta.env.VITE_BT_API_KEY_STORAGE_KEY
+  ?? `better-trigger:api-key:${import.meta.env.VITE_BT_API_URL ?? import.meta.env.BASE_URL}`;
+
+function readStoredApiKey(): string | null {
+  try {
+    return localStorage.getItem(API_KEY_STORAGE_KEY)?.trim() || null;
+  } catch {
+    // Storage can be unavailable; entering a key still works for this page.
+    return null;
+  }
+}
+
+export type ApiKeySource = 'vite-env' | 'local-storage' | 'memory' | 'none';
+
+const viteApiKey = import.meta.env.VITE_BT_API_KEY?.trim() || null;
+let apiKey: string | null = viteApiKey || readStoredApiKey();
+let apiKeySource: ApiKeySource = viteApiKey ? 'vite-env' : apiKey ? 'local-storage' : 'none';
 let apiKeyVersion = 0;
 const apiKeyListeners = new Set<() => void>();
 
 export function setApiKey(token: string | null): void {
   apiKey = token?.trim() || null;
   apiKeySource = apiKey ? 'memory' : 'none';
+  try {
+    if (apiKey) {
+      localStorage.setItem(API_KEY_STORAGE_KEY, apiKey);
+      apiKeySource = 'local-storage';
+    } else {
+      localStorage.removeItem(API_KEY_STORAGE_KEY);
+    }
+  } catch {
+    // Keep the current page usable if browser storage is blocked or full.
+  }
   apiKeyVersion += 1;
   apiKeyListeners.forEach((listener) => listener());
 }
@@ -41,7 +65,7 @@ export function getApiKey(): string | null {
   return apiKey;
 }
 
-export function getApiKeySource(): 'vite-env' | 'memory' | 'none' {
+export function getApiKeySource(): ApiKeySource {
   return apiKeySource;
 }
 

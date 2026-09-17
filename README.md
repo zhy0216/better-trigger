@@ -211,8 +211,9 @@ configure the public origin with `--cors-origin` or
 `BETTER_TRIGGER_CORS_ORIGIN` (see [CORS](./apps/worker/README.md#cors)).
 
 If the daemon uses `BETTER_TRIGGER_API_KEY`, the dashboard prompts for a key
-after a `401` and keeps a manually entered token only in page memory. Refreshing
-the page clears it; it is never stored in browser storage or cookies. For
+after a `401` and remembers a manually entered token in browser storage across
+refreshes. Use **Forget API key** to remove it. If storage is unavailable, the
+token lasts only for the current page. For
 local development only, `VITE_BT_API_KEY=...` may supply the initial token, but
 Vite embeds all `VITE_*` values in the bundle. Never use that option with a
 long-lived bearer secret in a public deployment.

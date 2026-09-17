@@ -18,7 +18,7 @@ import { TasksDashboard } from './screens/TasksDashboard';
 import { Schedules } from './screens/Schedules';
 import { Onboarding } from './screens/Onboarding';
 import { resetConnection, useConnection } from './api/hooks';
-import { getApiKeySource, setApiKey } from './api/client';
+import { getApiKey, getApiKeySource, setApiKey, type ApiKeySource } from './api/client';
 import type { Route, VizStyle } from './types';
 
 const TWEAK_DEFAULTS = {
@@ -37,7 +37,13 @@ const STATIC_ROUTES: Array<[string, Route]> = [
   ['/onboarding', 'onboarding'],
 ];
 
+const BASE_PATH = import.meta.env.BASE_URL.replace(/\/$/, '');
+const API_KEY_ENV_NAME = import.meta.env.VITE_BT_API_KEY_ENV_NAME ?? 'BETTER_TRIGGER_API_KEY';
+
 function parsePath(path: string): { route: Route; runId: string | null } {
+  if (BASE_PATH && (path === BASE_PATH || path.startsWith(`${BASE_PATH}/`))) {
+    path = path.slice(BASE_PATH.length) || '/';
+  }
   const runMatch = /^\/runs\/([^/]+)$/.exec(path);
   if (runMatch) return { route: 'run', runId: runMatch[1] };
   if (path === '/' || path === '/runs') return { route: 'runs', runId: null };
@@ -46,9 +52,9 @@ function parsePath(path: string): { route: Route; runId: string | null } {
 }
 
 function pathFor(route: Route, runId?: string | null): string {
-  if (route === 'run') return `/runs/${runId ?? ''}`;
-  if (route === 'runs') return '/runs';
-  return STATIC_ROUTES.find(([, r]) => r === route)?.[0] ?? '/runs';
+  if (route === 'run') return `${BASE_PATH}/runs/${runId ?? ''}`;
+  if (route === 'runs') return `${BASE_PATH}/runs`;
+  return BASE_PATH + (STATIC_ROUTES.find(([, r]) => r === route)?.[0] ?? '/runs');
 }
 
 export default function App() {
@@ -71,11 +77,20 @@ export default function App() {
   // Key-prompt state lives in App so it survives the prompt's unmount: the
   // token is kept for the user to edit on a rejection, and keyRejected
   // distinguishes a REJECTED key from a first visit.
-  const [pendingKey, setPendingKey] = React.useState('');
+  const [pendingKey, setPendingKey] = React.useState(() => getApiKey() ?? '');
   const [keyRejected, setKeyRejected] = React.useState(false);
-  const submittedRef = React.useRef(false);
+  const submittedRef = React.useRef(apiKeySource !== 'none');
 
-  // A second 'unauthorized' after a submit means the daemon rejected the key:
+  const clearApiKey = () => {
+    setApiKey(null);
+    setApiKeySource(getApiKeySource());
+    setPendingKey('');
+    setKeyRejected(false);
+    submittedRef.current = false;
+    resetConnection();
+  };
+
+  // An 'unauthorized' with a restored or submitted key means it was rejected:
   // surface that as a distinct variant instead of a blank first-visit prompt.
   React.useEffect(() => {
     if (connection === 'unauthorized' && submittedRef.current) {
@@ -164,6 +179,9 @@ export default function App() {
               Local API key
             </span>
           )}
+          {apiKeySource !== 'none' && (
+            <Button variant="ghost" size="sm" onClick={clearApiKey}>Forget API key</Button>
+          )}
           {route === 'tasks' && <Button variant="outline" size="sm" icon="plus" onClick={() => navigate('onboarding')}>New task</Button>}
         </TopBar>
         <main id="main-content" className="bt-main" tabIndex={-1} aria-label={titles[route]}>
@@ -181,14 +199,7 @@ export default function App() {
               submittedRef.current = true;
               resetConnection();
             }}
-            onClear={() => {
-              setApiKey(null);
-              setApiKeySource(getApiKeySource());
-              setPendingKey('');
-              setKeyRejected(false);
-              submittedRef.current = false;
-              resetConnection();
-            }}
+            onClear={clearApiKey}
           />
         ) : screen}
         </main>
@@ -243,7 +254,7 @@ export function ApiKeyPrompt({
   onSubmit,
   onClear,
 }: {
-  source: 'vite-env' | 'memory' | 'none';
+  source: ApiKeySource;
   token: string;
   keyRejected: boolean;
   onChangeToken: (token: string) => void;
@@ -273,8 +284,8 @@ export function ApiKeyPrompt({
             </p>
           ) : (
             <p style={{ margin: '0 0 20px', color: 'var(--fg-muted)', fontSize: 13.5, lineHeight: 1.6 }}>
-              Paste the token the daemon expects (check its <code className="mono">BETTER_TRIGGER_API_KEY</code>).
-              Tokens are kept in memory for this page only and you will be asked again after a refresh.
+              Paste the operator key configured in <code className="mono">{API_KEY_ENV_NAME}</code>.
+              Your key is saved in this browser and restored after a refresh. Use Forget API key to remove it.
             </p>
           )}
           <form onSubmit={(event) => { event.preventDefault(); onSubmit(token); }} style={{ display: 'flex', gap: 8 }}>

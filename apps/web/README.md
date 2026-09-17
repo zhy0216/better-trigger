@@ -29,9 +29,9 @@ rebuilt before it includes frontend changes.
 
 When the daemon has `BETTER_TRIGGER_API_KEY` set, the dashboard asks for the
 matching token after the first `401` response and sends it as a Bearer token on
-subsequent requests. A manually entered key is memory-only: it is not written
-to `localStorage`, `sessionStorage`, cookies, or any other persistent store,
-and a page refresh clears it.
+subsequent requests. A manually entered key is saved in `localStorage` and
+restored after a refresh. **Forget API key** removes it from the browser. If
+browser storage is unavailable, the key works only for the current page.
 
 The daemon serves the production build itself (`apps/worker` embeds `dist/`),
 so that build defaults to **same-origin** API access: without
@@ -49,6 +49,21 @@ Vite embeds `VITE_*` values in the browser bundle. Therefore
 `VITE_BT_API_KEY` is **not safe for public deployments** and must never contain
 a long-lived production bearer secret. Use an authenticated same-origin
 deployment/session instead.
+
+## Embedded dashboard builds
+
+Set Vite's `base` to the dashboard mount path, such as `/operations/workflows/`.
+Deep links, navigation, and browser history retain that prefix. Configure
+`VITE_BT_API_URL` separately to point at the API mount path; the client appends
+`/api/v1` to it.
+
+Hosts can set two optional build-time values without patching dashboard source:
+
+- `VITE_BT_API_KEY_ENV_NAME`: the server variable name displayed in the key
+  prompt; defaults to `BETTER_TRIGGER_API_KEY`. This is a label, not a secret.
+- `VITE_BT_API_KEY_STORAGE_KEY`: the browser storage key. By default it is
+  `better-trigger:api-key:` followed by `VITE_BT_API_URL`, or Vite's `BASE_URL`
+  when the API URL is unset, so different API endpoints keep separate tokens.
 
 ## Source map
 
